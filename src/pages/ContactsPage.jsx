@@ -17,6 +17,7 @@ function ContactsPage() {
   const [linkedinUrl, setLinkedinUrl] = useState('')
   const [tagsInput, setTagsInput] = useState('')
   const [skillsInput, setSkillsInput] = useState('')
+  const [searchQuery, setSearchQuery] = useState('')
 
   useEffect(() => {
     fetchContacts()
@@ -92,15 +93,45 @@ function ContactsPage() {
     await supabase.auth.signOut()
   }
 
+  const filteredContacts = searchQuery.trim() === ''
+    ? contacts
+    : contacts.filter((contact) => {
+        const q = searchQuery.toLowerCase()
+        return (
+          contact.name.toLowerCase().includes(q) ||
+          (contact.company && contact.company.toLowerCase().includes(q)) ||
+          (contact.role && contact.role.toLowerCase().includes(q)) ||
+          (contact.tags && contact.tags.some((tag) => tag.toLowerCase().includes(q)))
+        )
+      })
+
   return (
     <div className="min-h-screen bg-white px-6 py-10">
       <div className="mx-auto max-w-2xl">
-        <div className="mb-8 flex items-center justify-between">
-          <h1 className="text-3xl font-semibold text-gray-900">Contacts</h1>
+        <div className="mb-6 flex items-center justify-between">
+          <div>
+            <h1 className="text-3xl font-semibold text-gray-900">Contacts</h1>
+            {!loading && (
+              <p className="mt-1 text-sm text-gray-400">
+                {searchQuery.trim() !== '' && filteredContacts.length !== contacts.length
+                  ? `${filteredContacts.length} of ${contacts.length}`
+                  : contacts.length}{' '}
+                {contacts.length === 1 ? 'contact' : 'contacts'}
+              </p>
+            )}
+          </div>
           <button onClick={handleSignOut} className="text-sm font-medium text-gray-500 hover:text-gray-700">
             Sign Out
           </button>
         </div>
+
+        <input
+          type="text"
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+          placeholder="Search by name, company, role, or tag…"
+          className="mb-4 w-full rounded-md border border-gray-300 px-3 py-2 text-sm outline-none focus:border-indigo-500"
+        />
 
         <button
           onClick={() => setShowForm((prev) => !prev)}
@@ -198,9 +229,11 @@ function ContactsPage() {
           <p className="text-sm text-gray-400">Loading contacts...</p>
         ) : contacts.length === 0 ? (
           <p className="text-sm text-gray-400">No contacts yet. Add your first one above.</p>
+        ) : filteredContacts.length === 0 ? (
+          <p className="text-sm text-gray-400">No contacts match "{searchQuery}".</p>
         ) : (
           <ul className="space-y-3">
-            {contacts.map((contact) => (
+            {filteredContacts.map((contact) => (
               <ContactListItem key={contact.id} contact={contact} />
             ))}
           </ul>
