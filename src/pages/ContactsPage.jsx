@@ -89,10 +89,6 @@ function ContactsPage() {
     fetchContacts()
   }
 
-  async function handleSignOut() {
-    await supabase.auth.signOut()
-  }
-
   const filteredContacts = searchQuery.trim() === ''
     ? contacts
     : contacts.filter((contact) => {
@@ -108,21 +104,16 @@ function ContactsPage() {
   return (
     <div className="min-h-screen bg-white px-6 py-10">
       <div className="mx-auto max-w-2xl">
-        <div className="mb-6 flex items-center justify-between">
-          <div>
-            <h1 className="text-3xl font-semibold text-gray-900">Contacts</h1>
-            {!loading && (
-              <p className="mt-1 text-sm text-gray-400">
-                {searchQuery.trim() !== '' && filteredContacts.length !== contacts.length
-                  ? `${filteredContacts.length} of ${contacts.length}`
-                  : contacts.length}{' '}
-                {contacts.length === 1 ? 'contact' : 'contacts'}
-              </p>
-            )}
-          </div>
-          <button onClick={handleSignOut} className="text-sm font-medium text-gray-500 hover:text-gray-700">
-            Sign Out
-          </button>
+        <div className="mb-6">
+          <h1 className="text-3xl font-semibold text-gray-900">Contacts</h1>
+          {!loading && (
+            <p className="mt-1 text-sm text-gray-400">
+              {searchQuery.trim() !== '' && filteredContacts.length !== contacts.length
+                ? `${filteredContacts.length} of ${contacts.length}`
+                : contacts.length}{' '}
+              {contacts.length === 1 ? 'contact' : 'contacts'}
+            </p>
+          )}
         </div>
 
         <input
