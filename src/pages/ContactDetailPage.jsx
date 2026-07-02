@@ -29,6 +29,13 @@ function ContactDetailPage() {
   const [notes, setNotes] = useState('')
   const [followUpDate, setFollowUpDate] = useState('')
 
+  // Edit/delete interaction state
+  const [editingInteractionId, setEditingInteractionId] = useState(null)
+  const [interactionEditForm, setInteractionEditForm] = useState({})
+  const [savingInteraction, setSavingInteraction] = useState(false)
+  const [interactionSaveError, setInteractionSaveError] = useState('')
+  const [deletingInteractionId, setDeletingInteractionId] = useState(null)
+
   useEffect(() => {
     fetchContact()
     fetchInteractions()
@@ -118,6 +125,52 @@ function ContactDetailPage() {
     }
 
     navigate('/contacts')
+  }
+
+  function startEditInteraction(interaction) {
+    setInteractionEditForm({
+      type: interaction.type || 'Coffee chat',
+      date: interaction.interaction_date,
+      notes: interaction.notes || '',
+      followUpDate: interaction.follow_up_date || '',
+    })
+    setInteractionSaveError('')
+    setEditingInteractionId(interaction.id)
+  }
+
+  async function handleSaveInteraction(e) {
+    e.preventDefault()
+    setSavingInteraction(true)
+    setInteractionSaveError('')
+
+    const { error } = await supabase
+      .from('interactions')
+      .update({
+        type: interactionEditForm.type,
+        interaction_date: interactionEditForm.date,
+        notes: interactionEditForm.notes || null,
+        follow_up_date: interactionEditForm.followUpDate || null,
+      })
+      .eq('id', editingInteractionId)
+
+    setSavingInteraction(false)
+
+    if (error) {
+      setInteractionSaveError(error.message)
+      return
+    }
+
+    setEditingInteractionId(null)
+    fetchInteractions()
+  }
+
+  async function handleDeleteInteraction(interactionId) {
+    const { error } = await supabase.from('interactions').delete().eq('id', interactionId)
+
+    if (!error) {
+      setDeletingInteractionId(null)
+      fetchInteractions()
+    }
   }
 
   async function handleLogInteraction(e) {
@@ -447,15 +500,115 @@ function ContactDetailPage() {
               <ul className="space-y-3">
                 {interactions.map((interaction) => (
                   <li key={interaction.id} className="rounded-md border border-gray-200 p-4">
-                    <div className="flex items-start justify-between">
-                      <p className="font-medium text-gray-800">{interaction.type || 'Interaction'}</p>
-                      <p className="text-sm text-gray-400">{interaction.interaction_date}</p>
-                    </div>
-                    {interaction.notes && (
-                      <p className="mt-2 whitespace-pre-wrap text-sm text-gray-600">{interaction.notes}</p>
-                    )}
-                    {interaction.follow_up_date && (
-                      <p className="mt-2 text-xs font-medium text-amber-600">Follow up: {interaction.follow_up_date}</p>
+                    {editingInteractionId === interaction.id ? (
+                      <form onSubmit={handleSaveInteraction} className="space-y-3">
+                        <div>
+                          <label className="mb-1 block text-sm font-medium text-gray-700">Type</label>
+                          <select
+                            value={interactionEditForm.type}
+                            onChange={(e) => setInteractionEditForm({ ...interactionEditForm, type: e.target.value })}
+                            className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm outline-none focus:border-indigo-500"
+                          >
+                            <option>Coffee chat</option>
+                            <option>Email</option>
+                            <option>Event</option>
+                            <option>Call</option>
+                            <option>Message</option>
+                            <option>Other</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="mb-1 block text-sm font-medium text-gray-700">Date *</label>
+                          <input
+                            type="date"
+                            value={interactionEditForm.date}
+                            onChange={(e) => setInteractionEditForm({ ...interactionEditForm, date: e.target.value })}
+                            required
+                            className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm outline-none focus:border-indigo-500"
+                          />
+                        </div>
+                        <div>
+                          <label className="mb-1 block text-sm font-medium text-gray-700">Notes</label>
+                          <textarea
+                            value={interactionEditForm.notes}
+                            onChange={(e) => setInteractionEditForm({ ...interactionEditForm, notes: e.target.value })}
+                            rows={3}
+                            className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm outline-none focus:border-indigo-500"
+                          />
+                        </div>
+                        <div>
+                          <label className="mb-1 block text-sm font-medium text-gray-700">Follow-up date</label>
+                          <input
+                            type="date"
+                            value={interactionEditForm.followUpDate}
+                            onChange={(e) => setInteractionEditForm({ ...interactionEditForm, followUpDate: e.target.value })}
+                            className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm outline-none focus:border-indigo-500"
+                          />
+                        </div>
+                        {interactionSaveError && <p className="text-sm text-red-600">{interactionSaveError}</p>}
+                        <div className="flex gap-3">
+                          <button
+                            type="submit"
+                            disabled={savingInteraction}
+                            className="rounded-md bg-indigo-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-indigo-500 disabled:opacity-50"
+                          >
+                            {savingInteraction ? 'Saving...' : 'Save'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setEditingInteractionId(null)}
+                            className="rounded-md border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-600 hover:bg-gray-50"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </form>
+                    ) : (
+                      <>
+                        <div className="flex items-start justify-between">
+                          <div>
+                            <p className="font-medium text-gray-800">{interaction.type || 'Interaction'}</p>
+                            <p className="text-xs text-gray-400">{interaction.interaction_date}</p>
+                          </div>
+                          <div className="ml-4 flex shrink-0 items-center gap-3">
+                            <button
+                              onClick={() => startEditInteraction(interaction)}
+                              className="text-sm font-medium text-gray-400 hover:text-gray-700"
+                            >
+                              Edit
+                            </button>
+                            {deletingInteractionId === interaction.id ? (
+                              <div className="flex items-center gap-2">
+                                <button
+                                  onClick={() => handleDeleteInteraction(interaction.id)}
+                                  className="text-sm font-medium text-red-600 hover:text-red-500"
+                                >
+                                  Yes, delete
+                                </button>
+                                <button
+                                  onClick={() => setDeletingInteractionId(null)}
+                                  className="text-sm font-medium text-gray-400 hover:text-gray-600"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            ) : (
+                              <button
+                                onClick={() => setDeletingInteractionId(interaction.id)}
+                                className="text-sm font-medium text-red-400 hover:text-red-500"
+                              >
+                                Delete
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                        {interaction.notes && (
+                          <p className="mt-2 whitespace-pre-wrap text-sm text-gray-600">{interaction.notes}</p>
+                        )}
+                        {interaction.follow_up_date && (
+                          <p className="mt-2 text-xs font-medium text-amber-600">Follow up: {interaction.follow_up_date}</p>
+                        )}
+                      </>
                     )}
                   </li>
                 ))}
