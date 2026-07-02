@@ -4,7 +4,6 @@ import ContactListItem from '../components/ContactListItem'
 
 function ContactsPage() {
   const [contacts, setContacts] = useState([])
-  const [interactions, setInteractions] = useState([])
   const [loading, setLoading] = useState(true)
   const [showForm, setShowForm] = useState(false)
   const [submitting, setSubmitting] = useState(false)
@@ -17,10 +16,10 @@ function ContactsPage() {
   const [email, setEmail] = useState('')
   const [linkedinUrl, setLinkedinUrl] = useState('')
   const [tagsInput, setTagsInput] = useState('')
+  const [skillsInput, setSkillsInput] = useState('')
 
   useEffect(() => {
     fetchContacts()
-    fetchInteractions()
   }, [])
 
   async function fetchContacts() {
@@ -38,30 +37,6 @@ function ContactsPage() {
     setLoading(false)
   }
 
-  async function fetchInteractions() {
-    const { data, error } = await supabase
-      .from('interactions')
-      .select('*')
-      .order('interaction_date', { ascending: false })
-
-    if (error) {
-      setError(error.message)
-    } else {
-      setInteractions(data)
-    }
-  }
-
-  async function handleLogInteraction(contactId, payload) {
-    const { error } = await supabase.from('interactions').insert([{ contact_id: contactId, ...payload }])
-
-    if (error) {
-      return { error: error.message }
-    }
-
-    fetchInteractions()
-    return {}
-  }
-
   function resetForm() {
     setName('')
     setCompany('')
@@ -70,6 +45,7 @@ function ContactsPage() {
     setEmail('')
     setLinkedinUrl('')
     setTagsInput('')
+    setSkillsInput('')
   }
 
   async function handleAddContact(e) {
@@ -79,8 +55,13 @@ function ContactsPage() {
 
     const tags = tagsInput
       .split(',')
-      .map((tag) => tag.trim())
-      .filter((tag) => tag.length > 0)
+      .map((t) => t.trim())
+      .filter((t) => t.length > 0)
+
+    const skills = skillsInput
+      .split(',')
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0)
 
     const { error } = await supabase.from('contacts').insert([
       {
@@ -91,6 +72,7 @@ function ContactsPage() {
         email: email || null,
         linkedin_url: linkedinUrl || null,
         tags: tags.length > 0 ? tags : null,
+        skills: skills.length > 0 ? skills : null,
       },
     ])
 
@@ -189,6 +171,16 @@ function ContactsPage() {
               />
               <p className="mt-1 text-xs text-gray-400">Separate multiple tags with commas</p>
             </div>
+            <div>
+              <label className="mb-1 block text-sm font-medium text-gray-700">Skills</label>
+              <input
+                value={skillsInput}
+                onChange={(e) => setSkillsInput(e.target.value)}
+                placeholder="python, excel, financial modeling"
+                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm outline-none focus:border-indigo-500"
+              />
+              <p className="mt-1 text-xs text-gray-400">Separate multiple skills with commas</p>
+            </div>
 
             {error && <p className="text-sm text-red-600">{error}</p>}
 
@@ -209,12 +201,7 @@ function ContactsPage() {
         ) : (
           <ul className="space-y-3">
             {contacts.map((contact) => (
-              <ContactListItem
-                key={contact.id}
-                contact={contact}
-                interactions={interactions.filter((interaction) => interaction.contact_id === contact.id)}
-                onLogInteraction={handleLogInteraction}
-              />
+              <ContactListItem key={contact.id} contact={contact} />
             ))}
           </ul>
         )}

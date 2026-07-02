@@ -3,6 +3,7 @@ import { Routes, Route, Navigate } from 'react-router-dom'
 import { supabase } from './lib/supabase'
 import SignInPage from './pages/SignInPage'
 import ContactsPage from './pages/ContactsPage'
+import ContactDetailPage from './pages/ContactDetailPage'
 
 function App() {
   const [session, setSession] = useState(null)
@@ -33,6 +34,7 @@ function App() {
     <Routes>
       <Route path="/" element={<Navigate to="/contacts" replace />} />
       <Route path="/contacts" element={<ContactsPage />} />
+      <Route path="/contacts/:id" element={<ContactDetailPage />} />
     </Routes>
   )
 }
