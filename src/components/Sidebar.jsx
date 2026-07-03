@@ -20,12 +20,16 @@ function NavItem({ to, label, icon, badge, active }) {
   )
 }
 
+// Local date string — avoids UTC-offset "wrong day" bugs
+function getLocalToday() {
+  const d = new Date()
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
 function Sidebar() {
   const location = useLocation()
   const [user, setUser] = useState(null)
   const [followUpCount, setFollowUpCount] = useState(0)
-
-  const today = new Date().toISOString().slice(0, 10)
 
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => setUser(data.user))
@@ -37,7 +41,7 @@ function Sidebar() {
       .from('interactions')
       .select('id', { count: 'exact', head: true })
       .not('follow_up_date', 'is', null)
-      .lte('follow_up_date', today)
+      .lte('follow_up_date', getLocalToday())
     setFollowUpCount(count || 0)
   }
 
