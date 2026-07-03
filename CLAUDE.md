@@ -189,8 +189,8 @@ The contacts page filter pills use `useSearchParams`. Active tag is stored as `?
 | Dashboard with real stats + follow-up list | ✅ |
 | Add contact drawer (slide-in, Escape closes, scroll locked) | ✅ |
 | Per-user data isolation (RLS, two-user verified) | ✅ |
-| Follow-ups screen (`/followups`) | 🔵 Coming soon — Layer 2 |
-| Funnl AI screen (`/ai`) | 🔵 Coming soon — Layer 3 |
+| Follow-ups screen (`/followups`) | ✅ Real data — shows all interactions with a follow_up_date, bucketed into Overdue / Today / Upcoming with correct local-timezone date logic. Snooze and Mark done are Layer 2. |
+| Funnl AI screen (`/ai`) | ✅ Styled coming-soon screen — chat UI aesthetic, non-interactive input bar (`cursor-not-allowed`), example prompts (visual only), Layer 3 description. |
 | Rule-based reminders / cold alerts | 🔵 Layer 2 |
 | AI assistant and smart features | 🔵 Layer 3 |
 
