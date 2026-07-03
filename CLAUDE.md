@@ -32,7 +32,7 @@ The data schema (notes as freeform text, tags/skills as text arrays) was deliber
 - **Tailwind CSS v4** — custom tokens in `src/index.css` using `@theme {}` block (not a config file)
 - **Supabase** — PostgreSQL + auth; credentials in `.env` (never commit `.env`)
 - **React Router v7** — client-side routing
-- **Vercel** — planned deployment, not yet configured
+- **Vercel** — deployed; connected to GitHub (kindnav/funnlv2), auto-deploys on push to main. `vercel.json` at project root rewrites all routes to `index.html` so React Router handles SPA routing without 404s on direct URL access.
 
 ---
 
