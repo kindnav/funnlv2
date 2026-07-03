@@ -1,1 +1,48 @@
 @import "tailwindcss";
+
+@theme {
+  /* ── Fonts ─────────────────────────────────────── */
+  --font-sans: 'Plus Jakarta Sans', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+  --font-display: 'Space Grotesk', sans-serif;
+
+  /* ── Background layers ──────────────────────────── */
+  --color-base: #060608;
+  --color-surface: #0B0B0E;
+  --color-sidebar: #100F14;
+  --color-card: #141419;
+  --color-elevated: #1A1A21;
+  --color-input: #131318;
+
+  /* ── Brand accent ───────────────────────────────── */
+  --color-accent: #8B7CFF;
+  --color-accent-deep: #5B45F0;
+
+  /* ── Semantic states ────────────────────────────── */
+  --color-success: #2FD4B6;
+  --color-warning: #FFB84D;
+  --color-warning-deep: #F5A623;
+  --color-danger: #FF6B8A;
+
+  /* ── Text scale ─────────────────────────────────── */
+  --color-hi: #F4F3F8;
+  --color-mid: #A0A0AD;
+  --color-muted: #9A9AA5;
+  --color-low: #6C6C78;
+  --color-lower: #54545E;
+
+  /* ── Tag / skill chip text ──────────────────────── */
+  --color-tag: #B4A8FF;
+  --color-skill: #9EA0AD;
+}
+
+@layer base {
+  html {
+    background-color: #060608;
+  }
+  body {
+    font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
+    color: #F4F3F8;
+    -webkit-font-smoothing: antialiased;
+  }
+}
