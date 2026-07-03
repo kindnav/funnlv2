@@ -191,6 +191,8 @@ The contacts page filter pills use `useSearchParams`. Active tag is stored as `?
 | Per-user data isolation (RLS, two-user verified) | ✅ |
 | Follow-ups screen (`/followups`) | ✅ Real data — shows all interactions with a follow_up_date, bucketed into Overdue / Today / Upcoming with correct local-timezone date logic. Snooze and Mark done are Layer 2. |
 | Funnl AI screen (`/ai`) | ✅ Styled coming-soon screen — chat UI aesthetic, non-interactive input bar (`cursor-not-allowed`), example prompts (visual only), Layer 3 description. |
+| Empty states (all screens) | ✅ Contacts zero-state has icon + "Start building your network" CTA; search/filter no-results has icon + clear-filters link; all other screens handled. |
+| **Full dark redesign** | ✅ **Complete** — all 8 screens restyled to the Funnl design system (dark palette, Space Grotesk/Jakarta Sans/JetBrains Mono, shared sidebar). |
 | Rule-based reminders / cold alerts | 🔵 Layer 2 |
 | AI assistant and smart features | 🔵 Layer 3 |
 
@@ -214,8 +216,18 @@ The contacts page filter pills use `useSearchParams`. Active tag is stored as `?
 
 ## Known future work / tech debt
 
+### ⚠️ TOP PRIORITY before inviting real students
+**Real email sending (SMTP)** — Supabase's built-in email is rate-limited to ~2 emails/hour. This means most students who sign up will never receive their confirmation email and will assume the app is broken. This is the single gate between "finished MVP" and "can hand to a group."
+
+Set up a real email provider before sharing with anyone:
+1. Create an account with **Resend** (recommended — free tier, simple) at resend.com
+2. Get SMTP credentials from Resend
+3. In Supabase: **Project Settings → Authentication → SMTP Settings** → enter credentials
+4. Test: sign up a new account and confirm the confirmation email arrives reliably
+
+This is a configuration task, not a code change — the sign-up flow itself already works correctly.
+
 ### Before real launch (required)
-1. **Real email sending (SMTP)** — Supabase's built-in email is rate-limited (~2/hour). Use Resend (recommended) or Brevo via Supabase custom SMTP settings. Configuration only — the sign-up flow itself already works correctly.
 2. **User profile (display name + school)** — sidebar shows email username + "Funnl user". Add a `profiles` Supabase table + settings screen so users can set a real name.
 
 ### Before wider sharing (important)

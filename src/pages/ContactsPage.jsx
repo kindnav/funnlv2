@@ -127,14 +127,47 @@ function ContactsPage() {
         {loading ? (
           <p className="text-sm text-muted">Loading…</p>
         ) : contacts.length === 0 ? (
-          <div className="text-center py-20">
-            <p className="text-hi font-semibold mb-1">No contacts yet</p>
-            <p className="text-sm text-muted">Click "+ Add contact" to start building your network.</p>
+          <div className="text-center py-16">
+            <div className="w-[72px] h-[72px] mx-auto mb-6 rounded-[20px] bg-[rgba(108,92,255,0.12)] border border-[rgba(139,124,255,0.25)] flex items-center justify-center">
+              <svg width="32" height="32" viewBox="0 0 100 100" fill="none">
+                <rect x="8" y="6" width="84" height="17" rx="4" fill="#C7BFFF"/>
+                <rect x="20" y="27" width="60" height="17" rx="4" fill="#9D8FFF"/>
+                <rect x="32" y="48" width="36" height="17" rx="4" fill="#8B7CFF"/>
+                <rect x="44" y="69" width="12" height="17" rx="4" fill="#5B45F0"/>
+              </svg>
+            </div>
+            <h2 className="font-display text-[20px] font-bold text-hi mb-2">Start building your network</h2>
+            <p className="text-[14px] leading-relaxed text-muted mb-6 max-w-[320px] mx-auto">
+              Add your first contact to start tracking coffee chats, follow-ups, and warm intros in one place.
+            </p>
+            <button
+              onClick={() => setShowDrawer(true)}
+              className="inline-flex items-center gap-2 bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] text-white text-[14px] font-bold px-5 py-3 rounded-xl shadow-[0_8px_22px_rgba(91,69,240,0.4)] hover:opacity-90 transition-opacity"
+            >
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.2" strokeLinecap="round">
+                <path d="M12 5v14M5 12h14"/>
+              </svg>
+              Add your first contact
+            </button>
           </div>
         ) : filteredContacts.length === 0 ? (
-          <p className="text-sm text-muted">
-            No contacts match{activeTag ? ` the "${activeTag}" filter` : ''}{searchQuery ? ` "${searchQuery}"` : ''}.
-          </p>
+          <div className="flex flex-col items-center py-16 text-center">
+            <div className="w-12 h-12 mb-4 rounded-xl bg-elevated border border-[rgba(255,255,255,0.07)] flex items-center justify-center">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#6C6C78" strokeWidth="1.8" strokeLinecap="round">
+                <circle cx="11" cy="11" r="7"/><path d="m20 20-3.4-3.4"/>
+              </svg>
+            </div>
+            <p className="text-[14px] font-semibold text-hi mb-1">No contacts found</p>
+            <p className="text-[13px] text-muted mb-4">
+              {searchQuery ? `No results for "${searchQuery}"` : `No contacts tagged "${activeTag}"`}
+            </p>
+            <button
+              onClick={() => { setSearchQuery(''); setActiveTag('') }}
+              className="text-[13px] font-medium text-accent hover:text-tag transition-colors"
+            >
+              Clear filters
+            </button>
+          </div>
         ) : (
           <div className="grid grid-cols-2 gap-[14px]">
             {filteredContacts.map(contact => (
