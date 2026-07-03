@@ -1,17 +1,16 @@
 import { useState } from 'react'
 import { supabase } from '../lib/supabase'
 
-const envelopeIcon = (
-  <svg viewBox="0 0 20 20" fill="currentColor" className="h-5 w-5 shrink-0 text-indigo-500">
-    <path d="M2.94 6.94A2 2 0 0 1 4 6h12a2 2 0 0 1 1.06.94L10 12.5 2.94 6.94ZM2 8.6V14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8.6l-7.4 5.55a1 1 0 0 1-1.2 0L2 8.6Z" />
-  </svg>
-)
+// ── Input wrapper with focus glow — must be outside SignInPage to avoid remount on every keystroke ──
+function InputWrapper({ children }) {
+  return (
+    <div className="flex items-center gap-[10px] rounded-xl border border-[rgba(255,255,255,0.09)] bg-input px-[14px] py-[13px] focus-within:border-[rgba(139,124,255,0.5)] focus-within:shadow-[0_0_0_3px_rgba(108,92,255,0.12)] transition-[border-color,box-shadow] duration-150">
+      {children}
+    </div>
+  )
+}
 
-const lockIcon = (
-  <svg viewBox="0 0 20 20" fill="currentColor" className="h-5 w-5 shrink-0 text-gray-500">
-    <path fillRule="evenodd" d="M10 1a4 4 0 0 0-4 4v2H5a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-1V5a4 4 0 0 0-4-4Zm2 6V5a2 2 0 1 0-4 0v2h4Z" clipRule="evenodd" />
-  </svg>
-)
+// ── Auth logic is unchanged — only JSX below this line changes ──────────────
 
 function SignInPage() {
   const [mode, setMode] = useState('signin') // 'signin' | 'signup' | 'pending'
@@ -41,62 +40,144 @@ function SignInPage() {
   async function handleSignUp(e) {
     e.preventDefault()
     setError('')
-
-    if (password !== confirmPassword) {
-      setError('Passwords do not match.')
-      return
-    }
-    if (password.length < 6) {
-      setError('Password must be at least 6 characters.')
-      return
-    }
-
+    if (password !== confirmPassword) { setError('Passwords do not match.'); return }
+    if (password.length < 6) { setError('Password must be at least 6 characters.'); return }
     setLoading(true)
     const { error } = await supabase.auth.signUp({ email, password })
     setLoading(false)
-
-    if (error) {
-      setError(error.message)
-      return
-    }
-
+    if (error) { setError(error.message); return }
     setMode('pending')
   }
 
-  const rightPanel = (
-    <div className="hidden w-1/2 flex-col justify-end bg-gradient-to-br from-neutral-700 via-neutral-900 to-black p-16 lg:flex">
-      <p className="text-3xl font-light text-white">Your networking, organized.</p>
+  // ── Shared pieces ──────────────────────────────────────────────────────────
+
+  const logoTileSmall = (
+    <div className="w-[36px] h-[36px] rounded-[10px] bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] flex items-center justify-center shadow-[0_4px_14px_rgba(91,69,240,0.4)] flex-none">
+      <svg width="18" height="18" viewBox="0 0 100 100" fill="none">
+        <rect x="8" y="6" width="84" height="17" rx="4" fill="white"/>
+        <rect x="20" y="27" width="60" height="17" rx="4" fill="white" opacity="0.85"/>
+        <rect x="32" y="48" width="36" height="17" rx="4" fill="white" opacity="0.7"/>
+        <rect x="44" y="69" width="12" height="17" rx="4" fill="white" opacity="0.55"/>
+      </svg>
     </div>
   )
 
-  // Confirmation-pending screen — shown after a successful sign-up
+  const envelopeIcon = (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#8B7CFF" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="flex-none">
+      <rect x="3" y="5" width="18" height="14" rx="2.5"/><path d="m3 7 9 6 9-6"/>
+    </svg>
+  )
+
+  const lockIcon = (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#6C6C78" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="flex-none">
+      <rect x="4" y="10" width="16" height="10" rx="2.5"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>
+    </svg>
+  )
+
+  const inputCls = 'flex-1 bg-transparent text-[14px] text-hi placeholder-[#54545E] outline-none'
+  const labelCls = 'block text-[13px] font-semibold text-[#C7C7D1] mb-2'
+
+  // ── Shared right panel ─────────────────────────────────────────────────────
+
+  const rightPanel = (
+    <div
+      className="hidden lg:flex w-[520px] flex-col justify-center p-14 relative overflow-hidden"
+      style={{ background: 'linear-gradient(150deg,#3A2D66,#1C1633 55%,#100D1E)' }}
+    >
+      {/* Radial glow blobs — purely decorative CSS */}
+      <div className="absolute top-[-80px] right-[-80px] w-[320px] h-[320px] rounded-full pointer-events-none"
+        style={{ background: 'radial-gradient(circle,rgba(139,124,255,0.35),transparent 70%)' }}/>
+      <div className="absolute bottom-[-100px] left-[-60px] w-[280px] h-[280px] rounded-full pointer-events-none"
+        style={{ background: 'radial-gradient(circle,rgba(47,212,182,0.16),transparent 70%)' }}/>
+
+      <div className="relative">
+        {/* 64px logo tile */}
+        <div className="w-16 h-16 rounded-[18px] bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] flex items-center justify-center shadow-[0_12px_40px_rgba(91,69,240,0.5)] mb-9">
+          <svg width="32" height="32" viewBox="0 0 100 100" fill="none">
+            <rect x="8" y="6" width="84" height="17" rx="4" fill="white"/>
+            <rect x="20" y="27" width="60" height="17" rx="4" fill="white" opacity="0.85"/>
+            <rect x="32" y="48" width="36" height="17" rx="4" fill="white" opacity="0.7"/>
+            <rect x="44" y="69" width="12" height="17" rx="4" fill="white" opacity="0.55"/>
+          </svg>
+        </div>
+
+        <h3 className="font-display text-[34px] font-bold text-white leading-[1.25] mb-[14px] tracking-[-0.5px]">
+          Your networking, organized.
+        </h3>
+        <p className="text-[15px] leading-[1.6] text-[rgba(255,255,255,0.7)] mb-10 max-w-[380px]">
+          Track every contact, coffee chat, and follow-up, and let Funnl AI tell you who to reach next.
+        </p>
+
+        {/* Feature highlight cards */}
+        <div className="flex flex-col gap-[14px]">
+          <div className="flex items-center gap-[14px] bg-[rgba(255,255,255,0.05)] border border-[rgba(255,255,255,0.08)] rounded-[14px] px-[18px] py-4">
+            <div className="w-[38px] h-[38px] rounded-[11px] bg-[rgba(139,124,255,0.22)] flex items-center justify-center flex-none">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#B4A8FF" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="8" cy="8" r="3"/><path d="M2.5 20c0-3 2.5-5.5 5.5-5.5S13.5 17 13.5 20"/><circle cx="17" cy="9" r="2.4"/><path d="M15 14.6c2.8.3 5 2.6 5 5.4"/>
+              </svg>
+            </div>
+            <div>
+              <p className="text-[14px] font-bold text-white">Every contact in one place</p>
+              <p className="text-[12.5px] text-[rgba(255,255,255,0.55)]">Recruiters, alumni, and referrals organized by tag.</p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-[14px] bg-[rgba(255,255,255,0.05)] border border-[rgba(255,255,255,0.08)] rounded-[14px] px-[18px] py-4">
+            <div className="w-[38px] h-[38px] rounded-[11px] bg-[rgba(47,212,182,0.18)] flex items-center justify-center flex-none">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#6EE7D6" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>
+              </svg>
+            </div>
+            <div>
+              <p className="text-[14px] font-bold text-white">Never miss a follow-up</p>
+              <p className="text-[12.5px] text-[rgba(255,255,255,0.55)]">Automatic reminders keep your outreach on track.</p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-[14px] bg-[rgba(255,255,255,0.05)] border border-[rgba(255,255,255,0.08)] rounded-[14px] px-[18px] py-4">
+            <div className="w-[38px] h-[38px] rounded-[11px] bg-[rgba(245,166,35,0.18)] flex items-center justify-center flex-none">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="#FFB84D">
+                <path d="M12 3l1.7 5.3L19 10l-5.3 1.7L12 17l-1.7-5.3L5 10l5.3-1.7L12 3z"/>
+              </svg>
+            </div>
+            <div>
+              <p className="text-[14px] font-bold text-white">AI-guided outreach</p>
+              <p className="text-[12.5px] text-[rgba(255,255,255,0.55)]">Funnl AI drafts messages and suggests who to reach.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+
+  // ── Pending confirmation screen ────────────────────────────────────────────
+
   if (mode === 'pending') {
     return (
       <div className="flex min-h-screen">
-        <div className="flex w-full flex-col justify-center bg-black px-10 lg:w-1/2">
-          <div className="mx-auto w-full max-w-sm">
-            <p className="mb-12 text-xl font-semibold text-white">Funnl</p>
-            <h1 className="mb-4 text-3xl font-bold text-white">Check your email</h1>
-            <p className="mb-2 leading-relaxed text-gray-300">
+        <div className="flex flex-1 flex-col justify-center bg-[#0A0A0C] px-[88px]">
+          <div className="mx-auto w-full max-w-[400px]">
+            <div className="flex items-center gap-[11px] mb-14">
+              {logoTileSmall}
+              <span className="font-display font-bold text-[23px] text-hi tracking-[-0.5px]">Funnl</span>
+            </div>
+            <h1 className="font-display text-[32px] font-bold text-hi mb-3 tracking-[-0.5px]">Check your email</h1>
+            <p className="text-[15px] leading-relaxed text-[#9A9AA5] mb-2">
               We sent a confirmation link to{' '}
-              <span className="font-medium text-white">{email}</span>.
+              <span className="font-semibold text-hi">{email}</span>.
             </p>
-            <p className="mb-8 leading-relaxed text-gray-400">
-              Click the link in that email to verify your account, then come back here and sign in with your email and password.
+            <p className="text-[15px] leading-relaxed text-[#9A9AA5] mb-8">
+              Click that link to verify your account, then come back here and sign in.
             </p>
-            <p className="mb-8 text-sm text-gray-500">
+            <p className="text-[13.5px] text-[#6C6C78] mb-8">
               Didn't receive it? Check your spam folder, or{' '}
-              <button
-                onClick={() => switchMode('signup')}
-                className="text-indigo-400 underline hover:text-indigo-300"
-              >
+              <button onClick={() => switchMode('signup')} className="text-accent underline hover:text-tag transition-colors">
                 try signing up again
-              </button>
-              .
+              </button>.
             </p>
             <button
               onClick={() => switchMode('signin')}
-              className="w-full rounded-md bg-indigo-600 py-3 text-sm font-semibold uppercase tracking-wide text-white transition hover:bg-indigo-500"
+              className="w-full bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] text-white text-[15px] font-bold py-[14px] rounded-xl shadow-[0_8px_22px_rgba(91,69,240,0.4)] hover:opacity-90 transition-opacity"
             >
               Back to Sign In
             </button>
@@ -107,141 +188,110 @@ function SignInPage() {
     )
   }
 
+  // ── Sign in / Sign up screen ───────────────────────────────────────────────
+
   return (
     <div className="flex min-h-screen">
-      <div className="flex w-full flex-col justify-center bg-black px-10 lg:w-1/2">
-        <div className="mx-auto w-full max-w-sm">
-          <p className="mb-12 text-xl font-semibold text-white">Funnl</p>
-          <h1 className="mb-8 text-4xl font-bold text-white">
-            {mode === 'signin' ? 'Sign In' : 'Create Account'}
+      <div className="flex flex-1 flex-col justify-center bg-[#0A0A0C] px-[88px]">
+        <div className="mx-auto w-full max-w-[400px]">
+
+          {/* Logo lockup */}
+          <div className="flex items-center gap-[11px] mb-14">
+            {logoTileSmall}
+            <span className="font-display font-bold text-[23px] text-hi tracking-[-0.5px]">Funnl</span>
+          </div>
+
+          {/* Heading + subtitle */}
+          <h1 className="font-display text-[34px] font-bold text-hi tracking-[-0.5px] mb-2">
+            {mode === 'signin' ? 'Welcome back' : 'Create account'}
           </h1>
+          {mode === 'signin' && (
+            <p className="text-[15px] text-[#9A9AA5] mb-[34px]">Sign in to pick up where your network left off.</p>
+          )}
+          {mode === 'signup' && (
+            <p className="text-[15px] text-[#9A9AA5] mb-[34px]">Join your peers already using Funnl.</p>
+          )}
 
-          {mode === 'signin' ? (
-            <form onSubmit={handleSignIn} className="space-y-6">
+          {/* Sign-in form */}
+          {mode === 'signin' && (
+            <form onSubmit={handleSignIn} className="space-y-5">
               <div>
-                <label htmlFor="email" className="mb-2 block text-sm font-medium text-white">Email</label>
-                <div className="flex items-center gap-2 rounded-md border border-gray-600 bg-black px-3 py-3 focus-within:border-indigo-500">
+                <label className={labelCls}>Email</label>
+                <InputWrapper>
                   {envelopeIcon}
-                  <input
-                    id="email"
-                    type="email"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    required
-                    autoFocus
-                    className="w-full bg-transparent text-white placeholder-gray-500 outline-none"
-                    placeholder="you@example.com"
-                  />
-                </div>
+                  <input id="email" type="email" value={email} onChange={e => setEmail(e.target.value)}
+                    required autoFocus className={inputCls} placeholder="alex@university.edu"/>
+                </InputWrapper>
               </div>
               <div>
-                <label htmlFor="password" className="mb-2 block text-sm font-medium text-gray-300">Password</label>
-                <div className="flex items-center gap-2 rounded-md border border-gray-700 bg-black px-3 py-3 focus-within:border-indigo-500">
+                <label className={labelCls}>Password</label>
+                <InputWrapper>
                   {lockIcon}
-                  <input
-                    id="password"
-                    type="password"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    required
-                    className="w-full bg-transparent text-white placeholder-gray-500 outline-none"
-                    placeholder="Enter Password"
-                  />
-                </div>
+                  <input id="password" type="password" value={password} onChange={e => setPassword(e.target.value)}
+                    required className={inputCls} placeholder="Enter password"/>
+                </InputWrapper>
               </div>
 
-              {error && <p className="text-sm text-red-400">{error}</p>}
+              {error && <p className="text-sm text-danger">{error}</p>}
 
-              <button
-                type="submit"
-                disabled={loading}
-                className="w-full rounded-md bg-indigo-600 py-3 text-sm font-semibold uppercase tracking-wide text-white transition hover:bg-indigo-500 disabled:opacity-50"
-              >
-                {loading ? 'Signing In...' : 'Sign In'}
+              <button type="submit" disabled={loading}
+                className="w-full bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] text-white text-[15px] font-bold py-[14px] rounded-xl shadow-[0_8px_22px_rgba(91,69,240,0.4)] hover:opacity-90 transition-opacity disabled:opacity-50 mt-1">
+                {loading ? 'Signing in…' : 'Sign in'}
               </button>
 
-              <p className="text-center text-sm text-gray-500">
+              <p className="text-center text-[13.5px] text-[#6C6C78] pt-2">
                 Don't have an account?{' '}
-                <button
-                  type="button"
-                  onClick={() => switchMode('signup')}
-                  className="text-indigo-400 hover:text-indigo-300"
-                >
+                <button type="button" onClick={() => switchMode('signup')} className="text-accent font-semibold hover:text-tag transition-colors">
                   Create one
                 </button>
               </p>
             </form>
-          ) : (
-            <form onSubmit={handleSignUp} className="space-y-6">
+          )}
+
+          {/* Sign-up form */}
+          {mode === 'signup' && (
+            <form onSubmit={handleSignUp} className="space-y-5">
               <div>
-                <label htmlFor="signup-email" className="mb-2 block text-sm font-medium text-white">Email</label>
-                <div className="flex items-center gap-2 rounded-md border border-gray-600 bg-black px-3 py-3 focus-within:border-indigo-500">
+                <label className={labelCls}>Email</label>
+                <InputWrapper>
                   {envelopeIcon}
-                  <input
-                    id="signup-email"
-                    type="email"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    required
-                    autoFocus
-                    className="w-full bg-transparent text-white placeholder-gray-500 outline-none"
-                    placeholder="you@university.edu"
-                  />
-                </div>
+                  <input id="signup-email" type="email" value={email} onChange={e => setEmail(e.target.value)}
+                    required autoFocus className={inputCls} placeholder="you@university.edu"/>
+                </InputWrapper>
               </div>
               <div>
-                <label htmlFor="signup-password" className="mb-2 block text-sm font-medium text-gray-300">Password</label>
-                <div className="flex items-center gap-2 rounded-md border border-gray-700 bg-black px-3 py-3 focus-within:border-indigo-500">
+                <label className={labelCls}>Password</label>
+                <InputWrapper>
                   {lockIcon}
-                  <input
-                    id="signup-password"
-                    type="password"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    required
-                    className="w-full bg-transparent text-white placeholder-gray-500 outline-none"
-                    placeholder="At least 6 characters"
-                  />
-                </div>
+                  <input id="signup-password" type="password" value={password} onChange={e => setPassword(e.target.value)}
+                    required className={inputCls} placeholder="At least 6 characters"/>
+                </InputWrapper>
               </div>
               <div>
-                <label htmlFor="confirm-password" className="mb-2 block text-sm font-medium text-gray-300">Confirm Password</label>
-                <div className="flex items-center gap-2 rounded-md border border-gray-700 bg-black px-3 py-3 focus-within:border-indigo-500">
+                <label className={labelCls}>Confirm Password</label>
+                <InputWrapper>
                   {lockIcon}
-                  <input
-                    id="confirm-password"
-                    type="password"
-                    value={confirmPassword}
-                    onChange={(e) => setConfirmPassword(e.target.value)}
-                    required
-                    className="w-full bg-transparent text-white placeholder-gray-500 outline-none"
-                    placeholder="Re-enter your password"
-                  />
-                </div>
+                  <input id="confirm-password" type="password" value={confirmPassword} onChange={e => setConfirmPassword(e.target.value)}
+                    required className={inputCls} placeholder="Re-enter your password"/>
+                </InputWrapper>
               </div>
 
-              {error && <p className="text-sm text-red-400">{error}</p>}
+              {error && <p className="text-sm text-danger">{error}</p>}
 
-              <button
-                type="submit"
-                disabled={loading}
-                className="w-full rounded-md bg-indigo-600 py-3 text-sm font-semibold uppercase tracking-wide text-white transition hover:bg-indigo-500 disabled:opacity-50"
-              >
-                {loading ? 'Creating Account...' : 'Create Account'}
+              <button type="submit" disabled={loading}
+                className="w-full bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] text-white text-[15px] font-bold py-[14px] rounded-xl shadow-[0_8px_22px_rgba(91,69,240,0.4)] hover:opacity-90 transition-opacity disabled:opacity-50 mt-1">
+                {loading ? 'Creating account…' : 'Create account'}
               </button>
 
-              <p className="text-center text-sm text-gray-500">
+              <p className="text-center text-[13.5px] text-[#6C6C78] pt-2">
                 Already have an account?{' '}
-                <button
-                  type="button"
-                  onClick={() => switchMode('signin')}
-                  className="text-indigo-400 hover:text-indigo-300"
-                >
+                <button type="button" onClick={() => switchMode('signin')} className="text-accent font-semibold hover:text-tag transition-colors">
                   Sign in
                 </button>
               </p>
             </form>
           )}
+
         </div>
       </div>
       {rightPanel}
