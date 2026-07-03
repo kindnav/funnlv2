@@ -90,19 +90,26 @@ function FollowUpRow({ interaction, today, isLast }) {
 function FollowUpsPage() {
   const [interactions, setInteractions] = useState([])
   const [loading, setLoading] = useState(true)
+  const [fetchError, setFetchError] = useState('')
 
   const today = getLocalToday()
 
   useEffect(() => { fetchFollowUps() }, [])
 
   async function fetchFollowUps() {
+    setFetchError('')
+    setLoading(true)
     const { data, error } = await supabase
       .from('interactions')
       .select('*, contacts(id, name)')
       .not('follow_up_date', 'is', null)
       .order('follow_up_date', { ascending: true })
 
-    if (!error) setInteractions(data || [])
+    if (error) {
+      setFetchError(error.message)
+    } else {
+      setInteractions(data || [])
+    }
     setLoading(false)
   }
 
@@ -115,6 +122,25 @@ function FollowUpsPage() {
     return (
       <div className="min-h-screen bg-surface flex items-center justify-center">
         <p className="text-sm text-muted">Loading…</p>
+      </div>
+    )
+  }
+
+  if (fetchError) {
+    return (
+      <div className="min-h-screen bg-surface flex items-center justify-center p-12">
+        <div className="text-center max-w-sm">
+          <div className="w-12 h-12 mx-auto mb-4 rounded-xl bg-[rgba(255,107,138,0.1)] border border-[rgba(255,107,138,0.2)] flex items-center justify-center">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#FF6B8A" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/>
+            </svg>
+          </div>
+          <p className="text-hi font-semibold mb-2">Couldn't load your follow-ups</p>
+          <p className="text-muted text-sm mb-5">Check your connection and try again.</p>
+          <button onClick={fetchFollowUps} className="text-accent text-sm font-semibold hover:text-tag transition-colors">
+            Try again
+          </button>
+        </div>
       </div>
     )
   }

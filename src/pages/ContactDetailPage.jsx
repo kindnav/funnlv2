@@ -2,6 +2,12 @@ import { useEffect, useState } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 
+// ── Local date (YYYY-MM-DD) — avoids UTC-offset "wrong day" bugs ─────────────
+function getLocalToday() {
+  const d = new Date()
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
 // ── Avatar helpers (same algorithm as ContactListItem) ──────────────────────
 const AVATAR_COLORS = [
   'linear-gradient(135deg,#8B7CFF,#5B45F0)',
@@ -90,7 +96,7 @@ function ContactDetailPage() {
   const [submitting, setSubmitting] = useState(false)
   const [formError, setFormError] = useState('')
   const [type, setType] = useState('Coffee chat')
-  const [interactionDate, setInteractionDate] = useState(() => new Date().toISOString().slice(0, 10))
+  const [interactionDate, setInteractionDate] = useState(getLocalToday)
   const [notes, setNotes] = useState('')
   const [followUpDate, setFollowUpDate] = useState('')
 
@@ -99,6 +105,7 @@ function ContactDetailPage() {
   const [savingInteraction, setSavingInteraction] = useState(false)
   const [interactionSaveError, setInteractionSaveError] = useState('')
   const [deletingInteractionId, setDeletingInteractionId] = useState(null)
+  const [interactionsError, setInteractionsError] = useState('')
 
   useEffect(() => { fetchContact(); fetchInteractions() }, [id])
 
@@ -110,7 +117,12 @@ function ContactDetailPage() {
 
   async function fetchInteractions() {
     const { data, error } = await supabase.from('interactions').select('*').eq('contact_id', id).order('interaction_date', { ascending: false })
-    if (!error) setInteractions(data)
+    if (error) {
+      setInteractionsError('Couldn\'t load interactions. Refresh to try again.')
+    } else {
+      setInteractionsError('')
+      setInteractions(data)
+    }
   }
 
   function startEdit() {
@@ -198,7 +210,7 @@ function ContactDetailPage() {
   }
 
   // ── Derived values ───────────────────────────────────────────────────────
-  const today = new Date().toISOString().slice(0, 10)
+  const today = getLocalToday()
   const overdueFollowUp = interactions
     .filter(i => i.follow_up_date && i.follow_up_date <= today)
     .sort((a, b) => a.follow_up_date.localeCompare(b.follow_up_date))[0] || null
@@ -471,7 +483,12 @@ function ContactDetailPage() {
                 )}
 
                 {/* Interaction timeline */}
-                {interactions.length === 0 ? (
+                {interactionsError ? (
+                  <div className="text-center py-8">
+                    <p className="text-[13px] text-danger mb-2">{interactionsError}</p>
+                    <button onClick={fetchInteractions} className="text-[12px] text-accent hover:text-tag transition-colors">Try again</button>
+                  </div>
+                ) : interactions.length === 0 ? (
                   <div className="text-center py-8">
                     <p className="text-[13px] font-medium text-mid mb-1">No interactions yet</p>
                     <p className="text-[12px] text-low">Click <span className="text-accent">+ Log</span> to record your first one.</p>

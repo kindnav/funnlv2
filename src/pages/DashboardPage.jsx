@@ -24,8 +24,14 @@ function getInitials(name) {
   return parts.length === 1 ? parts[0].slice(0, 2).toUpperCase() : (parts[0][0] + parts[parts.length - 1][0]).toUpperCase()
 }
 
+// Local date string (YYYY-MM-DD) — avoids UTC-offset "wrong day" bugs
+function getLocalToday() {
+  const d = new Date()
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
 function followUpStatus(dateStr) {
-  const today = new Date().toISOString().slice(0, 10)
+  const today = getLocalToday()
   return dateStr === today
     ? { label: 'Today', cls: 'text-warning bg-[rgba(245,166,35,0.14)] border border-[rgba(245,166,35,0.3)]' }
     : { label: 'Overdue', cls: 'text-danger bg-[rgba(255,107,138,0.13)] border border-[rgba(255,107,138,0.25)]' }
@@ -40,23 +46,26 @@ function DashboardPage() {
   const [followUps, setFollowUps] = useState([])
   const [recentContacts, setRecentContacts] = useState([])
   const [loading, setLoading] = useState(true)
+  const [fetchError, setFetchError] = useState('')
   const [showDrawer, setShowDrawer] = useState(false)
 
   useEffect(() => { fetchAll() }, [])
 
   async function fetchAll() {
-    const today = new Date().toISOString().slice(0, 10)
+    setFetchError('')
+    setLoading(true)
+    const today = getLocalToday()
     const weekAgo = new Date(); weekAgo.setDate(weekAgo.getDate() - 7)
     const weekAgoStr = weekAgo.toISOString()
 
     const [
-      { count: contacts },
-      { count: interactions },
-      { count: newContacts },
-      { count: newInteractions },
-      { count: todayDue },
-      { data: followUpsData },
-      { data: recentData },
+      { count: contacts, error: e1 },
+      { count: interactions, error: e2 },
+      { count: newContacts, error: e3 },
+      { count: newInteractions, error: e4 },
+      { count: todayDue, error: e5 },
+      { data: followUpsData, error: e6 },
+      { data: recentData, error: e7 },
     ] = await Promise.all([
       supabase.from('contacts').select('*', { count: 'exact', head: true }),
       supabase.from('interactions').select('*', { count: 'exact', head: true }),
@@ -66,6 +75,13 @@ function DashboardPage() {
       supabase.from('interactions').select('*, contacts(id, name)').not('follow_up_date', 'is', null).lte('follow_up_date', today).order('follow_up_date', { ascending: true }),
       supabase.from('contacts').select('*').order('created_at', { ascending: false }).limit(5),
     ])
+
+    const queryError = e1 || e2 || e3 || e4 || e5 || e6 || e7
+    if (queryError) {
+      setFetchError(queryError.message)
+      setLoading(false)
+      return
+    }
 
     setContactCount(contacts || 0)
     setInteractionCount(interactions || 0)
@@ -82,6 +98,29 @@ function DashboardPage() {
     return (
       <div className="min-h-screen bg-surface flex items-center justify-center">
         <p className="text-muted text-sm">Loading…</p>
+      </div>
+    )
+  }
+
+  // ── Error — show a clear message instead of misleading zeros/empty state ──
+  if (fetchError) {
+    return (
+      <div className="min-h-screen bg-surface flex items-center justify-center p-12">
+        <div className="text-center max-w-sm">
+          <div className="w-12 h-12 mx-auto mb-4 rounded-xl bg-[rgba(255,107,138,0.1)] border border-[rgba(255,107,138,0.2)] flex items-center justify-center">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#FF6B8A" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/>
+            </svg>
+          </div>
+          <p className="text-hi font-semibold mb-2">Couldn't load your dashboard</p>
+          <p className="text-muted text-sm mb-5">Check your connection and try again.</p>
+          <button
+            onClick={fetchAll}
+            className="text-accent text-sm font-semibold hover:text-tag transition-colors"
+          >
+            Try again
+          </button>
+        </div>
       </div>
     )
   }
