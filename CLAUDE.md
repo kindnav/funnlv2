@@ -166,7 +166,7 @@ Stick to `4 · 8 · 12 · 16 · 24 · 32px` (Tailwind gap-1 through gap-8)
 - `fade-in 0.2s ease-out` — backdrop fades in
 
 ### Contact avatar colors
-Derived deterministically from contact name using a hash → 6-color palette (purple, teal, pink-orange, blue, amber, lavender). Same contact always gets the same color. Implementation is duplicated in `ContactListItem.jsx` and `ContactDetailPage.jsx` — consolidate into `src/lib/avatarUtils.js` when a third usage appears.
+Derived deterministically from contact name using a hash → 6-color palette (purple, teal, pink-orange, blue, amber, lavender). Same contact always gets the same color. Single source of truth: `src/lib/avatarUtils.js` — import `getAvatarColor` and `getInitials` from there in any new component that needs them.
 
 ---
 
@@ -193,6 +193,7 @@ The contacts page filter pills use `useSearchParams`. Active tag is stored as `?
 | Funnl AI screen (`/ai`) | ✅ Styled coming-soon screen — chat UI aesthetic, non-interactive input bar (`cursor-not-allowed`), example prompts (visual only), Layer 3 description. |
 | Empty states (all screens) | ✅ Contacts zero-state has icon + "Start building your network" CTA; search/filter no-results has icon + clear-filters link; all other screens handled. |
 | **Full dark redesign** | ✅ **Complete** — all 8 screens restyled to the Funnl design system (dark palette, Space Grotesk/Jakarta Sans/JetBrains Mono, shared sidebar). |
+| **Robustness pass** | ✅ Error handling on all Supabase reads (dashboard, contact detail, follow-ups); local-timezone date logic consistent app-wide (sidebar badge, dashboard, contact detail, follow-ups all agree); avatar helpers extracted to `src/lib/avatarUtils.js`; AddContactDrawer rejects whitespace-only names and uses safe scroll-lock cleanup. |
 | Rule-based reminders / cold alerts | 🔵 Layer 2 |
 | AI assistant and smart features | 🔵 Layer 3 |
 

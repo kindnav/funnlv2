@@ -23,23 +23,33 @@ function AddContactDrawer({ onClose, onSuccess }) {
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose])
 
-  // Lock background scroll while drawer is open (targets the main scroll container)
+  // Lock background scroll while drawer is open.
+  // Early-return pattern: if mainEl isn't found (shouldn't happen), no cleanup needed.
+  // React always runs the returned cleanup on unmount, so scroll can never stay locked.
   useEffect(() => {
     const mainEl = document.querySelector('main')
-    if (mainEl) mainEl.style.overflowY = 'hidden'
-    return () => { if (mainEl) mainEl.style.overflowY = '' }
+    if (!mainEl) return
+    mainEl.style.overflowY = 'hidden'
+    return () => { mainEl.style.overflowY = '' }
   }, [])
 
   async function handleSubmit(e) {
     e.preventDefault()
-    setSubmitting(true)
     setError('')
+
+    const trimmedName = name.trim()
+    if (!trimmedName) {
+      setError('Name is required.')
+      return
+    }
+
+    setSubmitting(true)
 
     const tags = tagsInput.split(',').map(t => t.trim()).filter(Boolean)
     const skills = skillsInput.split(',').map(s => s.trim()).filter(Boolean)
 
     const { error } = await supabase.from('contacts').insert([{
-      name,
+      name: trimmedName,
       company: company || null,
       role: role || null,
       how_met: howMet || null,
