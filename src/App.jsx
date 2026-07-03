@@ -7,6 +7,7 @@ import ContactsPage from './pages/ContactsPage'
 import ContactDetailPage from './pages/ContactDetailPage'
 import FollowUpsPage from './pages/FollowUpsPage'
 import FunnlAIPage from './pages/FunnlAIPage'
+import WelcomePage from './pages/WelcomePage'
 import Sidebar from './components/Sidebar'
 
 function App() {
@@ -31,7 +32,12 @@ function App() {
   }
 
   if (!session) {
-    return <SignInPage />
+    return (
+      <Routes>
+        <Route path="/welcome" element={<WelcomePage />} />
+        <Route path="*" element={<SignInPage />} />
+      </Routes>
+    )
   }
 
   return (
@@ -44,6 +50,7 @@ function App() {
           <Route path="/contacts/:id" element={<ContactDetailPage />} />
           <Route path="/followups" element={<FollowUpsPage />} />
           <Route path="/ai" element={<FunnlAIPage />} />
+          <Route path="/welcome" element={<WelcomePage />} />
         </Routes>
       </main>
     </div>

@@ -49,6 +49,7 @@ src/
     ContactsPage.jsx       Contacts grid + search + URL-based tag filter (?tag=recruiter)
     ContactDetailPage.jsx  Full contact profile: two-column (details + AI placeholder / interaction timeline)
     SignInPage.jsx         Dark split-screen: sign-in mode + sign-up mode + email-confirmation pending state
+    WelcomePage.jsx        Email-confirmation landing page at /welcome — no sidebar, accessible to logged-out users
   lib/
     supabase.js            Supabase client, reads VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY from .env
   App.jsx                  Auth gating, shared layout (Sidebar + main scroll area), all routes
@@ -67,8 +68,9 @@ CLAUDE.md                  This file — project reference, keep current
 | `/` | DashboardPage | Landing screen after login |
 | `/contacts` | ContactsPage | Grid + search + filter; `?tag=recruiter` drives filter pills |
 | `/contacts/:id` | ContactDetailPage | Full profile + interaction timeline |
-| `/followups` | ComingSoon | Layer 2 placeholder — do not add fake data |
-| `/ai` | ComingSoon | Layer 3 placeholder — do not add fake data |
+| `/followups` | FollowUpsPage | Real data — overdue/today/upcoming buckets; Snooze/Mark done are Layer 2 |
+| `/ai` | FunnlAIPage | Styled coming-soon; non-interactive chat UI; Layer 3 placeholder |
+| `/welcome` | WelcomePage | Email-confirmation landing; no sidebar; accessible to logged-out users |
 
 ---
 
@@ -194,6 +196,8 @@ The contacts page filter pills use `useSearchParams`. Active tag is stored as `?
 | Empty states (all screens) | ✅ Contacts zero-state has icon + "Start building your network" CTA; search/filter no-results has icon + clear-filters link; all other screens handled. |
 | **Full dark redesign** | ✅ **Complete** — all 8 screens restyled to the Funnl design system (dark palette, Space Grotesk/Jakarta Sans/JetBrains Mono, shared sidebar). |
 | **Robustness pass** | ✅ Error handling on all Supabase reads (dashboard, contact detail, follow-ups); local-timezone date logic consistent app-wide (sidebar badge, dashboard, contact detail, follow-ups all agree); avatar helpers extracted to `src/lib/avatarUtils.js`; AddContactDrawer rejects whitespace-only names and uses safe scroll-lock cleanup. |
+| **Real email / SMTP** | ✅ Resend connected via Supabase custom SMTP; sending from noreply@getfunnl.com; getfunnl.com verified on Cloudflare. Confirmation emails deliver reliably. |
+| **Email confirmation landing page** | ✅ `/welcome` — clean success screen (checkmark, "You're all set", "Continue to sign in" button). No sidebar. Accessible to logged-out users. Supabase redirect URLs must point here once deployed. |
 | Rule-based reminders / cold alerts | 🔵 Layer 2 |
 | AI assistant and smart features | 🔵 Layer 3 |
 
@@ -217,16 +221,15 @@ The contacts page filter pills use `useSearchParams`. Active tag is stored as `?
 
 ## Known future work / tech debt
 
-### ⚠️ TOP PRIORITY before inviting real students
-**Real email sending (SMTP)** — Supabase's built-in email is rate-limited to ~2 emails/hour. This means most students who sign up will never receive their confirmation email and will assume the app is broken. This is the single gate between "finished MVP" and "can hand to a group."
+### ✅ DONE — Real email / SMTP
+Resend is connected via Supabase custom SMTP. Sending from `noreply@getfunnl.com`. Domain `getfunnl.com` verified on Cloudflare. Confirmation emails deliver reliably.
 
-Set up a real email provider before sharing with anyone:
-1. Create an account with **Resend** (recommended — free tier, simple) at resend.com
-2. Get SMTP credentials from Resend
-3. In Supabase: **Project Settings → Authentication → SMTP Settings** → enter credentials
-4. Test: sign up a new account and confirm the confirmation email arrives reliably
+### ⚠️ Before deploying to getfunnl.com
+**Supabase redirect URLs** — once the app is deployed, update two settings in Supabase dashboard so confirmation emails land on the real welcome page:
+1. **Project Settings → General → Site URL** → `https://getfunnl.com`
+2. **Project Settings → Authentication → URL Configuration → Redirect URLs** → add `https://getfunnl.com/welcome`
 
-This is a configuration task, not a code change — the sign-up flow itself already works correctly.
+Without this, confirmation links will still redirect to localhost. The `/welcome` page is already built and waiting.
 
 ### Before real launch (required)
 2. **User profile (display name + school)** — sidebar shows email username + "Funnl user". Add a `profiles` Supabase table + settings screen so users can set a real name.
