@@ -289,6 +289,22 @@ Tracked here so progress survives across sessions. Mark each item `[x]` when don
 
 ---
 
+## Dead-end UI audit (2026-07-04)
+
+Full review of every interactive element before first-student rollout. Only 3 issues found — the rest of the app is clean.
+
+| # | Element | Location | Status | Decision |
+|---|---|---|---|---|
+| 1 | **User account card chevron** | `Sidebar.jsx` — the card below the logo | Plain `<div>` with a ↓ chevron icon. Looks like a profile dropdown trigger, does nothing on click. | Pending — wire to `/settings` when that page is built |
+| 2 | **Settings page** | `Sidebar.jsx` — Settings button | Correctly disabled + "SOON" badge. Needs a real minimal page. | Pending — build minimal Settings (display name + school) |
+| 3 | **AI page "BETA" badge + subtitle** | `FunnlAIPage.jsx` header | "BETA" implies functional; subtitle "Ask anything about your network" implies it works now. Contradicts the body which correctly says "coming." | Pending — change badge to "SOON", subtitle to "Coming in Layer 3" |
+
+**Everything else:** all nav links, pipeline links, contact cards, drawers, forms, error states, and empty-state CTAs work correctly or are properly disabled.
+
+**Settings storage decision:** Use a `profiles` Supabase table (`id UUID`, `display_name TEXT`, `school TEXT`, RLS on). Slightly more setup than user_metadata but queryable and the right foundation for Layer 3 AI. Mobile access: Settings is desktop-only for v1 (sidebar hidden on mobile, no BottomNav tab). Acceptable since setting a display name is a one-time action done from a laptop.
+
+---
+
 ## Known future work / tech debt
 
 ### ⚠️ Task 1 — Email deliverability (do BEFORE inviting real students)
