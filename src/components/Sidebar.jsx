@@ -63,7 +63,7 @@ function Sidebar() {
   const iconStroke = (active) => active ? '#8B7CFF' : '#6C6C78'
 
   return (
-    <div className="w-[248px] min-w-[248px] h-screen flex flex-col bg-sidebar border-r border-[rgba(255,255,255,0.06)] overflow-y-auto">
+    <div className="hidden md:flex w-[248px] min-w-[248px] h-screen flex-col bg-sidebar border-r border-[rgba(255,255,255,0.06)] overflow-y-auto">
 
       {/* Logo */}
       <div className="flex items-center gap-[10px] px-[18px] pt-[18px] pb-5">

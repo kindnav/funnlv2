@@ -10,6 +10,7 @@ import FunnlAIPage from './pages/FunnlAIPage'
 import WelcomePage from './pages/WelcomePage'
 import ResetPasswordPage from './pages/ResetPasswordPage'
 import Sidebar from './components/Sidebar'
+import BottomNav from './components/BottomNav'
 
 function App() {
   const [session, setSession] = useState(null)
@@ -45,7 +46,7 @@ function App() {
   return (
     <div className="flex h-screen overflow-hidden bg-base">
       <Sidebar />
-      <main className="flex-1 overflow-y-auto bg-surface">
+      <main className="flex-1 overflow-y-auto bg-surface pb-16 md:pb-0">
         <Routes>
           <Route path="/" element={<DashboardPage />} />
           <Route path="/contacts" element={<ContactsPage />} />
@@ -56,6 +57,7 @@ function App() {
           <Route path="/reset-password" element={<ResetPasswordPage />} />
         </Routes>
       </main>
+      <BottomNav />
     </div>
   )
 }
