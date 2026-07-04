@@ -85,8 +85,8 @@ function Sidebar() {
         <span className="font-display font-bold text-[20px] text-hi tracking-[-0.5px]">Funnl</span>
       </div>
 
-      {/* User account card */}
-      <div className="mx-[14px] mb-5 flex items-center gap-[10px] bg-elevated rounded-xl border border-[rgba(255,255,255,0.05)] px-2 py-2">
+      {/* User account card — links to Settings */}
+      <Link to="/settings" className="mx-[14px] mb-5 flex items-center gap-[10px] bg-elevated rounded-xl border border-[rgba(255,255,255,0.05)] px-2 py-2 no-underline hover:border-[rgba(139,124,255,0.3)] transition-colors">
         <div className="relative flex-none">
           <div className="w-[34px] h-[34px] rounded-[9px] bg-[linear-gradient(135deg,#FF6B8A,#F5A623)] flex items-center justify-center text-[13px] font-bold text-white">
             {getInitials(user?.email)}
@@ -100,7 +100,7 @@ function Sidebar() {
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#6C6C78" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-none">
           <path d="M6 9l6 6 6-6"/>
         </svg>
-      </div>
+      </Link>
 
       {/* MENU */}
       <div className="px-[22px] pb-2 text-[10.5px] font-bold tracking-[1.2px] text-lower uppercase font-mono">MENU</div>
