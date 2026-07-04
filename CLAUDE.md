@@ -233,6 +233,34 @@ The contacts page filter pills use `useSearchParams`. Active tag is stored as `?
 
 ---
 
+## Pre-rollout readiness review (2026-07-04)
+
+A full code review was done before first-student rollout. Honest verdict: close but two things must be fixed first.
+
+### ⚠️ MUST FIX before ANY users
+
+**1. Password reset — no recovery path exists.**
+`SignInPage.jsx` has no forgot-password link. If a student forgets their password, they have no way to recover — they can't re-register (email already exists in Supabase) and there's no reset flow. Supabase has a built-in `supabase.auth.resetPasswordForEmail()` that sends a magic link; the UI just needs a "Forgot password?" link that calls it, then a recovery page to accept the new password. Small, self-contained fix.
+
+**2. Mobile responsiveness — the app is desktop-only right now.**
+The layout (`flex h-screen` + fixed 248px sidebar + hardcoded grid layouts) is completely broken on phones. Students will open the link on their phone. The sign-in page is usable on mobile; the authenticated app is not. AddContactDrawer is `w-[452px]` fixed — overflows on any phone screen. Dashboard/contacts/detail pages all use multi-column grids that collapse to unusable widths. Fixing this requires: collapsing or hiding the sidebar on mobile, switching page grids to `grid-cols-1`, and making the drawer full-width on small screens. This is the largest single piece of work before wider rollout.
+
+### Should fix soon (small, after first few users)
+
+- **Search includes "skill" in placeholder but doesn't search skills** (`ContactsPage.jsx` line 98): Either add `c.skills?.some(s => s.toLowerCase().includes(q))` to the filter, or remove "skill" from the placeholder. One-liner.
+- **LinkedIn URLs without `https://` create broken links**: Users saving `linkedin.com/in/foo` get a relative href that goes nowhere. Auto-prepend `https://` if the value doesn't start with `http`.
+- **Settings button has no handler** (`Sidebar.jsx` line 183): Clicking it does nothing. Should be removed or visually disabled with `cursor-not-allowed` + "Coming soon" tooltip until a settings screen exists.
+- **Pipeline sidebar links don't filter** (`Sidebar.jsx` lines 164–175): "Target firms," "Recruiters," "Alumni" all link to `/contacts` with no `?tag=` param. One-line fix each: add `?tag=target+firm`, `?tag=recruiter`, `?tag=alumni`.
+- **ContactsPage error + empty state show simultaneously**: On fetch failure, `contacts` stays `[]` so the error banner AND "Start building your network" empty state both appear. Fetch error should suppress the rest of the page body.
+
+### Minor / later
+
+- Import out-of-order in `ContactDetailPage.jsx` (line 11): works fine, cosmetic lint issue only.
+- No post-save confirmation toast after logging an interaction: form closes silently. Fine for v1.
+- "Try Funnl AI" CTA in sidebar leads to coming-soon page: not a dead-end since the page explains this, but sets higher expectations than it delivers.
+
+---
+
 ## Known future work / tech debt
 
 ### ⚠️ Task 1 — Email deliverability (do BEFORE inviting real students)
@@ -262,6 +290,28 @@ Currently, clicking the email confirmation link auto-logs the user in and drops 
 
 ### Layer 2 (next major phase)
 5. **Follow-ups enhancements** — `/followups` shows real data. Still needed: Snooze, Mark done actions, and "going cold" detection logic.
+
+### Monetization — thinking only, do NOT build yet
+
+**Timing:** Don't build billing until you have 20–50 active returning users and understand which features they value enough to pay for. Building billing with zero users and unproven retention is premature and will slow down first-user acquisition.
+
+**The right trigger to revisit:** someone asks how to pay for it, or costs start to matter.
+
+**Likely model when ready:**
+- Free tier: up to 50 contacts, unlimited interactions — gets students in the door
+- Pro tier (~$5–8/month or $40/year): unlimited contacts + AI features (Layer 3)
+
+Students will pay for concrete time-savings during recruiting season (AI-drafted follow-ups, "who to contact next"). They won't pay for storage. The contact limit is a natural converting forcing function — active students recruiting across multiple firms will hit 50 contacts.
+
+### AI sequencing — wait until after first users
+
+Do NOT start Layer 3 before getting real user data. Reasons:
+1. You don't know what questions students will actually ask — don't build answers to hypothetical questions
+2. Every interaction logged in Layer 1 is training data for Layer 3; more data = better AI
+3. Claude API costs money per query; don't pay that before users are retained and potentially paying
+4. Real users will tell you exactly which AI feature matters most — watch what they search for, what they can't find, what they complain about
+
+**Sequence:** first cohort → watch usage → ask directly "if AI could help you with one thing here, what would it be?" → build that specific thing, not the full brainstorm list.
 
 ### Layer 3 — AI integration (Claude API — do NOT build until user initiates)
 
