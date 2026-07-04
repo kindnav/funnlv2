@@ -183,7 +183,7 @@ function ContactDetailPage() {
 
   if (error || !contact) {
     return (
-      <div className="min-h-screen bg-surface px-9 py-8">
+      <div className="min-h-screen bg-surface px-4 py-6 md:px-9 md:py-8">
         <Link to="/contacts" className="text-sm font-medium text-accent hover:text-tag no-underline">← Contacts</Link>
         <p className="mt-4 text-sm text-danger">{error || 'Contact not found.'}</p>
       </div>
@@ -201,7 +201,7 @@ function ContactDetailPage() {
   // ── Render ───────────────────────────────────────────────────────────────
 
   return (
-    <div className="min-h-screen bg-surface px-9 py-8">
+    <div className="min-h-screen bg-surface px-4 py-6 md:px-9 md:py-8">
 
       {/* Back link */}
       <Link to="/contacts" className="inline-flex items-center gap-1.5 text-[13px] font-semibold text-muted hover:text-hi transition-colors no-underline mb-5">
@@ -215,7 +215,7 @@ function ContactDetailPage() {
       {isEditing ? (
         <div className="bg-card border border-[rgba(255,255,255,0.07)] rounded-[18px] p-6">
           <h2 className="font-display text-[19px] font-bold text-hi mb-5">Edit contact</h2>
-          <form onSubmit={handleSave} className="grid grid-cols-2 gap-4">
+          <form onSubmit={handleSave} className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="col-span-2">
               <label className={lCls}>Name <span className="text-accent">*</span></label>
               <input value={editForm.name} onChange={e => setEditForm({ ...editForm, name: e.target.value })} required className={iCls}/>
@@ -264,7 +264,7 @@ function ContactDetailPage() {
       ) : (
         <>
           {/* ── HERO CARD ── */}
-          <div className="bg-card border border-[rgba(255,255,255,0.07)] rounded-[18px] p-[22px_24px] flex items-start justify-between gap-4 mb-3">
+          <div className="bg-card border border-[rgba(255,255,255,0.07)] rounded-[18px] p-[22px_24px] flex flex-col md:flex-row items-start justify-between gap-4 mb-3">
             {/* Avatar + name + tags */}
             <div className="flex gap-[18px] items-start flex-1 min-w-0">
               <div
@@ -341,7 +341,7 @@ function ContactDetailPage() {
           </div>
 
           {/* ── TWO-COLUMN BODY ── */}
-          <div className="grid grid-cols-[1fr_1.35fr] gap-[18px]">
+          <div className="grid grid-cols-1 md:grid-cols-[1fr_1.35fr] gap-[18px]">
 
             {/* LEFT: Details + Funnl AI placeholder */}
             <div className="flex flex-col gap-[18px]">
