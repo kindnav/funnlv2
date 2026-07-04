@@ -261,6 +261,28 @@ The layout (`flex h-screen` + fixed 248px sidebar + hardcoded grid layouts) is c
 
 ---
 
+## Pre-rollout fix plan
+
+Tracked here so progress survives across sessions. Mark each item `[x]` when done and committed.
+
+### Phase 1 — Must-fix before any student gets the link
+- [ ] **1. Password reset** — forgot-password flow via Supabase. "Forgot password?" on sign-in → email → `/reset-password` page → new password → sign in. New file: `ResetPasswordPage.jsx`. Small changes to `SignInPage.jsx` and `App.jsx`.
+- [ ] **2. Mobile responsiveness** — sidebar → hamburger/drawer on mobile; all page grids collapse to single column at mobile widths; AddContactDrawer full-width on phones; verify every screen at ~375px.
+
+### Phase 2 — Should-fix before wider push
+- [ ] **3. Search skills** — add skills to the contact search filter in `ContactsPage.jsx` (or remove "skill" from placeholder). One-liner.
+- [ ] **4. LinkedIn URL https://** — auto-prepend `https://` when saving/displaying LinkedIn URLs so they don't break as relative links.
+- [ ] **5. Settings button dead-end** — disable the Settings button in `Sidebar.jsx` with `cursor-not-allowed` + visual "coming soon" state instead of a silent dead-end click.
+- [ ] **6. Pipeline sidebar links** — wire "Target firms," "Recruiters," "Alumni" links to `/contacts?tag=target+firm` etc. `ContactsPage` already handles the param; one-line fix per link.
+- [ ] **7. ContactsPage error/empty-state collision** — on fetch failure, the error banner and "Start building your network" empty state both appear. Error state should suppress the page body.
+
+### Phase 3 — Minor cleanups
+- [ ] **8. Misplaced import in ContactDetailPage.jsx** — move `import { getAvatarColor, getInitials }` to the top of the file with the other imports.
+- [ ] **9. Post-save confirmation** — brief success feedback after logging an interaction (toast or inline message) instead of the form silently closing.
+- [ ] **10. "Try Funnl AI" CTA wording** — reconsider the sidebar CTA that implies live AI functionality when the destination is a coming-soon screen.
+
+---
+
 ## Known future work / tech debt
 
 ### ⚠️ Task 1 — Email deliverability (do BEFORE inviting real students)
