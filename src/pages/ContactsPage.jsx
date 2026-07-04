@@ -3,6 +3,7 @@ import { useSearchParams } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import ContactListItem from '../components/ContactListItem'
 import AddContactDrawer from '../components/AddContactDrawer'
+import ImportContactsModal from '../components/ImportContactsModal'
 
 const FILTER_OPTIONS = [
   { label: 'All', value: '' },
@@ -16,6 +17,7 @@ function ContactsPage() {
   const [loading, setLoading] = useState(true)
   const [fetchError, setFetchError] = useState('')
   const [showDrawer, setShowDrawer] = useState(false)
+  const [importOpen, setImportOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
 
   // URL-based tag filter — sidebar Pipeline links drive this by linking to /contacts?tag=recruiter
@@ -73,15 +75,28 @@ function ContactsPage() {
               </p>
             )}
           </div>
-          <button
-            onClick={() => setShowDrawer(true)}
-            className="flex items-center gap-2 bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] text-white text-[14px] font-bold px-[18px] py-[11px] rounded-[11px] shadow-[0_6px_18px_rgba(91,69,240,0.35)] hover:opacity-90 transition-opacity flex-none"
-          >
-            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.2" strokeLinecap="round">
-              <path d="M12 5v14M5 12h14"/>
-            </svg>
-            Add contact
-          </button>
+          <div className="flex items-center gap-2 flex-none">
+            <button
+              onClick={() => setImportOpen(true)}
+              className="flex items-center gap-2 bg-elevated border border-[rgba(255,255,255,0.09)] text-mid hover:text-hi hover:border-[rgba(255,255,255,0.16)] text-[14px] font-semibold px-[12px] md:px-[14px] py-[10px] rounded-[11px] transition-colors"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                <polyline points="17 8 12 3 7 8"/>
+                <line x1="12" y1="3" x2="12" y2="15"/>
+              </svg>
+              <span className="hidden md:inline">Import</span>
+            </button>
+            <button
+              onClick={() => setShowDrawer(true)}
+              className="flex items-center gap-2 bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] text-white text-[14px] font-bold px-[14px] md:px-[18px] py-[11px] rounded-[11px] shadow-[0_6px_18px_rgba(91,69,240,0.35)] hover:opacity-90 transition-opacity"
+            >
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.2" strokeLinecap="round">
+                <path d="M12 5v14M5 12h14"/>
+              </svg>
+              <span className="hidden md:inline">Add contact</span>
+            </button>
+          </div>
         </div>
 
         {/* Search bar */}
@@ -190,7 +205,6 @@ function ContactsPage() {
       {/* Drawer backdrop + drawer — rendered outside the blurred div so the drawer stays crisp */}
       {showDrawer && (
         <>
-          {/* Backdrop covers the content area only (not the 248px sidebar) */}
           <div
             className="fixed inset-0 md:left-[248px] bg-[rgba(6,6,8,0.55)] z-40 cursor-default"
             onClick={() => setShowDrawer(false)}
@@ -201,6 +215,14 @@ function ContactsPage() {
             onSuccess={() => { setShowDrawer(false); fetchContacts() }}
           />
         </>
+      )}
+
+      {/* Import modal */}
+      {importOpen && (
+        <ImportContactsModal
+          onClose={() => setImportOpen(false)}
+          onImported={() => fetchContacts()}
+        />
       )}
     </div>
   )

@@ -58,6 +58,7 @@ src/
     BottomNav.jsx          Mobile bottom tab bar (md:hidden): Home/Contacts/Follow-ups/Funnl AI, follow-up badge
     ContactListItem.jsx    Contact card in the 2-column grid (avatar tile, tags, skills, how-met footer)
     AddContactDrawer.jsx   Right-side slide-in drawer for adding a contact; full-width on mobile, 452px on desktop; Escape/backdrop closes; scroll locked
+    ImportContactsModal.jsx  3-step CSV import modal (upload → map → confirm). PapaParse parses; auto-detects headers; transformRow() is the AI seam.
   pages/
     DashboardPage.jsx      Landing screen after login: stats, follow-ups due, recent contacts
     ContactsPage.jsx       Contacts grid + search (name/company/role/tag/skill) + URL-based tag filter (?tag=recruiter)
@@ -230,6 +231,7 @@ The contacts page filter pills use `useSearchParams`. Active tag is stored as `?
 | **Mobile responsiveness** | ✅ BottomNav (4 tabs, follow-up badge, iPhone safe-area). Sidebar hidden on mobile. All 6 pages responsive at 375px. AddContactDrawer full-width on mobile. |
 | **Pre-rollout quality pass** | ✅ Password reset flow, search skills, LinkedIn URL normalization, error/empty-state collision fixed, pipeline links wired, import order fixed, interaction logged confirmation. |
 | **Settings page** | ✅ `/settings` — account-card layout: display name (editable, saves to `profiles` table), email + joined date (read-only), sign out. School field removed from UI and table. |
+| **CSV importer** | ✅ Import button on Contacts page opens a 3-step modal (upload → map columns → confirm). Auto-detects common header names. Tags/skills parsed from comma-separated cells. All-or-nothing bulk insert. `transformRow` has a clean seam for future AI pre-processing. CSV-only for now; xlsx and AI-assisted parsing are future upgrades. |
 | Rule-based reminders / cold alerts | 🔵 Layer 2 |
 | AI assistant and smart features | 🔵 Layer 3 |
 
@@ -349,6 +351,10 @@ Currently, clicking the email confirmation link auto-logs the user in and drops 
 2. **Google OAuth sign-in** — design shows a "Continue with Google" button; deliberately omitted. Requires Google Cloud project + Supabase OAuth config.
 3. **Sidebar Pipeline counts** — Target firms / Recruiters / Alumni show no counts yet. Wire by adding count queries to `Sidebar.jsx` or passing down from `ContactsPage`.
 4. ~~**Tag filter wiring (sidebar → contacts)**~~ — ✅ Done. All three pipeline links wired with correct `?tag=` params.
+5. **CSV importer — known limitations (future improvements):**
+   - **No duplicate detection** — importing the same file twice creates duplicate contacts. Detecting duplicates (by name+company, or email) is a future improvement.
+   - **CSV only** — `.xlsx` and other formats not supported yet. Users must export to CSV first.
+   - **AI-assisted parsing** — messy spreadsheets (single column jammed with "John Smith, Goldman, analyst") require manual mapping. The `transformRow` seam in `ImportContactsModal.jsx` is where AI pre-processing will plug in later.
 
 ### Layer 2 (next major phase)
 5. **Follow-ups enhancements** — `/followups` shows real data. Still needed: Snooze, Mark done actions, and "going cold" detection logic.
@@ -382,20 +388,71 @@ The bottom-tab mobile design was deliberately chosen because it translates natur
 
 Do not start either of these until the web app is stable and has real users.
 
-### Layer 3 — AI integration (Claude API — do NOT build until user initiates)
+### AI roadmap & access control (future — do NOT build until validated)
 
-**Confirmed by user:**
-- **Smart contact saving** — user pastes freeform text ("Met Priya Sharma, Goldman recruiter at the Career Fair, knows Python") → Claude infers and fills all form fields in AddContactDrawer. Transform the add experience from a form into an AI-first input.
-- **AI assistant / chatbot** — answers plain-English questions about the user's network.
+#### Why this is future, not now
 
-**Brainstormed ideas (not yet approved, to discuss when Layer 3 begins):**
-- **Draft outreach messages** — "write a follow-up email to Priya based on our coffee chat" — Claude reads interaction notes and drafts it
-- **Smart note enhancement** — after logging raw notes, Claude flags commitments made, suggests follow-up actions
-- **Semantic network search** — search by concept ("who can intro me to PE") not just keyword
-- **Weekly AI digest** — Claude-generated summary of the week's activity + recommended next actions
-- **Smart tagging / skill inference** — Claude infers tags and skills from freeform notes; user confirms
-- **Business card / LinkedIn parsing** — paste a LinkedIn URL or bio and Claude fills the add-contact form
-- **Relationship temperature scoring** — Claude rates which contacts are warm vs. going cold based on content and timing, feeds into Layer 2
+Zero users and no retention data. Building AI features (and their gating) before knowing which ones students actually want means building against guesses. AI features are the most expensive things to build and rebuild — both in engineering time and per-call API cost.
+
+**Sequence:** validate retention with the core product → watch what users search for, struggle with, and ask about → ask directly "if AI could help you with one thing here, what would it be?" → build exactly that, not the full brainstorm list.
+
+Every interaction logged now is training data for Layer 3. More data → better AI. Don't rush it.
+
+---
+
+#### AI vision — features to build after real users
+
+**1. AI-assisted CSV import** *(highest-value entry point)*
+
+Students often have messy spreadsheets — one column jammed with "John Smith, Goldman, analyst" or inconsistent headers across exports. The CSV importer (a plain import screen) has a deliberate seam left for AI augmentation. When ready:
+- Parse raw rows and infer which text maps to which contact field (name, company, role, etc.)
+- Suggest tags and skills based on the content
+- Find and format LinkedIn URLs if present or inferrable
+- Present a confirmation step so the user can review before committing
+
+This is the AI upgrade to the plain CSV importer — not a replacement of it.
+
+**2. Smart contact saving** *(confirmed)*
+
+User pastes freeform text ("Met Priya Sharma, Goldman recruiter at the Career Fair, knows Python") → Claude infers and fills all form fields in AddContactDrawer. Transforms the add experience from a form into an AI-first input.
+
+**3. AI enrichment throughout the app** *(brainstormed — validate before building any of these)*
+
+- **Smart tag/skill inference** — Claude infers tags and skills from freeform notes; user confirms
+- **Relationship summaries** — plain-English summary of a contact's history and current status
+- **"Who to follow up with"** — Claude reads interaction dates and notes, surfaces the contacts most worth a nudge
+- **Draft outreach messages** — "write a follow-up email to Priya based on our coffee chat" — Claude reads notes and drafts it
+- **Semantic search** — search by concept ("who can intro me to PE") not just keyword
 - **Opportunity detection** — Claude flags contacts who mentioned open roles, internships, or referral offers in notes
+- **Relationship temperature scoring** — rates contacts warm vs. going cold based on content and timing, feeds into Layer 2
+- **Weekly AI digest** — Claude-generated summary of the week's activity + recommended next actions
+- **Business card / LinkedIn parsing** — paste a LinkedIn URL or bio, Claude fills the add-contact form
 
 **Why the current data structure supports all of this:** notes are freeform text Claude can read directly; tags and skills are structured arrays Claude can generate and query; per-user RLS ensures Claude only ever sees one user's data.
+
+---
+
+#### Access control & cost protection — design decision (recorded, not built)
+
+AI features cost real money per API call. They must be gated to control who can use them and prevent runaway cost.
+
+**Rejected approach — shared password/secret to unlock AI:**
+A shared secret leaks. One user shares it, it's effectively public. It can't be revoked per-person, and gives no visibility into who is using what. Do not do this.
+
+**Chosen approach — per-user `ai_enabled` flag in the database:**
+- Add an `ai_enabled` boolean column to the `profiles` table, default `false`
+- Every AI feature checks this flag before calling the Claude API
+- Access is granted by flipping a specific user's flag to `true` directly in Supabase
+- Individual revocation: flip it back to `false`
+- No self-granting: users can't set their own flag (RLS ensures they can only read it, not write it)
+- Full visibility: can see in Supabase exactly who has access
+
+**SQL when ready (do not run yet):**
+```sql
+ALTER TABLE profiles ADD COLUMN ai_enabled boolean NOT NULL DEFAULT false;
+```
+
+**Later refinement — per-user usage limits:**
+Once the flag is in place, add a usage counter (e.g. `ai_calls_this_month int DEFAULT 0`, reset monthly via a cron job or Edge Function) so even authorized users can't accidentally run up the bill. Caps can be per-tier if monetization is live.
+
+**Connection to monetization:** the `ai_enabled` flag is the natural "Pro" gate. When billing is ready, the payment flow flips the flag. Until then, it's flipped manually. See the Monetization section above for timing guidance — don't build billing until there are 20–50 retained users.
