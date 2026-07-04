@@ -36,7 +36,7 @@ function Sidebar() {
     supabase.auth.getUser().then(({ data }) => {
       setUser(data.user)
       if (data.user) {
-        supabase.from('profiles').select('display_name, school').eq('id', data.user.id).maybeSingle()
+        supabase.from('profiles').select('display_name').eq('id', data.user.id).maybeSingle()
           .then(({ data: p }) => setProfile(p))
       }
     })
@@ -95,7 +95,7 @@ function Sidebar() {
         </div>
         <div className="flex-1 min-w-0">
           <div className="text-[13px] font-semibold text-hi leading-tight truncate">{profile?.display_name || getUsername(user?.email)}</div>
-          <div className="text-[11px] text-low truncate">{profile?.school || 'Funnl user'}</div>
+          <div className="text-[11px] text-low truncate">Funnl user</div>
         </div>
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#6C6C78" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-none">
           <path d="M6 9l6 6 6-6"/>

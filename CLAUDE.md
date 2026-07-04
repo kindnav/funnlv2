@@ -54,18 +54,22 @@ The data schema (notes as freeform text, tags/skills as text arrays) was deliber
 ```
 src/
   components/
-    Sidebar.jsx            Shared left nav: logo, user card, nav links, pipeline section, sign out
+    Sidebar.jsx            Shared left nav (desktop only, hidden md:flex): logo, user card → /settings, nav links, pipeline, sign out. Fetches profile on every route change.
+    BottomNav.jsx          Mobile bottom tab bar (md:hidden): Home/Contacts/Follow-ups/Funnl AI, follow-up badge
     ContactListItem.jsx    Contact card in the 2-column grid (avatar tile, tags, skills, how-met footer)
-    AddContactDrawer.jsx   Right-side slide-in drawer for adding a contact; Escape/backdrop closes; scroll locked
+    AddContactDrawer.jsx   Right-side slide-in drawer for adding a contact; full-width on mobile, 452px on desktop; Escape/backdrop closes; scroll locked
   pages/
     DashboardPage.jsx      Landing screen after login: stats, follow-ups due, recent contacts
-    ContactsPage.jsx       Contacts grid + search + URL-based tag filter (?tag=recruiter)
-    ContactDetailPage.jsx  Full contact profile: two-column (details + AI placeholder / interaction timeline)
-    SignInPage.jsx         Dark split-screen: sign-in mode + sign-up mode + email-confirmation pending state
+    ContactsPage.jsx       Contacts grid + search (name/company/role/tag/skill) + URL-based tag filter (?tag=recruiter)
+    ContactDetailPage.jsx  Full contact profile: two-column on desktop, stacked on mobile
+    SettingsPage.jsx       Account-card layout: display name input + Save; read-only email + joined date; sign out. Desktop only for v1.
+    SignInPage.jsx         Dark split-screen: sign-in mode + sign-up mode + email-confirmation pending state + forgot/reset-sent modes
     WelcomePage.jsx        Email-confirmation landing page at /welcome — no sidebar, accessible to logged-out users
+    ResetPasswordPage.jsx  Password recovery page at /reset-password — no sidebar, handles Supabase recovery link
   lib/
     supabase.js            Supabase client, reads VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY from .env
-  App.jsx                  Auth gating, shared layout (Sidebar + main scroll area), all routes
+    avatarUtils.js         getAvatarColor(name) and getInitials(name) — single source of truth for avatar colors
+  App.jsx                  Auth gating, shared layout (Sidebar + main + BottomNav), all routes
   index.css                Tailwind import + @theme design tokens + @keyframes (slide-in-right, fade-in)
   main.jsx                 React entry; wraps App in BrowserRouter
 index.html                 Google Fonts link tags (Plus Jakarta Sans, Space Grotesk, JetBrains Mono)
@@ -83,13 +87,15 @@ CLAUDE.md                  This file — project reference, keep current
 | `/contacts/:id` | ContactDetailPage | Full profile + interaction timeline |
 | `/followups` | FollowUpsPage | Real data — overdue/today/upcoming buckets; Snooze/Mark done are Layer 2 |
 | `/ai` | FunnlAIPage | Styled coming-soon; non-interactive chat UI; Layer 3 placeholder |
+| `/settings` | SettingsPage | Display name + school + sign out; reads/writes `profiles` table |
 | `/welcome` | WelcomePage | Email-confirmation landing; no sidebar; accessible to logged-out users |
+| `/reset-password` | ResetPasswordPage | Password recovery; no sidebar; handles Supabase recovery link |
 
 ---
 
 ## Database schema
 
-**Row Level Security is ON for both tables and has been verified with a two-user isolation test.**
+**Row Level Security is ON for all three tables and has been verified with a two-user isolation test.**
 
 ### `contacts`
 | Column | Type | Notes |
@@ -119,6 +125,15 @@ CLAUDE.md                  This file — project reference, keep current
 | `created_at` | timestamptz | Auto-set |
 
 **Relationship:** one contact → many interactions. Deleting a contact cascades to delete all their interactions.
+
+### `profiles`
+| Column | Type | Notes |
+|---|---|---|
+| `id` | uuid | PK, FK → auth.users ON DELETE CASCADE |
+| `display_name` | text | Optional — shown in sidebar |
+| `updated_at` | timestamptz | Set on every save |
+
+RLS on with a single policy: `auth.uid() = id` for all operations. Row is created on first Settings save via `upsert()`. Fetched with `.maybeSingle()` so missing row returns `null` (no error) — sidebar falls back to email username / "Funnl user". The `school` column was dropped (ALTER TABLE profiles DROP COLUMN school) when the Settings redesign removed it.
 
 ---
 
@@ -187,7 +202,7 @@ Derived deterministically from contact name using a hash → 6-color palette (pu
 
 ## Filter state: URL-based tag filtering
 
-The contacts page filter pills use `useSearchParams`. Active tag is stored as `?tag=recruiter` in the URL. **Sidebar Pipeline links are not yet wired** — they currently go to `/contacts`. To wire them: change each `Link`'s `to` prop to `/contacts?tag=target+firm` etc. ContactsPage already handles this, no code change needed there.
+The contacts page filter pills use `useSearchParams`. Active tag is stored as `?tag=recruiter` in the URL. **Sidebar Pipeline links are wired** — "Target firms" → `/contacts?tag=target+firm`, "Recruiters" → `/contacts?tag=recruiter`, "Alumni" → `/contacts?tag=alumni`. ContactsPage handles the param.
 
 ---
 
@@ -212,6 +227,9 @@ The contacts page filter pills use `useSearchParams`. Active tag is stored as `?
 | **Real email / SMTP** | ✅ Resend connected via Supabase custom SMTP; sending from noreply@getfunnl.com; getfunnl.com verified on Cloudflare. |
 | **Email confirmation landing page** | ✅ `/welcome` — success screen (checkmark, "You're all set", "Continue to sign in"). No sidebar. Accessible logged-out. Supabase redirect URLs configured to point here. |
 | **Deployed to production** | ✅ Live at getfunnl.com on Vercel. DNS on Cloudflare. Env vars set. SPA routing via vercel.json. Full sign-up → confirm → sign-in flow works end to end. |
+| **Mobile responsiveness** | ✅ BottomNav (4 tabs, follow-up badge, iPhone safe-area). Sidebar hidden on mobile. All 6 pages responsive at 375px. AddContactDrawer full-width on mobile. |
+| **Pre-rollout quality pass** | ✅ Password reset flow, search skills, LinkedIn URL normalization, error/empty-state collision fixed, pipeline links wired, import order fixed, interaction logged confirmation. |
+| **Settings page** | ✅ `/settings` — account-card layout: display name (editable, saves to `profiles` table), email + joined date (read-only), sign out. School field removed from UI and table. |
 | Rule-based reminders / cold alerts | 🔵 Layer 2 |
 | AI assistant and smart features | 🔵 Layer 3 |
 
@@ -278,7 +296,7 @@ Tracked here so progress survives across sessions. Mark each item `[x]` when don
 ### Phase 2 — Should-fix before wider push
 - [x] **3. Search skills** — done. Added `c.skills?.some(s => s.toLowerCase().includes(q))` to search filter in `ContactsPage.jsx`.
 - [x] **4. LinkedIn URL https://** — done. `normalizeUrl()` helper added in `AddContactDrawer.jsx` and `ContactDetailPage.jsx`; auto-prepends `https://` if URL doesn't start with `http`.
-- [x] **5. Settings button dead-end** — done. Button is now `disabled` + `cursor-not-allowed` + dimmed + "SOON" badge in `Sidebar.jsx`.
+- [x] **5. Settings button dead-end** — done. Button is now a real `<Link to="/settings">` with active-state highlight. Full `SettingsPage.jsx` built at `/settings`: display name, school, save with 3-second confirmation, sign out.
 - [x] **6. Pipeline sidebar links** — done. "Target firms" → `/contacts?tag=target+firm`, "Recruiters" → `/contacts?tag=recruiter`, "Alumni" → `/contacts?tag=alumni`.
 - [x] **7. ContactsPage error/empty-state collision** — done. `fetchError` now shows a proper centered error card with "Try again" button; suppresses search bar, filter pills, and contact grid.
 
@@ -295,13 +313,13 @@ Full review of every interactive element before first-student rollout. Only 3 is
 
 | # | Element | Location | Status | Decision |
 |---|---|---|---|---|
-| 1 | **User account card chevron** | `Sidebar.jsx` — the card below the logo | Plain `<div>` with a ↓ chevron icon. Looks like a profile dropdown trigger, does nothing on click. | Pending — wire to `/settings` when that page is built |
-| 2 | **Settings page** | `Sidebar.jsx` — Settings button | Correctly disabled + "SOON" badge. Needs a real minimal page. | Pending — build minimal Settings (display name + school) |
-| 3 | **AI page "BETA" badge + subtitle** | `FunnlAIPage.jsx` header | "BETA" implies functional; subtitle "Ask anything about your network" implies it works now. Contradicts the body which correctly says "coming." | Pending — change badge to "SOON", subtitle to "Coming in Layer 3" |
+| 1 | **User account card chevron** | `Sidebar.jsx` — the card below the logo | Plain `<div>` with a ↓ chevron icon. Looks like a profile dropdown trigger, does nothing on click. | ✅ Fixed — card is now a `<Link to="/settings">` with subtle hover border |
+| 2 | **Settings page** | `Sidebar.jsx` — Settings button | Correctly disabled + "SOON" badge. Needs a real minimal page. | ✅ Fixed — `/settings` built with display name + school + sign out. Settings button wired as active Link. |
+| 3 | **AI page "BETA" badge + subtitle** | `FunnlAIPage.jsx` header | "BETA" implies functional; subtitle "Ask anything about your network" implies it works now. Contradicts the body which correctly says "coming." | ✅ Fixed — badge → "SOON", subtitle → "Coming in Layer 3 — keep logging interactions" |
 
 **Everything else:** all nav links, pipeline links, contact cards, drawers, forms, error states, and empty-state CTAs work correctly or are properly disabled.
 
-**Settings storage decision:** Use a `profiles` Supabase table (`id UUID`, `display_name TEXT`, `school TEXT`, RLS on). Slightly more setup than user_metadata but queryable and the right foundation for Layer 3 AI. Mobile access: Settings is desktop-only for v1 (sidebar hidden on mobile, no BottomNav tab). Acceptable since setting a display name is a one-time action done from a laptop.
+**Settings storage decision:** Use a `profiles` Supabase table (`id UUID`, `display_name TEXT`, RLS on). Queryable and the right foundation for Layer 3 AI. `school` column was added initially and later dropped. Mobile access: Settings is desktop-only for v1 (sidebar hidden on mobile, no BottomNav tab). Acceptable since setting a display name is a one-time action done from a laptop.
 
 ---
 
@@ -325,12 +343,12 @@ Currently, clicking the email confirmation link auto-logs the user in and drops 
 **How to fix when ready:** In `WelcomePage.jsx`, call `supabase.auth.signOut()` on mount (before rendering), then show the page. This clears the auto-created session so the user arrives logged-out and signs in fresh. Small, self-contained change — revisit as a standalone task.
 
 ### Before real launch (required)
-1. **User profile (display name + school)** — sidebar shows email username + "Funnl user". Add a `profiles` Supabase table + settings screen so users can set a real name.
+1. ~~**User profile (display name)**~~ — ✅ Done. `profiles` table + `/settings` page built. Sidebar shows saved display name. School field was removed from both the UI and the table.
 
 ### Before wider sharing (important)
 2. **Google OAuth sign-in** — design shows a "Continue with Google" button; deliberately omitted. Requires Google Cloud project + Supabase OAuth config.
 3. **Sidebar Pipeline counts** — Target firms / Recruiters / Alumni show no counts yet. Wire by adding count queries to `Sidebar.jsx` or passing down from `ContactsPage`.
-4. **Tag filter wiring (sidebar → contacts)** — change Pipeline `Link` hrefs to `/contacts?tag=target+firm` etc. `ContactsPage` already handles the param.
+4. ~~**Tag filter wiring (sidebar → contacts)**~~ — ✅ Done. All three pipeline links wired with correct `?tag=` params.
 
 ### Layer 2 (next major phase)
 5. **Follow-ups enhancements** — `/followups` shows real data. Still needed: Snooze, Mark done actions, and "going cold" detection logic.
