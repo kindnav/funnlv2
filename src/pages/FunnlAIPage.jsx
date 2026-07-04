@@ -21,9 +21,9 @@ function FunnlAIPage() {
         <div>
           <div className="flex items-center gap-2">
             <span className="text-[16px] font-bold text-hi">Funnl AI</span>
-            <span className="font-mono text-[9.5px] font-bold tracking-[0.5px] text-accent bg-[rgba(139,124,255,0.14)] px-1.5 py-0.5 rounded-[5px]">BETA</span>
+            <span className="font-mono text-[9.5px] font-bold tracking-[0.5px] text-accent bg-[rgba(139,124,255,0.14)] px-1.5 py-0.5 rounded-[5px]">SOON</span>
           </div>
-          <p className="text-[12.5px] text-muted">Ask anything about your network</p>
+          <p className="text-[12.5px] text-muted">Coming in Layer 3 — keep logging interactions</p>
         </div>
       </div>
 
