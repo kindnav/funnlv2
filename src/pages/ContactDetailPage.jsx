@@ -2,6 +2,13 @@ import { useEffect, useState } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 
+function normalizeUrl(url) {
+  const s = (url || '').trim()
+  if (!s) return null
+  if (s.startsWith('http://') || s.startsWith('https://')) return s
+  return 'https://' + s
+}
+
 // ── Local date (YYYY-MM-DD) — avoids UTC-offset "wrong day" bugs ─────────────
 function getLocalToday() {
   const d = new Date()
@@ -122,7 +129,7 @@ function ContactDetailPage() {
     const skills = editForm.skillsInput.split(',').map(s => s.trim()).filter(Boolean)
     const { error } = await supabase.from('contacts').update({
       name: editForm.name, company: editForm.company || null, role: editForm.role || null,
-      how_met: editForm.howMet || null, email: editForm.email || null, linkedin_url: editForm.linkedinUrl || null,
+      how_met: editForm.howMet || null, email: editForm.email || null, linkedin_url: normalizeUrl(editForm.linkedinUrl),
       tags: tags.length > 0 ? tags : null, skills: skills.length > 0 ? skills : null,
     }).eq('id', id)
     setSaving(false)

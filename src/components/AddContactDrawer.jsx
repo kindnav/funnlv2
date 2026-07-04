@@ -1,6 +1,13 @@
 import { useEffect, useState } from 'react'
 import { supabase } from '../lib/supabase'
 
+function normalizeUrl(url) {
+  const s = url.trim()
+  if (!s) return null
+  if (s.startsWith('http://') || s.startsWith('https://')) return s
+  return 'https://' + s
+}
+
 const iCls = 'w-full bg-input border border-[rgba(255,255,255,0.09)] rounded-xl px-[13px] py-[11px] text-[13.5px] text-hi placeholder-[#54545E] outline-none focus:border-[rgba(139,124,255,0.5)] transition-colors'
 const lCls = 'mb-[7px] block text-[12.5px] font-semibold text-mid'
 
@@ -54,7 +61,7 @@ function AddContactDrawer({ onClose, onSuccess }) {
       role: role || null,
       how_met: howMet || null,
       email: email || null,
-      linkedin_url: linkedinUrl || null,
+      linkedin_url: normalizeUrl(linkedinUrl),
       tags: tags.length > 0 ? tags : null,
       skills: skills.length > 0 ? skills : null,
     }])

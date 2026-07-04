@@ -161,15 +161,15 @@ function Sidebar() {
       {/* PIPELINE */}
       <div className="px-[22px] pb-[10px] text-[10.5px] font-bold tracking-[1.2px] text-lower uppercase font-mono">PIPELINE</div>
       <div className="flex flex-col gap-0.5 px-[14px]">
-        <Link to="/contacts" className="flex items-center gap-[10px] px-3 py-2 rounded-[9px] hover:bg-[rgba(255,255,255,0.03)] transition-colors no-underline">
+        <Link to="/contacts?tag=target+firm" className="flex items-center gap-[10px] px-3 py-2 rounded-[9px] hover:bg-[rgba(255,255,255,0.03)] transition-colors no-underline">
           <span className="w-2 h-2 rounded-[3px] bg-accent flex-none"/>
           <span className="flex-1 text-[13px] text-mid">Target firms</span>
         </Link>
-        <Link to="/contacts" className="flex items-center gap-[10px] px-3 py-2 rounded-[9px] hover:bg-[rgba(255,255,255,0.03)] transition-colors no-underline">
+        <Link to="/contacts?tag=recruiter" className="flex items-center gap-[10px] px-3 py-2 rounded-[9px] hover:bg-[rgba(255,255,255,0.03)] transition-colors no-underline">
           <span className="w-2 h-2 rounded-[3px] bg-warning-deep flex-none"/>
           <span className="flex-1 text-[13px] text-mid">Recruiters</span>
         </Link>
-        <Link to="/contacts" className="flex items-center gap-[10px] px-3 py-2 rounded-[9px] hover:bg-[rgba(255,255,255,0.03)] transition-colors no-underline">
+        <Link to="/contacts?tag=alumni" className="flex items-center gap-[10px] px-3 py-2 rounded-[9px] hover:bg-[rgba(255,255,255,0.03)] transition-colors no-underline">
           <span className="w-2 h-2 rounded-[3px] bg-success flex-none"/>
           <span className="flex-1 text-[13px] text-mid">Alumni</span>
         </Link>
@@ -180,12 +180,17 @@ function Sidebar() {
 
       {/* Settings + Sign out */}
       <div className="px-[14px] pb-3 flex flex-col gap-0.5">
-        <button className="flex items-center gap-3 w-full px-3 py-[10px] rounded-[10px] text-[14px] font-medium text-low hover:text-hi hover:bg-[rgba(255,255,255,0.04)] transition-colors text-left">
+        <button
+          disabled
+          title="Settings — coming soon"
+          className="flex items-center gap-3 w-full px-3 py-[10px] rounded-[10px] text-[14px] font-medium text-lower cursor-not-allowed opacity-50 text-left"
+        >
           <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
             <circle cx="12" cy="12" r="3"/>
             <path d="M12 3v2.4M12 18.6V21M4.3 4.3l1.7 1.7M18 18l1.7 1.7M3 12h2.4M18.6 12H21M4.3 19.7 6 18M18 6l1.7-1.7"/>
           </svg>
-          <span>Settings</span>
+          <span className="flex-1">Settings</span>
+          <span className="text-[9.5px] font-bold text-lower bg-[rgba(255,255,255,0.05)] border border-[rgba(255,255,255,0.07)] px-1.5 py-0.5 rounded-[5px] font-mono">SOON</span>
         </button>
         <button
           onClick={() => supabase.auth.signOut()}

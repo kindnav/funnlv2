@@ -52,7 +52,8 @@ function ContactsPage() {
           c.name.toLowerCase().includes(q) ||
           (c.company && c.company.toLowerCase().includes(q)) ||
           (c.role && c.role.toLowerCase().includes(q)) ||
-          (c.tags && c.tags.some(t => t.toLowerCase().includes(q)))
+          (c.tags && c.tags.some(t => t.toLowerCase().includes(q))) ||
+          (c.skills && c.skills.some(s => s.toLowerCase().includes(q)))
         )
       })
 
@@ -82,8 +83,6 @@ function ContactsPage() {
             Add contact
           </button>
         </div>
-
-        {fetchError && <p className="mb-4 text-sm text-danger">{fetchError}</p>}
 
         {/* Search bar */}
         <div className="flex items-center gap-[10px] bg-input border border-[rgba(255,255,255,0.09)] rounded-xl px-[14px] py-3 mb-[18px]">
@@ -126,6 +125,17 @@ function ContactsPage() {
         {/* Contact grid */}
         {loading ? (
           <p className="text-sm text-muted">Loading…</p>
+        ) : fetchError ? (
+          <div className="text-center py-12">
+            <div className="w-12 h-12 mx-auto mb-4 rounded-xl bg-[rgba(255,107,138,0.1)] border border-[rgba(255,107,138,0.2)] flex items-center justify-center">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#FF6B8A" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/>
+              </svg>
+            </div>
+            <p className="text-hi font-semibold mb-2">Couldn't load contacts</p>
+            <p className="text-muted text-sm mb-5">Check your connection and try again.</p>
+            <button onClick={fetchContacts} className="text-accent text-sm font-semibold hover:text-tag transition-colors">Try again</button>
+          </div>
         ) : contacts.length === 0 ? (
           <div className="text-center py-16">
             <div className="w-[72px] h-[72px] mx-auto mb-6 rounded-[20px] bg-[rgba(108,92,255,0.12)] border border-[rgba(139,124,255,0.25)] flex items-center justify-center">
