@@ -270,7 +270,7 @@ Tracked here so progress survives across sessions. Mark each item `[x]` when don
 - [ ] **2. Mobile responsiveness** — done in 6 sub-steps below. Navigation decision: **bottom tab bar** (not hamburger). Desktop sidebar stays exactly as-is. `md` breakpoint (768px) is the switch point throughout.
   - [x] **2a. Mobile navigation** — done. `BottomNav.jsx` created: fixed bottom bar, `md:hidden`, 4 tabs (Home/Contacts/Follow-ups/Funnl AI), follow-up badge (capped at 9+), `env(safe-area-inset-bottom)` for iPhone. Sidebar outer div: `hidden md:flex flex-col`. App.jsx: BottomNav imported, `pb-16 md:pb-0` on main, `<BottomNav />` in authenticated layout.
   - [x] **2b. Dashboard** — done. Stat grid: `grid-cols-3` → `grid-cols-1 md:grid-cols-3`. Body: `grid-cols-[1.25fr_1fr]` → `grid-cols-1 md:grid-cols-[1.25fr_1fr]`. Page padding: `px-4 py-6 md:px-9 md:py-8`. Backdrop: `inset-0 md:left-[248px]` (full-screen on mobile).
-  - [ ] **2c. Contacts page** — 2-col contact card grid → single column on mobile; AddContactDrawer full-width on mobile (currently fixed 452px).
+  - [x] **2c. Contacts page** — done. Card grid: `grid-cols-2` → `grid-cols-1 md:grid-cols-2`. Page padding: `px-4 py-6 md:px-9 md:py-8`. Backdrop: `inset-0 md:left-[248px]`. AddContactDrawer: `w-full md:w-[452px]` (full-width on mobile).
   - [ ] **2d. Contact detail page** — 2-col layout (details + interactions) → single column; hero card tweaks for narrow screens.
   - [ ] **2e. Auth screens** — SignInPage fix `px-[88px]` padding on mobile (collapses content on small screens); right panel already `hidden lg:flex` so that's fine.
   - [ ] **2f. Final pass** — FollowUps, AI, Welcome, ResetPassword screens; overall padding/spacing polish at 375px.
