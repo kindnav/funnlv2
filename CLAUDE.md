@@ -266,7 +266,7 @@ The layout (`flex h-screen` + fixed 248px sidebar + hardcoded grid layouts) is c
 Tracked here so progress survives across sessions. Mark each item `[x]` when done and committed.
 
 ### Phase 1 — Must-fix before any student gets the link
-- [ ] **1. Password reset** — forgot-password flow via Supabase. "Forgot password?" on sign-in → email → `/reset-password` page → new password → sign in. New file: `ResetPasswordPage.jsx`. Small changes to `SignInPage.jsx` and `App.jsx`.
+- [x] **1. Password reset** — done. `ResetPasswordPage.jsx` handles the recovery link. `SignInPage.jsx` gained 'forgot' + 'reset-sent' modes and a success banner on return. `/reset-password` reachable logged-out and logged-in. On success: `updateUser` → navigate('/') with `{ state: { passwordReset: true } }` → `signOut`. Test on getfunnl.com; verify `https://getfunnl.com/**` is in Supabase Redirect URLs.
 - [ ] **2. Mobile responsiveness** — sidebar → hamburger/drawer on mobile; all page grids collapse to single column at mobile widths; AddContactDrawer full-width on phones; verify every screen at ~375px.
 
 ### Phase 2 — Should-fix before wider push

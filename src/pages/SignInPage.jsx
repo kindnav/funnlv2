@@ -1,7 +1,8 @@
 import { useState } from 'react'
+import { useLocation } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 
-// ── Input wrapper with focus glow — must be outside SignInPage to avoid remount on every keystroke ──
+// Must be outside SignInPage to avoid remount on every keystroke
 function InputWrapper({ children }) {
   return (
     <div className="flex items-center gap-[10px] rounded-xl border border-[rgba(255,255,255,0.09)] bg-input px-[14px] py-[13px] focus-within:border-[rgba(139,124,255,0.5)] focus-within:shadow-[0_0_0_3px_rgba(108,92,255,0.12)] transition-[border-color,box-shadow] duration-150">
@@ -10,15 +11,17 @@ function InputWrapper({ children }) {
   )
 }
 
-// ── Auth logic is unchanged — only JSX below this line changes ──────────────
-
 function SignInPage() {
-  const [mode, setMode] = useState('signin') // 'signin' | 'signup' | 'pending'
+  const location = useLocation()
+  const [mode, setMode] = useState('signin') // 'signin' | 'signup' | 'pending' | 'forgot' | 'reset-sent'
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+
+  // Captured once on mount — shows after arriving from /reset-password
+  const [showResetBanner] = useState(!!location.state?.passwordReset)
 
   function switchMode(newMode) {
     setMode(newMode)
@@ -47,6 +50,18 @@ function SignInPage() {
     setLoading(false)
     if (error) { setError(error.message); return }
     setMode('pending')
+  }
+
+  async function handleForgotPassword(e) {
+    e.preventDefault()
+    setError('')
+    setLoading(true)
+    const { error } = await supabase.auth.resetPasswordForEmail(email, {
+      redirectTo: 'https://getfunnl.com/reset-password',
+    })
+    setLoading(false)
+    if (error) { setError(error.message); return }
+    setMode('reset-sent')
   }
 
   // ── Shared pieces ──────────────────────────────────────────────────────────
@@ -84,14 +99,12 @@ function SignInPage() {
       className="hidden lg:flex w-[520px] flex-col justify-center p-14 relative overflow-hidden"
       style={{ background: 'linear-gradient(150deg,#3A2D66,#1C1633 55%,#100D1E)' }}
     >
-      {/* Radial glow blobs — purely decorative CSS */}
       <div className="absolute top-[-80px] right-[-80px] w-[320px] h-[320px] rounded-full pointer-events-none"
         style={{ background: 'radial-gradient(circle,rgba(139,124,255,0.35),transparent 70%)' }}/>
       <div className="absolute bottom-[-100px] left-[-60px] w-[280px] h-[280px] rounded-full pointer-events-none"
         style={{ background: 'radial-gradient(circle,rgba(47,212,182,0.16),transparent 70%)' }}/>
 
       <div className="relative">
-        {/* 64px logo tile */}
         <div className="w-16 h-16 rounded-[18px] bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] flex items-center justify-center shadow-[0_12px_40px_rgba(91,69,240,0.5)] mb-9">
           <svg width="32" height="32" viewBox="0 0 100 100" fill="none">
             <rect x="8" y="6" width="84" height="17" rx="4" fill="white"/>
@@ -108,7 +121,6 @@ function SignInPage() {
           Track every contact, coffee chat, and follow-up, and let Funnl AI tell you who to reach next.
         </p>
 
-        {/* Feature highlight cards */}
         <div className="flex flex-col gap-[14px]">
           <div className="flex items-center gap-[14px] bg-[rgba(255,255,255,0.05)] border border-[rgba(255,255,255,0.08)] rounded-[14px] px-[18px] py-4">
             <div className="w-[38px] h-[38px] rounded-[11px] bg-[rgba(139,124,255,0.22)] flex items-center justify-center flex-none">
@@ -188,7 +200,45 @@ function SignInPage() {
     )
   }
 
-  // ── Sign in / Sign up screen ───────────────────────────────────────────────
+  // ── Reset link sent screen ─────────────────────────────────────────────────
+
+  if (mode === 'reset-sent') {
+    return (
+      <div className="flex min-h-screen">
+        <div className="flex flex-1 flex-col justify-center bg-[#0A0A0C] px-[88px]">
+          <div className="mx-auto w-full max-w-[400px]">
+            <div className="flex items-center gap-[11px] mb-14">
+              {logoTileSmall}
+              <span className="font-display font-bold text-[23px] text-hi tracking-[-0.5px]">Funnl</span>
+            </div>
+            <h1 className="font-display text-[32px] font-bold text-hi mb-3 tracking-[-0.5px]">Check your email</h1>
+            <p className="text-[15px] leading-relaxed text-[#9A9AA5] mb-2">
+              We sent a password reset link to{' '}
+              <span className="font-semibold text-hi">{email}</span>.
+            </p>
+            <p className="text-[15px] leading-relaxed text-[#9A9AA5] mb-8">
+              Click that link to set a new password, then come back here and sign in.
+            </p>
+            <p className="text-[13.5px] text-[#6C6C78] mb-8">
+              Didn't receive it? Check your spam folder, or{' '}
+              <button onClick={() => switchMode('forgot')} className="text-accent underline hover:text-tag transition-colors">
+                try again
+              </button>.
+            </p>
+            <button
+              onClick={() => switchMode('signin')}
+              className="w-full bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] text-white text-[15px] font-bold py-[14px] rounded-xl shadow-[0_8px_22px_rgba(91,69,240,0.4)] hover:opacity-90 transition-opacity"
+            >
+              Back to Sign In
+            </button>
+          </div>
+        </div>
+        {rightPanel}
+      </div>
+    )
+  }
+
+  // ── Sign in / Sign up / Forgot password screen ─────────────────────────────
 
   return (
     <div className="flex min-h-screen">
@@ -201,15 +251,28 @@ function SignInPage() {
             <span className="font-display font-bold text-[23px] text-hi tracking-[-0.5px]">Funnl</span>
           </div>
 
+          {/* Password reset success banner */}
+          {mode === 'signin' && showResetBanner && (
+            <div className="flex items-center gap-3 mb-6 rounded-xl border border-[rgba(47,212,182,0.25)] bg-[rgba(47,212,182,0.08)] px-4 py-3">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#2FD4B6" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className="flex-none">
+                <path d="M20 6L9 17l-5-5"/>
+              </svg>
+              <p className="text-[13.5px] text-success font-medium">Password updated — sign in with your new password.</p>
+            </div>
+          )}
+
           {/* Heading + subtitle */}
           <h1 className="font-display text-[34px] font-bold text-hi tracking-[-0.5px] mb-2">
-            {mode === 'signin' ? 'Welcome back' : 'Create account'}
+            {mode === 'signin' ? 'Welcome back' : mode === 'signup' ? 'Create account' : 'Reset your password'}
           </h1>
           {mode === 'signin' && (
             <p className="text-[15px] text-[#9A9AA5] mb-[34px]">Sign in to pick up where your network left off.</p>
           )}
           {mode === 'signup' && (
             <p className="text-[15px] text-[#9A9AA5] mb-[34px]">Join your peers already using Funnl.</p>
+          )}
+          {mode === 'forgot' && (
+            <p className="text-[15px] text-[#9A9AA5] mb-[34px]">Enter your email and we'll send you a reset link.</p>
           )}
 
           {/* Sign-in form */}
@@ -230,6 +293,13 @@ function SignInPage() {
                   <input id="password" type="password" value={password} onChange={e => setPassword(e.target.value)}
                     required className={inputCls} placeholder="Enter password"/>
                 </InputWrapper>
+                <button
+                  type="button"
+                  onClick={() => switchMode('forgot')}
+                  className="mt-2 text-[12.5px] text-low hover:text-accent transition-colors"
+                >
+                  Forgot password?
+                </button>
               </div>
 
               {error && <p className="text-sm text-danger">{error}</p>}
@@ -287,6 +357,33 @@ function SignInPage() {
                 Already have an account?{' '}
                 <button type="button" onClick={() => switchMode('signin')} className="text-accent font-semibold hover:text-tag transition-colors">
                   Sign in
+                </button>
+              </p>
+            </form>
+          )}
+
+          {/* Forgot password form */}
+          {mode === 'forgot' && (
+            <form onSubmit={handleForgotPassword} className="space-y-5">
+              <div>
+                <label className={labelCls}>Email</label>
+                <InputWrapper>
+                  {envelopeIcon}
+                  <input id="forgot-email" type="email" value={email} onChange={e => setEmail(e.target.value)}
+                    required autoFocus className={inputCls} placeholder="alex@university.edu"/>
+                </InputWrapper>
+              </div>
+
+              {error && <p className="text-sm text-danger">{error}</p>}
+
+              <button type="submit" disabled={loading}
+                className="w-full bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] text-white text-[15px] font-bold py-[14px] rounded-xl shadow-[0_8px_22px_rgba(91,69,240,0.4)] hover:opacity-90 transition-opacity disabled:opacity-50">
+                {loading ? 'Sending…' : 'Send reset link'}
+              </button>
+
+              <p className="text-center text-[13.5px] text-[#6C6C78] pt-2">
+                <button type="button" onClick={() => switchMode('signin')} className="text-accent font-semibold hover:text-tag transition-colors">
+                  ← Back to sign in
                 </button>
               </p>
             </form>
