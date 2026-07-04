@@ -267,13 +267,13 @@ Tracked here so progress survives across sessions. Mark each item `[x]` when don
 
 ### Phase 1 — Must-fix before any student gets the link
 - [x] **1. Password reset** — done. `ResetPasswordPage.jsx` handles the recovery link. `SignInPage.jsx` gained 'forgot' + 'reset-sent' modes and a success banner on return. `/reset-password` reachable logged-out and logged-in. On success: `updateUser` → navigate('/') with `{ state: { passwordReset: true } }` → `signOut`. Test on getfunnl.com; verify `https://getfunnl.com/**` is in Supabase Redirect URLs.
-- [ ] **2. Mobile responsiveness** — done in 6 sub-steps below. Navigation decision: **bottom tab bar** (not hamburger). Desktop sidebar stays exactly as-is. `md` breakpoint (768px) is the switch point throughout.
+- [x] **2. Mobile responsiveness** — complete. Bottom tab bar navigation, all 6 pages mobile-friendly, AddContactDrawer full-width, all backdrops fixed. Desktop unchanged.
   - [x] **2a. Mobile navigation** — done. `BottomNav.jsx` created: fixed bottom bar, `md:hidden`, 4 tabs (Home/Contacts/Follow-ups/Funnl AI), follow-up badge (capped at 9+), `env(safe-area-inset-bottom)` for iPhone. Sidebar outer div: `hidden md:flex flex-col`. App.jsx: BottomNav imported, `pb-16 md:pb-0` on main, `<BottomNav />` in authenticated layout.
   - [x] **2b. Dashboard** — done. Stat grid: `grid-cols-3` → `grid-cols-1 md:grid-cols-3`. Body: `grid-cols-[1.25fr_1fr]` → `grid-cols-1 md:grid-cols-[1.25fr_1fr]`. Page padding: `px-4 py-6 md:px-9 md:py-8`. Backdrop: `inset-0 md:left-[248px]` (full-screen on mobile).
   - [x] **2c. Contacts page** — done. Card grid: `grid-cols-2` → `grid-cols-1 md:grid-cols-2`. Page padding: `px-4 py-6 md:px-9 md:py-8`. Backdrop: `inset-0 md:left-[248px]`. AddContactDrawer: `w-full md:w-[452px]` (full-width on mobile).
   - [x] **2d. Contact detail page** — done. Body grid: `grid-cols-1 md:grid-cols-[1fr_1.35fr]`. Hero: `flex-col md:flex-row` so avatar+buttons stack on mobile. Edit form: `grid-cols-1 md:grid-cols-2`. Page padding: `px-4 py-6 md:px-9 md:py-8`.
-  - [ ] **2e. Auth screens** — SignInPage fix `px-[88px]` padding on mobile (collapses content on small screens); right panel already `hidden lg:flex` so that's fine.
-  - [ ] **2f. Final pass** — FollowUps, AI, Welcome, ResetPassword screens; overall padding/spacing polish at 375px.
+  - [x] **2e. Auth screens** — done. All three `px-[88px]` panels (sign-in, pending, reset-sent) changed to `px-6 md:px-[88px]`. Right panel `hidden lg:flex` was already fine.
+  - [x] **2f. Final pass** — done. FollowUpsPage: `px-4 py-6 md:px-9 md:py-8`, error state `p-6 md:p-12`. FunnlAIPage: header/main/bottom-bar padding reduced on mobile. WelcomePage and ResetPasswordPage already used `p-6` — no changes needed.
 
 ### Phase 2 — Should-fix before wider push
 - [ ] **3. Search skills** — add skills to the contact search filter in `ContactsPage.jsx` (or remove "skill" from placeholder). One-liner.

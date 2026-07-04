@@ -108,7 +108,7 @@ function FollowUpsPage() {
 
   if (fetchError) {
     return (
-      <div className="min-h-screen bg-surface flex items-center justify-center p-12">
+      <div className="min-h-screen bg-surface flex items-center justify-center p-6 md:p-12">
         <div className="text-center max-w-sm">
           <div className="w-12 h-12 mx-auto mb-4 rounded-xl bg-[rgba(255,107,138,0.1)] border border-[rgba(255,107,138,0.2)] flex items-center justify-center">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#FF6B8A" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
@@ -126,7 +126,7 @@ function FollowUpsPage() {
   }
 
   return (
-    <div className="min-h-screen bg-surface px-9 py-8">
+    <div className="min-h-screen bg-surface px-4 py-6 md:px-9 md:py-8">
 
       {/* Header */}
       <div className="mb-6">

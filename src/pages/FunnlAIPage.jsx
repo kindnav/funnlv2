@@ -12,7 +12,7 @@ function FunnlAIPage() {
     <div className="min-h-screen bg-surface flex flex-col" style={{ backgroundImage: 'radial-gradient(circle at 50% -10%, rgba(108,92,255,0.09), transparent 45%)' }}>
 
       {/* Header */}
-      <div className="flex items-center gap-[11px] px-8 py-[22px] border-b border-[rgba(255,255,255,0.06)] flex-none">
+      <div className="flex items-center gap-[11px] px-4 md:px-8 py-[22px] border-b border-[rgba(255,255,255,0.06)] flex-none">
         <div className="w-9 h-9 rounded-[10px] bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] flex items-center justify-center shadow-[0_4px_16px_rgba(91,69,240,0.4)] flex-none">
           <svg width="19" height="19" viewBox="0 0 24 24" fill="white">
             <path d="M12 3l1.7 5.3L19 10l-5.3 1.7L12 17l-1.7-5.3L5 10l5.3-1.7L12 3z"/>
@@ -28,7 +28,7 @@ function FunnlAIPage() {
       </div>
 
       {/* Main area — empty state centered */}
-      <div className="flex-1 flex items-center justify-center px-12 py-12">
+      <div className="flex-1 flex items-center justify-center px-4 py-8 md:px-12 md:py-12">
         <div className="text-center max-w-md">
           <div className="w-[72px] h-[72px] mx-auto mb-6 rounded-[20px] bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] flex items-center justify-center shadow-[0_16px_48px_rgba(91,69,240,0.45)]">
             <svg width="34" height="34" viewBox="0 0 24 24" fill="white">
@@ -71,7 +71,7 @@ function FunnlAIPage() {
       </div>
 
       {/* Bottom — visual preview of the input experience, intentionally non-interactive */}
-      <div className="flex-none px-8 pb-6 pt-3 border-t border-[rgba(255,255,255,0.06)]">
+      <div className="flex-none px-4 md:px-8 pb-6 pt-3 border-t border-[rgba(255,255,255,0.06)]">
         {/* Prompt chips — pointer-events-none makes clear they're not clickable */}
         <div className="flex gap-2 mb-3 flex-wrap pointer-events-none opacity-40 select-none">
           {prompts.map(p => (
