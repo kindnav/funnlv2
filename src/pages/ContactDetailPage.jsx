@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
+import { getAvatarColor, getInitials } from '../lib/avatarUtils'
 
 function normalizeUrl(url) {
   const s = (url || '').trim()
@@ -14,8 +15,6 @@ function getLocalToday() {
   const d = new Date()
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
-
-import { getAvatarColor, getInitials } from '../lib/avatarUtils'
 
 // ── Relative date — parses YYYY-MM-DD as local midnight to avoid UTC offset bugs ──
 function relativeDate(dateStr) {
@@ -87,6 +86,8 @@ function ContactDetailPage() {
   const [interactionDate, setInteractionDate] = useState(getLocalToday)
   const [notes, setNotes] = useState('')
   const [followUpDate, setFollowUpDate] = useState('')
+
+  const [loggedMsg, setLoggedMsg] = useState(false)
 
   const [editingInteractionId, setEditingInteractionId] = useState(null)
   const [interactionEditForm, setInteractionEditForm] = useState({})
@@ -176,6 +177,7 @@ function ContactDetailPage() {
     setSubmitting(false)
     if (error) { setFormError(error.message); return }
     setNotes(''); setFollowUpDate(''); setShowForm(false); fetchInteractions()
+    setLoggedMsg(true); setTimeout(() => setLoggedMsg(false), 3000)
   }
 
   // ── Loading / error screens ──────────────────────────────────────────────
@@ -441,6 +443,16 @@ function ContactDetailPage() {
                     {showForm ? 'Cancel' : '+ Log'}
                   </button>
                 </div>
+
+                {/* Success banner — visible for 3s after logging */}
+                {loggedMsg && (
+                  <div className="flex items-center gap-2 mb-3 px-3 py-2 rounded-xl bg-[rgba(47,212,182,0.1)] border border-[rgba(47,212,182,0.22)]">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#2FD4B6" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M20 6L9 17l-5-5"/>
+                    </svg>
+                    <p className="text-[12.5px] text-success font-medium">Interaction logged</p>
+                  </div>
+                )}
 
                 {/* Log interaction form */}
                 {showForm && (

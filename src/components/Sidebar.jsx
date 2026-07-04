@@ -213,12 +213,12 @@ function Sidebar() {
           </svg>
           <span className="text-[13px] font-bold text-hi">Funnl AI</span>
         </div>
-        <p className="text-[11.5px] leading-[1.5] text-[#B0A8C8] mb-3">Ask anything about your network and get instant answers.</p>
+        <p className="text-[11.5px] leading-[1.5] text-[#B0A8C8] mb-3">Coming in Layer 3 — log interactions now to power it.</p>
         <Link
           to="/ai"
           className="block w-full bg-hi text-[#1A1530] text-center rounded-[9px] py-2 text-[12.5px] font-bold no-underline"
         >
-          Try Funnl AI
+          See what's coming
         </Link>
       </div>
 
