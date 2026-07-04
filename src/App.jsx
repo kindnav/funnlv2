@@ -11,6 +11,7 @@ import WelcomePage from './pages/WelcomePage'
 import ResetPasswordPage from './pages/ResetPasswordPage'
 import Sidebar from './components/Sidebar'
 import BottomNav from './components/BottomNav'
+import SettingsPage from './pages/SettingsPage'
 
 function App() {
   const [session, setSession] = useState(null)
@@ -53,6 +54,7 @@ function App() {
           <Route path="/contacts/:id" element={<ContactDetailPage />} />
           <Route path="/followups" element={<FollowUpsPage />} />
           <Route path="/ai" element={<FunnlAIPage />} />
+          <Route path="/settings" element={<SettingsPage />} />
           <Route path="/welcome" element={<WelcomePage />} />
           <Route path="/reset-password" element={<ResetPasswordPage />} />
         </Routes>

@@ -29,12 +29,19 @@ function getLocalToday() {
 function Sidebar() {
   const location = useLocation()
   const [user, setUser] = useState(null)
+  const [profile, setProfile] = useState(null)
   const [followUpCount, setFollowUpCount] = useState(0)
 
   useEffect(() => {
-    supabase.auth.getUser().then(({ data }) => setUser(data.user))
+    supabase.auth.getUser().then(({ data }) => {
+      setUser(data.user)
+      if (data.user) {
+        supabase.from('profiles').select('display_name, school').eq('id', data.user.id).maybeSingle()
+          .then(({ data: p }) => setProfile(p))
+      }
+    })
     fetchFollowUpCount()
-  }, [])
+  }, [location.pathname])
 
   async function fetchFollowUpCount() {
     const { count } = await supabase
@@ -87,8 +94,8 @@ function Sidebar() {
           <span className="absolute bottom-[-2px] right-[-2px] w-[11px] h-[11px] rounded-full bg-success border-2 border-elevated"/>
         </div>
         <div className="flex-1 min-w-0">
-          <div className="text-[13px] font-semibold text-hi leading-tight truncate">{getUsername(user?.email)}</div>
-          <div className="text-[11px] text-low">Funnl user</div>
+          <div className="text-[13px] font-semibold text-hi leading-tight truncate">{profile?.display_name || getUsername(user?.email)}</div>
+          <div className="text-[11px] text-low truncate">{profile?.school || 'Funnl user'}</div>
         </div>
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#6C6C78" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-none">
           <path d="M6 9l6 6 6-6"/>
@@ -180,18 +187,20 @@ function Sidebar() {
 
       {/* Settings + Sign out */}
       <div className="px-[14px] pb-3 flex flex-col gap-0.5">
-        <button
-          disabled
-          title="Settings — coming soon"
-          className="flex items-center gap-3 w-full px-3 py-[10px] rounded-[10px] text-[14px] font-medium text-lower cursor-not-allowed opacity-50 text-left"
+        <Link
+          to="/settings"
+          className={`flex items-center gap-3 px-3 py-[10px] rounded-[10px] text-[14px] font-medium transition-colors no-underline ${
+            isActive('/settings')
+              ? 'bg-[rgba(108,92,255,0.14)] text-hi shadow-[inset_0_0_0_1px_rgba(139,124,255,0.18)]'
+              : 'text-low hover:text-hi hover:bg-[rgba(255,255,255,0.04)]'
+          }`}
         >
           <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
             <circle cx="12" cy="12" r="3"/>
             <path d="M12 3v2.4M12 18.6V21M4.3 4.3l1.7 1.7M18 18l1.7 1.7M3 12h2.4M18.6 12H21M4.3 19.7 6 18M18 6l1.7-1.7"/>
           </svg>
-          <span className="flex-1">Settings</span>
-          <span className="text-[9.5px] font-bold text-lower bg-[rgba(255,255,255,0.05)] border border-[rgba(255,255,255,0.07)] px-1.5 py-0.5 rounded-[5px] font-mono">SOON</span>
-        </button>
+          <span>Settings</span>
+        </Link>
         <button
           onClick={() => supabase.auth.signOut()}
           className="flex items-center gap-3 w-full px-3 py-[10px] rounded-[10px] text-[14px] font-medium text-low hover:text-danger hover:bg-[rgba(255,107,138,0.06)] transition-colors text-left"
