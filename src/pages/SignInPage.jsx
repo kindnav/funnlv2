@@ -167,7 +167,7 @@ function SignInPage() {
   if (mode === 'pending') {
     return (
       <div className="flex min-h-screen">
-        <div className="flex flex-1 flex-col justify-center bg-[#0A0A0C] px-[88px]">
+        <div className="flex flex-1 flex-col justify-center bg-[#0A0A0C] px-6 md:px-[88px]">
           <div className="mx-auto w-full max-w-[400px]">
             <div className="flex items-center gap-[11px] mb-14">
               {logoTileSmall}
@@ -205,7 +205,7 @@ function SignInPage() {
   if (mode === 'reset-sent') {
     return (
       <div className="flex min-h-screen">
-        <div className="flex flex-1 flex-col justify-center bg-[#0A0A0C] px-[88px]">
+        <div className="flex flex-1 flex-col justify-center bg-[#0A0A0C] px-6 md:px-[88px]">
           <div className="mx-auto w-full max-w-[400px]">
             <div className="flex items-center gap-[11px] mb-14">
               {logoTileSmall}
@@ -242,7 +242,7 @@ function SignInPage() {
 
   return (
     <div className="flex min-h-screen">
-      <div className="flex flex-1 flex-col justify-center bg-[#0A0A0C] px-[88px]">
+      <div className="flex flex-1 flex-col justify-center bg-[#0A0A0C] px-6 md:px-[88px]">
         <div className="mx-auto w-full max-w-[400px]">
 
           {/* Logo lockup */}
