@@ -276,11 +276,11 @@ Tracked here so progress survives across sessions. Mark each item `[x]` when don
   - [x] **2f. Final pass** — done. FollowUpsPage: `px-4 py-6 md:px-9 md:py-8`, error state `p-6 md:p-12`. FunnlAIPage: header/main/bottom-bar padding reduced on mobile. WelcomePage and ResetPasswordPage already used `p-6` — no changes needed.
 
 ### Phase 2 — Should-fix before wider push
-- [ ] **3. Search skills** — add skills to the contact search filter in `ContactsPage.jsx` (or remove "skill" from placeholder). One-liner.
-- [ ] **4. LinkedIn URL https://** — auto-prepend `https://` when saving/displaying LinkedIn URLs so they don't break as relative links.
-- [ ] **5. Settings button dead-end** — disable the Settings button in `Sidebar.jsx` with `cursor-not-allowed` + visual "coming soon" state instead of a silent dead-end click.
-- [ ] **6. Pipeline sidebar links** — wire "Target firms," "Recruiters," "Alumni" links to `/contacts?tag=target+firm` etc. `ContactsPage` already handles the param; one-line fix per link.
-- [ ] **7. ContactsPage error/empty-state collision** — on fetch failure, the error banner and "Start building your network" empty state both appear. Error state should suppress the page body.
+- [x] **3. Search skills** — done. Added `c.skills?.some(s => s.toLowerCase().includes(q))` to search filter in `ContactsPage.jsx`.
+- [x] **4. LinkedIn URL https://** — done. `normalizeUrl()` helper added in `AddContactDrawer.jsx` and `ContactDetailPage.jsx`; auto-prepends `https://` if URL doesn't start with `http`.
+- [x] **5. Settings button dead-end** — done. Button is now `disabled` + `cursor-not-allowed` + dimmed + "SOON" badge in `Sidebar.jsx`.
+- [x] **6. Pipeline sidebar links** — done. "Target firms" → `/contacts?tag=target+firm`, "Recruiters" → `/contacts?tag=recruiter`, "Alumni" → `/contacts?tag=alumni`.
+- [x] **7. ContactsPage error/empty-state collision** — done. `fetchError` now shows a proper centered error card with "Try again" button; suppresses search bar, filter pills, and contact grid.
 
 ### Phase 3 — Minor cleanups
 - [ ] **8. Misplaced import in ContactDetailPage.jsx** — move `import { getAvatarColor, getInitials }` to the top of the file with the other imports.
