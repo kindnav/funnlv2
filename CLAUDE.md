@@ -283,9 +283,9 @@ Tracked here so progress survives across sessions. Mark each item `[x]` when don
 - [x] **7. ContactsPage error/empty-state collision** — done. `fetchError` now shows a proper centered error card with "Try again" button; suppresses search bar, filter pills, and contact grid.
 
 ### Phase 3 — Minor cleanups
-- [ ] **8. Misplaced import in ContactDetailPage.jsx** — move `import { getAvatarColor, getInitials }` to the top of the file with the other imports.
-- [ ] **9. Post-save confirmation** — brief success feedback after logging an interaction (toast or inline message) instead of the form silently closing.
-- [ ] **10. "Try Funnl AI" CTA wording** — reconsider the sidebar CTA that implies live AI functionality when the destination is a coming-soon screen.
+- [x] **8. Misplaced import in ContactDetailPage.jsx** — done. `import { getAvatarColor, getInitials }` moved to line 4 with the other imports.
+- [x] **9. Post-save confirmation** — done. Green "Interaction logged" banner appears for 3 seconds after a successful save; fades automatically.
+- [x] **10. "Try Funnl AI" CTA wording** — done. Sidebar promo card copy updated: "Ask anything...get instant answers" → "Coming in Layer 3 — log interactions now to power it." Button: "Try Funnl AI" → "See what's coming".
 
 ---
 
