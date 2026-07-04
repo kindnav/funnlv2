@@ -4,6 +4,18 @@ Keep this file current. When we make a durable decision, finish a feature, chang
 
 ---
 
+## Current status
+
+**Funnl is a live, deployed, multi-user MVP.** The full sign-up → email confirmation → sign-in → app flow works end to end.
+
+- Live at **https://getfunnl.com** (www redirects to it)
+- Deployed on Vercel, auto-deploys on push to `main`
+- Real email via Resend — confirmation emails send reliably from `noreply@getfunnl.com`
+- Supabase URL configuration set: Site URL = `https://getfunnl.com`, Redirect URLs include `/welcome` and `/**`
+- **Not yet shared with real students** — email deliverability (spam folder issue) needs to be resolved first; see Task 1 in Known future work
+
+---
+
 ## What Funnl is
 
 Funnl is a **networking CRM for students** recruiting for internships and jobs. Students meet many contacts (recruiters, alumni, founders, other students) but track them poorly — spreadsheets or nothing. Relationships go cold. Funnl fixes that.
@@ -30,9 +42,10 @@ The data schema (notes as freeform text, tags/skills as text arrays) was deliber
 
 - **Vite + React — JavaScript only, no TypeScript**
 - **Tailwind CSS v4** — custom tokens in `src/index.css` using `@theme {}` block (not a config file)
-- **Supabase** — PostgreSQL + auth; credentials in `.env` (never commit `.env`)
+- **Supabase** — PostgreSQL + auth; credentials in `.env` (never commit `.env`). URL config: Site URL = `https://getfunnl.com`, Redirect URLs include `https://getfunnl.com/welcome` and `https://getfunnl.com/**`.
 - **React Router v7** — client-side routing
-- **Vercel** — deployed; connected to GitHub (kindnav/funnlv2), auto-deploys on push to main. `vercel.json` at project root rewrites all routes to `index.html` so React Router handles SPA routing without 404s on direct URL access.
+- **Vercel** — live at `https://getfunnl.com`. Connected to GitHub (kindnav/funnlv2), auto-deploys on push to `main`. Env vars (`VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`) set in Vercel project settings. `vercel.json` at project root rewrites all routes to `index.html` so direct URL visits don't 404.
+- **Cloudflare DNS** — two CNAME records pointing `getfunnl.com` and `www.getfunnl.com` to Vercel, set to DNS-only (grey cloud). `www` redirects to apex. Domain also used for Resend email verification (SPF + DKIM records present, DMARC pending — see Task 1).
 
 ---
 
@@ -196,8 +209,9 @@ The contacts page filter pills use `useSearchParams`. Active tag is stored as `?
 | Empty states (all screens) | ✅ Contacts zero-state has icon + "Start building your network" CTA; search/filter no-results has icon + clear-filters link; all other screens handled. |
 | **Full dark redesign** | ✅ **Complete** — all 8 screens restyled to the Funnl design system (dark palette, Space Grotesk/Jakarta Sans/JetBrains Mono, shared sidebar). |
 | **Robustness pass** | ✅ Error handling on all Supabase reads (dashboard, contact detail, follow-ups); local-timezone date logic consistent app-wide (sidebar badge, dashboard, contact detail, follow-ups all agree); avatar helpers extracted to `src/lib/avatarUtils.js`; AddContactDrawer rejects whitespace-only names and uses safe scroll-lock cleanup. |
-| **Real email / SMTP** | ✅ Resend connected via Supabase custom SMTP; sending from noreply@getfunnl.com; getfunnl.com verified on Cloudflare. Confirmation emails deliver reliably. |
-| **Email confirmation landing page** | ✅ `/welcome` — clean success screen (checkmark, "You're all set", "Continue to sign in" button). No sidebar. Accessible to logged-out users. Supabase redirect URLs must point here once deployed. |
+| **Real email / SMTP** | ✅ Resend connected via Supabase custom SMTP; sending from noreply@getfunnl.com; getfunnl.com verified on Cloudflare. |
+| **Email confirmation landing page** | ✅ `/welcome` — success screen (checkmark, "You're all set", "Continue to sign in"). No sidebar. Accessible logged-out. Supabase redirect URLs configured to point here. |
+| **Deployed to production** | ✅ Live at getfunnl.com on Vercel. DNS on Cloudflare. Env vars set. SPA routing via vercel.json. Full sign-up → confirm → sign-in flow works end to end. |
 | Rule-based reminders / cold alerts | 🔵 Layer 2 |
 | AI assistant and smart features | 🔵 Layer 3 |
 
@@ -221,26 +235,33 @@ The contacts page filter pills use `useSearchParams`. Active tag is stored as `?
 
 ## Known future work / tech debt
 
-### ✅ DONE — Real email / SMTP
-Resend is connected via Supabase custom SMTP. Sending from `noreply@getfunnl.com`. Domain `getfunnl.com` verified on Cloudflare. Confirmation emails deliver reliably.
+### ⚠️ Task 1 — Email deliverability (do BEFORE inviting real students)
+Confirmation emails currently land in recipients' spam/junk folders. Must be resolved before sharing widely, or students won't find their confirmation email and won't be able to sign in.
 
-### ⚠️ Before deploying to getfunnl.com
-**Supabase redirect URLs** — once the app is deployed, update two settings in Supabase dashboard so confirmation emails land on the real welcome page:
-1. **Project Settings → General → Site URL** → `https://getfunnl.com`
-2. **Project Settings → Authentication → URL Configuration → Redirect URLs** → add `https://getfunnl.com/welcome`
+**Fixes, in order of impact:**
+1. **Add DMARC DNS record in Cloudflare** — Resend listed this as optional during domain verification and it was skipped. SPF and DKIM are already in place; DMARC completes email authentication and is the highest-impact fix. Add a `TXT` record for `_dmarc.getfunnl.com` with value `v=DMARC1; p=none; rua=mailto:navbir12345@gmail.com` (start with `p=none` to monitor, not block).
+2. **Domain warm-up** — Deliverability improves naturally over days/weeks as legitimate mail is sent and opened. Nothing to do; just takes time.
+3. **Train Gmail** — Marking test emails "Not spam" in Gmail helps train filters for other Gmail users.
 
-Without this, confirmation links will still redirect to localhost. The `/welcome` page is already built and waiting.
+This is a DNS/configuration task, not a code change.
+
+### Task 2 — /welcome confirmation UX (polish, not a blocker)
+Currently, clicking the email confirmation link auto-logs the user in and drops them directly on the dashboard, skipping `/welcome`. The desired behavior is: land on the standalone `/welcome` page (no sidebar, no app shell), show the "You're all set" confirmation, then have the user click "Continue to sign in" and sign in manually.
+
+**Why it matters:** the `/welcome` page was built for this moment, but Supabase's default behavior creates a session immediately on confirmation click, so the app's auth gate sees a logged-in user and renders the full dashboard instead.
+
+**How to fix when ready:** In `WelcomePage.jsx`, call `supabase.auth.signOut()` on mount (before rendering), then show the page. This clears the auto-created session so the user arrives logged-out and signs in fresh. Small, self-contained change — revisit as a standalone task.
 
 ### Before real launch (required)
-2. **User profile (display name + school)** — sidebar shows email username + "Funnl user". Add a `profiles` Supabase table + settings screen so users can set a real name.
+1. **User profile (display name + school)** — sidebar shows email username + "Funnl user". Add a `profiles` Supabase table + settings screen so users can set a real name.
 
 ### Before wider sharing (important)
-3. **Google OAuth sign-in** — design shows a "Continue with Google" button; deliberately omitted. Requires Google Cloud project + Supabase OAuth config.
-4. **Sidebar Pipeline counts** — Target firms / Recruiters / Alumni show no counts yet. Wire by adding count queries to `Sidebar.jsx` or passing down from `ContactsPage`.
-5. **Tag filter wiring (sidebar → contacts)** — change Pipeline `Link` hrefs to `/contacts?tag=target+firm` etc. `ContactsPage` already handles the param.
+2. **Google OAuth sign-in** — design shows a "Continue with Google" button; deliberately omitted. Requires Google Cloud project + Supabase OAuth config.
+3. **Sidebar Pipeline counts** — Target firms / Recruiters / Alumni show no counts yet. Wire by adding count queries to `Sidebar.jsx` or passing down from `ContactsPage`.
+4. **Tag filter wiring (sidebar → contacts)** — change Pipeline `Link` hrefs to `/contacts?tag=target+firm` etc. `ContactsPage` already handles the param.
 
 ### Layer 2 (next major phase)
-6. **Follow-ups screen** — `/followups` is a "coming soon" stub. Needs: grouping by overdue/today/upcoming, Snooze, Mark done actions, and "going cold" detection logic.
+5. **Follow-ups enhancements** — `/followups` shows real data. Still needed: Snooze, Mark done actions, and "going cold" detection logic.
 
 ### Layer 3 — AI integration (Claude API — do NOT build until user initiates)
 
