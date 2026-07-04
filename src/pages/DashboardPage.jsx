@@ -85,7 +85,7 @@ function DashboardPage() {
   // ── Error — show a clear message instead of misleading zeros/empty state ──
   if (fetchError) {
     return (
-      <div className="min-h-screen bg-surface flex items-center justify-center p-12">
+      <div className="min-h-screen bg-surface flex items-center justify-center p-6 md:p-12">
         <div className="text-center max-w-sm">
           <div className="w-12 h-12 mx-auto mb-4 rounded-xl bg-[rgba(255,107,138,0.1)] border border-[rgba(255,107,138,0.2)] flex items-center justify-center">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#FF6B8A" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
@@ -108,7 +108,7 @@ function DashboardPage() {
   // ── Empty state: brand-new user with no contacts ──────────────────────────
   if (contactCount === 0) {
     return (
-      <div className="min-h-screen bg-surface flex items-center justify-center p-12">
+      <div className="min-h-screen bg-surface flex items-center justify-center p-6 md:p-12">
         <div className="text-center max-w-sm">
           <div className="w-[72px] h-[72px] mx-auto mb-6 rounded-[20px] bg-[rgba(108,92,255,0.12)] border border-[rgba(139,124,255,0.25)] flex items-center justify-center">
             <svg width="32" height="32" viewBox="0 0 100 100" fill="none">
@@ -135,7 +135,7 @@ function DashboardPage() {
 
         {showDrawer && (
           <>
-            <div className="fixed inset-y-0 left-[248px] right-0 bg-[rgba(6,6,8,0.55)] z-40" onClick={() => setShowDrawer(false)} style={{ animation: 'fade-in 0.2s ease-out' }}/>
+            <div className="fixed inset-0 md:left-[248px] bg-[rgba(6,6,8,0.55)] z-40" onClick={() => setShowDrawer(false)} style={{ animation: 'fade-in 0.2s ease-out' }}/>
             <AddContactDrawer onClose={() => setShowDrawer(false)} onSuccess={() => { setShowDrawer(false); fetchAll() }}/>
           </>
         )}
@@ -145,7 +145,7 @@ function DashboardPage() {
 
   // ── Full dashboard ────────────────────────────────────────────────────────
   return (
-    <div className="min-h-screen bg-surface px-9 py-8">
+    <div className="min-h-screen bg-surface px-4 py-6 md:px-9 md:py-8">
 
       {/* Header */}
       <div className="flex items-start justify-between mb-7">
@@ -165,7 +165,7 @@ function DashboardPage() {
       </div>
 
       {/* Stat cards — all numbers from real data */}
-      <div className="grid grid-cols-3 gap-4 mb-5">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-5">
 
         {/* Contacts */}
         <div className="bg-card border border-[rgba(255,255,255,0.07)] rounded-2xl p-5">
@@ -235,7 +235,7 @@ function DashboardPage() {
       </div>
 
       {/* Two-column body: follow-ups (left) + recent contacts (right) */}
-      <div className="grid grid-cols-[1.25fr_1fr] gap-5">
+      <div className="grid grid-cols-1 md:grid-cols-[1.25fr_1fr] gap-5">
 
         {/* Follow-ups due */}
         <div className="bg-card border border-[rgba(255,255,255,0.07)] rounded-2xl p-5">
@@ -316,7 +316,7 @@ function DashboardPage() {
       {/* Add contact drawer + backdrop */}
       {showDrawer && (
         <>
-          <div className="fixed inset-y-0 left-[248px] right-0 bg-[rgba(6,6,8,0.55)] z-40" onClick={() => setShowDrawer(false)} style={{ animation: 'fade-in 0.2s ease-out' }}/>
+          <div className="fixed inset-0 md:left-[248px] bg-[rgba(6,6,8,0.55)] z-40" onClick={() => setShowDrawer(false)} style={{ animation: 'fade-in 0.2s ease-out' }}/>
           <AddContactDrawer onClose={() => setShowDrawer(false)} onSuccess={() => { setShowDrawer(false); fetchAll() }}/>
         </>
       )}
