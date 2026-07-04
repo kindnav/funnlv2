@@ -60,7 +60,7 @@ function ContactsPage() {
     <div className="min-h-screen bg-surface">
 
       {/* Contacts list content — blurred + non-interactive when drawer is open */}
-      <div className={`px-9 py-8 transition-all duration-200 ${showDrawer ? 'blur-[1.5px] opacity-40 pointer-events-none select-none' : ''}`}>
+      <div className={`px-4 py-6 md:px-9 md:py-8 transition-all duration-200 ${showDrawer ? 'blur-[1.5px] opacity-40 pointer-events-none select-none' : ''}`}>
 
         {/* Page header */}
         <div className="flex items-start justify-between mb-6">
@@ -169,7 +169,7 @@ function ContactsPage() {
             </button>
           </div>
         ) : (
-          <div className="grid grid-cols-2 gap-[14px]">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-[14px]">
             {filteredContacts.map(contact => (
               <ContactListItem key={contact.id} contact={contact}/>
             ))}
@@ -182,7 +182,7 @@ function ContactsPage() {
         <>
           {/* Backdrop covers the content area only (not the 248px sidebar) */}
           <div
-            className="fixed inset-y-0 left-[248px] right-0 bg-[rgba(6,6,8,0.55)] z-40 cursor-default"
+            className="fixed inset-0 md:left-[248px] bg-[rgba(6,6,8,0.55)] z-40 cursor-default"
             onClick={() => setShowDrawer(false)}
             style={{ animation: 'fade-in 0.2s ease-out' }}
           />
