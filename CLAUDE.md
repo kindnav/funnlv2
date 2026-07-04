@@ -267,7 +267,13 @@ Tracked here so progress survives across sessions. Mark each item `[x]` when don
 
 ### Phase 1 — Must-fix before any student gets the link
 - [x] **1. Password reset** — done. `ResetPasswordPage.jsx` handles the recovery link. `SignInPage.jsx` gained 'forgot' + 'reset-sent' modes and a success banner on return. `/reset-password` reachable logged-out and logged-in. On success: `updateUser` → navigate('/') with `{ state: { passwordReset: true } }` → `signOut`. Test on getfunnl.com; verify `https://getfunnl.com/**` is in Supabase Redirect URLs.
-- [ ] **2. Mobile responsiveness** — sidebar → hamburger/drawer on mobile; all page grids collapse to single column at mobile widths; AddContactDrawer full-width on phones; verify every screen at ~375px.
+- [ ] **2. Mobile responsiveness** — done in 6 sub-steps below. Navigation decision: **bottom tab bar** (not hamburger). Desktop sidebar stays exactly as-is. `md` breakpoint (768px) is the switch point throughout.
+  - [ ] **2a. Mobile navigation** — hide sidebar on mobile (`hidden md:flex`), show fixed bottom tab bar with 4 tabs (Dashboard, Contacts, Follow-ups, Funnl AI). New `BottomNav.jsx` component with `md:hidden`. Main content gets `pb-16 md:pb-0` so content isn't hidden behind the bar.
+  - [ ] **2b. Dashboard** — 3-col stat grid → single column; 2-col body (follow-ups + recent contacts) → stacked single column.
+  - [ ] **2c. Contacts page** — 2-col contact card grid → single column on mobile; AddContactDrawer full-width on mobile (currently fixed 452px).
+  - [ ] **2d. Contact detail page** — 2-col layout (details + interactions) → single column; hero card tweaks for narrow screens.
+  - [ ] **2e. Auth screens** — SignInPage fix `px-[88px]` padding on mobile (collapses content on small screens); right panel already `hidden lg:flex` so that's fine.
+  - [ ] **2f. Final pass** — FollowUps, AI, Welcome, ResetPassword screens; overall padding/spacing polish at 375px.
 
 ### Phase 2 — Should-fix before wider push
 - [ ] **3. Search skills** — add skills to the contact search filter in `ContactsPage.jsx` (or remove "skill" from placeholder). One-liner.
@@ -334,6 +340,13 @@ Do NOT start Layer 3 before getting real user data. Reasons:
 4. Real users will tell you exactly which AI feature matters most — watch what they search for, what they can't find, what they complain about
 
 **Sequence:** first cohort → watch usage → ask directly "if AI could help you with one thing here, what would it be?" → build that specific thing, not the full brainstorm list.
+
+### PWA / mobile app (future — do NOT build yet)
+The bottom-tab mobile design was deliberately chosen because it translates naturally to a native app later. Planned progression:
+1. **PWA "Add to Home Screen"** — add a web app manifest, service worker, and correct viewport meta tags so the app can be installed on iOS/Android home screens. Relatively small amount of work.
+2. **iOS/Android app via Capacitor** — wrap the React web app in a Capacitor shell to publish to the App Store / Play Store. Capacitor lets you ship a real native app from the same codebase. The bottom tab bar and mobile-first layouts built during the responsiveness pass are the right foundation for this.
+
+Do not start either of these until the web app is stable and has real users.
 
 ### Layer 3 — AI integration (Claude API — do NOT build until user initiates)
 
