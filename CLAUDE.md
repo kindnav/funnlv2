@@ -212,7 +212,8 @@ The contacts page filter pills use `useSearchParams`. Active tag is stored as `?
 | Feature | Status |
 |---|---|
 | Sign in / sign up with email confirmation | ✅ |
-| Add / edit / delete contacts | ✅ |
+| Add / edit / delete contacts | ✅ Delete on detail page (existing inline confirmation). Trash icon on contact cards: hover-reveal only (opacity-0 + pointer-events-none by default — not tappable on mobile). Clicking card trash opens a confirmation modal (Cancel / Yes delete). Detail page delete unchanged. |
+| Delete all contacts | ✅ De-emphasized button at bottom of contacts list (only shown when contacts exist). Two-step guard: (1) modal shows exact count, (2) user must type "delete all contacts" exactly before the delete button enables. Scoped two ways: `.eq('user_id', user.id)` in query + RLS enforces `auth.uid() = user_id` at the database level. ON DELETE CASCADE handles interactions automatically. |
 | Log / edit / delete interactions with notes | ✅ |
 | Follow-up dates on interactions | ✅ (stored; displayed on dashboard and detail page) |
 | Search contacts by name, company, role, tag | ✅ |
