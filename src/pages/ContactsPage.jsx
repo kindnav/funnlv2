@@ -20,6 +20,17 @@ function ContactsPage() {
   const [importOpen, setImportOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
 
+  // Individual contact delete
+  const [confirmDeleteContact, setConfirmDeleteContact] = useState(null) // contact object | null
+  const [deletingContact, setDeletingContact] = useState(false)
+  const [deleteContactError, setDeleteContactError] = useState('')
+
+  // Delete all contacts
+  const [showDeleteAll, setShowDeleteAll] = useState(false)
+  const [deleteAllInput, setDeleteAllInput] = useState('')
+  const [deletingAll, setDeletingAll] = useState(false)
+  const [deleteAllError, setDeleteAllError] = useState('')
+
   // URL-based tag filter — sidebar Pipeline links drive this by linking to /contacts?tag=recruiter
   const [searchParams, setSearchParams] = useSearchParams()
   const activeTag = searchParams.get('tag') || ''
@@ -39,6 +50,36 @@ function ContactsPage() {
 
     if (error) setFetchError(error.message); else setContacts(data)
     setLoading(false)
+  }
+
+  async function handleDeleteContact(contact) {
+    setDeletingContact(true)
+    setDeleteContactError('')
+    const { error } = await supabase.from('contacts').delete().eq('id', contact.id)
+    setDeletingContact(false)
+    if (error) { setDeleteContactError(error.message); return }
+    setConfirmDeleteContact(null)
+    fetchContacts()
+  }
+
+  async function handleDeleteAll() {
+    setDeletingAll(true)
+    setDeleteAllError('')
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) {
+      setDeleteAllError('Not signed in. Please refresh and try again.')
+      setDeletingAll(false)
+      return
+    }
+    // Explicitly scoped to this user's contacts via .eq('user_id', user.id).
+    // RLS also enforces auth.uid() = user_id at the database level — two independent guards.
+    // ON DELETE CASCADE removes all interactions for deleted contacts automatically.
+    const { error } = await supabase.from('contacts').delete().eq('user_id', user.id)
+    setDeletingAll(false)
+    if (error) { setDeleteAllError(`Delete failed: ${error.message}`); return }
+    setShowDeleteAll(false)
+    setDeleteAllInput('')
+    fetchContacts()
   }
 
   // Apply tag filter first, then text search
@@ -196,10 +237,26 @@ function ContactsPage() {
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-[14px]">
             {filteredContacts.map(contact => (
-              <ContactListItem key={contact.id} contact={contact}/>
+              <ContactListItem
+                key={contact.id}
+                contact={contact}
+                onDeleteRequest={c => { setDeleteContactError(''); setConfirmDeleteContact(c) }}
+              />
             ))}
           </div>
         )}
+        {/* Delete all contacts — shown only when contacts exist and the list loaded cleanly */}
+        {!loading && !fetchError && contacts.length > 0 && (
+          <div className="mt-16 pt-5 border-t border-[rgba(255,255,255,0.05)] flex justify-center">
+            <button
+              onClick={() => { setDeleteAllError(''); setShowDeleteAll(true) }}
+              className="text-[12px] font-medium text-lower hover:text-danger transition-colors"
+            >
+              Delete all contacts
+            </button>
+          </div>
+        )}
+
       </div>
 
       {/* Drawer backdrop + drawer — rendered outside the blurred div so the drawer stays crisp */}
@@ -223,6 +280,106 @@ function ContactsPage() {
           onClose={() => setImportOpen(false)}
           onImported={() => fetchContacts()}
         />
+      )}
+
+      {/* ── Individual contact delete confirmation modal ── */}
+      {confirmDeleteContact && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center px-4" style={{ animation: 'fade-in 0.15s ease-out' }}>
+          <div
+            className="absolute inset-0 bg-[rgba(0,0,0,0.65)]"
+            onClick={() => { if (!deletingContact) setConfirmDeleteContact(null) }}
+          />
+          <div className="relative w-full max-w-[400px] bg-card border border-[rgba(255,255,255,0.09)] rounded-2xl p-6 shadow-[0_24px_64px_rgba(0,0,0,0.7)]">
+            <div className="w-10 h-10 rounded-xl bg-[rgba(255,107,138,0.1)] border border-[rgba(255,107,138,0.2)] flex items-center justify-center mb-4">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#FF6B8A" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/>
+              </svg>
+            </div>
+            <h2 className="font-display font-bold text-[17px] text-hi mb-2">
+              Delete {confirmDeleteContact.name}?
+            </h2>
+            <p className="text-[13.5px] text-muted leading-relaxed mb-5">
+              This will permanently delete this contact and all their interactions. This cannot be undone.
+            </p>
+            {deleteContactError && (
+              <p className="text-[13px] text-danger mb-4">{deleteContactError}</p>
+            )}
+            <div className="flex gap-3">
+              <button
+                onClick={() => setConfirmDeleteContact(null)}
+                disabled={deletingContact}
+                className="flex-1 bg-elevated border border-[rgba(255,255,255,0.09)] text-mid text-[14px] font-semibold py-[11px] rounded-[11px] hover:text-hi transition-colors disabled:opacity-40"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => handleDeleteContact(confirmDeleteContact)}
+                disabled={deletingContact}
+                className="flex-1 bg-[#FF6B8A] text-white text-[14px] font-bold py-[11px] rounded-[11px] hover:opacity-90 transition-opacity disabled:opacity-40"
+              >
+                {deletingContact ? 'Deleting…' : 'Yes, delete'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Delete all contacts confirmation modal ── */}
+      {showDeleteAll && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center px-4" style={{ animation: 'fade-in 0.15s ease-out' }}>
+          <div
+            className="absolute inset-0 bg-[rgba(0,0,0,0.65)]"
+            onClick={() => {
+              if (!deletingAll) { setShowDeleteAll(false); setDeleteAllInput(''); setDeleteAllError('') }
+            }}
+          />
+          <div className="relative w-full max-w-[440px] bg-card border border-[rgba(255,255,255,0.09)] rounded-2xl p-6 shadow-[0_24px_64px_rgba(0,0,0,0.7)]">
+            <div className="w-10 h-10 rounded-xl bg-[rgba(255,107,138,0.1)] border border-[rgba(255,107,138,0.2)] flex items-center justify-center mb-4">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#FF6B8A" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+                <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+              </svg>
+            </div>
+            <h2 className="font-display font-bold text-[17px] text-hi mb-2">Delete all contacts</h2>
+            <p className="text-[13.5px] text-muted leading-relaxed mb-5">
+              This will permanently delete all{' '}
+              <strong className="text-hi">{contacts.length}</strong>{' '}
+              {contacts.length === 1 ? 'contact' : 'contacts'} and all their interactions. This cannot be undone.
+            </p>
+            <label className="block text-[12.5px] font-semibold text-mid mb-2">
+              Type <span className="font-mono text-hi">delete all contacts</span> to confirm
+            </label>
+            <input
+              value={deleteAllInput}
+              onChange={e => setDeleteAllInput(e.target.value)}
+              placeholder="delete all contacts"
+              autoFocus
+              className="w-full bg-input border border-[rgba(255,255,255,0.09)] rounded-xl px-[13px] py-[11px] text-[13.5px] text-hi placeholder-[#54545E] outline-none focus:border-[rgba(255,107,138,0.4)] transition-colors mb-4"
+            />
+            {deleteAllError && (
+              <p className="text-[13px] text-danger mb-3">{deleteAllError}</p>
+            )}
+            <div className="flex gap-3">
+              <button
+                onClick={() => { setShowDeleteAll(false); setDeleteAllInput(''); setDeleteAllError('') }}
+                disabled={deletingAll}
+                className="flex-1 bg-elevated border border-[rgba(255,255,255,0.09)] text-mid text-[14px] font-semibold py-[11px] rounded-[11px] hover:text-hi transition-colors disabled:opacity-40"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleDeleteAll}
+                disabled={deletingAll || deleteAllInput !== 'delete all contacts'}
+                className="flex-1 bg-[#FF6B8A] text-white text-[14px] font-bold py-[11px] rounded-[11px] hover:opacity-90 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                {deletingAll
+                  ? 'Deleting…'
+                  : `Delete ${contacts.length} ${contacts.length === 1 ? 'contact' : 'contacts'}`
+                }
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )

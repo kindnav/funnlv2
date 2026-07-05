@@ -1,7 +1,7 @@
 import { useNavigate } from 'react-router-dom'
 import { getAvatarColor, getInitials } from '../lib/avatarUtils'
 
-function ContactListItem({ contact }) {
+function ContactListItem({ contact, onDeleteRequest }) {
   const navigate = useNavigate()
   const hasEmail = !!contact.email
   const hasLinkedIn = !!contact.linkedin_url
@@ -11,7 +11,7 @@ function ContactListItem({ contact }) {
   return (
     <div
       onClick={() => navigate(`/contacts/${contact.id}`)}
-      className="bg-card border border-[rgba(255,255,255,0.07)] rounded-2xl p-[18px] cursor-pointer hover:border-[rgba(139,124,255,0.3)] transition-colors flex flex-col gap-[13px]"
+      className="group bg-card border border-[rgba(255,255,255,0.07)] rounded-2xl p-[18px] cursor-pointer hover:border-[rgba(139,124,255,0.3)] transition-colors flex flex-col gap-[13px]"
     >
       {/* Top row: avatar + name/role + icon buttons */}
       <div className="flex items-start gap-3">
@@ -74,6 +74,19 @@ function ContactListItem({ contact }) {
               in
             </div>
           )}
+
+          {/* Trash icon — revealed on desktop hover only.
+              opacity-0 + pointer-events-none on touch screens prevents accidental mis-taps.
+              Mobile users delete via the contact detail page (one tap away). */}
+          <button
+            onClick={e => { e.stopPropagation(); onDeleteRequest(contact) }}
+            title="Delete contact"
+            className="w-8 h-8 rounded-[9px] bg-elevated border border-[rgba(255,255,255,0.07)] flex items-center justify-center text-low hover:text-danger hover:border-[rgba(255,107,138,0.35)] opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto transition"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/>
+            </svg>
+          </button>
         </div>
       </div>
 
