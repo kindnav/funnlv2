@@ -2,7 +2,6 @@ import { useState, useRef } from 'react'
 import Papa from 'papaparse'
 import { supabase } from '../lib/supabase'
 
-// Funnl fields in display order
 const FUNNL_FIELDS = [
   { value: 'name',         label: 'Name',        required: true },
   { value: 'company',      label: 'Company' },
@@ -14,56 +13,156 @@ const FUNNL_FIELDS = [
   { value: 'skills',       label: 'Skills' },
 ]
 
-// Auto-detect: lowercased CSV header → Funnl field
-// First name and last name variants both map to 'name' so they
-// both land in assignment.name and join in header order (First before Last).
+// Normalize a CSV header before lookup:
+// lowercase, convert separators (underscores, hyphens, slashes, dots) to spaces,
+// collapse multiple spaces. Means first_name / first-name / first.name all become
+// 'first name' and match one HEADER_MAP entry — no need to list every variant.
+function normalizeHeader(h) {
+  return h
+    .toLowerCase()
+    .replace(/[\s_\-./\\]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+// Auto-detect: normalized header → Funnl field.
+//
+// Design principle: when NOT confident, leave unassigned — a wrong auto-guess that
+// needs correcting is worse than an unassigned column that takes one click to place.
+//
+// Pruned false positives vs previous version:
+//   'title'    → removed (Mr./Dr. vs job title — use 'job title' / 'current title')
+//   'type'     → removed (too generic — rarely means Funnl tags)
+//   'source'   → removed (lead source vs meeting context — ambiguous)
+//   'met'      → removed (too short/ambiguous)
+//   'label'    → removed (too generic)
+//   'org'      → removed (too short — often an ID or GitHub org)
+//   'category' → removed (too generic)
+//   'tech'     → removed (company sector vs skills list — ambiguous)
+//   'contact'  → removed (contact record ID vs person name — ambiguous)
+//
+// Normalization handles separator variants automatically, so 'first_name' /
+// 'first-name' / 'First.Name' all normalize to 'first name' and match that entry.
 const HEADER_MAP = {
-  // Name — plain
-  'name': 'name', 'full name': 'name', 'full_name': 'name',
-  'contact name': 'name', 'contact_name': 'name', 'contact': 'name', 'person': 'name',
-  // Name — first
-  'first name': 'name', 'first_name': 'name', 'firstname': 'name',
-  'fname': 'name', 'given name': 'name', 'given_name': 'name',
-  // Name — last
-  'last name': 'name', 'last_name': 'name', 'lastname': 'name',
-  'lname': 'name', 'surname': 'name', 'family name': 'name', 'family_name': 'name',
-  // Company
-  'company': 'company', 'company name': 'company', 'company_name': 'company',
-  'organization': 'company', 'organisation': 'company',
-  'firm': 'company', 'employer': 'company', 'org': 'company',
-  // Role
-  'role': 'role', 'title': 'role', 'job title': 'role', 'job_title': 'role',
-  'position': 'role', 'job position': 'role',
-  // Email
-  'email': 'email', 'email address': 'email', 'email_address': 'email',
-  'e-mail': 'email', 'work email': 'email',
-  // LinkedIn
-  'linkedin': 'linkedin_url', 'linkedin url': 'linkedin_url', 'linkedin_url': 'linkedin_url',
-  'linkedin profile': 'linkedin_url', 'linkedin_profile': 'linkedin_url',
+  // ── Name ─────────────────────────────────────────────────────────────────────
+  'name': 'name',
+  'full name': 'name',
+  'fullname': 'name',        // camelCase without separator
+  'contact name': 'name',
+  'contactname': 'name',
+  'person': 'name',
+  'person name': 'name',
+  'attendee': 'name',
+  'attendee name': 'name',
+  'contact person': 'name',
+  // Split first / last — auto-combine in chip order (First before Last)
+  'first name': 'name',
+  'firstname': 'name',
+  'fname': 'name',
+  'given name': 'name',
+  'last name': 'name',
+  'lastname': 'name',
+  'lname': 'name',
+  'surname': 'name',
+  'family name': 'name',
+
+  // ── Company ───────────────────────────────────────────────────────────────────
+  'company': 'company',
+  'company name': 'company',
+  'companyname': 'company',
+  'organization': 'company',
+  'organisation': 'company',
+  'employer': 'company',
+  'employer name': 'company',
+  'workplace': 'company',
+  'current company': 'company',
+  'firm': 'company',
+  // NOT: 'org' (ambiguous), 'work' (ambiguous)
+
+  // ── Role ──────────────────────────────────────────────────────────────────────
+  'role': 'role',
+  'job title': 'role',
+  'jobtitle': 'role',
+  'position': 'role',
+  'job position': 'role',
+  'job role': 'role',
+  'current role': 'role',
+  'current title': 'role',
+  'current position': 'role',
+  'occupation': 'role',
+  'designation': 'role',
+  // NOT: 'title' alone — ambiguous (Mr./Dr. salutation vs job title)
+
+  // ── Email ─────────────────────────────────────────────────────────────────────
+  'email': 'email',
+  'email address': 'email',
+  'emailaddress': 'email',
+  'e mail': 'email',         // 'e-mail' normalizes to 'e mail'
+  'work email': 'email',
+  'personal email': 'email',
+  'professional email': 'email',
+  'contact email': 'email',
+  'email id': 'email',
+  // NOT: 'company email' (company's address or person's? — ambiguous)
+
+  // ── LinkedIn URL ──────────────────────────────────────────────────────────────
+  'linkedin': 'linkedin_url',
+  'linkedin url': 'linkedin_url',
+  'linkedin profile': 'linkedin_url',
+  'linkedin profile url': 'linkedin_url',
+  'linkedin page': 'linkedin_url',
   'linkedin link': 'linkedin_url',
-  // How met
-  'how met': 'how_met', 'how_met': 'how_met', 'how we met': 'how_met',
-  'met at': 'how_met', 'met': 'how_met', 'source': 'how_met',
-  'where met': 'how_met', 'meeting context': 'how_met',
-  // Tags
-  'tags': 'tags', 'tag': 'tags', 'label': 'tags', 'labels': 'tags',
-  'category': 'tags', 'categories': 'tags', 'type': 'tags',
-  // Skills
-  'skills': 'skills', 'skill': 'skills', 'expertise': 'skills',
-  'tech': 'skills', 'technologies': 'skills', 'technical skills': 'skills',
+  'li url': 'linkedin_url',
+  'li profile': 'linkedin_url',
+  // NOT: 'profile' alone, 'url' alone (too generic)
+
+  // ── How met ───────────────────────────────────────────────────────────────────
+  'how met': 'how_met',
+  'howmet': 'how_met',
+  'how we met': 'how_met',
+  'where met': 'how_met',
+  'where we met': 'how_met',
+  'meeting context': 'how_met',
+  'met through': 'how_met',
+  'met at': 'how_met',
+  'met via': 'how_met',
+  'introduction': 'how_met',
+  // NOT: 'source' (ambiguous), 'met' alone (too short), 'context' alone (too generic)
+
+  // ── Tags ──────────────────────────────────────────────────────────────────────
+  'tags': 'tags',
+  'tag': 'tags',
+  'labels': 'tags',
+  'relationship type': 'tags',
+  'contact type': 'tags',
+  'connection type': 'tags',
+  'relationship': 'tags',
+  // NOT: 'type' alone, 'label' alone, 'category'/'categories' alone (all too generic)
+
+  // ── Skills ────────────────────────────────────────────────────────────────────
+  'skills': 'skills',
+  'skill': 'skills',
+  'expertise': 'skills',
+  'technical skills': 'skills',
+  'technologies': 'skills',
+  'tech stack': 'skills',
+  'techstack': 'skills',
+  'areas of expertise': 'skills',
+  'abilities': 'skills',
+  // NOT: 'tech' alone (could mean tech company/sector, not a skills list)
 }
 
 function freshAssignment() {
   return { name: [], company: [], role: [], email: [], linkedin_url: [], how_met: [], tags: [], skills: [] }
 }
 
-// Builds initial assignment from CSV headers, iterating in file order so that
-// "First Name" lands before "Last Name" in the name array.
+// Iterates headers in file order so 'First Name' lands before 'Last Name' in the
+// name array, producing "John Smith" not "Smith John" when joined.
 function buildInitialAssignment(headers) {
   const result = freshAssignment()
   const used = new Set()
   for (const header of headers) {
-    const field = HEADER_MAP[header.toLowerCase().trim()]
+    const field = HEADER_MAP[normalizeHeader(header)]
     if (field && !used.has(header)) {
       result[field] = [...result[field], header]
       used.add(header)
@@ -89,7 +188,7 @@ function transformRow(rawRow, assignment) {
   for (const [field, cols] of Object.entries(assignment)) {
     if (!cols || cols.length === 0) continue
     if (field === 'tags' || field === 'skills') {
-      // Each assigned column is split on commas; all values merged into one flat array
+      // Each assigned column split on commas, merged into one flat array
       const values = cols.flatMap(col =>
         (rawRow[col] || '').trim().split(',').map(s => s.trim()).filter(Boolean)
       )
@@ -99,7 +198,7 @@ function transformRow(rawRow, assignment) {
       const raw = cols.map(col => (rawRow[col] || '').trim()).filter(Boolean)[0]
       if (raw) contact.linkedin_url = normalizeUrl(raw)
     } else {
-      // Text fields: chip order determines join order — empty cells skipped, no double spaces
+      // Text fields: chip order = join order; empty cells skipped, no double spaces
       const combined = cols.map(col => (rawRow[col] || '').trim()).filter(Boolean).join(' ')
       if (combined) contact[field] = combined
     }
@@ -123,15 +222,31 @@ function processRows(rows, assignment) {
 
 const STEP_LABEL = { upload: 'Step 1 of 3', map: 'Step 2 of 3', confirm: 'Step 3 of 3', done: 'Done' }
 
-function ImportContactsModal({ onClose, onImported }) {
+// Compute picker position, flipping upward when near the bottom of the viewport
+// so the dropdown never gets clipped on mobile or in short windows.
+function calcPickerPos(e, estimatedHeight = 240) {
+  const rect = e.currentTarget.getBoundingClientRect()
+  const spaceBelow = window.innerHeight - rect.bottom
+  const top = spaceBelow > estimatedHeight + 8
+    ? rect.bottom + 6
+    : rect.top - estimatedHeight - 6
+  const left = Math.min(rect.left, window.innerWidth - 204)
+  return { top, left }
+}
+
+export default function ImportContactsModal({ onClose, onImported }) {
   const [step, setStep]           = useState('upload')
   const [dragging, setDragging]   = useState(false)
   const [parseError, setParseError] = useState('')
   const [headers, setHeaders]     = useState([])
   const [rows, setRows]           = useState([])
   const [assignment, setAssignment] = useState(freshAssignment)
-  const [openPicker, setOpenPicker] = useState(null)   // funnlField value | null
-  const [pickerPos, setPickerPos]   = useState({ top: 0, left: 0 })
+
+  // Unified picker state — only one picker open at a time.
+  // mode 'field': key = funnlField, dropdown lists unassigned columns (field-first flow)
+  // mode 'col':   key = CSV header,  dropdown lists Funnl fields    (column-first flow)
+  const [picker, setPicker]       = useState(null)
+
   const [importing, setImporting] = useState(false)
   const [importError, setImportError] = useState('')
   const [result, setResult]       = useState(null)
@@ -142,7 +257,6 @@ function ImportContactsModal({ onClose, onImported }) {
   const ignoredCols  = headers.filter(h => !assignedSet.has(h))
   const hasNameMapped = assignment.name.length > 0
 
-  // Preview: Name always first, then other assigned fields, max 5 cols total
   const previewFields = [
     'name',
     ...FUNNL_FIELDS
@@ -198,7 +312,7 @@ function ImportContactsModal({ onClose, onImported }) {
     setHeaders([])
     setRows([])
     setAssignment(freshAssignment())
-    setOpenPicker(null)
+    setPicker(null)
     setParseError('')
     if (fileInputRef.current) fileInputRef.current.value = ''
   }
@@ -206,19 +320,25 @@ function ImportContactsModal({ onClose, onImported }) {
   // --- Assignment ---
   function addColumn(field, col) {
     setAssignment(prev => ({ ...prev, [field]: [...prev[field], col] }))
-    setOpenPicker(null)
+    setPicker(null)
   }
 
   function removeColumn(field, col) {
     setAssignment(prev => ({ ...prev, [field]: prev[field].filter(c => c !== col) }))
   }
 
-  function openPickerFor(field, e) {
+  // Field-first: "what columns can I pull into this field?" → lists unassigned cols
+  function openFieldPicker(field, e) {
     e.stopPropagation()
-    if (openPicker === field) { setOpenPicker(null); return }
-    const rect = e.currentTarget.getBoundingClientRect()
-    setPickerPos({ top: rect.bottom + 6, left: rect.left })
-    setOpenPicker(field)
+    if (picker?.mode === 'field' && picker.key === field) { setPicker(null); return }
+    setPicker({ mode: 'field', key: field, pos: calcPickerPos(e) })
+  }
+
+  // Column-first: "where does this column go?" → lists Funnl fields
+  function openColPicker(col, e) {
+    e.stopPropagation()
+    if (picker?.mode === 'col' && picker.key === col) { setPicker(null); return }
+    setPicker({ mode: 'col', key: col, pos: calcPickerPos(e, 320) })
   }
 
   // --- Import ---
@@ -239,7 +359,6 @@ function ImportContactsModal({ onClose, onImported }) {
     }
     const contacts = toImport.map(c => ({ ...c, user_id: user.id }))
     // Single bulk insert — all-or-nothing at the database level.
-    // On failure: zero contacts saved, error shown below.
     const { error } = await supabase.from('contacts').insert(contacts)
     setImporting(false)
     if (error) {
@@ -255,7 +374,7 @@ function ImportContactsModal({ onClose, onImported }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center px-4" style={{ animation: 'fade-in 0.15s ease-out' }}>
 
-      {/* Modal backdrop */}
+      {/* Backdrop */}
       <div className="absolute inset-0 bg-[rgba(0,0,0,0.65)]" onClick={onClose}/>
 
       {/* Modal panel */}
@@ -277,10 +396,10 @@ function ImportContactsModal({ onClose, onImported }) {
           </button>
         </div>
 
-        {/* Scrollable body — closes picker on scroll so it never drifts from its button */}
+        {/* Scrollable body — closes picker on scroll so it doesn't drift from its button */}
         <div
           className="overflow-y-auto flex-1 px-6 py-5"
-          onScroll={() => openPicker && setOpenPicker(null)}
+          onScroll={() => picker && setPicker(null)}
         >
 
           {/* ── STEP 1: Upload ── */}
@@ -338,7 +457,7 @@ function ImportContactsModal({ onClose, onImported }) {
 
               {/* Name required warning */}
               {!hasNameMapped && (
-                <div className="flex items-center gap-2.5 mb-5 px-3 py-2.5 bg-[rgba(255,184,77,0.08)] border border-[rgba(255,184,77,0.25)] rounded-xl">
+                <div className="flex items-center gap-2.5 mb-4 px-3 py-2.5 bg-[rgba(255,184,77,0.08)] border border-[rgba(255,184,77,0.25)] rounded-xl">
                   <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#FFB84D" strokeWidth="2" strokeLinecap="round" className="flex-none">
                     <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
                     <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
@@ -349,13 +468,49 @@ function ImportContactsModal({ onClose, onImported }) {
                 </div>
               )}
 
-              {/* Field assignment table */}
-              <p className="text-[11px] font-bold tracking-[1px] text-lower uppercase font-mono mb-3">
-                For each Funnl field, choose which CSV column(s) feed it
+              {/* ── Pool: unassigned columns (primary entry point for assignment) ── */}
+              <div className="mb-5">
+                {ignoredCols.length === 0 ? (
+                  <div className="flex items-center gap-2 px-4 py-3 bg-[rgba(47,212,182,0.07)] border border-[rgba(47,212,182,0.2)] rounded-xl">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#2FD4B6" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M20 6L9 17l-5-5"/>
+                    </svg>
+                    <p className="text-[12.5px] text-success font-medium">All columns placed — check the preview below.</p>
+                  </div>
+                ) : (
+                  <div className="px-4 py-3.5 bg-elevated border border-[rgba(255,255,255,0.08)] rounded-xl">
+                    <p className="text-[11px] font-bold tracking-[1px] text-lower uppercase font-mono mb-3">
+                      Not yet assigned — click a column to place it
+                    </p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {ignoredCols.map(col => (
+                        <button
+                          key={col}
+                          onClick={e => openColPicker(col, e)}
+                          className={`inline-flex items-center gap-1.5 border text-[12px] font-mono px-2.5 py-[6px] rounded-lg transition-colors ${
+                            picker?.mode === 'col' && picker.key === col
+                              ? 'bg-[rgba(139,124,255,0.15)] border-accent text-hi'
+                              : 'bg-card border-[rgba(255,255,255,0.11)] text-mid hover:border-[rgba(139,124,255,0.4)] hover:text-hi'
+                          }`}
+                        >
+                          {col}
+                          <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                            <path d="M6 9l6 6 6-6"/>
+                          </svg>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* ── Field assignment table ── */}
+              <p className="text-[11px] font-bold tracking-[1px] text-lower uppercase font-mono mb-1">
+                Funnl fields
               </p>
-              <p className="text-[12px] text-lower mb-4">
-                Multiple columns can feed one field — their values join in chip order.
-                Tags and Skills: comma-separated values in each cell are split into separate entries.
+              <p className="text-[12px] text-lower mb-3">
+                Click a column above to assign it, or use + Add on any field.
+                Multiple columns combine in chip order — chip order matters for First + Last name.
               </p>
 
               <div className="divide-y divide-[rgba(255,255,255,0.05)] border border-[rgba(255,255,255,0.07)] rounded-xl overflow-hidden mb-5">
@@ -367,7 +522,7 @@ function ImportContactsModal({ onClose, onImported }) {
                       {field.required && <span className="text-danger text-[12px] ml-0.5">*</span>}
                     </div>
 
-                    {/* Assigned column chips + Add button */}
+                    {/* Chips + controls */}
                     <div className="flex-1 flex flex-wrap items-center gap-1.5 pt-1.5 min-h-[32px]">
                       {assignment[field.value].map(col => (
                         <span
@@ -377,18 +532,28 @@ function ImportContactsModal({ onClose, onImported }) {
                           {col}
                           <button
                             onClick={() => removeColumn(field.value, col)}
+                            title="Remove — returns this column to the unassigned pool above"
                             className="text-[rgba(180,168,255,0.45)] hover:text-danger transition-colors ml-0.5 leading-none text-[14px]"
-                            title="Remove"
                           >
                             ×
                           </button>
                         </span>
                       ))}
 
+                      {/* "— not assigned" placeholder so empty fields are visually obvious */}
+                      {assignment[field.value].length === 0 && (
+                        <span className="text-[12px] text-lower italic pt-[5px]">— not assigned</span>
+                      )}
+
+                      {/* + Add: secondary field-first flow (when user knows the field, not the column) */}
                       {ignoredCols.length > 0 && (
                         <button
-                          onClick={e => openPickerFor(field.value, e)}
-                          className="inline-flex items-center gap-1 text-[12px] font-semibold text-low hover:text-accent px-2 py-[5px] rounded-lg hover:bg-[rgba(139,124,255,0.08)] transition-colors leading-none"
+                          onClick={e => openFieldPicker(field.value, e)}
+                          className={`inline-flex items-center gap-1 text-[12px] font-semibold px-2 py-[5px] rounded-lg transition-colors leading-none ${
+                            picker?.mode === 'field' && picker.key === field.value
+                              ? 'text-accent bg-[rgba(139,124,255,0.12)]'
+                              : 'text-low hover:text-accent hover:bg-[rgba(139,124,255,0.08)]'
+                          }`}
                         >
                           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
                             <path d="M12 5v14M5 12h14"/>
@@ -396,41 +561,18 @@ function ImportContactsModal({ onClose, onImported }) {
                           Add
                         </button>
                       )}
-
-                      {assignment[field.value].length === 0 && ignoredCols.length === 0 && (
-                        <span className="text-[12px] text-lower pt-1">—</span>
-                      )}
                     </div>
                   </div>
                 ))}
               </div>
 
-              {/* Ignored / unused columns */}
-              {ignoredCols.length > 0 && (
-                <div className="mb-6">
-                  <p className="text-[11px] font-bold tracking-[1px] text-lower uppercase font-mono mb-2">
-                    Not used — click "+ Add" on a field above to use these
-                  </p>
-                  <div className="flex flex-wrap gap-1.5">
-                    {ignoredCols.map(col => (
-                      <span
-                        key={col}
-                        className="text-[12px] text-low bg-elevated border border-[rgba(255,255,255,0.07)] px-2 py-[5px] rounded-lg font-mono"
-                      >
-                        {col}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Live preview */}
+              {/* ── Live preview ── */}
               <div className="border-t border-[rgba(255,255,255,0.06)] pt-5">
                 <p className="text-[11px] font-bold tracking-[1px] text-lower uppercase font-mono mb-1">
                   Live preview
                 </p>
                 <p className="text-[12px] text-lower mb-3">
-                  Showing first {Math.min(rows.length, 5)} of {rows.length} rows · updates as you change the mapping above
+                  First {Math.min(rows.length, 5)} of {rows.length} rows · updates instantly as you change assignments
                 </p>
                 <div className="overflow-x-auto rounded-xl border border-[rgba(255,255,255,0.07)]">
                   <table className="w-full text-[12px]" style={{ minWidth: previewFields.length * 130 }}>
@@ -535,7 +677,6 @@ function ImportContactsModal({ onClose, onImported }) {
 
         {/* Footer */}
         <div className="px-6 py-4 border-t border-[rgba(255,255,255,0.07)] flex-none flex items-center justify-between gap-3">
-
           {step === 'upload' && (
             <>
               <div/>
@@ -544,14 +685,13 @@ function ImportContactsModal({ onClose, onImported }) {
               </button>
             </>
           )}
-
           {step === 'map' && (
             <>
               <button onClick={goBackToUpload} className="text-[14px] font-semibold text-low hover:text-hi transition-colors">
                 ← Back
               </button>
               <button
-                onClick={() => { setImportError(''); setOpenPicker(null); setStep('confirm') }}
+                onClick={() => { setImportError(''); setPicker(null); setStep('confirm') }}
                 disabled={!hasNameMapped}
                 className="bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] text-white text-[14px] font-bold px-6 py-[10px] rounded-[11px] shadow-[0_6px_18px_rgba(91,69,240,0.35)] hover:opacity-90 transition-opacity disabled:opacity-30 disabled:cursor-not-allowed"
               >
@@ -559,7 +699,6 @@ function ImportContactsModal({ onClose, onImported }) {
               </button>
             </>
           )}
-
           {step === 'confirm' && (
             <>
               <button
@@ -586,7 +725,6 @@ function ImportContactsModal({ onClose, onImported }) {
               </button>
             </>
           )}
-
           {step === 'done' && (
             <button
               onClick={onClose}
@@ -595,27 +733,46 @@ function ImportContactsModal({ onClose, onImported }) {
               Done
             </button>
           )}
-
         </div>
       </div>
 
-      {/* Column picker — fixed to viewport so scrollable modal body can't clip it */}
-      {openPicker && (
+      {/* Unified picker — fixed to viewport so scrollable modal body can't clip it.
+          Closes automatically when body scrolls (onScroll handler above). */}
+      {picker && (
         <>
-          <div className="fixed inset-0 z-[60]" onClick={() => setOpenPicker(null)}/>
+          <div className="fixed inset-0 z-[60]" onClick={() => setPicker(null)}/>
           <div
-            className="fixed z-[70] bg-elevated border border-[rgba(255,255,255,0.13)] rounded-xl shadow-[0_8px_32px_rgba(0,0,0,0.5)] py-1 min-w-[180px] max-h-[220px] overflow-y-auto"
-            style={{ top: pickerPos.top, left: pickerPos.left }}
+            className="fixed z-[70] bg-elevated border border-[rgba(255,255,255,0.13)] rounded-xl shadow-[0_8px_32px_rgba(0,0,0,0.5)] py-1 min-w-[180px] max-h-[260px] overflow-y-auto"
+            style={{ top: picker.pos.top, left: picker.pos.left }}
           >
-            {ignoredCols.map(col => (
-              <button
-                key={col}
-                onClick={() => addColumn(openPicker, col)}
-                className="w-full text-left px-3 py-[9px] text-[13px] text-mid hover:text-hi hover:bg-[rgba(255,255,255,0.05)] transition-colors font-mono"
-              >
-                {col}
-              </button>
-            ))}
+            {picker.mode === 'field' ? (
+              // Field-first: list unassigned columns to pull into the open field
+              ignoredCols.length === 0 ? (
+                <p className="px-3 py-2 text-[13px] text-lower">No columns available</p>
+              ) : (
+                ignoredCols.map(col => (
+                  <button
+                    key={col}
+                    onClick={() => addColumn(picker.key, col)}
+                    className="w-full text-left px-3 py-[9px] text-[13px] text-mid hover:text-hi hover:bg-[rgba(255,255,255,0.05)] transition-colors font-mono"
+                  >
+                    {col}
+                  </button>
+                ))
+              )
+            ) : (
+              // Column-first: list Funnl fields to place the clicked column into
+              FUNNL_FIELDS.map(field => (
+                <button
+                  key={field.value}
+                  onClick={() => addColumn(field.value, picker.key)}
+                  className="w-full text-left px-3 py-[9px] text-[13px] text-mid hover:text-hi hover:bg-[rgba(255,255,255,0.05)] transition-colors flex items-center justify-between gap-3"
+                >
+                  <span>{field.label}</span>
+                  {field.required && <span className="text-danger text-[10.5px] font-mono flex-none">required</span>}
+                </button>
+              ))
+            )}
           </div>
         </>
       )}
@@ -623,5 +780,3 @@ function ImportContactsModal({ onClose, onImported }) {
     </div>
   )
 }
-
-export default ImportContactsModal
