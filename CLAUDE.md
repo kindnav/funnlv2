@@ -32,7 +32,7 @@ Funnl is a **networking CRM for students** recruiting for internships and jobs. 
 |---|---|---|
 | **Layer 1** | ✅ Built | Core CRM: add/edit/delete contacts, log interactions, write notes, search, dashboard |
 | **Layer 2** | 🔵 Next | Rule-based follow-up reminders, "going cold" flags based on days since last interaction |
-| **Layer 3** | 🔵 Later | AI assistant (Claude API) — reads logged data, answers questions, drafts messages, finds opportunities |
+| **Layer 3** | 🔵 Building | AI Pro feature (paid tier). Build plan: Layer A (plumbing + Pro gate) → Layer B (contact from text) → Layer C (AI assistant) → Layer D (Stripe). See "AI Pro feature — build plan" section. |
 
 The data schema (notes as freeform text, tags/skills as text arrays) was deliberately designed to feed Layer 3.
 
@@ -372,15 +372,11 @@ Currently, clicking the email confirmation link auto-logs the user in and drops 
 
 Students will pay for concrete time-savings during recruiting season (AI-drafted follow-ups, "who to contact next"). They won't pay for storage. The contact limit is a natural converting forcing function — active students recruiting across multiple firms will hit 50 contacts.
 
-### AI sequencing — wait until after first users
+### AI sequencing — decision made to build
 
-Do NOT start Layer 3 before getting real user data. Reasons:
-1. You don't know what questions students will actually ask — don't build answers to hypothetical questions
-2. Every interaction logged in Layer 1 is training data for Layer 3; more data = better AI
-3. Claude API costs money per query; don't pay that before users are retained and potentially paying
-4. Real users will tell you exactly which AI feature matters most — watch what they search for, what they can't find, what they complain about
+**Decision made (2026-07-05):** Building Layer 3 now, starting with the Pro gate plumbing and "Contact from text" as the first feature. Original reasoning for waiting (no users, unproven retention) was valid, but the build sequence is designed to be low-risk: Layer A is infrastructure (no user-facing AI yet), Layer B is contained and verifiable (fields are visibly right or wrong), and the Pro gate bounds cost to enabled users only.
 
-**Sequence:** first cohort → watch usage → ask directly "if AI could help you with one thing here, what would it be?" → build that specific thing, not the full brainstorm list.
+For the full plan, see **"AI Pro feature — build plan"** section below.
 
 ### PWA / mobile app (future — do NOT build yet)
 The bottom-tab mobile design was deliberately chosen because it translates naturally to a native app later. Planned progression:
@@ -389,7 +385,7 @@ The bottom-tab mobile design was deliberately chosen because it translates natur
 
 Do not start either of these until the web app is stable and has real users.
 
-### AI roadmap & access control (future — do NOT build until validated)
+### AI roadmap & access control (vision + brainstorm — see build plan section for what to actually build)
 
 #### Why this is future, not now
 
@@ -457,3 +453,208 @@ ALTER TABLE profiles ADD COLUMN ai_enabled boolean NOT NULL DEFAULT false;
 Once the flag is in place, add a usage counter (e.g. `ai_calls_this_month int DEFAULT 0`, reset monthly via a cron job or Edge Function) so even authorized users can't accidentally run up the bill. Caps can be per-tier if monetization is live.
 
 **Connection to monetization:** the `ai_enabled` flag is the natural "Pro" gate. When billing is ready, the payment flow flips the flag. Until then, it's flipped manually. See the Monetization section above for timing guidance — don't build billing until there are 20–50 retained users.
+
+---
+
+## AI Pro feature — build plan
+
+**Status: actively building.** Decision made 2026-07-05. AI is Funnl's paid "Pro" tier differentiator. Built in four layers so each is proven before the next is added.
+
+### Build layers
+
+| Layer | Name | Status | Description |
+|---|---|---|---|
+| **A** | Plumbing + Pro gate | ✅ Done | `ai_enabled` column + RLS fix. `src/lib/ai.js` canUseAI() Stripe-ready gate. Edge Function `ai-parse-contact` deployed. Gate tested: 403 for non-Pro, 200 for Pro. |
+| **B** | Contact from text | ✅ Done | AI Fill section added to AddContactDrawer. Pro-gated (hidden for non-Pro). Textarea → Parse → fields fill with purple highlight. Manual edits clear the highlight. Follow-up suggestion shown as reminder. Never auto-saves. |
+| **C** | AI Assistant | 🔵 Later | Natural-language questions about your network. Higher accuracy bar; build after A+B in production. |
+| **D** | Stripe billing | 🔵 Later | Replace manual `ai_enabled` flag with real subscription check. canUseAI() is the seam. |
+
+---
+
+### Architecture — how AI calls work securely
+
+The Anthropic API key must **never** be in frontend code — anything in the browser is visible to anyone who opens DevTools. Solution: **Supabase Edge Functions**.
+
+```
+React (browser)  →  Supabase Edge Function (server)  →  Anthropic API (Claude)
+```
+
+An Edge Function is a small server-side function that runs on Supabase's infrastructure, not in the browser. It holds the API key as a Supabase secret (never leaves the server), verifies the caller's Supabase auth token, enforces the Pro gate, and returns results to the browser.
+
+Frontend calls it via: `supabase.functions.invoke('function-name', { body: { ... } })` — the Supabase client automatically attaches the user's auth token.
+
+**Why Edge Functions over Vercel API routes or a separate backend:**
+- Already using Supabase for auth + DB — no new vendor
+- Edge Functions can read the DB directly (with the service-role key) for authoritative Pro-gate checks
+- Secret management lives in one place (Supabase dashboard)
+- Deploy with `npx supabase functions deploy` — no new platform to learn
+
+---
+
+### Pro gate — Stripe-ready design
+
+**One function: `canUseAI(userId)` in `src/lib/ai.js`**
+
+Every AI feature in the app calls this function — nothing reads `ai_enabled` directly. That's the seam.
+
+- **Today:** reads `ai_enabled` from the `profiles` table. Grant access by setting `ai_enabled = true` for a user in Supabase manually.
+- **Future (Stripe, Layer D):** same function, reads Stripe subscription status instead. Every AI feature becomes Stripe-gated automatically — no feature-level code changes.
+
+`ai_enabled` is enforced at two independent levels:
+1. **Frontend** — cosmetic only. Hides the UI or shows a "Pro feature" prompt.
+2. **Edge Function (server-side)** — authoritative. The function re-checks `ai_enabled` using the service-role key. A manipulated client request is still blocked here.
+
+**RLS protection:** the profiles UPDATE policy must be updated to prevent users from setting their own `ai_enabled = true`. Without this fix, any user can self-grant via the Supabase client. See Layer A SQL.
+
+---
+
+### Security rules — permanent, apply to every AI feature
+
+1. Anthropic API key only in Supabase secrets — never in `.env`, never committed to the repo, never in any frontend file
+2. Edge Function verifies caller's JWT before every AI call — unauthenticated requests rejected immediately
+3. Edge Function re-checks `ai_enabled` server-side — the frontend check is cosmetic only, never relied upon for enforcement
+4. Only the current user's data passes to Claude — never another user's contacts or interactions. Respect user scoping the same way RLS does.
+5. `ai_enabled` is RLS-protected — users cannot self-grant via UPDATE (see Layer A SQL)
+
+---
+
+### Model selection
+
+| Feature | Model | Why |
+|---|---|---|
+| Layer B — Contact from text | `claude-haiku-4-5-20251001` | Simple field extraction; very fast + cheap (~$0.0004/call) |
+| Layer C — AI Assistant | `claude-sonnet-5` | Reasoning over contact history; needs more capability |
+
+---
+
+### What must be set up before building Layer A
+
+These are one-time setup steps, not code changes:
+
+1. **Anthropic API key** — generate at console.anthropic.com. Store it as a **Supabase secret** (Supabase dashboard → Edge Functions → Secrets, name it `ANTHROPIC_API_KEY`). Never put it in `.env` or the repo.
+2. **Supabase CLI** — required to create and deploy Edge Functions. Install with `npm install -g supabase` or use `npx supabase`. Must be logged in (`supabase login`) and linked to the project (`supabase link`).
+3. **SQL** — run the `ai_enabled` column addition + updated RLS policy (see Layer A spec).
+
+---
+
+### Layer A spec — Plumbing + Pro gate
+
+**Step 1: SQL (run in Supabase SQL Editor)**
+
+```sql
+-- 1. Add the Pro gate column to profiles
+ALTER TABLE profiles ADD COLUMN ai_enabled boolean NOT NULL DEFAULT false;
+
+-- 2. Fix the profiles UPDATE policy to prevent self-granting.
+--    The existing policy lets users update their own row freely — that includes ai_enabled.
+--    This replacement allows updating display_name etc. but locks ai_enabled in place.
+--    First: find the exact policy name in Supabase → Authentication → Policies → profiles table,
+--    then drop and recreate it.
+DROP POLICY IF EXISTS "<existing_update_policy_name>" ON profiles;
+
+CREATE POLICY "Users can update own profile"
+  ON profiles FOR UPDATE
+  USING (auth.uid() = id)
+  WITH CHECK (
+    auth.uid() = id AND
+    ai_enabled IS NOT DISTINCT FROM (SELECT ai_enabled FROM profiles WHERE id = auth.uid())
+  );
+```
+
+**Step 2: `src/lib/ai.js` — the Stripe-ready gate**
+
+```js
+import { supabase } from './supabase'
+
+// Stripe-ready seam: every AI feature calls this. Never read ai_enabled directly.
+// To gate by Stripe later, replace this function body — no feature code changes needed.
+export async function canUseAI(userId) {
+  const { data } = await supabase
+    .from('profiles')
+    .select('ai_enabled')
+    .eq('id', userId)
+    .maybeSingle()
+  return data?.ai_enabled === true
+}
+```
+
+**Step 3: `supabase/functions/ai-parse-contact/index.ts` — Edge Function**
+
+Responsibilities:
+- Verify caller JWT → extract user ID
+- Read `ai_enabled` for that user via service-role key (authoritative)
+- If `ai_enabled = false`: return `{ error: 'Pro feature' }` with HTTP 403
+- Build Claude prompt, call Anthropic API (`claude-haiku-4-5-20251001`)
+- Return structured JSON: `{ name, company, role, email, linkedin_url, how_met, tags, skills, follow_up_suggestion }`
+- Only ever uses data belonging to the calling user
+
+**Step 4: Test the gate**
+- Test with a non-Pro user: Edge Function should return 403
+- Set `ai_enabled = true` for your account in Supabase: function should return parsed JSON
+- Verify in the browser Network tab that no API key appears in any request
+
+---
+
+### Layer B spec — Contact from text
+
+**File:** `AddContactDrawer.jsx`
+
+**UI change:** Add an "AI Fill" section at the top of the drawer, above the existing form fields.
+
+```
+┌─────────────────────────────────────────────┐
+│  AI Fill  (Pro)                             │
+│  ┌─────────────────────────────────────┐   │
+│  │ Paste anything about this person…   │   │
+│  └─────────────────────────────────────┘   │
+│  [Parse with AI]                           │
+├─────────────────────────────────────────────┤
+│  Name *          [            ]             │
+│  Company         [            ]             │
+│  Role            [            ]             │
+│  ...existing form fields...                 │
+└─────────────────────────────────────────────┘
+```
+
+**Flow:**
+1. User types or pastes freeform text into the textarea (e.g. "Met Priya Sharma at career fair, Goldman analyst, knows Python + financial modeling, follow up in 2 weeks")
+2. Clicks "Parse with AI" — button shows spinner
+3. Frontend calls `supabase.functions.invoke('ai-parse-contact', { body: { text } })`
+4. Edge Function calls Claude, returns `{ name: "Priya Sharma", company: "Goldman Sachs", ... }`
+5. Form fields fill in with the parsed values (visually highlighted so user can see what AI filled)
+6. User reviews every field, edits anything wrong, then clicks Save — same as always
+7. **Never auto-saves.** AI fills the form; human reviews + confirms.
+
+**Non-Pro users:** The AI Fill section is not rendered. No upgrade prompt yet (no Stripe path exists). Will revisit when Layer D is built.
+
+**Claude prompt (inside Edge Function):**
+```
+Parse the following text about a person into contact fields.
+Return ONLY valid JSON. Only extract fields explicitly mentioned — do not invent anything.
+If a field is not mentioned, omit it from the JSON entirely.
+
+Fields to extract:
+- name (string)
+- company (string)
+- role (string)
+- email (string — only if an actual email address is stated)
+- linkedin_url (string — only if a URL or linkedin.com link is stated)
+- how_met (string — e.g. "Career fair", "Coffee chat")
+- tags (array of strings — relationship labels like ["recruiter", "target firm"])
+- skills (array of strings — technical abilities like ["Python", "Excel"])
+- follow_up_suggestion (string — only if a timeframe is mentioned, e.g. "2 weeks")
+
+Text: "<user input>"
+```
+
+---
+
+### Layer C spec — AI Assistant (later)
+
+Reads the user's contacts + interactions to answer plain-English questions ("who do I know at Goldman?", "who haven't I followed up with?"). Higher accuracy bar than extraction — wrong answers erode trust. Uses `claude-sonnet-5`. Build after Layer A+B are proven in production with real users.
+
+---
+
+### Layer D spec — Stripe billing (later)
+
+When billing is ready: update `canUseAI()` to read Stripe subscription status instead of (or in addition to) `ai_enabled`. Because every AI feature calls `canUseAI()`, this is a one-place change. The `ai_enabled` column either becomes the fallback for manually-granted access or is retired. See Monetization section for timing.
