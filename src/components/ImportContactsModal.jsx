@@ -2,27 +2,35 @@ import { useState, useRef } from 'react'
 import Papa from 'papaparse'
 import { supabase } from '../lib/supabase'
 
+// Funnl fields in display order
 const FUNNL_FIELDS = [
-  { value: 'name',         label: 'Name (required)' },
+  { value: 'name',         label: 'Name',        required: true },
   { value: 'company',      label: 'Company' },
   { value: 'role',         label: 'Role' },
   { value: 'email',        label: 'Email' },
   { value: 'linkedin_url', label: 'LinkedIn URL' },
   { value: 'how_met',      label: 'How met' },
-  { value: 'tags',         label: 'Tags (comma-separated)' },
-  { value: 'skills',       label: 'Skills (comma-separated)' },
-  { value: 'ignore',       label: '— Ignore this column —' },
+  { value: 'tags',         label: 'Tags' },
+  { value: 'skills',       label: 'Skills' },
 ]
 
 // Auto-detect: lowercased CSV header → Funnl field
+// First name and last name variants both map to 'name' so they
+// both land in assignment.name and join in header order (First before Last).
 const HEADER_MAP = {
-  // Name
+  // Name — plain
   'name': 'name', 'full name': 'name', 'full_name': 'name',
   'contact name': 'name', 'contact_name': 'name', 'contact': 'name', 'person': 'name',
+  // Name — first
+  'first name': 'name', 'first_name': 'name', 'firstname': 'name',
+  'fname': 'name', 'given name': 'name', 'given_name': 'name',
+  // Name — last
+  'last name': 'name', 'last_name': 'name', 'lastname': 'name',
+  'lname': 'name', 'surname': 'name', 'family name': 'name', 'family_name': 'name',
   // Company
   'company': 'company', 'company name': 'company', 'company_name': 'company',
-  'organization': 'company', 'organisation': 'company', 'firm': 'company',
-  'employer': 'company', 'org': 'company',
+  'organization': 'company', 'organisation': 'company',
+  'firm': 'company', 'employer': 'company', 'org': 'company',
   // Role
   'role': 'role', 'title': 'role', 'job title': 'role', 'job_title': 'role',
   'position': 'role', 'job position': 'role',
@@ -45,20 +53,23 @@ const HEADER_MAP = {
   'tech': 'skills', 'technologies': 'skills', 'technical skills': 'skills',
 }
 
-function buildInitialMapping(headers) {
+function freshAssignment() {
+  return { name: [], company: [], role: [], email: [], linkedin_url: [], how_met: [], tags: [], skills: [] }
+}
+
+// Builds initial assignment from CSV headers, iterating in file order so that
+// "First Name" lands before "Last Name" in the name array.
+function buildInitialAssignment(headers) {
+  const result = freshAssignment()
   const used = new Set()
-  const mapping = {}
   for (const header of headers) {
-    const key = header.toLowerCase().trim()
-    const field = HEADER_MAP[key]
-    if (field && !used.has(field)) {
-      mapping[header] = field
-      used.add(field)
-    } else {
-      mapping[header] = 'ignore'
+    const field = HEADER_MAP[header.toLowerCase().trim()]
+    if (field && !used.has(header)) {
+      result[field] = [...result[field], header]
+      used.add(header)
     }
   }
-  return mapping
+  return result
 }
 
 function normalizeUrl(url) {
@@ -68,33 +79,39 @@ function normalizeUrl(url) {
   return 'https://' + s
 }
 
-// AI SEAM: This is the right place to add AI pre-processing later.
+// AI SEAM: This is where future AI pre-processing plugs in.
 // A future AI step would transform rawRow before this function runs — e.g. splitting
-// "John Smith, Goldman, analyst" from a single jammed column into separate fields,
+// "John Smith, Goldman, analyst" from a single jammed column into named fields,
 // or inferring tags/skills from freeform notes.
-// This function itself stays unchanged; the AI step just pre-processes rawRow first.
-function transformRow(rawRow, mapping) {
+// This function stays unchanged; the AI step just pre-processes rawRow first.
+function transformRow(rawRow, assignment) {
   const contact = {}
-  for (const [csvCol, funnlField] of Object.entries(mapping)) {
-    if (funnlField === 'ignore') continue
-    const raw = (rawRow[csvCol] || '').trim()
-    if (!raw) continue
-    if (funnlField === 'tags' || funnlField === 'skills') {
-      contact[funnlField] = raw.split(',').map(s => s.trim()).filter(Boolean)
-    } else if (funnlField === 'linkedin_url') {
-      contact.linkedin_url = normalizeUrl(raw)
+  for (const [field, cols] of Object.entries(assignment)) {
+    if (!cols || cols.length === 0) continue
+    if (field === 'tags' || field === 'skills') {
+      // Each assigned column is split on commas; all values merged into one flat array
+      const values = cols.flatMap(col =>
+        (rawRow[col] || '').trim().split(',').map(s => s.trim()).filter(Boolean)
+      )
+      if (values.length > 0) contact[field] = values
+    } else if (field === 'linkedin_url') {
+      // First non-empty value wins
+      const raw = cols.map(col => (rawRow[col] || '').trim()).filter(Boolean)[0]
+      if (raw) contact.linkedin_url = normalizeUrl(raw)
     } else {
-      contact[funnlField] = raw
+      // Text fields: chip order determines join order — empty cells skipped, no double spaces
+      const combined = cols.map(col => (rawRow[col] || '').trim()).filter(Boolean).join(' ')
+      if (combined) contact[field] = combined
     }
   }
   return contact
 }
 
-function processRows(rows, mapping) {
+function processRows(rows, assignment) {
   const toImport = []
   let skipped = 0
   for (const row of rows) {
-    const contact = transformRow(row, mapping)
+    const contact = transformRow(row, assignment)
     if (!contact.name || !contact.name.trim()) {
       skipped++
     } else {
@@ -107,17 +124,38 @@ function processRows(rows, mapping) {
 const STEP_LABEL = { upload: 'Step 1 of 3', map: 'Step 2 of 3', confirm: 'Step 3 of 3', done: 'Done' }
 
 function ImportContactsModal({ onClose, onImported }) {
-  const [step, setStep] = useState('upload')
-  const [dragging, setDragging] = useState(false)
+  const [step, setStep]           = useState('upload')
+  const [dragging, setDragging]   = useState(false)
   const [parseError, setParseError] = useState('')
-  const [headers, setHeaders] = useState([])
-  const [rows, setRows] = useState([])
-  const [mapping, setMapping] = useState({})
+  const [headers, setHeaders]     = useState([])
+  const [rows, setRows]           = useState([])
+  const [assignment, setAssignment] = useState(freshAssignment)
+  const [openPicker, setOpenPicker] = useState(null)   // funnlField value | null
+  const [pickerPos, setPickerPos]   = useState({ top: 0, left: 0 })
   const [importing, setImporting] = useState(false)
   const [importError, setImportError] = useState('')
-  const [result, setResult] = useState(null)
+  const [result, setResult]       = useState(null)
   const fileInputRef = useRef()
 
+  // --- Derived ---
+  const assignedSet  = new Set(Object.values(assignment).flat())
+  const ignoredCols  = headers.filter(h => !assignedSet.has(h))
+  const hasNameMapped = assignment.name.length > 0
+
+  // Preview: Name always first, then other assigned fields, max 5 cols total
+  const previewFields = [
+    'name',
+    ...FUNNL_FIELDS
+      .filter(f => f.value !== 'name' && assignment[f.value]?.length > 0)
+      .map(f => f.value),
+  ].slice(0, 5)
+  const previewContacts = rows.slice(0, 5).map(row => transformRow(row, assignment))
+
+  const confirmData = step === 'confirm'
+    ? processRows(rows, assignment)
+    : { toImport: [], skipped: 0 }
+
+  // --- File handling ---
   function handleFile(file) {
     if (!file) return
     setParseError('')
@@ -130,17 +168,17 @@ function ImportContactsModal({ onClose, onImported }) {
       skipEmptyLines: true,
       transformHeader: h => h.trim(),
       complete: (results) => {
-        if (!results.meta.fields || results.meta.fields.length === 0) {
+        if (!results.meta.fields?.length) {
           setParseError('This file has no columns — it may be empty or not a valid CSV.')
           return
         }
         if (results.data.length === 0) {
-          setParseError('This CSV has column headers but no data rows.')
+          setParseError('This CSV has headers but no data rows.')
           return
         }
         setHeaders(results.meta.fields)
         setRows(results.data)
-        setMapping(buildInitialMapping(results.meta.fields))
+        setAssignment(buildInitialAssignment(results.meta.fields))
         setStep('map')
       },
       error: () => {
@@ -159,62 +197,66 @@ function ImportContactsModal({ onClose, onImported }) {
     setStep('upload')
     setHeaders([])
     setRows([])
-    setMapping({})
+    setAssignment(freshAssignment())
+    setOpenPicker(null)
     setParseError('')
     if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
-  const hasNameMapped = Object.values(mapping).includes('name')
+  // --- Assignment ---
+  function addColumn(field, col) {
+    setAssignment(prev => ({ ...prev, [field]: [...prev[field], col] }))
+    setOpenPicker(null)
+  }
 
-  // Compute preview counts for confirm step UI
-  const { toImport: previewContacts, skipped: previewSkipped } =
-    step === 'confirm' ? processRows(rows, mapping) : { toImport: [], skipped: 0 }
+  function removeColumn(field, col) {
+    setAssignment(prev => ({ ...prev, [field]: prev[field].filter(c => c !== col) }))
+  }
 
+  function openPickerFor(field, e) {
+    e.stopPropagation()
+    if (openPicker === field) { setOpenPicker(null); return }
+    const rect = e.currentTarget.getBoundingClientRect()
+    setPickerPos({ top: rect.bottom + 6, left: rect.left })
+    setOpenPicker(field)
+  }
+
+  // --- Import ---
   async function handleImport() {
     setImporting(true)
     setImportError('')
-
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) {
       setImportError('Not signed in. Please refresh the page and try again.')
       setImporting(false)
       return
     }
-
-    // Re-compute from current state so values are always fresh
-    const { toImport, skipped } = processRows(rows, mapping)
-
+    const { toImport, skipped } = processRows(rows, assignment)
     if (toImport.length === 0) {
       setImportError('No importable rows — every row is missing a name value.')
       setImporting(false)
       return
     }
-
     const contacts = toImport.map(c => ({ ...c, user_id: user.id }))
-
     // Single bulk insert — all-or-nothing at the database level.
-    // If this fails, zero contacts are saved and the error is shown below.
+    // On failure: zero contacts saved, error shown below.
     const { error } = await supabase.from('contacts').insert(contacts)
-
     setImporting(false)
     if (error) {
       setImportError(`Import failed: ${error.message}. No contacts were saved — please try again.`)
       return
     }
-
     setResult({ imported: toImport.length, skipped })
     setStep('done')
     onImported()
   }
 
+  // --- Render ---
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center px-4" style={{ animation: 'fade-in 0.15s ease-out' }}>
 
-      {/* Backdrop */}
-      <div
-        className="absolute inset-0 bg-[rgba(0,0,0,0.65)]"
-        onClick={onClose}
-      />
+      {/* Modal backdrop */}
+      <div className="absolute inset-0 bg-[rgba(0,0,0,0.65)]" onClick={onClose}/>
 
       {/* Modal panel */}
       <div className="relative w-full max-w-[620px] max-h-[88vh] flex flex-col bg-card border border-[rgba(255,255,255,0.09)] rounded-2xl shadow-[0_24px_64px_rgba(0,0,0,0.7)]">
@@ -235,8 +277,11 @@ function ImportContactsModal({ onClose, onImported }) {
           </button>
         </div>
 
-        {/* Scrollable body */}
-        <div className="overflow-y-auto flex-1 px-6 py-5">
+        {/* Scrollable body — closes picker on scroll so it never drifts from its button */}
+        <div
+          className="overflow-y-auto flex-1 px-6 py-5"
+          onScroll={() => openPicker && setOpenPicker(null)}
+        >
 
           {/* ── STEP 1: Upload ── */}
           {step === 'upload' && (
@@ -244,8 +289,6 @@ function ImportContactsModal({ onClose, onImported }) {
               <p className="text-[14px] text-muted mb-5 leading-relaxed">
                 Upload a CSV file exported from a spreadsheet. Each row becomes one contact.
               </p>
-
-              {/* Drop zone */}
               <div
                 className={`border-2 border-dashed rounded-xl p-10 text-center cursor-pointer transition-colors ${
                   dragging
@@ -274,8 +317,6 @@ function ImportContactsModal({ onClose, onImported }) {
                 <p className="text-[14px] font-semibold text-hi mb-1">Drop a CSV file here</p>
                 <p className="text-[13px] text-low">or click to browse · .csv files only</p>
               </div>
-
-              {/* Parse error */}
               {parseError && (
                 <div className="mt-4 flex items-start gap-2.5 px-4 py-3 bg-[rgba(255,107,138,0.08)] border border-[rgba(255,107,138,0.2)] rounded-xl">
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#FF6B8A" strokeWidth="2" strokeLinecap="round" className="flex-none mt-0.5">
@@ -284,7 +325,6 @@ function ImportContactsModal({ onClose, onImported }) {
                   <p className="text-[13px] text-danger">{parseError}</p>
                 </div>
               )}
-
               <p className="text-[12px] text-lower mt-5 leading-relaxed">
                 Tip: in Google Sheets, go to File → Download → Comma Separated Values (.csv).
                 In Excel, use File → Save As → CSV.
@@ -295,76 +335,140 @@ function ImportContactsModal({ onClose, onImported }) {
           {/* ── STEP 2: Map columns ── */}
           {step === 'map' && (
             <div>
-              {/* Preview table */}
-              <p className="text-[11.5px] font-bold tracking-[1px] text-lower uppercase font-mono mb-3">
-                Preview — first {Math.min(rows.length, 3)} of {rows.length} rows
-              </p>
-              <div className="overflow-x-auto rounded-xl border border-[rgba(255,255,255,0.07)] mb-6">
-                <table style={{ minWidth: headers.length * 110 }} className="w-full text-[12px]">
-                  <thead>
-                    <tr className="border-b border-[rgba(255,255,255,0.07)] bg-[rgba(255,255,255,0.02)]">
-                      {headers.map(h => (
-                        <th key={h} className="px-3 py-2 text-left text-lower font-mono font-bold whitespace-nowrap">{h}</th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {rows.slice(0, 3).map((row, i) => (
-                      <tr key={i} className="border-b border-[rgba(255,255,255,0.04)] last:border-0">
-                        {headers.map(h => (
-                          <td key={h} className="px-3 py-2 text-muted whitespace-nowrap" style={{ maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                            {row[h] || ''}
-                          </td>
-                        ))}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
 
               {/* Name required warning */}
               {!hasNameMapped && (
-                <div className="flex items-center gap-2.5 mb-4 px-3 py-2.5 bg-[rgba(255,184,77,0.08)] border border-[rgba(255,184,77,0.25)] rounded-xl">
+                <div className="flex items-center gap-2.5 mb-5 px-3 py-2.5 bg-[rgba(255,184,77,0.08)] border border-[rgba(255,184,77,0.25)] rounded-xl">
                   <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#FFB84D" strokeWidth="2" strokeLinecap="round" className="flex-none">
                     <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
-                    <line x1="12" y1="9" x2="12" y2="13"/>
-                    <line x1="12" y1="17" x2="12.01" y2="17"/>
+                    <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
                   </svg>
-                  <p className="text-[12.5px] text-warning">Map one column to <strong>Name</strong> to continue — it's required.</p>
+                  <p className="text-[12.5px] text-warning">
+                    Assign at least one column to <strong>Name</strong> to continue — it's required.
+                  </p>
                 </div>
               )}
 
-              {/* Column mapping rows */}
-              <p className="text-[11.5px] font-bold tracking-[1px] text-lower uppercase font-mono mb-3">Map columns to Funnl fields</p>
-              <div className="space-y-2.5">
-                {headers.map(header => (
-                  <div key={header} className="flex items-center gap-3">
-                    <span
-                      className="text-[13px] text-hi font-medium flex-none w-[150px] truncate"
-                      title={header}
-                    >
-                      {header}
-                    </span>
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#54545E" strokeWidth="2" strokeLinecap="round" className="flex-none">
-                      <path d="M5 12h14M13 6l6 6-6 6"/>
-                    </svg>
-                    <div className="relative flex-1">
-                      <select
-                        value={mapping[header]}
-                        onChange={e => setMapping(m => ({ ...m, [header]: e.target.value }))}
-                        className="w-full appearance-none bg-input border border-[rgba(255,255,255,0.09)] rounded-lg pl-3 pr-8 py-[9px] text-[13px] text-hi outline-none focus:border-[rgba(139,124,255,0.5)] cursor-pointer transition-colors"
-                      >
-                        {FUNNL_FIELDS.map(f => (
-                          <option key={f.value} value={f.value}>{f.label}</option>
-                        ))}
-                      </select>
-                      <svg className="absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#6C6C78" strokeWidth="2" strokeLinecap="round">
-                        <path d="M6 9l6 6 6-6"/>
-                      </svg>
+              {/* Field assignment table */}
+              <p className="text-[11px] font-bold tracking-[1px] text-lower uppercase font-mono mb-3">
+                For each Funnl field, choose which CSV column(s) feed it
+              </p>
+              <p className="text-[12px] text-lower mb-4">
+                Multiple columns can feed one field — their values join in chip order.
+                Tags and Skills: comma-separated values in each cell are split into separate entries.
+              </p>
+
+              <div className="divide-y divide-[rgba(255,255,255,0.05)] border border-[rgba(255,255,255,0.07)] rounded-xl overflow-hidden mb-5">
+                {FUNNL_FIELDS.map(field => (
+                  <div key={field.value} className="flex items-start gap-3 px-4 py-3 bg-card">
+                    {/* Field label */}
+                    <div className="w-[106px] flex-none pt-[7px]">
+                      <span className="text-[13px] font-semibold text-hi">{field.label}</span>
+                      {field.required && <span className="text-danger text-[12px] ml-0.5">*</span>}
+                    </div>
+
+                    {/* Assigned column chips + Add button */}
+                    <div className="flex-1 flex flex-wrap items-center gap-1.5 pt-1.5 min-h-[32px]">
+                      {assignment[field.value].map(col => (
+                        <span
+                          key={col}
+                          className="inline-flex items-center gap-1 bg-[rgba(139,124,255,0.12)] border border-[rgba(139,124,255,0.22)] text-tag text-[12px] font-mono px-2 py-[5px] rounded-lg leading-none"
+                        >
+                          {col}
+                          <button
+                            onClick={() => removeColumn(field.value, col)}
+                            className="text-[rgba(180,168,255,0.45)] hover:text-danger transition-colors ml-0.5 leading-none text-[14px]"
+                            title="Remove"
+                          >
+                            ×
+                          </button>
+                        </span>
+                      ))}
+
+                      {ignoredCols.length > 0 && (
+                        <button
+                          onClick={e => openPickerFor(field.value, e)}
+                          className="inline-flex items-center gap-1 text-[12px] font-semibold text-low hover:text-accent px-2 py-[5px] rounded-lg hover:bg-[rgba(139,124,255,0.08)] transition-colors leading-none"
+                        >
+                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                            <path d="M12 5v14M5 12h14"/>
+                          </svg>
+                          Add
+                        </button>
+                      )}
+
+                      {assignment[field.value].length === 0 && ignoredCols.length === 0 && (
+                        <span className="text-[12px] text-lower pt-1">—</span>
+                      )}
                     </div>
                   </div>
                 ))}
               </div>
+
+              {/* Ignored / unused columns */}
+              {ignoredCols.length > 0 && (
+                <div className="mb-6">
+                  <p className="text-[11px] font-bold tracking-[1px] text-lower uppercase font-mono mb-2">
+                    Not used — click "+ Add" on a field above to use these
+                  </p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {ignoredCols.map(col => (
+                      <span
+                        key={col}
+                        className="text-[12px] text-low bg-elevated border border-[rgba(255,255,255,0.07)] px-2 py-[5px] rounded-lg font-mono"
+                      >
+                        {col}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Live preview */}
+              <div className="border-t border-[rgba(255,255,255,0.06)] pt-5">
+                <p className="text-[11px] font-bold tracking-[1px] text-lower uppercase font-mono mb-1">
+                  Live preview
+                </p>
+                <p className="text-[12px] text-lower mb-3">
+                  Showing first {Math.min(rows.length, 5)} of {rows.length} rows · updates as you change the mapping above
+                </p>
+                <div className="overflow-x-auto rounded-xl border border-[rgba(255,255,255,0.07)]">
+                  <table className="w-full text-[12px]" style={{ minWidth: previewFields.length * 130 }}>
+                    <thead>
+                      <tr className="border-b border-[rgba(255,255,255,0.07)] bg-[rgba(255,255,255,0.02)]">
+                        {previewFields.map(f => {
+                          const fd = FUNNL_FIELDS.find(x => x.value === f)
+                          return (
+                            <th key={f} className="px-3 py-2 text-left text-lower font-mono font-bold whitespace-nowrap">
+                              {fd.label}
+                            </th>
+                          )
+                        })}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {previewContacts.map((contact, i) => (
+                        <tr key={i} className="border-b border-[rgba(255,255,255,0.04)] last:border-0">
+                          {previewFields.map(f => {
+                            const val = (f === 'tags' || f === 'skills')
+                              ? (contact[f] || []).join(', ')
+                              : (contact[f] || '')
+                            return (
+                              <td key={f} className="px-3 py-2 max-w-[160px]">
+                                {val
+                                  ? <span className="text-muted block truncate">{val}</span>
+                                  : <span className="text-lower">—</span>
+                                }
+                              </td>
+                            )
+                          })}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
             </div>
           )}
 
@@ -383,21 +487,19 @@ function ImportContactsModal({ onClose, onImported }) {
                   </div>
                   <div>
                     <p className="text-[16px] font-bold text-hi">
-                      About to import {previewContacts.length} {previewContacts.length === 1 ? 'contact' : 'contacts'}
+                      About to import {confirmData.toImport.length} {confirmData.toImport.length === 1 ? 'contact' : 'contacts'}
                     </p>
-                    {previewSkipped > 0 && (
+                    {confirmData.skipped > 0 && (
                       <p className="text-[12.5px] text-warning mt-0.5">
-                        {previewSkipped} {previewSkipped === 1 ? 'row' : 'rows'} will be skipped — no name value
+                        {confirmData.skipped} {confirmData.skipped === 1 ? 'row' : 'rows'} will be skipped — no name value
                       </p>
                     )}
                   </div>
                 </div>
               </div>
-
               <p className="text-[13px] text-low leading-relaxed mb-5">
-                This import is all-or-nothing — if anything fails, zero contacts will be saved and you'll see a clear error message below.
+                This import is all-or-nothing — if anything fails, zero contacts will be saved and you'll see a clear error.
               </p>
-
               {importError && (
                 <div className="flex items-start gap-2.5 px-4 py-3 bg-[rgba(255,107,138,0.08)] border border-[rgba(255,107,138,0.2)] rounded-xl">
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#FF6B8A" strokeWidth="2" strokeLinecap="round" className="flex-none mt-0.5">
@@ -431,16 +533,13 @@ function ImportContactsModal({ onClose, onImported }) {
 
         </div>
 
-        {/* Footer — navigation buttons */}
+        {/* Footer */}
         <div className="px-6 py-4 border-t border-[rgba(255,255,255,0.07)] flex-none flex items-center justify-between gap-3">
 
           {step === 'upload' && (
             <>
               <div/>
-              <button
-                onClick={onClose}
-                className="text-[14px] font-semibold text-low hover:text-hi transition-colors"
-              >
+              <button onClick={onClose} className="text-[14px] font-semibold text-low hover:text-hi transition-colors">
                 Cancel
               </button>
             </>
@@ -448,14 +547,11 @@ function ImportContactsModal({ onClose, onImported }) {
 
           {step === 'map' && (
             <>
-              <button
-                onClick={goBackToUpload}
-                className="text-[14px] font-semibold text-low hover:text-hi transition-colors"
-              >
+              <button onClick={goBackToUpload} className="text-[14px] font-semibold text-low hover:text-hi transition-colors">
                 ← Back
               </button>
               <button
-                onClick={() => { setImportError(''); setStep('confirm') }}
+                onClick={() => { setImportError(''); setOpenPicker(null); setStep('confirm') }}
                 disabled={!hasNameMapped}
                 className="bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] text-white text-[14px] font-bold px-6 py-[10px] rounded-[11px] shadow-[0_6px_18px_rgba(91,69,240,0.35)] hover:opacity-90 transition-opacity disabled:opacity-30 disabled:cursor-not-allowed"
               >
@@ -475,7 +571,7 @@ function ImportContactsModal({ onClose, onImported }) {
               </button>
               <button
                 onClick={handleImport}
-                disabled={importing || previewContacts.length === 0}
+                disabled={importing || confirmData.toImport.length === 0}
                 className="flex items-center gap-2 bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] text-white text-[14px] font-bold px-6 py-[10px] rounded-[11px] shadow-[0_6px_18px_rgba(91,69,240,0.35)] hover:opacity-90 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 {importing && (
@@ -485,7 +581,7 @@ function ImportContactsModal({ onClose, onImported }) {
                 )}
                 {importing
                   ? 'Importing…'
-                  : `Import ${previewContacts.length} ${previewContacts.length === 1 ? 'contact' : 'contacts'}`
+                  : `Import ${confirmData.toImport.length} ${confirmData.toImport.length === 1 ? 'contact' : 'contacts'}`
                 }
               </button>
             </>
@@ -502,6 +598,28 @@ function ImportContactsModal({ onClose, onImported }) {
 
         </div>
       </div>
+
+      {/* Column picker — fixed to viewport so scrollable modal body can't clip it */}
+      {openPicker && (
+        <>
+          <div className="fixed inset-0 z-[60]" onClick={() => setOpenPicker(null)}/>
+          <div
+            className="fixed z-[70] bg-elevated border border-[rgba(255,255,255,0.13)] rounded-xl shadow-[0_8px_32px_rgba(0,0,0,0.5)] py-1 min-w-[180px] max-h-[220px] overflow-y-auto"
+            style={{ top: pickerPos.top, left: pickerPos.left }}
+          >
+            {ignoredCols.map(col => (
+              <button
+                key={col}
+                onClick={() => addColumn(openPicker, col)}
+                className="w-full text-left px-3 py-[9px] text-[13px] text-mid hover:text-hi hover:bg-[rgba(255,255,255,0.05)] transition-colors font-mono"
+              >
+                {col}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+
     </div>
   )
 }
