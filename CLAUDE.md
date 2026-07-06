@@ -32,7 +32,7 @@ Funnl is a **networking CRM for students** recruiting for internships and jobs. 
 |---|---|---|
 | **Layer 1** | ✅ Built | Core CRM: add/edit/delete contacts, log interactions, write notes, search, dashboard |
 | **Layer 2** | 🔵 Next | Rule-based follow-up reminders, "going cold" flags based on days since last interaction |
-| **Layer 3** | 🔵 Building | AI Pro feature (paid tier). Build plan: Layer A (plumbing + Pro gate) → Layer B (contact from text) → Layer C (AI assistant) → Layer D (Stripe). See "AI Pro feature — build plan" section. |
+| **Layer 3** | ✅ Built (A/B/C) | AI Pro feature (paid tier). Layers A (gate), B (contact from text), C (AI assistant chat) all done. Layer D (Stripe billing) is next when user count warrants it. See "AI Pro feature — build plan" section. |
 
 The data schema (notes as freeform text, tags/skills as text arrays) was deliberately designed to feed Layer 3.
 
@@ -466,7 +466,7 @@ Once the flag is in place, add a usage counter (e.g. `ai_calls_this_month int DE
 |---|---|---|---|
 | **A** | Plumbing + Pro gate | ✅ Done | `ai_enabled` column + RLS fix. `src/lib/ai.js` canUseAI() Stripe-ready gate. Edge Function `ai-parse-contact` deployed. Gate tested: 403 for non-Pro, 200 for Pro. |
 | **B** | Contact from text | ✅ Done | AI Fill section added to AddContactDrawer. Pro-gated (hidden for non-Pro). Textarea → Parse → fields fill with purple highlight. Manual edits clear the highlight. Follow-up suggestion shown as reminder. Never auto-saves. |
-| **C** | AI Assistant | 🔵 Later | Natural-language questions about your network. Higher accuracy bar; build after A+B in production. |
+| **C** | AI Assistant | ✅ Done | Working chat UI on /ai (FunnlAIPage.jsx). Edge Function `ai-chat` deployed (claude-sonnet-5). Loads all contacts + interactions per call. "Thinking partner" persona. Starter prompts, bouncing dots loading state, error handling. Pro-gated: non-Pro users see locked state in same layout. Multi-turn conversation works. Extended thinking handled: response extraction uses `.find(b => b.type === 'text')` not `[0]` since claude-sonnet-5 sometimes returns a thinking block first. All stale "coming soon" copy updated across Sidebar, Dashboard, ContactDetail, and AI page. |
 | **D** | Stripe billing | 🔵 Later | Replace manual `ai_enabled` flag with real subscription check. canUseAI() is the seam. |
 
 ---
@@ -649,9 +649,27 @@ Text: "<user input>"
 
 ---
 
-### Layer C spec — AI Assistant (later)
+### Layer C spec — AI Assistant
 
-Reads the user's contacts + interactions to answer plain-English questions ("who do I know at Goldman?", "who haven't I followed up with?"). Higher accuracy bar than extraction — wrong answers erode trust. Uses `claude-sonnet-5`. Build after Layer A+B are proven in production with real users.
+**Screen:** replaces the coming-soon placeholder at `/ai`. Full working chat UI.
+
+**Architecture:** new Edge Function `ai-chat`. Same secure pattern as `ai-parse-contact`: verifies JWT, re-checks `ai_enabled` server-side (Pro gate), loads current user's contacts + interactions from DB via service-role key, builds a structured context string, calls Claude with system prompt + context + conversation history, returns the assistant's response. Frontend maintains conversation history in component state; no chat persistence to DB yet (future).
+
+**Data loading:** loads ALL of the current user's contacts and interactions per call. Correct for student scale (dozens to low hundreds of contacts). A retrieval/embeddings approach (semantic search over a vector store) is the future upgrade if a user ever has too much data to send at once — do NOT build that now; it's over-engineering for this scale.
+
+**Security:** Edge Function loads data using service-role key scoped to `user_id = authenticated user`. One user's data never reaches another user's AI call.
+
+**Model:** `claude-sonnet-5` — capable enough for multi-turn reasoning over contact data. Meaningfully more expensive than Haiku (roughly $0.05–$0.10/message depending on network size). Pro gate bounds who can call it.
+
+**Persona:** knowledgeable thinking partner for exploring your network — NOT an authority handing down verdicts. Primary job is helping the user explore and understand their data. Advice is secondary and offered humbly ("here's what I notice; you know these people better than I do"). Acknowledges it only sees logged data, not full human context — defers to user judgment on genuine judgment calls. Still substantive and honest: surfaces patterns, flags overdue follow-ups and cold contacts, notes habits worth improving (about behavior/patterns, not character; said once, not preachy). Answers from provided data only — says "I don't see that in your Funnl data" rather than inventing. Politely declines off-topic questions and redirects (on-topic guardrail).
+
+**Conversation:** single session, no saved history. Fresh each page load. Multi-thread history is future work.
+
+**Future work (do NOT build now):**
+- Proactive insights scattered through the app (e.g. "3 contacts going cold" banner on dashboard) — reactive assistant first, proactive later
+- Retrieval/embeddings for very large networks (hundreds+ contacts) — not needed at student scale
+- Saved conversation history / multiple chat threads
+- Streaming responses (currently waits for full response before displaying)
 
 ---
 

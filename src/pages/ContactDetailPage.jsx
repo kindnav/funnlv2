@@ -405,9 +405,9 @@ function ContactDetailPage() {
                   <span className="text-[13px] font-bold text-hi">Funnl AI</span>
                 </div>
                 <p className="text-[12.5px] leading-[1.6] text-[#C5BEDB]">
-                  AI summaries of your contacts are coming in a future update. Keep logging interactions — that's the data it will use.
+                  Ask anything about this contact — their history, what to follow up on, how they connect to others in your network.
                 </p>
-                <p className="font-mono text-[10.5px] text-accent mt-3">Coming in Layer 3</p>
+                <Link to="/ai" className="inline-block font-mono text-[10.5px] text-accent mt-3 hover:underline">Open Funnl AI →</Link>
               </div>
 
             </div>

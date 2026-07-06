@@ -30,14 +30,15 @@ function Sidebar() {
   const location = useLocation()
   const [user, setUser] = useState(null)
   const [profile, setProfile] = useState(null)
+  const [isProUser, setIsProUser] = useState(false)
   const [followUpCount, setFollowUpCount] = useState(0)
 
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => {
       setUser(data.user)
       if (data.user) {
-        supabase.from('profiles').select('display_name').eq('id', data.user.id).maybeSingle()
-          .then(({ data: p }) => setProfile(p))
+        supabase.from('profiles').select('display_name, ai_enabled').eq('id', data.user.id).maybeSingle()
+          .then(({ data: p }) => { setProfile(p); setIsProUser(p?.ai_enabled === true) })
       }
     })
     fetchFollowUpCount()
@@ -222,12 +223,16 @@ function Sidebar() {
           </svg>
           <span className="text-[13px] font-bold text-hi">Funnl AI</span>
         </div>
-        <p className="text-[11.5px] leading-[1.5] text-[#B0A8C8] mb-3">Coming in Layer 3 — log interactions now to power it.</p>
+        <p className="text-[11.5px] leading-[1.5] text-[#B0A8C8] mb-3">
+          {isProUser
+            ? 'Ask anything about your contacts — who\'s gone cold, who you know somewhere, what to follow up on next.'
+            : 'Funnl AI reads your network — unlock it with Pro access.'}
+        </p>
         <Link
           to="/ai"
           className="block w-full bg-hi text-[#1A1530] text-center rounded-[9px] py-2 text-[12.5px] font-bold no-underline"
         >
-          See what's coming
+          Open Funnl AI
         </Link>
       </div>
 

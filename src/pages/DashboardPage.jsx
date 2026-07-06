@@ -227,11 +227,11 @@ function DashboardPage() {
             </svg>
           </div>
           <div>
-            <p className="text-[14px] font-bold text-hi">Funnl AI is coming in Layer 3</p>
-            <p className="text-[13px] text-[#B0A8C8]">Keep logging interactions — it will tell you who to reach next and why.</p>
+            <p className="text-[14px] font-bold text-hi">Funnl AI is live</p>
+            <p className="text-[13px] text-[#B0A8C8]">Ask anything about your network — who to reach, who's gone cold. Available with Pro.</p>
           </div>
         </div>
-        <span className="font-mono text-[10.5px] font-bold text-accent bg-[rgba(139,124,255,0.14)] px-2 py-1 rounded-[5px] flex-none">SOON</span>
+        <span className="font-mono text-[10.5px] font-bold text-accent bg-[rgba(139,124,255,0.14)] px-2 py-1 rounded-[5px] flex-none">PRO</span>
       </div>
 
       {/* Two-column body: follow-ups (left) + recent contacts (right) */}

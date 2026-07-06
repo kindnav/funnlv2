@@ -1,102 +1,267 @@
-// Funnl AI — Layer 3 coming-soon screen
-// The chat interface is designed and waiting. Nothing is wired up yet.
+import { useEffect, useRef, useState } from 'react'
+import { supabase } from '../lib/supabase'
+import { canUseAI } from '../lib/ai'
+
+const STARTER_PROMPTS = [
+  "Who haven't I followed up with?",
+  "Which contacts have no interactions logged?",
+  "What patterns do you notice in my networking?",
+  "Who should I be thinking about reaching out to?",
+]
+
+const INITIAL_MESSAGE = {
+  role: 'assistant',
+  content: "Your network is loaded. Ask me anything about your contacts — who you know somewhere, who's gone quiet, what your follow-up situation looks like, or whatever you're wondering about.",
+}
+
+const SparkleIcon = ({ size = 13 }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor">
+    <path d="M12 3l1.7 5.3L19 10l-5.3 1.7L12 17l-1.7-5.3L5 10l5.3-1.7L12 3z"/>
+  </svg>
+)
+
+const SendIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M12 19V5M6 11l6-6 6 6"/>
+  </svg>
+)
 
 function FunnlAIPage() {
-  const prompts = [
-    'Summarize my coffee chats',
-    'Find alumni at Google',
-    "Who haven't I contacted?",
-  ]
+  const [isCheckingPro, setIsCheckingPro] = useState(true)
+  const [isProUser, setIsProUser]         = useState(false)
+  const [messages, setMessages]           = useState([INITIAL_MESSAGE])
+  const [input, setInput]                 = useState('')
+  const [loading, setLoading]             = useState(false)
+  const [error, setError]                 = useState('')
+  const bottomRef = useRef(null)
+  const inputRef  = useRef(null)
+
+  useEffect(() => {
+    supabase.auth.getUser().then(({ data }) => {
+      if (data.user) {
+        canUseAI(data.user.id).then(result => {
+          setIsProUser(result)
+          setIsCheckingPro(false)
+        })
+      } else {
+        setIsCheckingPro(false)
+      }
+    })
+  }, [])
+
+  // Scroll to latest message
+  useEffect(() => {
+    if (isProUser) bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messages, loading, isProUser])
+
+  async function sendMessage(text) {
+    const trimmed = text.trim()
+    if (!trimmed || loading) return
+
+    const userMsg      = { role: 'user', content: trimmed }
+    const nextMessages = [...messages, userMsg]
+
+    setMessages(nextMessages)
+    setInput('')
+    setError('')
+    setLoading(true)
+
+    if (inputRef.current) inputRef.current.style.height = 'auto'
+
+    try {
+      const { data, error: fnError } = await supabase.functions.invoke('ai-chat', {
+        body: { messages: nextMessages },
+      })
+
+      setLoading(false)
+
+      if (fnError || data?.error) {
+        setError(fnError?.message || data?.error || 'Something went wrong — please try again.')
+        return
+      }
+
+      if (data?.reply) {
+        setMessages(prev => [...prev, { role: 'assistant', content: data.reply }])
+      } else {
+        // Guard against a silent blank — data came back but reply is missing
+        setError('No response received — please try again.')
+      }
+    } catch (err) {
+      setLoading(false)
+      setError('Something went wrong — please try again.')
+    }
+  }
+
+  function handleKeyDown(e) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      sendMessage(input)
+    }
+  }
+
+  function handleInputChange(e) {
+    setInput(e.target.value)
+    e.target.style.height = 'auto'
+    e.target.style.height = Math.min(e.target.scrollHeight, 120) + 'px'
+  }
+
+  const hasUserMessaged = messages.some(m => m.role === 'user')
+
+  if (isCheckingPro) {
+    return (
+      <div className="h-full flex items-center justify-center bg-surface">
+        <div className="w-5 h-5 rounded-full border-2 border-accent border-t-transparent animate-spin"/>
+      </div>
+    )
+  }
 
   return (
-    <div className="min-h-screen bg-surface flex flex-col" style={{ backgroundImage: 'radial-gradient(circle at 50% -10%, rgba(108,92,255,0.09), transparent 45%)' }}>
+    <div
+      className="h-full flex flex-col bg-surface"
+      style={{ backgroundImage: 'radial-gradient(circle at 50% -10%, rgba(108,92,255,0.09), transparent 45%)' }}
+    >
 
-      {/* Header */}
+      {/* ── Header ─────────────────────────────────────────────────────────────── */}
       <div className="flex items-center gap-[11px] px-4 md:px-8 py-[22px] border-b border-[rgba(255,255,255,0.06)] flex-none">
-        <div className="w-9 h-9 rounded-[10px] bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] flex items-center justify-center shadow-[0_4px_16px_rgba(91,69,240,0.4)] flex-none">
-          <svg width="19" height="19" viewBox="0 0 24 24" fill="white">
-            <path d="M12 3l1.7 5.3L19 10l-5.3 1.7L12 17l-1.7-5.3L5 10l5.3-1.7L12 3z"/>
-          </svg>
+        <div className="w-9 h-9 rounded-[10px] bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] flex items-center justify-center shadow-[0_4px_16px_rgba(91,69,240,0.4)] flex-none text-white">
+          <SparkleIcon size={19}/>
         </div>
         <div>
           <div className="flex items-center gap-2">
             <span className="text-[16px] font-bold text-hi">Funnl AI</span>
-            <span className="font-mono text-[9.5px] font-bold tracking-[0.5px] text-accent bg-[rgba(139,124,255,0.14)] px-1.5 py-0.5 rounded-[5px]">SOON</span>
+            {isProUser && (
+              <span className="font-mono text-[9.5px] font-bold tracking-[0.5px] text-accent bg-[rgba(139,124,255,0.14)] px-1.5 py-0.5 rounded-[5px]">
+                PRO
+              </span>
+            )}
           </div>
-          <p className="text-[12.5px] text-muted">Coming in Layer 3 — keep logging interactions</p>
+          <p className="text-[12.5px] text-muted">
+            {isProUser
+              ? 'Your networking thinking partner'
+              : 'Available with Pro access'}
+          </p>
         </div>
       </div>
 
-      {/* Main area — empty state centered */}
-      <div className="flex-1 flex items-center justify-center px-4 py-8 md:px-12 md:py-12">
-        <div className="text-center max-w-md">
-          <div className="w-[72px] h-[72px] mx-auto mb-6 rounded-[20px] bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] flex items-center justify-center shadow-[0_16px_48px_rgba(91,69,240,0.45)]">
-            <svg width="34" height="34" viewBox="0 0 24 24" fill="white">
-              <path d="M12 3l1.7 5.3L19 10l-5.3 1.7L12 17l-1.7-5.3L5 10l5.3-1.7L12 3z"/>
-            </svg>
-          </div>
+      {/* ── Messages / locked state ─────────────────────────────────────────────── */}
+      <div className="flex-1 overflow-y-auto min-h-0 px-4 md:px-8 py-5">
+        {isProUser ? (
+          <div className="space-y-4">
 
-          <h1 className="font-display text-[26px] font-bold text-hi mb-3 tracking-[-0.3px]">Funnl AI is coming</h1>
-
-          <p className="text-[14.5px] leading-[1.65] text-muted mb-5">
-            Ask anything about your network — who to reach out to, who you know at a specific company, or get a summary of your recent conversations. It reads your notes, not just your contacts.
-          </p>
-
-          <p className="font-mono text-[11px] font-bold text-accent bg-[rgba(139,124,255,0.12)] border border-[rgba(139,124,255,0.2)] inline-block px-3 py-1.5 rounded-lg mb-8">
-            Arriving in Layer 3 · Claude API
-          </p>
-
-          <div className="text-left bg-card border border-[rgba(255,255,255,0.07)] rounded-2xl p-5">
-            <p className="text-[11.5px] font-bold tracking-[1px] text-lower uppercase font-mono mb-3">What you'll be able to ask</p>
-            <ul className="space-y-2.5">
-              {[
-                { q: '"Who do I know at Goldman Sachs?"', note: 'Search your network by company' },
-                { q: '"Who should I follow up with this week?"', note: 'Based on your interaction history' },
-                { q: '"Summarize my coffee chats this month"', note: 'AI reads your logged notes' },
-                { q: '"Who mentioned Python skills?"', note: 'Semantic search over your data' },
-              ].map(({ q, note }) => (
-                <li key={q} className="flex items-start gap-3">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="#B4A8FF" className="flex-none mt-0.5">
-                    <path d="M12 3l1.7 5.3L19 10l-5.3 1.7L12 17l-1.7-5.3L5 10l5.3-1.7L12 3z"/>
-                  </svg>
-                  <div>
-                    <p className="text-[13.5px] font-semibold text-hi">{q}</p>
-                    <p className="text-[12px] text-low">{note}</p>
+            {/* Chat messages */}
+            {messages.map((msg, i) => (
+              <div key={i} className={`flex items-start ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                {msg.role === 'assistant' && (
+                  <div className="w-[28px] h-[28px] rounded-[8px] bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] flex items-center justify-center flex-none mr-2.5 mt-0.5 text-white">
+                    <SparkleIcon size={13}/>
                   </div>
-                </li>
-              ))}
-            </ul>
+                )}
+                <div className={`max-w-[80%] md:max-w-[68%] px-4 py-3 text-[14px] leading-relaxed whitespace-pre-wrap rounded-2xl ${
+                  msg.role === 'user'
+                    ? 'bg-[rgba(139,124,255,0.14)] border border-[rgba(139,124,255,0.25)] text-hi rounded-tr-sm'
+                    : 'bg-card border border-[rgba(255,255,255,0.07)] text-muted rounded-tl-sm'
+                }`}>
+                  {msg.content}
+                </div>
+              </div>
+            ))}
+
+            {/* Starter prompts — visible until first user message */}
+            {!hasUserMessaged && (
+              <div className="flex flex-wrap gap-2 pl-[36px]">
+                {STARTER_PROMPTS.map(prompt => (
+                  <button
+                    key={prompt}
+                    onClick={() => sendMessage(prompt)}
+                    className="text-[12.5px] text-mid bg-elevated border border-[rgba(255,255,255,0.08)] px-[13px] py-[7px] rounded-full hover:border-[rgba(139,124,255,0.35)] hover:text-hi transition-colors"
+                  >
+                    {prompt}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {/* Thinking dots */}
+            {loading && (
+              <div className="flex items-start justify-start">
+                <div className="w-[28px] h-[28px] rounded-[8px] bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] flex items-center justify-center flex-none mr-2.5 mt-0.5 text-white">
+                  <SparkleIcon size={13}/>
+                </div>
+                <div className="bg-card border border-[rgba(255,255,255,0.07)] rounded-2xl rounded-tl-sm px-4 py-[14px]">
+                  <div className="flex gap-[5px] items-center">
+                    <span className="w-[6px] h-[6px] rounded-full bg-low animate-bounce" style={{ animationDelay: '0ms' }}/>
+                    <span className="w-[6px] h-[6px] rounded-full bg-low animate-bounce" style={{ animationDelay: '160ms' }}/>
+                    <span className="w-[6px] h-[6px] rounded-full bg-low animate-bounce" style={{ animationDelay: '320ms' }}/>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Error */}
+            {error && (
+              <div className="flex justify-center px-4">
+                <p className="text-[13px] text-danger bg-[rgba(255,107,138,0.08)] border border-[rgba(255,107,138,0.2)] px-4 py-2.5 rounded-xl text-center">
+                  {error}
+                </p>
+              </div>
+            )}
+
+            <div ref={bottomRef}/>
           </div>
-        </div>
+        ) : (
+          /* Locked state — non-Pro */
+          <div className="flex flex-col items-center justify-center min-h-[300px] h-full text-center gap-5 py-12">
+            <div className="w-[64px] h-[64px] rounded-[18px] bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] flex items-center justify-center text-white opacity-50 shadow-[0_12px_40px_rgba(91,69,240,0.35)]">
+              <SparkleIcon size={28}/>
+            </div>
+            <div className="max-w-[260px]">
+              <h3 className="font-display text-[19px] font-bold text-hi mb-2">AI only available for Pro</h3>
+              <p className="text-[13.5px] leading-relaxed text-muted">
+                Ask anything about your network — who's gone cold, who you know at a specific company, what to follow up on next.
+              </p>
+            </div>
+          </div>
+        )}
       </div>
 
-      {/* Bottom — visual preview of the input experience, intentionally non-interactive */}
-      <div className="flex-none px-4 md:px-8 pb-6 pt-3 border-t border-[rgba(255,255,255,0.06)]">
-        {/* Prompt chips — pointer-events-none makes clear they're not clickable */}
-        <div className="flex gap-2 mb-3 flex-wrap pointer-events-none opacity-40 select-none">
-          {prompts.map(p => (
-            <span key={p} className="text-[12.5px] text-mid bg-elevated border border-[rgba(255,255,255,0.08)] px-[13px] py-[7px] rounded-full">
-              {p}
-            </span>
-          ))}
-        </div>
-
-        {/* Input bar — styled div, not a real input, cursor signals it's not active */}
-        <div
-          className="flex items-center gap-3 bg-input border border-[rgba(139,124,255,0.35)] rounded-2xl px-4 py-3 cursor-not-allowed"
-          title="Funnl AI is coming in Layer 3"
-          style={{ boxShadow: '0 0 0 1px rgba(139,124,255,0.18)' }}
-        >
-          <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#6C6C78" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="flex-none">
-            <path d="M21 11.5 12 20a5 5 0 0 1-7-7l8.5-8.5a3.3 3.3 0 0 1 4.7 4.7L9 16"/>
-          </svg>
-          <span className="flex-1 text-[14.5px] text-lower select-none">Funnl AI is coming in Layer 3…</span>
-          <div className="w-9 h-9 rounded-[11px] bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] flex items-center justify-center opacity-40 flex-none">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M12 19V5M6 11l6-6 6 6"/>
-            </svg>
+      {/* ── Input bar ───────────────────────────────────────────────────────────── */}
+      <div className="flex-none px-4 md:px-8 pb-5 pt-3 border-t border-[rgba(255,255,255,0.06)]">
+        {isProUser ? (
+          <>
+            <div
+              className="flex items-end gap-3 bg-input border border-[rgba(139,124,255,0.3)] rounded-2xl px-4 py-3"
+              style={{ boxShadow: '0 0 0 1px rgba(139,124,255,0.12)' }}
+            >
+              <textarea
+                ref={inputRef}
+                value={input}
+                onChange={handleInputChange}
+                onKeyDown={handleKeyDown}
+                placeholder="Ask about your network…"
+                rows={1}
+                disabled={loading}
+                className="flex-1 bg-transparent text-[14.5px] text-hi placeholder-[#54545E] outline-none resize-none disabled:opacity-50 leading-relaxed"
+              />
+              <button
+                onClick={() => sendMessage(input)}
+                disabled={loading || !input.trim()}
+                className="w-9 h-9 rounded-[11px] bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] flex items-center justify-center hover:opacity-90 transition-opacity disabled:opacity-30 flex-none mb-[1px]"
+              >
+                <SendIcon/>
+              </button>
+            </div>
+            <p className="text-[11px] text-lower text-center mt-2">Enter to send · Shift+Enter for new line</p>
+          </>
+        ) : (
+          <div
+            className="flex items-center gap-3 bg-input border border-[rgba(255,255,255,0.08)] rounded-2xl px-4 py-3 cursor-not-allowed opacity-50 select-none"
+          >
+            <span className="flex-1 text-[14.5px] text-lower">AI only available for Pro…</span>
+            <div className="w-9 h-9 rounded-[11px] bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] flex items-center justify-center opacity-40 flex-none">
+              <SendIcon/>
+            </div>
           </div>
-        </div>
+        )}
       </div>
 
     </div>
