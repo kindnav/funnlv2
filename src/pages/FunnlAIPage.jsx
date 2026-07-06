@@ -1,6 +1,19 @@
 import { useEffect, useRef, useState } from 'react'
+import ReactMarkdown from 'react-markdown'
 import { supabase } from '../lib/supabase'
 import { canUseAI } from '../lib/ai'
+
+// Markdown component overrides — applied only to assistant messages.
+// Raw HTML is not rendered (react-markdown default, kept intentionally).
+const mdComponents = {
+  p:      ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
+  ul:     ({ children }) => <ul className="list-disc pl-4 mb-2 space-y-0.5">{children}</ul>,
+  ol:     ({ children }) => <ol className="list-decimal pl-4 mb-2 space-y-0.5">{children}</ol>,
+  li:     ({ children }) => <li>{children}</li>,
+  strong: ({ children }) => <strong className="font-semibold text-hi">{children}</strong>,
+  em:     ({ children }) => <em className="italic">{children}</em>,
+  a:      ({ children }) => <span>{children}</span>,
+}
 
 const STARTER_PROMPTS = [
   "Who haven't I followed up with?",
@@ -156,12 +169,16 @@ function FunnlAIPage() {
                     <SparkleIcon size={13}/>
                   </div>
                 )}
-                <div className={`max-w-[80%] md:max-w-[68%] px-4 py-3 text-[14px] leading-relaxed whitespace-pre-wrap rounded-2xl ${
+                <div className={`max-w-[80%] md:max-w-[68%] px-4 py-3 text-[14px] leading-relaxed rounded-2xl ${
                   msg.role === 'user'
-                    ? 'bg-[rgba(139,124,255,0.14)] border border-[rgba(139,124,255,0.25)] text-hi rounded-tr-sm'
+                    ? 'bg-[rgba(139,124,255,0.14)] border border-[rgba(139,124,255,0.25)] text-hi rounded-tr-sm whitespace-pre-wrap'
                     : 'bg-card border border-[rgba(255,255,255,0.07)] text-muted rounded-tl-sm'
                 }`}>
-                  {msg.content}
+                  {msg.role === 'assistant' ? (
+                    <ReactMarkdown components={mdComponents}>{msg.content}</ReactMarkdown>
+                  ) : (
+                    msg.content
+                  )}
                 </div>
               </div>
             ))}
@@ -225,13 +242,10 @@ function FunnlAIPage() {
       </div>
 
       {/* ── Input bar ───────────────────────────────────────────────────────────── */}
-      <div className="flex-none px-4 md:px-8 pb-5 pt-3 border-t border-[rgba(255,255,255,0.06)]">
+      <div className="flex-none px-4 md:px-8 pb-6 pt-3 border-t border-[rgba(255,255,255,0.06)]">
         {isProUser ? (
           <>
-            <div
-              className="flex items-end gap-3 bg-input border border-[rgba(139,124,255,0.3)] rounded-2xl px-4 py-3"
-              style={{ boxShadow: '0 0 0 1px rgba(139,124,255,0.12)' }}
-            >
+            <div className="flex items-end bg-input border border-[rgba(255,255,255,0.09)] rounded-[20px] focus-within:border-[rgba(139,124,255,0.45)] focus-within:shadow-[0_0_0_3px_rgba(139,124,255,0.07)] transition-all duration-150">
               <textarea
                 ref={inputRef}
                 value={input}
@@ -240,25 +254,27 @@ function FunnlAIPage() {
                 placeholder="Ask about your network…"
                 rows={1}
                 disabled={loading}
-                className="flex-1 bg-transparent text-[14.5px] text-hi placeholder-[#54545E] outline-none resize-none disabled:opacity-50 leading-relaxed"
+                className="flex-1 bg-transparent text-[14.5px] text-hi placeholder-[#54545E] outline-none resize-none disabled:opacity-50 leading-relaxed pl-5 pr-2 py-[15px]"
               />
-              <button
-                onClick={() => sendMessage(input)}
-                disabled={loading || !input.trim()}
-                className="w-9 h-9 rounded-[11px] bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] flex items-center justify-center hover:opacity-90 transition-opacity disabled:opacity-30 flex-none mb-[1px]"
-              >
-                <SendIcon/>
-              </button>
+              <div className="flex-none p-[10px]">
+                <button
+                  onClick={() => sendMessage(input)}
+                  disabled={loading || !input.trim()}
+                  className="w-9 h-9 rounded-[12px] bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] flex items-center justify-center hover:opacity-90 active:scale-95 transition-all disabled:opacity-20 shadow-[0_4px_12px_rgba(91,69,240,0.25)]"
+                >
+                  <SendIcon/>
+                </button>
+              </div>
             </div>
-            <p className="text-[11px] text-lower text-center mt-2">Enter to send · Shift+Enter for new line</p>
+            <p className="text-[11px] text-lower text-center mt-2.5">Enter to send · Shift+Enter for new line</p>
           </>
         ) : (
-          <div
-            className="flex items-center gap-3 bg-input border border-[rgba(255,255,255,0.08)] rounded-2xl px-4 py-3 cursor-not-allowed opacity-50 select-none"
-          >
-            <span className="flex-1 text-[14.5px] text-lower">AI only available for Pro…</span>
-            <div className="w-9 h-9 rounded-[11px] bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] flex items-center justify-center opacity-40 flex-none">
-              <SendIcon/>
+          <div className="flex items-center bg-input border border-[rgba(255,255,255,0.07)] rounded-[20px] cursor-not-allowed opacity-40 select-none">
+            <span className="flex-1 text-[14.5px] text-lower pl-5 py-[15px]">AI only available for Pro…</span>
+            <div className="flex-none p-[10px]">
+              <div className="w-9 h-9 rounded-[12px] bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] flex items-center justify-center">
+                <SendIcon/>
+              </div>
             </div>
           </div>
         )}
