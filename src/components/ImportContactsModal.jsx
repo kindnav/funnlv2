@@ -3,14 +3,15 @@ import Papa from 'papaparse'
 import { supabase } from '../lib/supabase'
 
 const FUNNL_FIELDS = [
-  { value: 'name',         label: 'Name',        required: true },
-  { value: 'company',      label: 'Company' },
-  { value: 'role',         label: 'Role' },
-  { value: 'email',        label: 'Email' },
-  { value: 'linkedin_url', label: 'LinkedIn URL' },
-  { value: 'how_met',      label: 'How met' },
-  { value: 'tags',         label: 'Tags' },
-  { value: 'skills',       label: 'Skills' },
+  { value: 'name',              label: 'Name',              required: true },
+  { value: 'company',           label: 'Company' },
+  { value: 'role',              label: 'Role' },
+  { value: 'email',             label: 'Email' },
+  { value: 'linkedin_url',      label: 'LinkedIn URL' },
+  { value: 'how_met',           label: 'How met' },
+  { value: 'tags',              label: 'Tags' },
+  { value: 'relationship_type', label: 'Relationship type' },
+  { value: 'relationship_note', label: 'Why they matter' },
 ]
 
 // Normalize a CSV header before lookup:
@@ -133,27 +134,24 @@ const HEADER_MAP = {
   'tags': 'tags',
   'tag': 'tags',
   'labels': 'tags',
-  'relationship type': 'tags',
-  'contact type': 'tags',
-  'connection type': 'tags',
-  'relationship': 'tags',
   // NOT: 'type' alone, 'label' alone, 'category'/'categories' alone (all too generic)
 
-  // ── Skills ────────────────────────────────────────────────────────────────────
-  'skills': 'skills',
-  'skill': 'skills',
-  'expertise': 'skills',
-  'technical skills': 'skills',
-  'technologies': 'skills',
-  'tech stack': 'skills',
-  'techstack': 'skills',
-  'areas of expertise': 'skills',
-  'abilities': 'skills',
-  // NOT: 'tech' alone (could mean tech company/sector, not a skills list)
+  // ── Relationship type ─────────────────────────────────────────────────────────
+  'relationship type': 'relationship_type',
+  'contact type': 'relationship_type',
+  'connection type': 'relationship_type',
+  'relationship': 'relationship_type',
+
+  // ── Relationship note ─────────────────────────────────────────────────────────
+  'relationship note': 'relationship_note',
+  'why this person matters': 'relationship_note',
+  'why they matter': 'relationship_note',
+  'notes on relationship': 'relationship_note',
+  'context': 'relationship_note',
 }
 
 function freshAssignment() {
-  return { name: [], company: [], role: [], email: [], linkedin_url: [], how_met: [], tags: [], skills: [] }
+  return { name: [], company: [], role: [], email: [], linkedin_url: [], how_met: [], tags: [], relationship_type: [], relationship_note: [] }
 }
 
 // Iterates headers in file order so 'First Name' lands before 'Last Name' in the
@@ -187,7 +185,7 @@ function transformRow(rawRow, assignment) {
   const contact = {}
   for (const [field, cols] of Object.entries(assignment)) {
     if (!cols || cols.length === 0) continue
-    if (field === 'tags' || field === 'skills') {
+    if (field === 'tags') {
       // Each assigned column split on commas, merged into one flat array
       const values = cols.flatMap(col =>
         (rawRow[col] || '').trim().split(',').map(s => s.trim()).filter(Boolean)
@@ -592,7 +590,7 @@ export default function ImportContactsModal({ onClose, onImported }) {
                       {previewContacts.map((contact, i) => (
                         <tr key={i} className="border-b border-[rgba(255,255,255,0.04)] last:border-0">
                           {previewFields.map(f => {
-                            const val = (f === 'tags' || f === 'skills')
+                            const val = f === 'tags'
                               ? (contact[f] || []).join(', ')
                               : (contact[f] || '')
                             return (

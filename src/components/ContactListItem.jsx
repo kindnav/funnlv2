@@ -6,7 +6,6 @@ function ContactListItem({ contact, onDeleteRequest }) {
   const hasEmail = !!contact.email
   const hasLinkedIn = !!contact.linkedin_url
   const hasTags = contact.tags && contact.tags.length > 0
-  const hasSkills = contact.skills && contact.skills.length > 0
 
   return (
     <div
@@ -90,10 +89,10 @@ function ContactListItem({ contact, onDeleteRequest }) {
         </div>
       </div>
 
-      {/* Tags + skills — only renders if at least one exists */}
-      {(hasTags || hasSkills) && (
+      {/* Tags — only renders if any exist */}
+      {hasTags && (
         <div className="flex flex-wrap gap-1.5">
-          {hasTags && contact.tags.map((tag) => (
+          {contact.tags.map((tag) => (
             <span
               key={tag}
               className="text-[11px] font-semibold text-tag bg-[rgba(108,92,255,0.13)] border border-[rgba(108,92,255,0.22)] px-[9px] py-[3px] rounded-full"
@@ -101,25 +100,27 @@ function ContactListItem({ contact, onDeleteRequest }) {
               {tag}
             </span>
           ))}
-          {hasSkills && contact.skills.map((skill) => (
-            <span
-              key={skill}
-              className="font-mono text-[10.5px] text-skill bg-[rgba(255,255,255,0.05)] border border-[rgba(255,255,255,0.08)] px-[7px] py-[3px] rounded-[6px]"
-            >
-              {skill}
-            </span>
-          ))}
         </div>
       )}
 
-      {/* Footer: how_met — only renders if the field exists */}
-      {contact.how_met && (
+      {/* Footer: relationship_type + how_met */}
+      {(contact.relationship_type || contact.how_met) && (
         <div className="flex items-center gap-1.5 text-[12px] text-low border-t border-[rgba(255,255,255,0.05)] pt-[11px] min-w-0">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" className="flex-none">
-            <path d="M12 21s-6-5.2-6-10a6 6 0 0 1 12 0c0 4.8-6 10-6 10z"/>
-            <circle cx="12" cy="11" r="2"/>
-          </svg>
-          <span className="truncate">Met at {contact.how_met}</span>
+          {contact.relationship_type && (
+            <span className="text-[11.5px] font-semibold text-accent shrink-0">{contact.relationship_type}</span>
+          )}
+          {contact.relationship_type && contact.how_met && (
+            <span className="text-lower shrink-0">·</span>
+          )}
+          {contact.how_met && (
+            <>
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" className="flex-none">
+                <path d="M12 21s-6-5.2-6-10a6 6 0 0 1 12 0c0 4.8-6 10-6 10z"/>
+                <circle cx="12" cy="11" r="2"/>
+              </svg>
+              <span className="truncate">Met at {contact.how_met}</span>
+            </>
+          )}
         </div>
       )}
     </div>

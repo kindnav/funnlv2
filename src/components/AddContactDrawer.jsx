@@ -11,6 +11,7 @@ function normalizeUrl(url) {
 
 const iCls = 'w-full bg-input border border-[rgba(255,255,255,0.09)] rounded-xl px-[13px] py-[11px] text-[13.5px] text-hi placeholder-[#54545E] outline-none focus:border-[rgba(139,124,255,0.5)] transition-colors'
 const iClsAI = 'w-full bg-[rgba(139,124,255,0.06)] border border-[rgba(139,124,255,0.35)] rounded-xl px-[13px] py-[11px] text-[13.5px] text-hi placeholder-[#54545E] outline-none focus:border-[rgba(139,124,255,0.5)] transition-colors'
+const sCls = `${iCls} cursor-pointer`
 const lCls = 'mb-[7px] block text-[12.5px] font-semibold text-mid'
 
 function AddContactDrawer({ onClose, onSuccess }) {
@@ -18,10 +19,11 @@ function AddContactDrawer({ onClose, onSuccess }) {
   const [company, setCompany] = useState('')
   const [role, setRole] = useState('')
   const [howMet, setHowMet] = useState('')
+  const [relationshipType, setRelationshipType] = useState('')
+  const [relationshipNote, setRelationshipNote] = useState('')
   const [email, setEmail] = useState('')
   const [linkedinUrl, setLinkedinUrl] = useState('')
   const [tagsInput, setTagsInput] = useState('')
-  const [skillsInput, setSkillsInput] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
 
@@ -95,14 +97,14 @@ function AddContactDrawer({ onClose, onSuccess }) {
 
     // Fill form fields and track which ones were filled so they can be highlighted
     const filled = new Set()
-    if (contact.name)            { setName(contact.name);                       filled.add('name') }
-    if (contact.company)         { setCompany(contact.company);                 filled.add('company') }
-    if (contact.role)            { setRole(contact.role);                       filled.add('role') }
-    if (contact.how_met)         { setHowMet(contact.how_met);                  filled.add('howMet') }
-    if (contact.email)           { setEmail(contact.email);                     filled.add('email') }
-    if (contact.linkedin_url)    { setLinkedinUrl(contact.linkedin_url);        filled.add('linkedinUrl') }
-    if (contact.tags?.length)    { setTagsInput(contact.tags.join(', '));       filled.add('tags') }
-    if (contact.skills?.length)  { setSkillsInput(contact.skills.join(', '));   filled.add('skills') }
+    if (contact.name)                { setName(contact.name);                          filled.add('name') }
+    if (contact.company)             { setCompany(contact.company);                    filled.add('company') }
+    if (contact.role)                { setRole(contact.role);                          filled.add('role') }
+    if (contact.how_met)             { setHowMet(contact.how_met);                     filled.add('howMet') }
+    if (contact.email)               { setEmail(contact.email);                        filled.add('email') }
+    if (contact.linkedin_url)        { setLinkedinUrl(contact.linkedin_url);           filled.add('linkedinUrl') }
+    if (contact.tags?.length)        { setTagsInput(contact.tags.join(', '));          filled.add('tags') }
+    if (contact.relationship_note)   { setRelationshipNote(contact.relationship_note); filled.add('relationshipNote') }
 
     setAiFilledFields(filled)
 
@@ -125,7 +127,6 @@ function AddContactDrawer({ onClose, onSuccess }) {
     setSubmitting(true)
 
     const tags = tagsInput.split(',').map(t => t.trim()).filter(Boolean)
-    const skills = skillsInput.split(',').map(s => s.trim()).filter(Boolean)
 
     const { error } = await supabase.from('contacts').insert([{
       name: trimmedName,
@@ -135,7 +136,8 @@ function AddContactDrawer({ onClose, onSuccess }) {
       email: email || null,
       linkedin_url: normalizeUrl(linkedinUrl),
       tags: tags.length > 0 ? tags : null,
-      skills: skills.length > 0 ? skills : null,
+      relationship_type: relationshipType || null,
+      relationship_note: relationshipNote.trim() || null,
     }])
 
     setSubmitting(false)
@@ -286,6 +288,45 @@ function AddContactDrawer({ onClose, onSuccess }) {
           />
         </div>
 
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className={lCls}>Relationship type</label>
+            <select
+              value={relationshipType}
+              onChange={e => setRelationshipType(e.target.value)}
+              className={sCls}
+            >
+              <option value="">— not set —</option>
+              <option>Mentor</option>
+              <option>Collaborator</option>
+              <option>Referral path</option>
+              <option>Potential employer</option>
+              <option>Connector</option>
+              <option>Other</option>
+            </select>
+          </div>
+          <div>
+            <label className={lCls}>Tags</label>
+            <input
+              value={tagsInput}
+              onChange={e => { setTagsInput(e.target.value); clearAiFill('tags') }}
+              className={inputCls('tags')}
+              placeholder="alumni, recruiter"
+            />
+            <p className="mt-1.5 text-[11px] text-lower">Comma-separated</p>
+          </div>
+        </div>
+
+        <div>
+          <label className={lCls}>Why this person matters</label>
+          <input
+            value={relationshipNote}
+            onChange={e => { setRelationshipNote(e.target.value); clearAiFill('relationshipNote') }}
+            className={inputCls('relationshipNote')}
+            placeholder="e.g. Can intro me to the PM team at Stripe"
+          />
+        </div>
+
         <div>
           <label className={lCls}>Email</label>
           <input
@@ -305,28 +346,6 @@ function AddContactDrawer({ onClose, onSuccess }) {
             className={inputCls('linkedinUrl')}
             placeholder="linkedin.com/in/…"
           />
-        </div>
-
-        <div>
-          <label className={lCls}>Tags</label>
-          <input
-            value={tagsInput}
-            onChange={e => { setTagsInput(e.target.value); clearAiFill('tags') }}
-            className={inputCls('tags')}
-            placeholder="alumni, recruiter, target firm"
-          />
-          <p className="mt-1.5 text-[11px] text-lower">Separate multiple tags with commas</p>
-        </div>
-
-        <div>
-          <label className={lCls}>Skills</label>
-          <input
-            value={skillsInput}
-            onChange={e => { setSkillsInput(e.target.value); clearAiFill('skills') }}
-            className={inputCls('skills')}
-            placeholder="python, excel, financial modeling"
-          />
-          <p className="mt-1.5 text-[11px] text-lower">Separate multiple skills with commas</p>
         </div>
 
         {error && <p className="text-sm text-danger">{error}</p>}

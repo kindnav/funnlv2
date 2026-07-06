@@ -96,7 +96,7 @@ function ContactsPage() {
           (c.company && c.company.toLowerCase().includes(q)) ||
           (c.role && c.role.toLowerCase().includes(q)) ||
           (c.tags && c.tags.some(t => t.toLowerCase().includes(q))) ||
-          (c.skills && c.skills.some(s => s.toLowerCase().includes(q)))
+          (c.relationship_type && c.relationship_type.toLowerCase().includes(q))
         )
       })
 
@@ -149,7 +149,7 @@ function ContactsPage() {
             type="text"
             value={searchQuery}
             onChange={e => setSearchQuery(e.target.value)}
-            placeholder="Search by name, company, role, skill, or tag…"
+            placeholder="Search by name, company, role, or tag…"
             className="flex-1 bg-transparent text-[14px] text-hi placeholder-[#6C6C78] outline-none"
           />
           {searchQuery && (

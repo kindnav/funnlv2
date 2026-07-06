@@ -94,8 +94,8 @@ Fields to extract (include only those explicitly present in the text):
 - email (string) — only if a complete email address is explicitly stated
 - linkedin_url (string) — only if a linkedin.com URL is explicitly stated
 - how_met (string) — where or how you met them, e.g. "Career fair", "Coffee chat"
-- tags (array of strings) — relationship labels e.g. ["recruiter", "alumni", "target firm"]
-- skills (array of strings) — technical or professional skills e.g. ["Python", "Excel"]
+- tags (array of strings) — informal labels e.g. ["alumni", "target firm"]
+- relationship_note (string) — why this person matters or how they can help, e.g. "Can intro me to the PM team at Stripe" (do NOT include this for generic contact info)
 - follow_up_suggestion (string) — only if a specific timeframe is explicitly mentioned, e.g. "2 weeks", "next Monday"
 
 Text: ${JSON.stringify(text)}`,

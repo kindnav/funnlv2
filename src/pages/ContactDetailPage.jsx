@@ -119,7 +119,8 @@ function ContactDetailPage() {
       name: contact.name, company: contact.company || '', role: contact.role || '',
       howMet: contact.how_met || '', email: contact.email || '', linkedinUrl: contact.linkedin_url || '',
       tagsInput: contact.tags ? contact.tags.join(', ') : '',
-      skillsInput: contact.skills ? contact.skills.join(', ') : '',
+      relationshipType: contact.relationship_type || '',
+      relationshipNote: contact.relationship_note || '',
     })
     setSaveError(''); setIsEditing(true)
   }
@@ -127,11 +128,12 @@ function ContactDetailPage() {
   async function handleSave(e) {
     e.preventDefault(); setSaving(true); setSaveError('')
     const tags = editForm.tagsInput.split(',').map(t => t.trim()).filter(Boolean)
-    const skills = editForm.skillsInput.split(',').map(s => s.trim()).filter(Boolean)
     const { error } = await supabase.from('contacts').update({
       name: editForm.name, company: editForm.company || null, role: editForm.role || null,
       how_met: editForm.howMet || null, email: editForm.email || null, linkedin_url: normalizeUrl(editForm.linkedinUrl),
-      tags: tags.length > 0 ? tags : null, skills: skills.length > 0 ? skills : null,
+      tags: tags.length > 0 ? tags : null,
+      relationship_type: editForm.relationshipType || null,
+      relationship_note: editForm.relationshipNote.trim() || null,
     }).eq('id', id)
     setSaving(false)
     if (error) { setSaveError(error.message); return }
@@ -205,7 +207,7 @@ function ContactDetailPage() {
     .filter(i => i.follow_up_date && i.follow_up_date <= today)
     .sort((a, b) => a.follow_up_date.localeCompare(b.follow_up_date))[0] || null
   const hasAnyDetails = contact.email || contact.linkedin_url || contact.how_met ||
-    (contact.skills && contact.skills.length > 0)
+    contact.relationship_type || contact.relationship_note
 
   // ── Render ───────────────────────────────────────────────────────────────
 
@@ -255,9 +257,20 @@ function ContactDetailPage() {
               <p className="mt-1.5 text-[11px] text-lower">Separate with commas</p>
             </div>
             <div>
-              <label className={lCls}>Skills</label>
-              <input value={editForm.skillsInput} onChange={e => setEditForm({ ...editForm, skillsInput: e.target.value })} className={iCls} placeholder="python, excel, financial modeling"/>
-              <p className="mt-1.5 text-[11px] text-lower">Separate with commas</p>
+              <label className={lCls}>Relationship type</label>
+              <select value={editForm.relationshipType} onChange={e => setEditForm({ ...editForm, relationshipType: e.target.value })} className={sCls}>
+                <option value="">— not set —</option>
+                <option>Mentor</option>
+                <option>Collaborator</option>
+                <option>Referral path</option>
+                <option>Potential employer</option>
+                <option>Connector</option>
+                <option>Other</option>
+              </select>
+            </div>
+            <div className="col-span-2">
+              <label className={lCls}>Why this person matters</label>
+              <input value={editForm.relationshipNote} onChange={e => setEditForm({ ...editForm, relationshipNote: e.target.value })} className={iCls} placeholder="e.g. Can intro me to the PM team at Stripe"/>
             </div>
             {saveError && <p className="col-span-2 text-sm text-danger">{saveError}</p>}
             <div className="col-span-2 flex gap-3 pt-1">
@@ -378,16 +391,18 @@ function ContactDetailPage() {
                         <p className="text-[13.5px] font-medium text-hi">{contact.how_met}</p>
                       </div>
                     )}
-                    {contact.skills && contact.skills.length > 0 && (
+                    {contact.relationship_type && (
                       <div>
-                        <p className="text-[12px] text-low mb-2">Skills</p>
-                        <div className="flex flex-wrap gap-1.5">
-                          {contact.skills.map(skill => (
-                            <span key={skill} className="font-mono text-[10.5px] text-skill bg-[rgba(255,255,255,0.05)] border border-[rgba(255,255,255,0.08)] px-[7px] py-[3px] rounded-[6px]">
-                              {skill}
-                            </span>
-                          ))}
-                        </div>
+                        <p className="text-[12px] text-low mb-1">Relationship type</p>
+                        <span className="inline-block text-[11.5px] font-semibold text-accent bg-[rgba(139,124,255,0.14)] border border-[rgba(139,124,255,0.22)] px-[10px] py-[3px] rounded-full">
+                          {contact.relationship_type}
+                        </span>
+                      </div>
+                    )}
+                    {contact.relationship_note && (
+                      <div>
+                        <p className="text-[12px] text-low mb-1">Why this person matters</p>
+                        <p className="text-[13.5px] font-medium text-hi leading-[1.5]">{contact.relationship_note}</p>
                       </div>
                     )}
                   </div>

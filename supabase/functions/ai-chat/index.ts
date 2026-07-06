@@ -36,15 +36,16 @@ function formatNetworkContext(contacts: any[], interactions: any[], today: strin
     const cInteractions = byContact.get(c.id) ?? []
 
     const meta: string[] = []
-    if (c.company) meta.push(`Company: ${c.company}`)
-    if (c.role)    meta.push(`Role: ${c.role}`)
-    if (c.how_met) meta.push(`How met: ${c.how_met}`)
+    if (c.company)           meta.push(`Company: ${c.company}`)
+    if (c.role)              meta.push(`Role: ${c.role}`)
+    if (c.how_met)           meta.push(`How met: ${c.how_met}`)
+    if (c.relationship_type) meta.push(`Relationship type: ${c.relationship_type}`)
 
     lines.push(`[${i + 1}] ${c.name}`)
-    if (meta.length)        lines.push(`  ${meta.join(' | ')}`)
-    if (c.tags?.length)     lines.push(`  Tags: ${c.tags.join(', ')}`)
-    if (c.skills?.length)   lines.push(`  Skills: ${c.skills.join(', ')}`)
-    if (c.email)            lines.push(`  Email: ${c.email}`)
+    if (meta.length)              lines.push(`  ${meta.join(' | ')}`)
+    if (c.tags?.length)           lines.push(`  Tags: ${c.tags.join(', ')}`)
+    if (c.relationship_note)      lines.push(`  Relationship note: ${c.relationship_note}`)
+    if (c.email)                  lines.push(`  Email: ${c.email}`)
 
     if (cInteractions.length === 0) {
       lines.push(`  No interactions logged`)
@@ -176,7 +177,7 @@ Deno.serve(async (req) => {
     const [{ data: contacts }, { data: interactions }] = await Promise.all([
       supabaseAdmin
         .from('contacts')
-        .select('id, name, company, role, how_met, email, linkedin_url, tags, skills, created_at')
+        .select('id, name, company, role, how_met, email, linkedin_url, tags, relationship_type, relationship_note, created_at')
         .eq('user_id', user.id)
         .order('created_at', { ascending: false }),
       supabaseAdmin
