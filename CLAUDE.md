@@ -131,10 +131,18 @@ CLAUDE.md                  This file — project reference, keep current
 | Column | Type | Notes |
 |---|---|---|
 | `id` | uuid | PK, FK → auth.users ON DELETE CASCADE |
+| `email` | text | Copied from auth.users on signup by trigger — used to identify users when granting Pro access |
 | `display_name` | text | Optional — shown in sidebar |
+| `ai_enabled` | boolean | Default false — flip to true in Supabase to grant Pro/AI access |
 | `updated_at` | timestamptz | Set on every save |
 
-RLS on with a single policy: `auth.uid() = id` for all operations. Row is created on first Settings save via `upsert()`. Fetched with `.maybeSingle()` so missing row returns `null` (no error) — sidebar falls back to email username / "Funnl user". The `school` column was dropped (ALTER TABLE profiles DROP COLUMN school) when the Settings redesign removed it.
+**Profile rows are auto-created on signup via a Postgres trigger** (`on_auth_user_created` on `auth.users`). The trigger function `public.handle_new_user()` runs `SECURITY DEFINER` (bypasses RLS) and inserts a row with `id`, `email`, `ai_enabled=false`, `display_name=null` the moment a new user signs up. `ON CONFLICT (id) DO NOTHING` makes it safe if a row somehow already exists.
+
+**To grant Pro access to a user:** `UPDATE profiles SET ai_enabled = true WHERE email = 'their@email.com';` in the Supabase SQL editor.
+
+Settings page `upsert()` still works — now it always UPDATES an existing row (never needs to INSERT). Existing accounts were backfilled with `email` and profile rows via a one-time SQL migration.
+
+RLS: UPDATE policy prevents users from changing `ai_enabled` on their own row. The `school` column was dropped earlier. Sidebar falls back to email username / "Funnl user" if `display_name` is null.
 
 ---
 
