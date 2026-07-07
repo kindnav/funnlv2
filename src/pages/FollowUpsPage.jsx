@@ -134,13 +134,13 @@ function FollowUpsPage() {
         <p className="text-[14.5px] text-muted mt-1">Stay on top of your outreach — nothing slips through.</p>
       </div>
 
-      {/* Layer 2 teaser — honest about what's coming */}
+      {/* Usage hint */}
       <div className="flex items-start gap-3 bg-[rgba(139,124,255,0.06)] border border-[rgba(139,124,255,0.2)] rounded-xl px-4 py-3 mb-7">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="#B4A8FF" className="flex-none mt-0.5">
-          <path d="M12 3l1.7 5.3L19 10l-5.3 1.7L12 17l-1.7-5.3L5 10l5.3-1.7L12 3z"/>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#B4A8FF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-none mt-0.5">
+          <circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/>
         </svg>
         <p className="text-[13px] text-muted leading-relaxed">
-          <span className="font-semibold text-hi">Layer 2 coming soon:</span> Snooze, Mark done, and "going cold" alerts. For now, click any row to open the contact and update the follow-up date there.
+          Click any row to open the contact and update or clear the follow-up date from there.
         </p>
       </div>
 
