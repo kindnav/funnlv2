@@ -1,6 +1,7 @@
 import { useState, useRef } from 'react'
 import Papa from 'papaparse'
 import { supabase } from '../lib/supabase'
+import { track } from '../lib/analytics'
 
 const FUNNL_FIELDS = [
   { value: 'name',              label: 'Name',              required: true },
@@ -363,6 +364,7 @@ export default function ImportContactsModal({ onClose, onImported }) {
       setImportError(`Import failed: ${error.message}. No contacts were saved — please try again.`)
       return
     }
+    track('csv_import_used', { contacts_imported: toImport.length })
     setResult({ imported: toImport.length, skipped })
     setStep('done')
     onImported()

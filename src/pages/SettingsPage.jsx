@@ -140,6 +140,10 @@ function SettingsPage() {
           Sign out
         </button>
 
+        <Link to="/privacy" className="text-[12px] text-lower hover:text-muted transition-colors no-underline mt-1">
+          Privacy Policy
+        </Link>
+
       </div>
 
     </div>

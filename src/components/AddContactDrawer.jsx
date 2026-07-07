@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { supabase } from '../lib/supabase'
 import { canUseAI } from '../lib/ai'
+import { track } from '../lib/analytics'
 
 function normalizeUrl(url) {
   const s = url.trim()
@@ -108,6 +109,9 @@ function AddContactDrawer({ onClose, onSuccess }) {
 
     setAiFilledFields(filled)
 
+    // Behavior-only event — number of fields filled, no contact content
+    track('ai_fill_used', { fields_filled: filled.size })
+
     // follow_up_suggestion lives on interactions, not contacts — show it as a reminder
     if (contact.follow_up_suggestion) {
       setAiFollowUpSuggestion(contact.follow_up_suggestion)
@@ -146,6 +150,17 @@ function AddContactDrawer({ onClose, onSuccess }) {
       setError(error.message)
       return
     }
+
+    // Behavior-only — booleans and no contact content
+    track('contact_added', {
+      via_ai_fill: aiFilledFields.size > 0,
+      has_tags: tags.length > 0,
+      has_relationship_type: !!relationshipType,
+    })
+
+    // Check if this is the user's very first contact (activation moment)
+    const { count } = await supabase.from('contacts').select('id', { count: 'exact', head: true })
+    if (count === 1) track('first_contact_added')
 
     onSuccess()
   }

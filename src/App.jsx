@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Routes, Route } from 'react-router-dom'
 import { supabase } from './lib/supabase'
+import { identifyUser, resetAnalytics } from './lib/analytics'
 import SignInPage from './pages/SignInPage'
 import DashboardPage from './pages/DashboardPage'
 import ContactsPage from './pages/ContactsPage'
@@ -9,6 +10,7 @@ import FollowUpsPage from './pages/FollowUpsPage'
 import FunnlAIPage from './pages/FunnlAIPage'
 import WelcomePage from './pages/WelcomePage'
 import ResetPasswordPage from './pages/ResetPasswordPage'
+import PrivacyPage from './pages/PrivacyPage'
 import Sidebar from './components/Sidebar'
 import BottomNav from './components/BottomNav'
 import SettingsPage from './pages/SettingsPage'
@@ -25,6 +27,11 @@ function App() {
 
     const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
       setSession(session)
+      if (session?.user) {
+        identifyUser(session.user.id, session.user.email)
+      } else {
+        resetAnalytics()
+      }
     })
 
     return () => listener.subscription.unsubscribe()
@@ -39,6 +46,7 @@ function App() {
       <Routes>
         <Route path="/welcome" element={<WelcomePage />} />
         <Route path="/reset-password" element={<ResetPasswordPage />} />
+        <Route path="/privacy" element={<PrivacyPage />} />
         <Route path="*" element={<SignInPage />} />
       </Routes>
     )
@@ -55,6 +63,7 @@ function App() {
           <Route path="/followups" element={<FollowUpsPage />} />
           <Route path="/ai" element={<FunnlAIPage />} />
           <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/privacy" element={<PrivacyPage />} />
           <Route path="/welcome" element={<WelcomePage />} />
           <Route path="/reset-password" element={<ResetPasswordPage />} />
         </Routes>

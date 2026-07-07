@@ -13,6 +13,7 @@
     "@supabase/supabase-js": "^2.108.2",
     "@tailwindcss/vite": "^4.3.1",
     "papaparse": "^5.5.4",
+    "posthog-js": "^1.398.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "react-markdown": "^10.1.0",

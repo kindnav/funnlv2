@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import { supabase } from '../lib/supabase'
 import { canUseAI } from '../lib/ai'
+import { track } from '../lib/analytics'
 
 // Markdown component overrides — applied only to assistant messages.
 // Raw HTML is not rendered (react-markdown default, kept intentionally).
@@ -94,6 +95,7 @@ function FunnlAIPage() {
       }
 
       if (data?.reply) {
+        track('ai_assistant_used')
         setMessages(prev => [...prev, { role: 'assistant', content: data.reply }])
       } else {
         // Guard against a silent blank — data came back but reply is missing

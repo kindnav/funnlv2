@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { getAvatarColor, getInitials } from '../lib/avatarUtils'
+import { track } from '../lib/analytics'
 
 function normalizeUrl(url) {
   const s = (url || '').trim()
@@ -178,6 +179,16 @@ function ContactDetailPage() {
     }])
     setSubmitting(false)
     if (error) { setFormError(error.message); return }
+
+    // Behavior-only — interaction_type is a controlled dropdown value, not freeform content.
+    // has_notes is a boolean; the note text itself is never sent.
+    track('interaction_logged', {
+      interaction_type: type,
+      has_follow_up: !!followUpDate,
+      has_notes: !!notes,
+    })
+    if (followUpDate) track('followup_set')
+
     setNotes(''); setFollowUpDate(''); setShowForm(false); fetchInteractions()
     setLoggedMsg(true); setTimeout(() => setLoggedMsg(false), 3000)
   }

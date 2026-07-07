@@ -1,6 +1,7 @@
 import { useState } from 'react'
-import { useLocation } from 'react-router-dom'
+import { Link, useLocation } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
+import { track } from '../lib/analytics'
 
 // Must be outside SignInPage to avoid remount on every keystroke
 function InputWrapper({ children }) {
@@ -49,6 +50,7 @@ function SignInPage() {
     const { error } = await supabase.auth.signUp({ email, password })
     setLoading(false)
     if (error) { setError(error.message); return }
+    track('user_signed_up')
     setMode('pending')
   }
 
@@ -390,6 +392,12 @@ function SignInPage() {
           )}
 
         </div>
+
+        {/* Privacy policy link */}
+        <p className="text-center text-[12px] text-[#4A4A56] mt-6">
+          <Link to="/privacy" className="hover:text-[#6C6C78] transition-colors no-underline">Privacy Policy</Link>
+        </p>
+
       </div>
       {rightPanel}
     </div>
