@@ -44,7 +44,8 @@ The data schema (notes as freeform text, tags/skills as text arrays) was deliber
 - **Tailwind CSS v4** — custom tokens in `src/index.css` using `@theme {}` block (not a config file)
 - **Supabase** — PostgreSQL + auth; credentials in `.env` (never commit `.env`). URL config: Site URL = `https://getfunnl.com`, Redirect URLs include `https://getfunnl.com/welcome` and `https://getfunnl.com/**`.
 - **React Router v7** — client-side routing
-- **Vercel** — live at `https://getfunnl.com`. Connected to GitHub (kindnav/funnlv2), auto-deploys on push to `main`. Env vars (`VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`) set in Vercel project settings. `vercel.json` at project root rewrites all routes to `index.html` so direct URL visits don't 404.
+- **Vercel** — live at `https://getfunnl.com`. Connected to GitHub (kindnav/funnlv2), auto-deploys on push to `main`. Env vars (`VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `VITE_POSTHOG_KEY`, `VITE_POSTHOG_HOST`) set in Vercel project settings. `vercel.json` at project root rewrites all routes to `index.html` so direct URL visits don't 404.
+- **PostHog** — product analytics. Project API key in `VITE_POSTHOG_KEY` (public/client-side key — safe to expose in frontend, unlike Anthropic/service-role keys). US region, host `https://us.i.posthog.com`. Autocapture disabled — only explicit events tracked. Wrapper at `src/lib/analytics.js`.
 - **Cloudflare DNS** — two CNAME records pointing `getfunnl.com` and `www.getfunnl.com` to Vercel, set to DNS-only (grey cloud). `www` redirects to apex. Domain also used for Resend email verification (SPF + DKIM records present, DMARC pending — see Task 1).
 
 ---
@@ -67,12 +68,14 @@ src/
     SignInPage.jsx         Dark split-screen: sign-in mode + sign-up mode + email-confirmation pending state + forgot/reset-sent modes
     WelcomePage.jsx        Email-confirmation landing page at /welcome — no sidebar, accessible to logged-out users
     ResetPasswordPage.jsx  Password recovery page at /reset-password — no sidebar, handles Supabase recovery link
+    PrivacyPage.jsx        Plain-language privacy policy at /privacy — no sidebar, accessible logged-out and logged-in
   lib/
     supabase.js            Supabase client, reads VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY from .env
     avatarUtils.js         getAvatarColor(name) and getInitials(name) — single source of truth for avatar colors
+    analytics.js           PostHog wrapper: initAnalytics(), identifyUser(), track(), resetAnalytics()
   App.jsx                  Auth gating, shared layout (Sidebar + main + BottomNav), all routes
   index.css                Tailwind import + @theme design tokens + @keyframes (slide-in-right, fade-in)
-  main.jsx                 React entry; wraps App in BrowserRouter
+  main.jsx                 React entry; wraps App in BrowserRouter; calls initAnalytics()
 index.html                 Google Fonts link tags (Plus Jakarta Sans, Space Grotesk, JetBrains Mono)
 CLAUDE.md                  This file — project reference, keep current
 ```
@@ -91,6 +94,37 @@ CLAUDE.md                  This file — project reference, keep current
 | `/settings` | SettingsPage | Display name + school + sign out; reads/writes `profiles` table |
 | `/welcome` | WelcomePage | Email-confirmation landing; no sidebar; accessible to logged-out users |
 | `/reset-password` | ResetPasswordPage | Password recovery; no sidebar; handles Supabase recovery link |
+| `/privacy` | PrivacyPage | Plain-language privacy policy; no sidebar; accessible logged-out and logged-in |
+
+---
+
+## Analytics (PostHog)
+
+**Key principle:** track BEHAVIOR only — never contact content (no names, companies, notes, emails, or any user-typed data goes to PostHog).
+
+**Identification:** `posthog.identify(userId, { email })` called on every sign-in via `onAuthStateChange` in App.jsx. Links all events to the user so their journey is traceable in the PostHog dashboard.
+
+**Events tracked:**
+
+| Event | Where it fires | Properties | Purpose |
+|---|---|---|---|
+| `user_signed_up` | SignInPage after signUp() | none | Activation funnel step 1 |
+| `first_contact_added` | AddContactDrawer after insert (count===1) | none | Activation moment — THE key onboarding signal |
+| `contact_added` | AddContactDrawer after insert | `{ via_ai_fill, has_tags, has_relationship_type }` — booleans only | Overall usage |
+| `interaction_logged` | ContactDetailPage handleLogInteraction | `{ interaction_type, has_follow_up, has_notes }` — controlled enum + booleans | Core value / retention signal |
+| `followup_set` | ContactDetailPage handleLogInteraction (when followUpDate set) | none | Feature usage |
+| `csv_import_used` | ImportContactsModal handleImport | `{ contacts_imported: number }` | Feature usage |
+| `ai_assistant_used` | FunnlAIPage sendMessage on success | none | AI feature usage |
+| `ai_fill_used` | AddContactDrawer handleAIParse on success | `{ fields_filled: number }` | AI feature usage |
+
+**What PostHog tracks automatically (no code needed):** pageviews, session start/end, returning users, browser/device/country.
+
+**Key signals to build in PostHog:**
+- **Activation funnel** (Insights → Funnel): `user_signed_up` → `first_contact_added` → `interaction_logged`
+- **Retention / "second interaction"** (Insights → Retention): cohort event = `interaction_logged`, return event = `interaction_logged`, 30-day window. Shows what % of users who log their first interaction come back to log a second one on Day 1, 7, 14, 30. This is the core retention signal.
+- **Live verification:** PostHog left sidebar → Activity → Live events. Do an action; event appears within seconds.
+
+**PostHog project API key** (`VITE_POSTHOG_KEY`) is intentionally public — safe in frontend code. It can only send events in, not read data. Completely different from Anthropic API key and Supabase service-role key (those must stay in Supabase secrets, never in frontend).
 
 ---
 
@@ -244,6 +278,8 @@ The contacts page filter pills use `useSearchParams`. Active tag is stored as `?
 | **CSV importer** | ✅ Import button on Contacts page opens a 3-step modal (upload → map → confirm). Mapping step: **pool-at-top UI** — unassigned columns shown prominently at the top as clickable chips ("click to place"); clicking a chip opens a field picker (1 click to assign). Field-first assignment also available via + Add on each field row. `normalizeHeader()` normalizes separators before lookup (first_name / first-name / first.name all match one HEADER_MAP entry). HEADER_MAP pruned of false-positive generic entries. Multiple columns combine in chip order (e.g. First Name + Last Name → "John Smith"). "— not assigned" placeholder on empty fields. Picker uses fixed-position viewport coords (not absolute) so scrollable container can't clip it. Tags: comma-separated cell values split into arrays. relationship_type and relationship_note are mappable fields. All-or-nothing bulk insert. `transformRow` AI seam intact. Known limitations: no duplicate detection, CSV-only, no cell-level editing. |
 | **Skills removed → relationship intent** | ✅ `skills` column dropped. `relationship_type` (preset select: Mentor/Collaborator/Referral path/Potential employer/Connector/Other) and `relationship_note` (freeform "why this person matters") added to contacts table, all forms, detail page, importer, and AI context. AI Fill extracts `relationship_note` from freeform text but never auto-selects `relationship_type` (deliberate user choice). |
 | **Dynamic sidebar YOUR TAGS** | ✅ Replaced hardcoded Pipeline section (Target firms/Recruiters/Alumni) with live user-tag groups. Queries contacts table on each nav change, counts tag occurrences in JS, sorts by count desc, caps at top 8. Deterministic dot colors per tag. Active tag highlighted. Empty state: "Tags you add to contacts will appear here." |
+| **Product analytics (PostHog)** | ✅ 8 core events: user_signed_up, first_contact_added, contact_added, interaction_logged, followup_set, csv_import_used, ai_assistant_used, ai_fill_used. Autocapture off. Behavior only — no contact content. Users identified by Supabase ID. Key signals: activation funnel + "second interaction" retention. |
+| **Privacy policy** | ✅ `/privacy` — plain-language page covering data stored, all third parties (Supabase, Anthropic, PostHog, Resend, Vercel), analytics disclosure, user rights, contact email. Linked from sign-in page and settings. Accessible logged-out. |
 | Rule-based reminders / cold alerts | 🔵 Layer 2 |
 | AI assistant and smart features | 🔵 Layer 3 |
 
