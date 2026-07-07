@@ -32,6 +32,7 @@ function Sidebar() {
   const [profile, setProfile] = useState(null)
   const [isProUser, setIsProUser] = useState(false)
   const [followUpCount, setFollowUpCount] = useState(0)
+  const [tagCounts, setTagCounts] = useState([])
 
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => {
@@ -42,7 +43,23 @@ function Sidebar() {
       }
     })
     fetchFollowUpCount()
+    fetchTagCounts()
   }, [location.pathname])
+
+  async function fetchTagCounts() {
+    const { data } = await supabase.from('contacts').select('tags').not('tags', 'is', null)
+    if (!data) return
+    const counts = {}
+    for (const row of data) {
+      for (const tag of (row.tags || [])) {
+        counts[tag] = (counts[tag] || 0) + 1
+      }
+    }
+    const sorted = Object.entries(counts)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8)
+    setTagCounts(sorted)
+  }
 
   async function fetchFollowUpCount() {
     const { count } = await supabase
@@ -69,6 +86,17 @@ function Sidebar() {
   }
 
   const iconStroke = (active) => active ? '#8B7CFF' : '#6C6C78'
+
+  // Deterministic dot color per tag — same tag always gets the same color
+  const TAG_DOT_COLORS = ['#8B7CFF', '#F5A623', '#2FD4B6', '#4DA3FF', '#C77DFF']
+  function tagDotColor(tag) {
+    let h = 0
+    for (let i = 0; i < tag.length; i++) h = (h * 31 + tag.charCodeAt(i)) >>> 0
+    return TAG_DOT_COLORS[h % TAG_DOT_COLORS.length]
+  }
+
+  // Active tag from URL — drives highlight in the tag list
+  const activeTag = new URLSearchParams(location.search).get('tag')
 
   return (
     <div className="hidden md:flex w-[248px] min-w-[248px] h-screen flex-col bg-sidebar border-r border-[rgba(255,255,255,0.06)] overflow-y-auto">
@@ -166,21 +194,38 @@ function Sidebar() {
       {/* Divider */}
       <div className="h-px bg-[rgba(255,255,255,0.06)] mx-[14px] my-5"/>
 
-      {/* PIPELINE */}
-      <div className="px-[22px] pb-[10px] text-[10.5px] font-bold tracking-[1.2px] text-lower uppercase font-mono">PIPELINE</div>
+      {/* YOUR TAGS */}
+      <div className="px-[22px] pb-[10px] text-[10.5px] font-bold tracking-[1.2px] text-lower uppercase font-mono">YOUR TAGS</div>
       <div className="flex flex-col gap-0.5 px-[14px]">
-        <Link to="/contacts?tag=target+firm" className="flex items-center gap-[10px] px-3 py-2 rounded-[9px] hover:bg-[rgba(255,255,255,0.03)] transition-colors no-underline">
-          <span className="w-2 h-2 rounded-[3px] bg-accent flex-none"/>
-          <span className="flex-1 text-[13px] text-mid">Target firms</span>
-        </Link>
-        <Link to="/contacts?tag=recruiter" className="flex items-center gap-[10px] px-3 py-2 rounded-[9px] hover:bg-[rgba(255,255,255,0.03)] transition-colors no-underline">
-          <span className="w-2 h-2 rounded-[3px] bg-warning-deep flex-none"/>
-          <span className="flex-1 text-[13px] text-mid">Recruiters</span>
-        </Link>
-        <Link to="/contacts?tag=alumni" className="flex items-center gap-[10px] px-3 py-2 rounded-[9px] hover:bg-[rgba(255,255,255,0.03)] transition-colors no-underline">
-          <span className="w-2 h-2 rounded-[3px] bg-success flex-none"/>
-          <span className="flex-1 text-[13px] text-mid">Alumni</span>
-        </Link>
+        {tagCounts.length === 0 ? (
+          <p className="px-3 py-1 text-[12px] text-lower leading-relaxed">
+            Tags you add to contacts will appear here.
+          </p>
+        ) : (
+          tagCounts.map(([tag, count]) => {
+            const isTagActive = activeTag === tag
+            return (
+              <Link
+                key={tag}
+                to={`/contacts?tag=${encodeURIComponent(tag)}`}
+                className={`flex items-center gap-[10px] px-3 py-2 rounded-[9px] transition-colors no-underline ${
+                  isTagActive
+                    ? 'bg-[rgba(108,92,255,0.14)] shadow-[inset_0_0_0_1px_rgba(139,124,255,0.18)]'
+                    : 'hover:bg-[rgba(255,255,255,0.03)]'
+                }`}
+              >
+                <span
+                  className="w-2 h-2 rounded-[3px] flex-none"
+                  style={{ background: tagDotColor(tag) }}
+                />
+                <span className={`flex-1 text-[13px] truncate ${isTagActive ? 'text-hi font-medium' : 'text-mid'}`}>
+                  {tag}
+                </span>
+                <span className="text-[11px] text-lower flex-none">{count}</span>
+              </Link>
+            )
+          })
+        )}
       </div>
 
       {/* Spacer */}
