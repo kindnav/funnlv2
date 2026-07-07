@@ -54,9 +54,9 @@ The data schema (notes as freeform text, tags/skills as text arrays) was deliber
 ```
 src/
   components/
-    Sidebar.jsx            Shared left nav (desktop only, hidden md:flex): logo, user card → /settings, nav links, pipeline, sign out. Fetches profile on every route change.
+    Sidebar.jsx            Shared left nav (desktop only, hidden md:flex): logo, user card → /settings, nav links, YOUR TAGS dynamic section (top 8 user-tags by count, links to ?tag= filter), sign out. Fetches profile + tag counts on every route change.
     BottomNav.jsx          Mobile bottom tab bar (md:hidden): Home/Contacts/Follow-ups/Funnl AI, follow-up badge
-    ContactListItem.jsx    Contact card in the 2-column grid (avatar tile, tags, skills, how-met footer)
+    ContactListItem.jsx    Contact card in the 2-column grid (avatar tile, tags, relationship_type + how-met footer)
     AddContactDrawer.jsx   Right-side slide-in drawer for adding a contact; full-width on mobile, 452px on desktop; Escape/backdrop closes; scroll locked
     ImportContactsModal.jsx  3-step CSV import modal (upload → map → confirm). PapaParse parses; auto-detects headers; transformRow() is the AI seam.
   pages/
@@ -109,8 +109,9 @@ CLAUDE.md                  This file — project reference, keep current
 | `how_met` | text | Optional |
 | `email` | text | Optional |
 | `linkedin_url` | text | Optional |
-| `tags` | text[] | Optional — relationship labels e.g. ["recruiter", "target firm"] |
-| `skills` | text[] | Optional — technical abilities e.g. ["python", "excel"]. Distinct from tags. Added early for Layer 3 AI. |
+| `tags` | text[] | Optional — relationship labels e.g. ["recruiter", "target firm"]. Drives the sidebar YOUR TAGS section and ContactsPage ?tag= filter. |
+| `relationship_type` | text | Optional — preset select: Mentor, Collaborator, Referral path, Potential employer, Connector, Other. |
+| `relationship_note` | text | Optional — freeform "why this person matters" note. |
 | `created_at` | timestamptz | Auto-set |
 
 ### `interactions`
@@ -211,7 +212,7 @@ Derived deterministically from contact name using a hash → 6-color palette (pu
 
 ## Filter state: URL-based tag filtering
 
-The contacts page filter pills use `useSearchParams`. Active tag is stored as `?tag=recruiter` in the URL. **Sidebar Pipeline links are wired** — "Target firms" → `/contacts?tag=target+firm`, "Recruiters" → `/contacts?tag=recruiter`, "Alumni" → `/contacts?tag=alumni`. ContactsPage handles the param.
+The contacts page filter pills use `useSearchParams`. Active tag is stored as `?tag=recruiter` in the URL. **Sidebar YOUR TAGS section is dynamic** — queries the user's own contacts, counts tag occurrences in JS, sorts by count descending, caps at top 8. Each tag links to `/contacts?tag=<tag>`. Active tag is highlighted. Empty state shows a quiet one-line message. ContactsPage handles the param unchanged.
 
 ---
 
@@ -238,9 +239,11 @@ The contacts page filter pills use `useSearchParams`. Active tag is stored as `?
 | **Email confirmation landing page** | ✅ `/welcome` — success screen (checkmark, "You're all set", "Continue to sign in"). No sidebar. Accessible logged-out. Supabase redirect URLs configured to point here. |
 | **Deployed to production** | ✅ Live at getfunnl.com on Vercel. DNS on Cloudflare. Env vars set. SPA routing via vercel.json. Full sign-up → confirm → sign-in flow works end to end. |
 | **Mobile responsiveness** | ✅ BottomNav (4 tabs, follow-up badge, iPhone safe-area). Sidebar hidden on mobile. All 6 pages responsive at 375px. AddContactDrawer full-width on mobile. |
-| **Pre-rollout quality pass** | ✅ Password reset flow, search skills, LinkedIn URL normalization, error/empty-state collision fixed, pipeline links wired, import order fixed, interaction logged confirmation. |
+| **Pre-rollout quality pass** | ✅ Password reset flow, LinkedIn URL normalization, error/empty-state collision fixed, import order fixed, interaction logged confirmation. |
 | **Settings page** | ✅ `/settings` — account-card layout: display name (editable, saves to `profiles` table), email + joined date (read-only), sign out. School field removed from UI and table. |
-| **CSV importer** | ✅ Import button on Contacts page opens a 3-step modal (upload → map → confirm). Mapping step: **pool-at-top UI** — unassigned columns shown prominently at the top as clickable chips ("click to place"); clicking a chip opens a field picker (1 click to assign). Field-first assignment also available via + Add on each field row. `normalizeHeader()` normalizes separators before lookup (first_name / first-name / first.name all match one HEADER_MAP entry). HEADER_MAP pruned of false-positive generic entries ('title', 'type', 'source', 'met', 'label', 'org', 'category', 'tech', 'contact'). Multiple columns combine in chip order (e.g. First Name + Last Name → "John Smith"). "— not assigned" placeholder on empty fields. Picker uses fixed-position viewport coords (not absolute) so scrollable container can't clip it. Tags/skills: comma-separated cell values split into arrays. All-or-nothing bulk insert. `transformRow` AI seam intact. Known limitations: no duplicate detection, CSV-only, no cell-level editing. 'title' → Role intentionally excluded (ambiguous vs Mr./Dr. salutation; use 'job title' or 'current title'). |
+| **CSV importer** | ✅ Import button on Contacts page opens a 3-step modal (upload → map → confirm). Mapping step: **pool-at-top UI** — unassigned columns shown prominently at the top as clickable chips ("click to place"); clicking a chip opens a field picker (1 click to assign). Field-first assignment also available via + Add on each field row. `normalizeHeader()` normalizes separators before lookup (first_name / first-name / first.name all match one HEADER_MAP entry). HEADER_MAP pruned of false-positive generic entries. Multiple columns combine in chip order (e.g. First Name + Last Name → "John Smith"). "— not assigned" placeholder on empty fields. Picker uses fixed-position viewport coords (not absolute) so scrollable container can't clip it. Tags: comma-separated cell values split into arrays. relationship_type and relationship_note are mappable fields. All-or-nothing bulk insert. `transformRow` AI seam intact. Known limitations: no duplicate detection, CSV-only, no cell-level editing. |
+| **Skills removed → relationship intent** | ✅ `skills` column dropped. `relationship_type` (preset select: Mentor/Collaborator/Referral path/Potential employer/Connector/Other) and `relationship_note` (freeform "why this person matters") added to contacts table, all forms, detail page, importer, and AI context. AI Fill extracts `relationship_note` from freeform text but never auto-selects `relationship_type` (deliberate user choice). |
+| **Dynamic sidebar YOUR TAGS** | ✅ Replaced hardcoded Pipeline section (Target firms/Recruiters/Alumni) with live user-tag groups. Queries contacts table on each nav change, counts tag occurrences in JS, sorts by count desc, caps at top 8. Deterministic dot colors per tag. Active tag highlighted. Empty state: "Tags you add to contacts will appear here." |
 | Rule-based reminders / cold alerts | 🔵 Layer 2 |
 | AI assistant and smart features | 🔵 Layer 3 |
 
@@ -358,8 +361,8 @@ Currently, clicking the email confirmation link auto-logs the user in and drops 
 
 ### Before wider sharing (important)
 2. **Google OAuth sign-in** — design shows a "Continue with Google" button; deliberately omitted. Requires Google Cloud project + Supabase OAuth config.
-3. **Sidebar Pipeline counts** — Target firms / Recruiters / Alumni show no counts yet. Wire by adding count queries to `Sidebar.jsx` or passing down from `ContactsPage`.
-4. ~~**Tag filter wiring (sidebar → contacts)**~~ — ✅ Done. All three pipeline links wired with correct `?tag=` params.
+3. ~~**Sidebar Pipeline counts**~~ — ✅ Done (superseded). Replaced the entire hardcoded Pipeline section with the dynamic YOUR TAGS section: user's own tags, live counts, capped at 8, active-tag highlight.
+4. ~~**Tag filter wiring (sidebar → contacts)**~~ — ✅ Done. Dynamic YOUR TAGS links use `?tag=` params; ContactsPage handles them unchanged.
 5. **CSV importer — known limitations (future improvements):**
    - **No duplicate detection** — importing the same file twice creates duplicate contacts. Detecting duplicates (by name+company, or email) is a future improvement.
    - **CSV only** — `.xlsx` and other formats not supported yet. Users must export to CSV first.
