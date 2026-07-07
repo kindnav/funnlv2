@@ -1,12 +1,21 @@
 import posthog from 'posthog-js'
 
 export function initAnalytics() {
-  posthog.init(import.meta.env.VITE_POSTHOG_KEY, {
-    api_host: import.meta.env.VITE_POSTHOG_HOST || 'https://us.i.posthog.com',
+  const key  = import.meta.env.VITE_POSTHOG_KEY
+  const host = import.meta.env.VITE_POSTHOG_HOST || 'https://us.i.posthog.com'
+
+  // TEMPORARY DIAGNOSTIC — remove once confirmed working in production
+  console.log('[Funnl analytics] key present:', !!key, '| starts with:', key?.slice(0, 6) ?? 'undefined')
+
+  if (!key) {
+    console.warn('[Funnl analytics] VITE_POSTHOG_KEY is not set — analytics will not run')
+    return
+  }
+
+  posthog.init(key, {
+    api_host: host,
     capture_pageview: true,
     capture_pageleave: true,
-    // Disable autocapture — we only track the specific events defined in this file.
-    // This keeps analytics focused and avoids a firehose of every DOM click.
     autocapture: false,
     person_profiles: 'identified_only',
   })
