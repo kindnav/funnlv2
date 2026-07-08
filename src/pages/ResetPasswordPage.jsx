@@ -33,11 +33,10 @@ function ResetPasswordPage() {
   }
 
   const logoMark = (
-    <div
-      className="w-[52px] h-[52px] rounded-[14px] flex items-center justify-center mx-auto mb-8"
-      style={{ background: 'linear-gradient(135deg,#8B7CFF,#5B45F0)' }}
-    >
-      <span className="font-display font-bold text-[22px] text-white">F</span>
+    <div className="w-[52px] h-[52px] rounded-[14px] bg-[#4B3AF0] flex items-center justify-center mx-auto mb-8 shadow-[0_6px_20px_rgba(75,58,240,0.35)]">
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+        <path d="M3 4H21L15 12.5V20H9V12.5Z" fill="white"/>
+      </svg>
     </div>
   )
 

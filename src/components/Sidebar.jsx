@@ -103,12 +103,9 @@ function Sidebar() {
 
       {/* Logo */}
       <div className="flex items-center gap-[10px] px-[18px] pt-[18px] pb-5">
-        <div className="w-8 h-8 rounded-[9px] bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] flex items-center justify-center shadow-[0_4px_14px_rgba(91,69,240,0.4)] flex-none">
-          <svg width="16" height="16" viewBox="0 0 100 100" fill="none">
-            <rect x="8" y="6" width="84" height="17" rx="4" fill="white"/>
-            <rect x="20" y="27" width="60" height="17" rx="4" fill="white" opacity="0.85"/>
-            <rect x="32" y="48" width="36" height="17" rx="4" fill="white" opacity="0.7"/>
-            <rect x="44" y="69" width="12" height="17" rx="4" fill="white" opacity="0.55"/>
+        <div className="w-8 h-8 rounded-[9px] bg-[#4B3AF0] flex items-center justify-center shadow-[0_4px_14px_rgba(75,58,240,0.4)] flex-none">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
+            <path d="M3 4H21L15 12.5V20H9V12.5Z" fill="white"/>
           </svg>
         </div>
         <span className="font-display font-bold text-[20px] text-hi tracking-[-0.5px]">Funnl</span>
