@@ -503,6 +503,68 @@ Once the flag is in place, add a usage counter (e.g. `ai_calls_this_month int DE
 
 ---
 
+## Startup audit — July 2026
+
+External audit conducted July 12, 2026 against commit `05db542`. Full document: `FUNNL_STARTUP_AUDIT.md`.
+
+### Verdict
+
+Funnl is a real, usable MVP — more polished than most early student projects. The main problem is no longer "build the CRM." It is that Funnl has no convincing path from cold visitor → activated, returning user. The product stores networking work; it does not yet consistently create the next valuable networking action.
+
+### Strategic wedge
+
+Stop targeting "students who network." Start targeting **students actively recruiting into relationship-driven careers (finance, consulting, VC, PE, competitive tech) who already have 15–100 real contacts.** These users feel the pain acutely, are reachable through clubs, and are seasonal — which creates urgency.
+
+Recommended positioning:
+> **Turn networking conversations into follow-ups that lead somewhere.**
+> Funnl helps students recruiting for competitive roles remember every conversation, follow up at the right time, and see who to contact next.
+
+### Launch blockers (must fix before pilot users)
+
+| # | Issue | File | Why it matters |
+|---|---|---|---|
+| 1 | No public landing page | `App.jsx` — wildcard renders `SignInPage` for logged-out users | Cold traffic hits a login wall; can't understand the product |
+| 2 | Follow-up loop is incomplete | `FollowUpsPage.jsx` — display only, no Done/Snooze/Log | Core promise is broken; overdue items never clear |
+| 3 | No Pro path to purchase or test | `FunnlAIPage.jsx` — locked state has no price or waitlist | Revenue cannot occur or be measured |
+| 4 | Email deliverability (spam) | Documented in Known future work → Task 1 | Users can't confirm → can't sign in → never activate |
+
+### Prioritized backlog (from audit)
+
+| # | What | Impact | Effort |
+|---|---|---|---|
+| 1 | Public landing page (screenshots, differentiation, pricing test, CTA) | 5 | 2 |
+| 2 | Guided activation: contacts → log interaction → set follow-up | 5 | 3 |
+| 3 | Mark done / snooze / log-result on follow-ups | 5 | 3 |
+| 4 | Fix email deliverability / add Google OAuth | 5 | 2 |
+| 5 | Run concierge pilot with 10 qualified students | 5 | 2 |
+| 6 | Weekly reminder email + overdue notifications | 5 | 3 |
+| 7 | Fix activation analytics (CSV-first users currently missed) | 4 | 2 |
+| 8 | Pro pricing test + early-access CTA (no billing yet) | 4 | 1 |
+| 9 | Duplicate detection during CSV import | 4 | 2 |
+| 10 | Self-service data export + account deletion | 3 | 3 |
+
+### Explicitly do NOT build now
+
+- Native mobile app / PWA
+- University administration portal
+- Complex relationship scoring
+- Calendar or email integrations
+- More open-ended AI features
+- Paid billing (Stripe) — validate demand first
+
+### Days 1–14 immediate focus
+
+1. Fix email confirmation deliverability (DMARC record)
+2. Build public landing page
+3. Remove "Join your peers already using Funnl" copy (overclaims traction)
+4. Add CSV import CTA to empty-state dashboard
+5. Guide new users through contact → interaction → follow-up in one session
+6. Add Done, Snooze, Log Result to follow-ups page
+7. Fix activation analytics to capture CSV-first users
+8. Add Pro price + early-access interest button (no billing, just a tracked CTA)
+
+---
+
 ## AI Pro feature — build plan
 
 **Status: actively building.** Decision made 2026-07-05. AI is Funnl's paid "Pro" tier differentiator. Built in four layers so each is proven before the next is added.
