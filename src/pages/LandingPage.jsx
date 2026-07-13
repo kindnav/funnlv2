@@ -121,7 +121,7 @@ function LandingPage() {
           <div className="relative bg-[#141220] border border-[rgba(255,255,255,0.09)] rounded-[20px] p-[22px] shadow-[0_40px_90px_rgba(0,0,0,0.55)]">
             <div className="flex items-center justify-between mb-[18px]">
               <span className="font-display font-bold text-[15px] text-[#F5F3FA]">This week</span>
-              <span className="font-mono text-[10.5px] font-bold text-[#FFC97A] bg-[rgba(255,184,77,0.14)] rounded-[6px] px-2 py-1 whitespace-nowrap">🔥 6-day streak</span>
+              <span className="font-mono text-[10.5px] font-bold text-[#FFC97A] bg-[rgba(255,184,77,0.14)] rounded-[6px] px-2 py-1 whitespace-nowrap">3 follow-ups this week</span>
             </div>
             <div className="flex flex-col gap-0.5 mb-4">
               <div className="flex items-center gap-3 py-[11px] border-b border-[rgba(255,255,255,0.07)]">
@@ -141,13 +141,11 @@ function LandingPage() {
                 <span className="text-[10.5px] font-bold text-[#2FD4B6] bg-[rgba(47,212,182,0.15)] rounded-full px-[9px] py-[3px] flex-none whitespace-nowrap">On track</span>
               </div>
             </div>
-            <div>
-              <div className="flex items-center justify-between mb-[6px]">
-                <span className="text-[11.5px] font-semibold text-[#9C97AC]">Follow-ups on track</span>
-                <span className="text-[11.5px] font-bold text-[#F5F3FA]">8/10</span>
-              </div>
-              <div className="w-full h-[7px] rounded-full bg-[rgba(255,255,255,0.08)] overflow-hidden">
-                <div className="w-[80%] h-full rounded-full bg-[#7C6BFF]"/>
+            <div className="pt-[10px] border-t border-[rgba(255,255,255,0.07)]">
+              <p className="text-[11.5px] font-semibold text-[#9C97AC] m-0 mb-[8px]">Upcoming follow-ups</p>
+              <div className="flex items-center gap-[7px]">
+                <span className="w-[6px] h-[6px] rounded-full bg-[#FFB84D] flex-none"/>
+                <span className="text-[11.5px] font-semibold text-[#FFB84D]">Priya Sharma — Jul 22</span>
               </div>
             </div>
           </div>
@@ -366,7 +364,7 @@ function LandingPage() {
           >
             <p className="font-mono text-[11px] font-bold text-[#B4A8FF] tracking-[1px] uppercase m-0 mb-5">Funnl</p>
             <div className="flex flex-col gap-[14px]">
-              {['Automatic follow-up visibility', 'Conversation history per contact', 'Tag and filter effortlessly', 'AI networking insights — Pro'].map(item => (
+              {['Follow-up dashboard (overdue + upcoming)', 'Conversation history per contact', 'Tag and filter effortlessly', 'AI networking insights — Pro'].map(item => (
                 <div key={item} className="flex items-center gap-[10px]">
                   <span className="text-[#2FD4B6] text-[13px] flex-none">✓</span>
                   <span className="text-[13.5px] text-[#F5F3FA]">{item}</span>
