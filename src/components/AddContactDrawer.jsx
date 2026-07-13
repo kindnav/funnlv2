@@ -132,7 +132,7 @@ function AddContactDrawer({ onClose, onSuccess }) {
 
     const tags = tagsInput.split(',').map(t => t.trim()).filter(Boolean)
 
-    const { error } = await supabase.from('contacts').insert([{
+    const { data: newContact, error } = await supabase.from('contacts').insert([{
       name: trimmedName,
       company: company || null,
       role: role || null,
@@ -142,7 +142,7 @@ function AddContactDrawer({ onClose, onSuccess }) {
       tags: tags.length > 0 ? tags : null,
       relationship_type: relationshipType || null,
       relationship_note: relationshipNote.trim() || null,
-    }])
+    }]).select('id').single()
 
     setSubmitting(false)
 
@@ -162,7 +162,7 @@ function AddContactDrawer({ onClose, onSuccess }) {
     const { count } = await supabase.from('contacts').select('id', { count: 'exact', head: true })
     if (count === 1) track('first_contact_added')
 
-    onSuccess()
+    onSuccess?.(newContact?.id ?? null)
   }
 
   return (
