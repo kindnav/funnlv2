@@ -1,7 +1,19 @@
+import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { supabase } from '../lib/supabase'
 
 function WelcomePage() {
   const navigate = useNavigate()
+  const [signingOut, setSigningOut] = useState(false)
+
+  async function handleContinue() {
+    setSigningOut(true)
+    // Sign out first — confirmation links auto-create a session; clear it so /signin renders
+    // in the unauthenticated route tree. signOut() clears local storage regardless of server error.
+    const { error } = await supabase.auth.signOut()
+    if (error) console.error('Sign-out on welcome failed:', error.message)
+    navigate('/signin')
+  }
 
   return (
     <div className="min-h-screen bg-base flex items-center justify-center p-6">
@@ -33,10 +45,11 @@ function WelcomePage() {
 
         {/* Primary CTA */}
         <button
-          onClick={() => navigate('/')}
-          className="w-full bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] text-white text-[15px] font-bold rounded-[12px] py-[14px] shadow-[0_6px_20px_rgba(91,69,240,0.35)] hover:opacity-90 transition-opacity"
+          onClick={handleContinue}
+          disabled={signingOut}
+          className="w-full bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] text-white text-[15px] font-bold rounded-[12px] py-[14px] shadow-[0_6px_20px_rgba(91,69,240,0.35)] hover:opacity-90 transition-opacity disabled:opacity-50"
         >
-          Continue to sign in
+          {signingOut ? 'Signing out…' : 'Continue to sign in'}
         </button>
 
       </div>

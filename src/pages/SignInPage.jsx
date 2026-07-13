@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { Link, useLocation } from 'react-router-dom'
+import { useEffect, useState } from 'react'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { track } from '../lib/analytics'
 
@@ -14,7 +14,8 @@ function InputWrapper({ children }) {
 
 function SignInPage() {
   const location = useLocation()
-  const [mode, setMode] = useState('signin') // 'signin' | 'signup' | 'pending' | 'forgot' | 'reset-sent'
+  const navigate = useNavigate()
+  const [mode, setMode] = useState(location.pathname === '/signup' ? 'signup' : 'signin') // 'signin' | 'signup' | 'pending' | 'forgot' | 'reset-sent'
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
@@ -23,6 +24,21 @@ function SignInPage() {
 
   // Captured once on mount — shows after arriving from /reset-password
   const [showResetBanner] = useState(!!location.state?.passwordReset)
+
+  // Keep form in sync if React Router reuses this component without remounting.
+  // mode is in deps because the guards read it; the guards prevent resets during pending/forgot/reset-sent.
+  useEffect(() => {
+    if (location.pathname === '/signup' && mode !== 'signup' && mode !== 'pending' && mode !== 'forgot' && mode !== 'reset-sent') {
+      setMode('signup')
+    } else if (location.pathname === '/signin' && mode !== 'signin' && mode !== 'pending' && mode !== 'forgot' && mode !== 'reset-sent') {
+      setMode('signin')
+    }
+  }, [location.pathname, mode])
+
+  // Fire once per arrival at signup mode: on initial mount at /signup AND on /signin → /signup navigation.
+  useEffect(() => {
+    if (mode === 'signup') track('signup_started')
+  }, [mode])
 
   function switchMode(newMode) {
     setMode(newMode)
@@ -138,7 +154,7 @@ function SignInPage() {
             </div>
             <div>
               <p className="text-[14px] font-bold text-white">Never miss a follow-up</p>
-              <p className="text-[12.5px] text-[rgba(255,255,255,0.55)]">Automatic reminders keep your outreach on track.</p>
+              <p className="text-[12.5px] text-[rgba(255,255,255,0.55)]">Follow-up dates keep your outreach on track.</p>
             </div>
           </div>
 
@@ -265,7 +281,7 @@ function SignInPage() {
             <p className="text-[15px] text-[#9A9AA5] mb-[34px]">Sign in to pick up where your network left off.</p>
           )}
           {mode === 'signup' && (
-            <p className="text-[15px] text-[#9A9AA5] mb-[34px]">Join your peers already using Funnl.</p>
+            <p className="text-[15px] text-[#9A9AA5] mb-[34px]">Start turning networking conversations into follow-ups that lead somewhere.</p>
           )}
           {mode === 'forgot' && (
             <p className="text-[15px] text-[#9A9AA5] mb-[34px]">Enter your email and we'll send you a reset link.</p>
@@ -307,7 +323,7 @@ function SignInPage() {
 
               <p className="text-center text-[13.5px] text-[#6C6C78] pt-2">
                 Don't have an account?{' '}
-                <button type="button" onClick={() => switchMode('signup')} className="text-accent font-semibold hover:text-tag transition-colors">
+                <button type="button" onClick={() => { switchMode('signup'); navigate('/signup') }} className="text-accent font-semibold hover:text-tag transition-colors">
                   Create one
                 </button>
               </p>
@@ -351,7 +367,7 @@ function SignInPage() {
 
               <p className="text-center text-[13.5px] text-[#6C6C78] pt-2">
                 Already have an account?{' '}
-                <button type="button" onClick={() => switchMode('signin')} className="text-accent font-semibold hover:text-tag transition-colors">
+                <button type="button" onClick={() => { switchMode('signin'); navigate('/signin') }} className="text-accent font-semibold hover:text-tag transition-colors">
                   Sign in
                 </button>
               </p>

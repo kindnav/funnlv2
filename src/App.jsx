@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
-import { Routes, Route } from 'react-router-dom'
+import { Routes, Route, Navigate } from 'react-router-dom'
 import { supabase } from './lib/supabase'
 import { identifyUser, resetAnalytics } from './lib/analytics'
+import LandingPage from './pages/LandingPage'
 import SignInPage from './pages/SignInPage'
 import DashboardPage from './pages/DashboardPage'
 import ContactsPage from './pages/ContactsPage'
@@ -44,10 +45,13 @@ function App() {
   if (!session) {
     return (
       <Routes>
+        <Route path="/" element={<LandingPage />} />
+        <Route path="/signin" element={<SignInPage />} />
+        <Route path="/signup" element={<SignInPage />} />
         <Route path="/welcome" element={<WelcomePage />} />
         <Route path="/reset-password" element={<ResetPasswordPage />} />
         <Route path="/privacy" element={<PrivacyPage />} />
-        <Route path="*" element={<SignInPage />} />
+        <Route path="*" element={<Navigate to="/signin" replace />} />
       </Routes>
     )
   }
