@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useParams, Link, useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { getAvatarColor, getInitials } from '../lib/avatarUtils'
@@ -97,15 +97,13 @@ function ContactDetailPage() {
   const [deletingInteractionId, setDeletingInteractionId] = useState(null)
   const [interactionsError, setInteractionsError] = useState('')
 
-  useEffect(() => { fetchContact(); fetchInteractions() }, [id])
-
-  async function fetchContact() {
+  const fetchContact = useCallback(async () => {
     const { data, error } = await supabase.from('contacts').select('*').eq('id', id).single()
     if (error) setError(error.message); else setContact(data)
     setLoading(false)
-  }
+  }, [id])
 
-  async function fetchInteractions() {
+  const fetchInteractions = useCallback(async () => {
     const { data, error } = await supabase.from('interactions').select('*').eq('contact_id', id).order('interaction_date', { ascending: false })
     if (error) {
       setInteractionsError('Couldn\'t load interactions. Refresh to try again.')
@@ -113,7 +111,12 @@ function ContactDetailPage() {
       setInteractionsError('')
       setInteractions(data)
     }
-  }
+  }, [id])
+
+  useEffect(() => {
+    fetchContact()
+    fetchInteractions()
+  }, [fetchContact, fetchInteractions])
 
   function startEdit() {
     setEditForm({

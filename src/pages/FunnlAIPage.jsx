@@ -101,7 +101,7 @@ function FunnlAIPage() {
         // Guard against a silent blank — data came back but reply is missing
         setError('No response received — please try again.')
       }
-    } catch (err) {
+    } catch {
       setLoading(false)
       setError('Something went wrong — please try again.')
     }
