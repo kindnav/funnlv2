@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 
@@ -44,7 +44,14 @@ function Sidebar() {
     })
     fetchFollowUpCount()
     fetchTagCounts()
-  }, [location.pathname])
+  }, [location.pathname, fetchFollowUpCount])
+
+  // Refresh badge count whenever a follow-up action completes on FollowUpsPage
+  useEffect(() => {
+    const handler = () => fetchFollowUpCount()
+    window.addEventListener('funnl:followups-changed', handler)
+    return () => window.removeEventListener('funnl:followups-changed', handler)
+  }, [fetchFollowUpCount])
 
   async function fetchTagCounts() {
     const { data } = await supabase.from('contacts').select('tags').not('tags', 'is', null)
@@ -61,14 +68,14 @@ function Sidebar() {
     setTagCounts(sorted)
   }
 
-  async function fetchFollowUpCount() {
+  const fetchFollowUpCount = useCallback(async () => {
     const { count } = await supabase
       .from('interactions')
       .select('id', { count: 'exact', head: true })
       .not('follow_up_date', 'is', null)
       .lte('follow_up_date', getLocalToday())
     setFollowUpCount(count || 0)
-  }
+  }, [])
 
   function getInitials(email) {
     if (!email) return 'F'

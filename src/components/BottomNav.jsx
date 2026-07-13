@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 
@@ -28,18 +28,23 @@ function BottomNav() {
   const location = useLocation()
   const [followUpCount, setFollowUpCount] = useState(0)
 
-  useEffect(() => {
-    fetchCount()
-  }, [])
-
-  async function fetchCount() {
+  const fetchCount = useCallback(async () => {
     const { count } = await supabase
       .from('interactions')
       .select('id', { count: 'exact', head: true })
       .not('follow_up_date', 'is', null)
       .lte('follow_up_date', getLocalToday())
     setFollowUpCount(count || 0)
-  }
+  }, [])
+
+  useEffect(() => { fetchCount() }, [fetchCount])
+
+  // Refresh badge whenever a follow-up action completes on FollowUpsPage
+  useEffect(() => {
+    const handler = () => fetchCount()
+    window.addEventListener('funnl:followups-changed', handler)
+    return () => window.removeEventListener('funnl:followups-changed', handler)
+  }, [fetchCount])
 
   function isActive(path) {
     if (path === '/') return location.pathname === '/'

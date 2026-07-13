@@ -89,7 +89,8 @@ function ContactDetailPage() {
   const [notes, setNotes] = useState('')
   const [followUpDate, setFollowUpDate] = useState('')
 
-  const [loggedMsg, setLoggedMsg] = useState(false)
+  const [loggedMsg, setLoggedMsg]         = useState(false)
+  const [loggedWarning, setLoggedWarning] = useState('')
 
   const [editingInteractionId, setEditingInteractionId] = useState(null)
   const [interactionEditForm, setInteractionEditForm] = useState({})
@@ -98,7 +99,14 @@ function ContactDetailPage() {
   const [deletingInteractionId, setDeletingInteractionId] = useState(null)
   const [interactionsError, setInteractionsError] = useState('')
 
-  const interactionFormRef = useRef(null)
+  const interactionFormRef    = useRef(null)
+  const sourceFollowUpIdRef   = useRef(null)
+  const loggedWarningTimerRef = useRef(null)
+
+  // Cleanup loggedWarning timer on unmount
+  useEffect(() => () => {
+    if (loggedWarningTimerRef.current) clearTimeout(loggedWarningTimerRef.current)
+  }, [])
 
   const fetchContact = useCallback(async () => {
     const { data, error } = await supabase.from('contacts').select('*').eq('id', id).single()
@@ -123,6 +131,10 @@ function ContactDetailPage() {
 
   useEffect(() => {
     if (location.state?.openInteractionForm) {
+      // Capture sourceFollowUpId into a ref before navigate clears the Router state
+      if (location.state.sourceFollowUpId) {
+        sourceFollowUpIdRef.current = location.state.sourceFollowUpId
+      }
       setShowForm(true)
       navigate(location.pathname, { replace: true, state: {} })
     }
@@ -209,6 +221,27 @@ function ContactDetailPage() {
       has_notes: !!notes,
     })
     if (followUpDate) track('followup_set')
+
+    // Log Result flow: clear the old source follow-up date after the new interaction is saved
+    const srcId = sourceFollowUpIdRef.current
+    if (srcId) {
+      sourceFollowUpIdRef.current = null  // clear before async op to prevent double-fire
+      const { error: clearError } = await supabase
+        .from('interactions')
+        .update({ follow_up_date: null })
+        .eq('id', srcId)
+        .eq('contact_id', id)   // scope to this contact for safety
+      if (clearError) {
+        console.error('[Funnl] Log Result: interaction saved but old follow-up clear failed:', clearError.message)
+        if (loggedWarningTimerRef.current) clearTimeout(loggedWarningTimerRef.current)
+        setLoggedWarning("Interaction logged, but the previous follow-up couldn't be cleared — remove it from Follow-ups manually.")
+        loggedWarningTimerRef.current = setTimeout(() => setLoggedWarning(''), 8000)
+        // do not dispatch badge event or track followup_completed on partial failure
+      } else {
+        window.dispatchEvent(new Event('funnl:followups-changed'))
+        track('followup_completed', { method: 'log_result' })
+      }
+    }
 
     setNotes(''); setFollowUpDate(''); setShowForm(false); fetchInteractions()
     setLoggedMsg(true); setTimeout(() => setLoggedMsg(false), 3000)
@@ -498,6 +531,16 @@ function ContactDetailPage() {
                       <path d="M20 6L9 17l-5-5"/>
                     </svg>
                     <p className="text-[12.5px] text-success font-medium">Interaction logged</p>
+                  </div>
+                )}
+
+                {/* Partial-success warning — shown when Log Result's old follow-up clear fails */}
+                {loggedWarning && (
+                  <div className="flex items-start gap-2 mb-3 px-3 py-2 rounded-xl bg-[rgba(255,184,77,0.08)] border border-[rgba(255,184,77,0.2)]">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#FFB84D" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-none mt-[1px]">
+                      <circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/>
+                    </svg>
+                    <p className="text-[12.5px] text-warning font-medium leading-relaxed">{loggedWarning}</p>
                   </div>
                 )}
 
