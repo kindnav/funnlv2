@@ -25,11 +25,12 @@ function ResetPasswordPage() {
     if (newPassword !== confirmPassword) { setError('Passwords do not match.'); return }
     if (newPassword.length < 6) { setError('Password must be at least 6 characters.'); return }
     setSubmitting(true)
-    const { error } = await supabase.auth.updateUser({ password: newPassword })
-    if (error) { setError(error.message); setSubmitting(false); return }
-    // Navigate to sign-in with success state, then clear the recovery session
-    navigate('/', { state: { passwordReset: true } })
-    supabase.auth.signOut()
+    const { error: updateError } = await supabase.auth.updateUser({ password: newPassword })
+    if (updateError) { setError(updateError.message); setSubmitting(false); return }
+    // Sign out first — clears the recovery session so navigate lands in the unauthenticated route tree
+    const { error: signOutError } = await supabase.auth.signOut()
+    if (signOutError) console.error('Sign-out after password update failed:', signOutError.message)
+    navigate('/signin', { state: { passwordReset: true } })
   }
 
   const logoMark = (
@@ -65,7 +66,7 @@ function ResetPasswordPage() {
             This reset link has already been used or has expired. Request a new one from the sign-in page.
           </p>
           <button
-            onClick={() => navigate('/')}
+            onClick={() => navigate('/signin')}
             className="w-full bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] text-white text-[15px] font-bold rounded-[12px] py-[14px] shadow-[0_6px_20px_rgba(91,69,240,0.35)] hover:opacity-90 transition-opacity"
           >
             Back to sign in
