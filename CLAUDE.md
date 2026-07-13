@@ -44,7 +44,7 @@ The data schema (notes as freeform text, tags/skills as text arrays) was deliber
 - **Tailwind CSS v4** — custom tokens in `src/index.css` using `@theme {}` block (not a config file)
 - **Supabase** — PostgreSQL + auth; credentials in `.env` (never commit `.env`). URL config: Site URL = `https://getfunnl.com`, Redirect URLs include `https://getfunnl.com/welcome` and `https://getfunnl.com/**`.
 - **React Router v7** — client-side routing
-- **Vercel** — live at `https://getfunnl.com`. Connected to GitHub (kindnav/funnlv2), auto-deploys on push to `main`. Env vars (`VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `VITE_POSTHOG_KEY`, `VITE_POSTHOG_HOST`) set in Vercel project settings. `vercel.json` at project root rewrites all routes to `index.html` so direct URL visits don't 404.
+- **Vercel** — live at `https://getfunnl.com`. Connected to GitHub (kindnav/funnlv2), auto-deploys on push to `main`. Env vars (`VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `VITE_POSTHOG_KEY`, `VITE_POSTHOG_HOST`) set in Vercel project settings. `vercel.json` at project root rewrites all routes to `index.html` so direct URL visits don't 404. `git.deploymentEnabled` is set to `{ "main": true, "*": false }` — only `main` generates a Vercel deployment; non-main branches do not create preview deployments.
 - **PostHog** — product analytics. Project API key in `VITE_POSTHOG_KEY` (public/client-side key — safe to expose in frontend, unlike Anthropic/service-role keys). US region, host `https://us.i.posthog.com`. Autocapture disabled — only explicit events tracked. Wrapper at `src/lib/analytics.js`.
 - **Cloudflare DNS** — two CNAME records pointing `getfunnl.com` and `www.getfunnl.com` to Vercel, set to DNS-only (grey cloud). `www` redirects to apex. Domain also used for Resend email verification (SPF + DKIM records present, DMARC pending — see Task 1).
 
@@ -64,8 +64,9 @@ src/
     DashboardPage.jsx      Landing screen after login: stats, follow-ups due, recent contacts
     ContactsPage.jsx       Contacts grid + search (name/company/role/tag/skill) + URL-based tag filter (?tag=recruiter)
     ContactDetailPage.jsx  Full contact profile: two-column on desktop, stacked on mobile
+    LandingPage.jsx        Public marketing page at /; visible to logged-out users only; 11 sections; 3 tracked CTAs (nav/hero/bottom)
     SettingsPage.jsx       Account-card layout: display name input + Save; read-only email + joined date; sign out. Desktop only for v1.
-    SignInPage.jsx         Dark split-screen: sign-in mode + sign-up mode + email-confirmation pending state + forgot/reset-sent modes
+    SignInPage.jsx         Dark split-screen: sign-in mode + sign-up mode + email-confirmation pending state + forgot/reset-sent modes. Route-synchronized: /signin opens sign-in mode, /signup opens sign-up mode. After successful sign-in, navigate('/', { replace: true }) fires immediately to prevent blank screen at /signin.
     WelcomePage.jsx        Email-confirmation landing page at /welcome — no sidebar, accessible to logged-out users
     ResetPasswordPage.jsx  Password recovery page at /reset-password — no sidebar, handles Supabase recovery link
     PrivacyPage.jsx        Plain-language privacy policy at /privacy — no sidebar, accessible logged-out and logged-in
@@ -84,17 +85,33 @@ CLAUDE.md                  This file — project reference, keep current
 
 ## Routes
 
+**Logged-out tree (unauthenticated users in `App.jsx`):**
+
 | Path | Component | Notes |
 |---|---|---|
-| `/` | DashboardPage | Landing screen after login |
+| `/` | LandingPage | Public marketing page; 11 sections; 3 CTAs tracked via `landing_cta_clicked` |
+| `/signin` | SignInPage | Sign-in mode (auto-detected from pathname) |
+| `/signup` | SignInPage | Sign-up mode (auto-detected from pathname) |
+| `/welcome` | WelcomePage | Email-confirmation landing; no sidebar |
+| `/reset-password` | ResetPasswordPage | Password recovery; handles Supabase recovery link |
+| `/privacy` | PrivacyPage | Plain-language privacy policy |
+| `*` | — | Redirects to `/signin` |
+
+**Authenticated tree (logged-in users in `App.jsx`):**
+
+| Path | Component | Notes |
+|---|---|---|
+| `/` | DashboardPage | Landing screen after login; activation checklist shown until all 3 steps complete |
 | `/contacts` | ContactsPage | Grid + search + filter; `?tag=recruiter` drives filter pills |
 | `/contacts/:id` | ContactDetailPage | Full profile + interaction timeline |
-| `/followups` | FollowUpsPage | Real data — overdue/today/upcoming buckets; Snooze/Mark done are Layer 2 |
-| `/ai` | FunnlAIPage | Styled coming-soon; non-interactive chat UI; Layer 3 placeholder |
-| `/settings` | SettingsPage | Display name + school + sign out; reads/writes `profiles` table |
-| `/welcome` | WelcomePage | Email-confirmation landing; no sidebar; accessible to logged-out users |
-| `/reset-password` | ResetPasswordPage | Password recovery; no sidebar; handles Supabase recovery link |
-| `/privacy` | PrivacyPage | Plain-language privacy policy; no sidebar; accessible logged-out and logged-in |
+| `/followups` | FollowUpsPage | Real data — overdue/today/upcoming buckets; Mark done/Snooze are Phase 3 |
+| `/ai` | FunnlAIPage | Working AI chat for Pro users; locked state for non-Pro |
+| `/settings` | SettingsPage | Display name + sign out; reads/writes `profiles` table |
+| `/welcome` | WelcomePage | Email-confirmation landing; no sidebar; accessible while authenticated |
+| `/reset-password` | ResetPasswordPage | Password recovery; no sidebar; accessible while authenticated |
+| `/privacy` | PrivacyPage | Plain-language privacy policy; accessible while authenticated |
+| `/signin`, `/signup` | — | Defensive redirects to `/` — prevents blank screen if auth state updates while on these paths |
+| `*` | — | Defensive redirect to `/` |
 
 ---
 
@@ -116,6 +133,11 @@ CLAUDE.md                  This file — project reference, keep current
 | `csv_import_used` | ImportContactsModal handleImport | `{ contacts_imported: number }` | Feature usage |
 | `ai_assistant_used` | FunnlAIPage sendMessage on success | none | AI feature usage |
 | `ai_fill_used` | AddContactDrawer handleAIParse on success | `{ fields_filled: number }` | AI feature usage |
+| `landing_cta_clicked` | LandingPage — all three CTA buttons | `{ location: 'nav'\|'hero'\|'bottom' }` | Acquisition / landing page conversion |
+| `signup_started` | SignInPage on mount when mode === 'signup' | none | Activation funnel step 0.5 |
+| `activation_checklist_viewed` | DashboardPage on mount when checklist is shown | none | Onboarding engagement |
+| `activation_step_completed` | DashboardPage recordMilestones — once per step, idempotent | `{ step: 'five_contacts'\|'first_interaction'\|'first_followup' }` | Phase 2A activation tracking |
+| `activation_completed` | DashboardPage recordMilestones — once when all 3 steps done | `{ contacts_count: number }` | Phase 2A activation tracking |
 
 **What PostHog tracks automatically (no code needed):** pageviews, session start/end, returning users, browser/device/country.
 
@@ -170,6 +192,12 @@ CLAUDE.md                  This file — project reference, keep current
 | `display_name` | text | Optional — shown in sidebar |
 | `ai_enabled` | boolean | Default false — flip to true in Supabase to grant Pro/AI access |
 | `updated_at` | timestamptz | Set on every save |
+| `activation_five_contacts_at` | timestamptz | Nullable — set when user reaches 5 contacts. Written with `WHERE col IS NULL` for idempotent deduplication. |
+| `activation_first_interaction_at` | timestamptz | Nullable — set on first logged interaction. Same idempotent write. |
+| `activation_first_followup_at` | timestamptz | Nullable — set on first follow-up date set. Same idempotent write. |
+| `activation_completed_at` | timestamptz | Nullable — set when all three activation steps are complete. Same idempotent write. |
+
+**Applied migrations:** `supabase/migrations/20260713075431_add_activation_milestones.sql` — adds the four activation timestamp columns above to `profiles`, with backfill SQL for existing users. Applied to production 2026-07-13. The original schema (contacts, interactions, profiles, RLS policies, triggers) was created manually in Supabase before the migration system was set up — no baseline migration file exists for it (known limitation).
 
 **Profile rows are auto-created on signup via a Postgres trigger** (`on_auth_user_created` on `auth.users`). The trigger function `public.handle_new_user()` runs `SECURITY DEFINER` (bypasses RLS) and inserts a row with `id`, `email`, `ai_enabled=false`, `display_name=null` the moment a new user signs up. `ON CONFLICT (id) DO NOTHING` makes it safe if a row somehow already exists.
 
@@ -264,8 +292,8 @@ The contacts page filter pills use `useSearchParams`. Active tag is stored as `?
 | Dashboard with real stats + follow-up list | ✅ |
 | Add contact drawer (slide-in, Escape closes, scroll locked) | ✅ |
 | Per-user data isolation (RLS, two-user verified) | ✅ |
-| Follow-ups screen (`/followups`) | ✅ Real data — shows all interactions with a follow_up_date, bucketed into Overdue / Today / Upcoming with correct local-timezone date logic. Snooze and Mark done are Layer 2. |
-| Funnl AI screen (`/ai`) | ✅ Styled coming-soon screen — chat UI aesthetic, non-interactive input bar (`cursor-not-allowed`), example prompts (visual only), Layer 3 description. |
+| Follow-ups screen (`/followups`) | ✅ Real data — shows all interactions with a follow_up_date, bucketed into Overdue / Today / Upcoming with correct local-timezone date logic. Mark done / Snooze / Log Result are Phase 3. |
+| Funnl AI screen (`/ai`) | ✅ Working AI chat UI. Pro users get full multi-turn chat backed by Edge Function `ai-chat` (claude-sonnet-5). Non-Pro users see a locked state. react-markdown renders assistant replies. |
 | Empty states (all screens) | ✅ Contacts zero-state has icon + "Start building your network" CTA; search/filter no-results has icon + clear-filters link; all other screens handled. |
 | **Full dark redesign** | ✅ **Complete** — all 8 screens restyled to the Funnl design system (dark palette, Space Grotesk/Jakarta Sans/JetBrains Mono, shared sidebar). |
 | **Robustness pass** | ✅ Error handling on all Supabase reads (dashboard, contact detail, follow-ups); local-timezone date logic consistent app-wide (sidebar badge, dashboard, contact detail, follow-ups all agree); avatar helpers extracted to `src/lib/avatarUtils.js`; AddContactDrawer rejects whitespace-only names and uses safe scroll-lock cleanup. |
@@ -278,10 +306,15 @@ The contacts page filter pills use `useSearchParams`. Active tag is stored as `?
 | **CSV importer** | ✅ Import button on Contacts page opens a 3-step modal (upload → map → confirm). Mapping step: **pool-at-top UI** — unassigned columns shown prominently at the top as clickable chips ("click to place"); clicking a chip opens a field picker (1 click to assign). Field-first assignment also available via + Add on each field row. `normalizeHeader()` normalizes separators before lookup (first_name / first-name / first.name all match one HEADER_MAP entry). HEADER_MAP pruned of false-positive generic entries. Multiple columns combine in chip order (e.g. First Name + Last Name → "John Smith"). "— not assigned" placeholder on empty fields. Picker uses fixed-position viewport coords (not absolute) so scrollable container can't clip it. Tags: comma-separated cell values split into arrays. relationship_type and relationship_note are mappable fields. All-or-nothing bulk insert. `transformRow` AI seam intact. Known limitations: no duplicate detection, CSV-only, no cell-level editing. |
 | **Skills removed → relationship intent** | ✅ `skills` column dropped. `relationship_type` (preset select: Mentor/Collaborator/Referral path/Potential employer/Connector/Other) and `relationship_note` (freeform "why this person matters") added to contacts table, all forms, detail page, importer, and AI context. AI Fill extracts `relationship_note` from freeform text but never auto-selects `relationship_type` (deliberate user choice). |
 | **Dynamic sidebar YOUR TAGS** | ✅ Replaced hardcoded Pipeline section (Target firms/Recruiters/Alumni) with live user-tag groups. Queries contacts table on each nav change, counts tag occurrences in JS, sorts by count desc, caps at top 8. Deterministic dot colors per tag. Active tag highlighted. Empty state: "Tags you add to contacts will appear here." |
-| **Product analytics (PostHog)** | ✅ 8 core events: user_signed_up, first_contact_added, contact_added, interaction_logged, followup_set, csv_import_used, ai_assistant_used, ai_fill_used. Autocapture off. Behavior only — no contact content. Users identified by Supabase ID. Key signals: activation funnel + "second interaction" retention. |
+| **Product analytics (PostHog)** | ✅ 13 events total (8 core + 2 Phase 1 + 3 Phase 2A). Core: user_signed_up, first_contact_added, contact_added, interaction_logged, followup_set, csv_import_used, ai_assistant_used, ai_fill_used. Phase 1 additions: landing_cta_clicked, signup_started. Phase 2A additions: activation_checklist_viewed, activation_step_completed, activation_completed. Autocapture off. Behavior only — no contact content. Users identified by Supabase ID. |
 | **Privacy policy** | ✅ `/privacy` — plain-language page covering data stored, all third parties (Supabase, Anthropic, PostHog, Resend, Vercel), analytics disclosure, user rights, contact email. Linked from sign-in page and settings. Accessible logged-out. |
+| **Phase 1 — Public landing page** | ✅ `LandingPage.jsx` at `/` for logged-out users. 11 sections: nav, hero with annotated product mock, marquee ticker, problem statement, feature rows (01–03), Funnl AI section, who-it's-for grid, comparison table, privacy note, final CTA, footer. `/signin` and `/signup` as separate routes, mode auto-detected from pathname. Post-sign-in `navigate('/', { replace: true })` prevents blank screen. All product claims verified against actual functionality. |
+| **Phase 2A — Guided activation checklist** | ✅ Three-step checklist on DashboardPage: (1) add or import 5 contacts, (2) log the first conversation, (3) schedule the first follow-up. Milestones stored as four nullable `timestamptz` columns on `profiles` (the fourth records overall activation completion). Written with `WHERE col IS NULL` conditional updates for idempotent deduplication across tabs and sessions. Backfill included in migration `20260713075431_add_activation_milestones.sql`. CSV import button accessible from dashboard in addition to contacts page. |
+| **Vercel main-only deployments** | ✅ `vercel.json` `git.deploymentEnabled: { main: true, "*": false }`. Preview deployments disabled for all non-main branches. |
 | Rule-based reminders / cold alerts | 🔵 Layer 2 |
-| AI assistant and smart features | 🔵 Layer 3 |
+| **Phase 2B — Guided first-contact-to-interaction handoff** | 🔵 Next — after the first manual contact add, navigate to that contact's detail page and auto-open the log-interaction form using Router state; preserve the existing Phase 2A milestone tracking |
+| **Phase 3 — Complete follow-up loop** | 🔵 Later — Mark done, Snooze, Log Result on `/followups`; badge synchronization via custom browser event |
+| **Phase 4 — Remaining pilot analytics and launch work** | 🔵 Later |
 
 ---
 
@@ -521,27 +554,27 @@ Recommended positioning:
 
 ### Launch blockers (must fix before pilot users)
 
-| # | Issue | File | Why it matters |
+| # | Issue | File | Status |
 |---|---|---|---|
-| 1 | No public landing page | `App.jsx` — wildcard renders `SignInPage` for logged-out users | Cold traffic hits a login wall; can't understand the product |
-| 2 | Follow-up loop is incomplete | `FollowUpsPage.jsx` — display only, no Done/Snooze/Log | Core promise is broken; overdue items never clear |
-| 3 | No Pro path to purchase or test | `FunnlAIPage.jsx` — locked state has no price or waitlist | Revenue cannot occur or be measured |
-| 4 | Email deliverability (spam) | Documented in Known future work → Task 1 | Users can't confirm → can't sign in → never activate |
+| 1 | No public landing page | `App.jsx` — wildcard renders `SignInPage` for logged-out users | ✅ **Fixed — Phase 1.** `LandingPage.jsx` at `/` for logged-out users. |
+| 2 | Follow-up loop is incomplete | `FollowUpsPage.jsx` — display only, no Done/Snooze/Log | 🔵 **Phase 3 — not yet built.** |
+| 3 | No Pro path to purchase or test | `FunnlAIPage.jsx` — locked state has no price or waitlist | 🔵 **Not yet built.** |
+| 4 | Email deliverability (spam) | Documented in Known future work → Task 1 | ⚠️ **Unverified operationally** — cannot be determined from code. |
 
-### Prioritized backlog (from audit)
+### Prioritized backlog (from audit — updated status)
 
-| # | What | Impact | Effort |
-|---|---|---|---|
-| 1 | Public landing page (screenshots, differentiation, pricing test, CTA) | 5 | 2 |
-| 2 | Guided activation: contacts → log interaction → set follow-up | 5 | 3 |
-| 3 | Mark done / snooze / log-result on follow-ups | 5 | 3 |
-| 4 | Fix email deliverability / add Google OAuth | 5 | 2 |
-| 5 | Run concierge pilot with 10 qualified students | 5 | 2 |
-| 6 | Weekly reminder email + overdue notifications | 5 | 3 |
-| 7 | Fix activation analytics (CSV-first users currently missed) | 4 | 2 |
-| 8 | Pro pricing test + early-access CTA (no billing yet) | 4 | 1 |
-| 9 | Duplicate detection during CSV import | 4 | 2 |
-| 10 | Self-service data export + account deletion | 3 | 3 |
+| # | What | Impact | Effort | Status |
+|---|---|---|---|---|
+| 1 | Public landing page (screenshots, differentiation, pricing test, CTA) | 5 | 2 | ✅ Done — Phase 1 |
+| 2 | Guided activation: contacts → log interaction → set follow-up | 5 | 3 | ✅ Done — Phase 2A |
+| 3 | Mark done / snooze / log-result on follow-ups | 5 | 3 | 🔵 Phase 3 |
+| 4 | Fix email deliverability / add Google OAuth | 5 | 2 | ⚠️ Unverified operationally |
+| 5 | Run concierge pilot with 10 qualified students | 5 | 2 | 🔵 Not started |
+| 6 | Weekly reminder email + overdue notifications | 5 | 3 | 🔵 Not started |
+| 7 | Fix activation analytics (CSV-first users currently missed) | 4 | 2 | 🔵 Partially — 5 events added |
+| 8 | Pro pricing test + early-access CTA (no billing yet) | 4 | 1 | 🔵 Not started |
+| 9 | Duplicate detection during CSV import | 4 | 2 | 🔵 Not started |
+| 10 | Self-service data export + account deletion | 3 | 3 | 🔵 Not started |
 
 ### Explicitly do NOT build now
 
@@ -552,16 +585,18 @@ Recommended positioning:
 - More open-ended AI features
 - Paid billing (Stripe) — validate demand first
 
-### Days 1–14 immediate focus
+### Days 1–14 immediate focus (updated status)
 
-1. Fix email confirmation deliverability (DMARC record)
-2. Build public landing page
-3. Remove "Join your peers already using Funnl" copy (overclaims traction)
-4. Add CSV import CTA to empty-state dashboard
-5. Guide new users through contact → interaction → follow-up in one session
-6. Add Done, Snooze, Log Result to follow-ups page
-7. Fix activation analytics to capture CSV-first users
-8. Add Pro price + early-access interest button (no billing, just a tracked CTA)
+| # | Item | Status |
+|---|---|---|
+| 1 | Fix email confirmation deliverability (DMARC record) | ⚠️ Unverified — DNS change, not code |
+| 2 | Build public landing page | ✅ **Done — Phase 1** |
+| 3 | Remove "Join your peers already using Funnl" copy (overclaims traction) | ✅ **Done — Phase 1** |
+| 4 | Add CSV import CTA to empty-state dashboard | ✅ **Done — Phase 2A** |
+| 5 | Guide new users through contact → interaction → follow-up in one session | ⚠️ Partially complete — Phase 2A added the three-step checklist and durable milestone tracking. Phase 2B will add the direct first-contact → pre-opened interaction form handoff. |
+| 6 | Add Done, Snooze, Log Result to follow-ups page | 🔵 **Phase 3 — not yet built** |
+| 7 | Fix activation analytics to capture CSV-first users | 🔵 Partially — 5 new events added; CSV-first path improvement TBD |
+| 8 | Add Pro price + early-access interest button (no billing, just a tracked CTA) | 🔵 Not yet built |
 
 ---
 
