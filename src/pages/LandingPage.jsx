@@ -265,24 +265,21 @@ function LandingPage() {
               </thead>
               <tbody className="divide-y divide-[rgba(255,255,255,0.05)]">
                 {[
-                  ['Follow-up dashboard', false, true],
-                  ['Searchable notes', false, true],
-                  ['Tag and filter contacts', false, true],
-                  ['Import your existing data', 'Manual', true],
-                  ['AI insights', false, 'Pro'],
+                  ['Follow-up visibility',    'Manual setup',           true],
+                  ['Conversation history',    'Scattered across cells', 'Attached to each contact'],
+                  ['Tag and filter contacts', 'Manual upkeep',          true],
+                  ['Import existing contacts','Manual cleanup',          'Guided CSV import'],
+                  ['AI networking insights',  'Not built in',           'Pro'],
                 ].map(([feature, spreadsheet, funnl]) => (
                   <tr key={feature}>
                     <td className="py-4 text-[14px] text-mid">{feature}</td>
                     <td className="py-4 text-center">
-                      {spreadsheet === false
-                        ? <svg className="mx-auto" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#FF6B8A" strokeWidth="2.5" strokeLinecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
-                        : <span className="text-[13px] text-muted">{spreadsheet}</span>
-                      }
+                      <span className="text-[13px] text-muted">{spreadsheet}</span>
                     </td>
                     <td className="py-4 text-center">
                       {funnl === true
                         ? <svg className="mx-auto" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#2FD4B6" strokeWidth="2.5" strokeLinecap="round"><path d="M20 6L9 17l-5-5"/></svg>
-                        : <span className="text-[13px] text-accent font-semibold">{funnl}</span>
+                        : <span className={`text-[13px] font-semibold ${funnl === 'Pro' ? 'text-accent' : 'text-success'}`}>{funnl}</span>
                       }
                     </td>
                   </tr>
