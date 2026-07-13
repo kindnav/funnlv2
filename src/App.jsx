@@ -70,6 +70,9 @@ function App() {
           <Route path="/privacy" element={<PrivacyPage />} />
           <Route path="/welcome" element={<WelcomePage />} />
           <Route path="/reset-password" element={<ResetPasswordPage />} />
+          <Route path="/signin" element={<Navigate to="/" replace />} />
+          <Route path="/signup" element={<Navigate to="/" replace />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>
       <BottomNav />
