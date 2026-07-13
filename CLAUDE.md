@@ -312,8 +312,8 @@ The contacts page filter pills use `useSearchParams`. Active tag is stored as `?
 | **Phase 2A — Guided activation checklist** | ✅ Three-step checklist on DashboardPage: (1) add or import 5 contacts, (2) log the first conversation, (3) schedule the first follow-up. Milestones stored as four nullable `timestamptz` columns on `profiles` (the fourth records overall activation completion). Written with `WHERE col IS NULL` conditional updates for idempotent deduplication across tabs and sessions. Backfill included in migration `20260713075431_add_activation_milestones.sql`. CSV import button accessible from dashboard in addition to contacts page. |
 | **Vercel main-only deployments** | ✅ `vercel.json` `git.deploymentEnabled: { main: true, "*": false }`. Preview deployments disabled for all non-main branches. |
 | Rule-based reminders / cold alerts | 🔵 Layer 2 |
-| **Phase 2B — Guided first-contact-to-interaction handoff** | 🔵 Next — after the first manual contact add, navigate to that contact's detail page and auto-open the log-interaction form using Router state; preserve the existing Phase 2A milestone tracking |
-| **Phase 3 — Complete follow-up loop** | 🔵 Later — Mark done, Snooze, Log Result on `/followups`; badge synchronization via custom browser event |
+| **Phase 2B — Guided first-contact-to-interaction handoff** | ✅ After the first manual contact add from the Dashboard (`contactCount === 0`), navigates to that contact's detail page with Router state `{ openInteractionForm: true }`. ContactDetailPage reads this state on mount, calls `setShowForm(true)`, then immediately clears the state via `navigate(pathname, { replace: true, state: {} })` so refresh and Back do not reopen it. Scroll-into-view effect handles mobile: fires after both `showForm` becomes true AND `loading` becomes false (ref is null during the loading screen). `AddContactDrawer` now returns the new contact's `id` via `.select('id').single()` and passes it to `onSuccess?.(newContact?.id ?? null)`. Existing Phase 2A milestone tracking untouched. Phase 3 is next. |
+| **Phase 3 — Complete follow-up loop** | 🔵 Next — Mark done, Snooze, Log Result on `/followups`; badge synchronization via custom browser event |
 | **Phase 4 — Remaining pilot analytics and launch work** | 🔵 Later |
 
 ---
@@ -593,7 +593,7 @@ Recommended positioning:
 | 2 | Build public landing page | ✅ **Done — Phase 1** |
 | 3 | Remove "Join your peers already using Funnl" copy (overclaims traction) | ✅ **Done — Phase 1** |
 | 4 | Add CSV import CTA to empty-state dashboard | ✅ **Done — Phase 2A** |
-| 5 | Guide new users through contact → interaction → follow-up in one session | ⚠️ Partially complete — Phase 2A added the three-step checklist and durable milestone tracking. Phase 2B will add the direct first-contact → pre-opened interaction form handoff. |
+| 5 | Guide new users through contact → interaction → follow-up in one session | ✅ **Done — Phase 2A + Phase 2B.** Phase 2A: three-step checklist + durable milestone tracking. Phase 2B: first contact add navigates to the contact's detail page with the interaction form pre-opened. |
 | 6 | Add Done, Snooze, Log Result to follow-ups page | 🔵 **Phase 3 — not yet built** |
 | 7 | Fix activation analytics to capture CSV-first users | 🔵 Partially — 5 new events added; CSV-first path improvement TBD |
 | 8 | Add Pro price + early-access interest button (no billing, just a tracked CTA) | 🔵 Not yet built |

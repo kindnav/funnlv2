@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import AddContactDrawer from '../components/AddContactDrawer'
 import ImportContactsModal from '../components/ImportContactsModal'
@@ -40,6 +40,7 @@ function ChecklistStep({ done, label, children }) {
 }
 
 function DashboardPage() {
+  const navigate = useNavigate()
   const [contactCount,       setContactCount]       = useState(0)
   const [interactionCount,   setInteractionCount]   = useState(0)
   const [newContactsWeek,    setNewContactsWeek]    = useState(0)
@@ -492,7 +493,14 @@ function DashboardPage() {
           />
           <AddContactDrawer
             onClose={() => setShowDrawer(false)}
-            onSuccess={() => { setShowDrawer(false); fetchAll() }}
+            onSuccess={(newId) => {
+              setShowDrawer(false)
+              if (contactCount === 0 && newId) {
+                navigate(`/contacts/${newId}`, { state: { openInteractionForm: true } })
+              } else {
+                fetchAll()
+              }
+            }}
           />
         </>
       )}

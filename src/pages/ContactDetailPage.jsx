@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from 'react'
-import { useParams, Link, useNavigate } from 'react-router-dom'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { useParams, Link, useLocation, useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { getAvatarColor, getInitials } from '../lib/avatarUtils'
 import { track } from '../lib/analytics'
@@ -67,6 +67,7 @@ const TYPE_OPTIONS = ['Coffee chat', 'Email', 'Event', 'Call', 'Message', 'Other
 function ContactDetailPage() {
   const { id } = useParams()
   const navigate = useNavigate()
+  const location = useLocation()
 
   const [contact, setContact] = useState(null)
   const [interactions, setInteractions] = useState([])
@@ -97,6 +98,8 @@ function ContactDetailPage() {
   const [deletingInteractionId, setDeletingInteractionId] = useState(null)
   const [interactionsError, setInteractionsError] = useState('')
 
+  const interactionFormRef = useRef(null)
+
   const fetchContact = useCallback(async () => {
     const { data, error } = await supabase.from('contacts').select('*').eq('id', id).single()
     if (error) setError(error.message); else setContact(data)
@@ -117,6 +120,21 @@ function ContactDetailPage() {
     fetchContact()
     fetchInteractions()
   }, [fetchContact, fetchInteractions])
+
+  useEffect(() => {
+    if (location.state?.openInteractionForm) {
+      setShowForm(true)
+      navigate(location.pathname, { replace: true, state: {} })
+    }
+  }, [location.state, location.pathname, navigate])
+
+  // Runs whenever showForm or loading changes — handles the case where the form
+  // was requested before the contact finished loading (ref is null until loading=false)
+  useEffect(() => {
+    if (showForm && !loading) {
+      interactionFormRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }
+  }, [showForm, loading])
 
   function startEdit() {
     setEditForm({
@@ -485,7 +503,7 @@ function ContactDetailPage() {
 
                 {/* Log interaction form */}
                 {showForm && (
-                  <form onSubmit={handleLogInteraction} className="mb-5 space-y-3 bg-elevated border border-[rgba(255,255,255,0.07)] rounded-xl p-4">
+                  <form ref={interactionFormRef} onSubmit={handleLogInteraction} className="mb-5 space-y-3 bg-elevated border border-[rgba(255,255,255,0.07)] rounded-xl p-4">
                     <div>
                       <label className={lCls}>Type</label>
                       <select value={type} onChange={e => setType(e.target.value)} className={sCls}>
