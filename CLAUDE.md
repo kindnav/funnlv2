@@ -130,6 +130,8 @@ CLAUDE.md                  This file — project reference, keep current
 | `contact_added` | AddContactDrawer after insert | `{ via_ai_fill, has_tags, has_relationship_type }` — booleans only | Overall usage |
 | `interaction_logged` | ContactDetailPage handleLogInteraction | `{ interaction_type, has_follow_up, has_notes }` — controlled enum + booleans | Core value / retention signal |
 | `followup_set` | ContactDetailPage handleLogInteraction (when followUpDate set) | none | Feature usage |
+| `followup_completed` | FollowUpsPage handleDone / ContactDetailPage handleLogInteraction (via Log Result) | `{ method: 'mark_done'\|'log_result' }` — controlled enum only | Core loop closure |
+| `followup_snoozed` | FollowUpsPage handleSnooze | `{ option: 'tomorrow'\|'three_days'\|'one_week'\|'custom' }` — controlled enum only | Feature usage |
 | `csv_import_used` | ImportContactsModal handleImport | `{ contacts_imported: number }` | Feature usage |
 | `ai_assistant_used` | FunnlAIPage sendMessage on success | none | AI feature usage |
 | `ai_fill_used` | AddContactDrawer handleAIParse on success | `{ fields_filled: number }` | AI feature usage |
@@ -306,15 +308,15 @@ The contacts page filter pills use `useSearchParams`. Active tag is stored as `?
 | **CSV importer** | ✅ Import button on Contacts page opens a 3-step modal (upload → map → confirm). Mapping step: **pool-at-top UI** — unassigned columns shown prominently at the top as clickable chips ("click to place"); clicking a chip opens a field picker (1 click to assign). Field-first assignment also available via + Add on each field row. `normalizeHeader()` normalizes separators before lookup (first_name / first-name / first.name all match one HEADER_MAP entry). HEADER_MAP pruned of false-positive generic entries. Multiple columns combine in chip order (e.g. First Name + Last Name → "John Smith"). "— not assigned" placeholder on empty fields. Picker uses fixed-position viewport coords (not absolute) so scrollable container can't clip it. Tags: comma-separated cell values split into arrays. relationship_type and relationship_note are mappable fields. All-or-nothing bulk insert. `transformRow` AI seam intact. Known limitations: no duplicate detection, CSV-only, no cell-level editing. |
 | **Skills removed → relationship intent** | ✅ `skills` column dropped. `relationship_type` (preset select: Mentor/Collaborator/Referral path/Potential employer/Connector/Other) and `relationship_note` (freeform "why this person matters") added to contacts table, all forms, detail page, importer, and AI context. AI Fill extracts `relationship_note` from freeform text but never auto-selects `relationship_type` (deliberate user choice). |
 | **Dynamic sidebar YOUR TAGS** | ✅ Replaced hardcoded Pipeline section (Target firms/Recruiters/Alumni) with live user-tag groups. Queries contacts table on each nav change, counts tag occurrences in JS, sorts by count desc, caps at top 8. Deterministic dot colors per tag. Active tag highlighted. Empty state: "Tags you add to contacts will appear here." |
-| **Product analytics (PostHog)** | ✅ 13 events total (8 core + 2 Phase 1 + 3 Phase 2A). Core: user_signed_up, first_contact_added, contact_added, interaction_logged, followup_set, csv_import_used, ai_assistant_used, ai_fill_used. Phase 1 additions: landing_cta_clicked, signup_started. Phase 2A additions: activation_checklist_viewed, activation_step_completed, activation_completed. Autocapture off. Behavior only — no contact content. Users identified by Supabase ID. |
+| **Product analytics (PostHog)** | ✅ 15 events total (8 core + 2 Phase 1 + 3 Phase 2A + 2 Phase 3). Core: user_signed_up, first_contact_added, contact_added, interaction_logged, followup_set, csv_import_used, ai_assistant_used, ai_fill_used. Phase 1 additions: landing_cta_clicked, signup_started. Phase 2A additions: activation_checklist_viewed, activation_step_completed, activation_completed. Phase 3 additions: followup_completed, followup_snoozed. Autocapture off. Behavior only — no contact content. Users identified by Supabase ID. |
 | **Privacy policy** | ✅ `/privacy` — plain-language page covering data stored, all third parties (Supabase, Anthropic, PostHog, Resend, Vercel), analytics disclosure, user rights, contact email. Linked from sign-in page and settings. Accessible logged-out. |
 | **Phase 1 — Public landing page** | ✅ `LandingPage.jsx` at `/` for logged-out users. 11 sections: nav, hero with annotated product mock, marquee ticker, problem statement, feature rows (01–03), Funnl AI section, who-it's-for grid, comparison table, privacy note, final CTA, footer. `/signin` and `/signup` as separate routes, mode auto-detected from pathname. Post-sign-in `navigate('/', { replace: true })` prevents blank screen. All product claims verified against actual functionality. |
 | **Phase 2A — Guided activation checklist** | ✅ Three-step checklist on DashboardPage: (1) add or import 5 contacts, (2) log the first conversation, (3) schedule the first follow-up. Milestones stored as four nullable `timestamptz` columns on `profiles` (the fourth records overall activation completion). Written with `WHERE col IS NULL` conditional updates for idempotent deduplication across tabs and sessions. Backfill included in migration `20260713075431_add_activation_milestones.sql`. CSV import button accessible from dashboard in addition to contacts page. |
 | **Vercel main-only deployments** | ✅ `vercel.json` `git.deploymentEnabled: { main: true, "*": false }`. Preview deployments disabled for all non-main branches. |
 | Rule-based reminders / cold alerts | 🔵 Layer 2 |
 | **Phase 2B — Guided first-contact-to-interaction handoff** | ✅ After the first manual contact add from the Dashboard (`contactCount === 0`), navigates to that contact's detail page with Router state `{ openInteractionForm: true }`. ContactDetailPage reads this state on mount, calls `setShowForm(true)`, then immediately clears the state via `navigate(pathname, { replace: true, state: {} })` so refresh and Back do not reopen it. Scroll-into-view effect handles mobile: fires after both `showForm` becomes true AND `loading` becomes false (ref is null during the loading screen). `AddContactDrawer` now returns the new contact's `id` via `.select('id').single()` and passes it to `onSuccess?.(newContact?.id ?? null)`. Existing Phase 2A milestone tracking untouched. Phase 3 is next. |
-| **Phase 3 — Complete follow-up loop** | 🔵 Next — Mark done, Snooze, Log Result on `/followups`; badge synchronization via custom browser event |
-| **Phase 4 — Remaining pilot analytics and launch work** | 🔵 Later |
+| **Phase 3 — Complete follow-up loop** | ✅ Done — Mark Done, Snooze/Reschedule, Log Result on `/followups`. Badge synchronization via `funnl:followups-changed` custom event. try/finally ensures savingId clears. Row-match verification via `.select('id').single()`. Log Result carries `sourceFollowUpId` Router state → ContactDetailPage clears old follow-up after new interaction saves. Partial-failure path preserved. |
+| **Phase 4 — Remaining pilot analytics and launch work** | 🔵 Next |
 
 ---
 
@@ -567,7 +569,7 @@ Recommended positioning:
 |---|---|---|---|---|
 | 1 | Public landing page (screenshots, differentiation, pricing test, CTA) | 5 | 2 | ✅ Done — Phase 1 |
 | 2 | Guided activation: contacts → log interaction → set follow-up | 5 | 3 | ✅ Done — Phase 2A |
-| 3 | Mark done / snooze / log-result on follow-ups | 5 | 3 | 🔵 Phase 3 |
+| 3 | Mark done / snooze / log-result on follow-ups | 5 | 3 | ✅ Done — Phase 3 |
 | 4 | Fix email deliverability / add Google OAuth | 5 | 2 | ⚠️ Unverified operationally |
 | 5 | Run concierge pilot with 10 qualified students | 5 | 2 | 🔵 Not started |
 | 6 | Weekly reminder email + overdue notifications | 5 | 3 | 🔵 Not started |
@@ -594,7 +596,7 @@ Recommended positioning:
 | 3 | Remove "Join your peers already using Funnl" copy (overclaims traction) | ✅ **Done — Phase 1** |
 | 4 | Add CSV import CTA to empty-state dashboard | ✅ **Done — Phase 2A** |
 | 5 | Guide new users through contact → interaction → follow-up in one session | ✅ **Done — Phase 2A + Phase 2B.** Phase 2A: three-step checklist + durable milestone tracking. Phase 2B: first contact add navigates to the contact's detail page with the interaction form pre-opened. |
-| 6 | Add Done, Snooze, Log Result to follow-ups page | 🔵 **Phase 3 — not yet built** |
+| 6 | Add Done, Snooze, Log Result to follow-ups page | ✅ **Done — Phase 3** |
 | 7 | Fix activation analytics to capture CSV-first users | 🔵 Partially — 5 new events added; CSV-first path improvement TBD |
 | 8 | Add Pro price + early-access interest button (no billing, just a tracked CTA) | 🔵 Not yet built |
 
