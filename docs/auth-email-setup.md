@@ -79,6 +79,8 @@ the specific record names and values; copying them from elsewhere risks mismatch
 4. If aggregate reports are wanted, use a dedicated monitoring mailbox or a legitimate DMARC
    reporting service — not a personal email address.
 5. Do not add a subdomain DMARC policy without first understanding the root DMARC policy.
+6. Do not weaken an existing working DMARC policy from quarantine or reject to none without
+   understanding why it was configured.
 
 ### Verification
 
@@ -157,8 +159,23 @@ adding it avoids any edge case where Supabase validates the redirect before that
 - Production: `emailRedirectTo: 'https://www.getfunnl.com/welcome'`
 - Local dev: `emailRedirectTo: window.location.origin + '/welcome'` (e.g. `http://localhost:5173/welcome`)
 
-The production value must appear in the Supabase Redirect URLs allowlist above or Supabase will
-reject it. The local dev value is not added to the production allowlist.
+The production values must appear in the Supabase Redirect URLs allowlist or Supabase will
+reject them.
+
+**Local development testing against the linked Supabase project:**
+
+Testing the confirmation and password-reset flows locally requires the exact localhost URLs to be
+allowlisted in the same Supabase project. Add only the URLs for the port you use for auth testing,
+for example:
+
+```
+http://localhost:5173/welcome
+http://localhost:5173/reset-password
+```
+
+Use a stable port for auth testing — if the port changes, the new origin must be added. After
+testing, unused localhost URLs can be removed from the allowlist. Do not add an unrestricted
+wildcard that would cover arbitrary domains.
 
 `handleForgotPassword` uses:
 - Production: `redirectTo: 'https://www.getfunnl.com/reset-password'`

@@ -8,7 +8,7 @@ Keep this file current. When we make a durable decision, finish a feature, chang
 
 **Funnl is a live, deployed, multi-user MVP.** The full sign-up → email confirmation → sign-in → app flow works end to end.
 
-- Live at **https://getfunnl.com** (www redirects to it)
+- Live at **https://www.getfunnl.com** (getfunnl.com redirects to www)
 - Deployed on Vercel, auto-deploys on push to `main`
 - Resend.com is the transactional email provider (existing, connected via Supabase SMTP). Confirmation emails frequently land in spam — deliverability has not yet been fixed; see Task 1 in Known future work.
 - Supabase URL configuration: Site URL and Redirect URLs need to be verified in the dashboard; see `docs/auth-email-setup.md` Part 4.
@@ -44,9 +44,9 @@ The data schema (notes as freeform text, tags/skills as text arrays) was deliber
 - **Tailwind CSS v4** — custom tokens in `src/index.css` using `@theme {}` block (not a config file)
 - **Supabase** — PostgreSQL + auth; credentials in `.env` (never commit `.env`). URL config: Site URL = `https://www.getfunnl.com`, Redirect URLs include `https://www.getfunnl.com/welcome` and `https://www.getfunnl.com/**`. Signup confirmation uses `emailRedirectTo: 'https://www.getfunnl.com/welcome'` (set explicitly in `handleSignUp` in `SignInPage.jsx`). Setup guide: `docs/auth-email-setup.md`.
 - **React Router v7** — client-side routing
-- **Vercel** — live at `https://getfunnl.com`. Connected to GitHub (kindnav/funnlv2), auto-deploys on push to `main`. Env vars (`VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `VITE_POSTHOG_KEY`, `VITE_POSTHOG_HOST`) set in Vercel project settings. `vercel.json` at project root rewrites all routes to `index.html` so direct URL visits don't 404. `git.deploymentEnabled` is set to `{ "main": true, "*": false }` — only `main` generates a Vercel deployment; non-main branches do not create preview deployments.
+- **Vercel** — live at `https://www.getfunnl.com`. Connected to GitHub (kindnav/funnlv2), auto-deploys on push to `main`. Env vars (`VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `VITE_POSTHOG_KEY`, `VITE_POSTHOG_HOST`) set in Vercel project settings. `vercel.json` at project root rewrites all routes to `index.html` so direct URL visits don't 404. `git.deploymentEnabled` is set to `{ "main": true, "*": false }` — only `main` generates a Vercel deployment; non-main branches do not create preview deployments.
 - **PostHog** — product analytics. Project API key in `VITE_POSTHOG_KEY` (public/client-side key — safe to expose in frontend, unlike Anthropic/service-role keys). US region, host `https://us.i.posthog.com`. Autocapture disabled — only explicit events tracked. Wrapper at `src/lib/analytics.js`.
-- **Cloudflare DNS** — two CNAME records pointing `getfunnl.com` and `www.getfunnl.com` to Vercel, set to DNS-only (grey cloud). `www` redirects to apex. Domain also used for Resend email verification (SPF + DKIM records present, DMARC pending — see Task 1).
+- **Cloudflare DNS** — two CNAME records pointing `getfunnl.com` and `www.getfunnl.com` to Vercel, set to DNS-only (grey cloud). `getfunnl.com` redirects to `www.getfunnl.com`; www serves the application. Domain also used for Resend email authentication (DNS record status unverified — see Task 1 and `docs/auth-email-setup.md`).
 
 ---
 
@@ -110,7 +110,7 @@ supabase/
 | `/` | DashboardPage | Landing screen after login; activation checklist shown until all 3 steps complete |
 | `/contacts` | ContactsPage | Grid + search + filter; `?tag=recruiter` drives filter pills |
 | `/contacts/:id` | ContactDetailPage | Full profile + interaction timeline |
-| `/followups` | FollowUpsPage | Real data — overdue/today/upcoming buckets; Mark done/Snooze are Phase 3 |
+| `/followups` | FollowUpsPage | Real data — overdue/today/upcoming buckets; Mark Done, Snooze, Log Result complete |
 | `/ai` | FunnlAIPage | Working AI chat for Pro users; locked state for non-Pro |
 | `/settings` | SettingsPage | Display name + sign out; reads/writes `profiles` table |
 | `/welcome` | WelcomePage | Email-confirmation landing; no sidebar; accessible while authenticated |
@@ -308,7 +308,7 @@ The contacts page filter pills use `useSearchParams`. Active tag is stored as `?
 | Dashboard with real stats + follow-up list | ✅ |
 | Add contact drawer (slide-in, Escape closes, scroll locked) | ✅ |
 | Per-user data isolation (RLS, two-user verified) | ✅ |
-| Follow-ups screen (`/followups`) | ✅ Real data — shows all interactions with a follow_up_date, bucketed into Overdue / Today / Upcoming with correct local-timezone date logic. Mark done / Snooze / Log Result are Phase 3. |
+| Follow-ups screen (`/followups`) | ✅ Real data — shows all interactions with a follow_up_date, bucketed into Overdue / Today / Upcoming with correct local-timezone date logic. Mark Done, Snooze/Reschedule, Log Result all complete (Phase 3). |
 | Funnl AI screen (`/ai`) | ✅ Working AI chat UI. Pro users get full multi-turn chat backed by Edge Function `ai-chat` (claude-sonnet-5). Non-Pro users see a locked state. react-markdown renders assistant replies. |
 | Empty states (all screens) | ✅ Contacts zero-state has icon + "Start building your network" CTA; search/filter no-results has icon + clear-filters link; all other screens handled. |
 | **Full dark redesign** | ✅ **Complete** — all 8 screens restyled to the Funnl design system (dark palette, Space Grotesk/Jakarta Sans/JetBrains Mono, shared sidebar). |
@@ -328,7 +328,7 @@ The contacts page filter pills use `useSearchParams`. Active tag is stored as `?
 | **Phase 2A — Guided activation checklist** | ✅ Three-step checklist on DashboardPage: (1) add or import 5 contacts, (2) log the first conversation, (3) schedule the first follow-up. Milestones stored as four nullable `timestamptz` columns on `profiles` (the fourth records overall activation completion). Written with `WHERE col IS NULL` conditional updates for idempotent deduplication across tabs and sessions. Backfill included in migration `20260713075431_add_activation_milestones.sql`. CSV import button accessible from dashboard in addition to contacts page. |
 | **Vercel main-only deployments** | ✅ `vercel.json` `git.deploymentEnabled: { main: true, "*": false }`. Preview deployments disabled for all non-main branches. |
 | Rule-based reminders / cold alerts | 🔵 Layer 2 |
-| **Phase 2B — Guided first-contact-to-interaction handoff** | ✅ After the first manual contact add from the Dashboard (`contactCount === 0`), navigates to that contact's detail page with Router state `{ openInteractionForm: true }`. ContactDetailPage reads this state on mount, calls `setShowForm(true)`, then immediately clears the state via `navigate(pathname, { replace: true, state: {} })` so refresh and Back do not reopen it. Scroll-into-view effect handles mobile: fires after both `showForm` becomes true AND `loading` becomes false (ref is null during the loading screen). `AddContactDrawer` now returns the new contact's `id` via `.select('id').single()` and passes it to `onSuccess?.(newContact?.id ?? null)`. Existing Phase 2A milestone tracking untouched. Phase 3 is next. |
+| **Phase 2B — Guided first-contact-to-interaction handoff** | ✅ After the first manual contact add from the Dashboard (`contactCount === 0`), navigates to that contact's detail page with Router state `{ openInteractionForm: true }`. ContactDetailPage reads this state on mount, calls `setShowForm(true)`, then immediately clears the state via `navigate(pathname, { replace: true, state: {} })` so refresh and Back do not reopen it. Scroll-into-view effect handles mobile: fires after both `showForm` becomes true AND `loading` becomes false (ref is null during the loading screen). `AddContactDrawer` now returns the new contact's `id` via `.select('id').single()` and passes it to `onSuccess?.(newContact?.id ?? null)`. Existing Phase 2A milestone tracking untouched. |
 | **Phase 3 — Complete follow-up loop** | ✅ Done — Mark Done, Snooze/Reschedule, Log Result on `/followups`. Badge synchronization via `funnl:followups-changed` custom event. try/finally ensures savingId clears. Row-match verification via `.select('id').single()`. Log Result carries `sourceFollowUpId` Router state → ContactDetailPage clears old follow-up after new interaction saves. Partial-failure path preserved. |
 | **Phase 4 — Remaining pilot analytics and launch work** | 🔵 Next |
 
@@ -575,7 +575,7 @@ Recommended positioning:
 | # | Issue | File | Status |
 |---|---|---|---|
 | 1 | No public landing page | `App.jsx` — wildcard renders `SignInPage` for logged-out users | ✅ **Fixed — Phase 1.** `LandingPage.jsx` at `/` for logged-out users. |
-| 2 | Follow-up loop is incomplete | `FollowUpsPage.jsx` — display only, no Done/Snooze/Log | 🔵 **Phase 3 — not yet built.** |
+| 2 | Follow-up loop is incomplete | `FollowUpsPage.jsx` — display only, no Done/Snooze/Log | ✅ **Fixed — Phase 3.** Mark Done, Snooze, Log Result all complete. |
 | 3 | No Pro path to purchase or test | `FunnlAIPage.jsx` — locked state has no price or waitlist | 🔵 **Not yet built.** |
 | 4 | Email deliverability (spam) | Documented in Known future work → Task 1 | ⚠️ **Unverified operationally** — cannot be determined from code. |
 

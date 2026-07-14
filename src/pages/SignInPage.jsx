@@ -60,6 +60,21 @@ function SignInPage() {
     return () => { if (resendTimerRef.current) clearInterval(resendTimerRef.current) }
   }, [])
 
+  function startResendCooldown() {
+    if (resendTimerRef.current) clearInterval(resendTimerRef.current)
+    setResendCooldown(60)
+    resendTimerRef.current = setInterval(() => {
+      setResendCooldown(prev => {
+        if (prev <= 1) {
+          clearInterval(resendTimerRef.current)
+          resendTimerRef.current = null
+          return 0
+        }
+        return prev - 1
+      })
+    }, 1000)
+  }
+
   function switchMode(newMode) {
     setMode(newMode)
     setEmail('')
@@ -99,6 +114,7 @@ function SignInPage() {
     setLoading(false)
     if (error) { setError(error.message); return }
     track('user_signed_up')
+    startResendCooldown()
     setMode('pending')
   }
 
@@ -135,22 +151,7 @@ function SignInPage() {
       }
 
       setResendStatus('sent')
-      setResendCooldown(60)
-
-      if (resendTimerRef.current) {
-        clearInterval(resendTimerRef.current)
-      }
-
-      resendTimerRef.current = setInterval(() => {
-        setResendCooldown(prev => {
-          if (prev <= 1) {
-            clearInterval(resendTimerRef.current)
-            resendTimerRef.current = null
-            return 0
-          }
-          return prev - 1
-        })
-      }, 1000)
+      startResendCooldown()
     } catch {
       setResendStatus('error')
       setResendError('Something went wrong. Please try again.')
@@ -276,7 +277,7 @@ function SignInPage() {
               <span className="font-semibold text-hi">{email}</span>.
             </p>
             <p className="text-[15px] leading-relaxed text-[#9A9AA5] mb-8">
-              Click that link to verify your account. Check your spam folder if you don't see it within a minute.
+              Click that link to verify your account. Check your spam or promotions folder if you don't see it.
             </p>
 
             <div className="mb-8">
