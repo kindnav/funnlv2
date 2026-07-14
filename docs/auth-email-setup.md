@@ -16,9 +16,16 @@ The confirmation email flow is:
 User signs up → Supabase Auth issues a confirmation → Resend delivers the email → User clicks link → /welcome
 ```
 
-**Known issue:** Confirmation emails frequently land in Junk or Spam folders. The cause has not yet
-been diagnosed from code — it requires inspecting the actual Resend.com account, DNS records, and
-delivered email headers. This guide documents that process.
+**Deliverability status (as of 2026-07-13):**
+- Resend domain `send.getfunnl.com` is **Verified** in Resend.com → Domains
+- DKIM, SPF, and return-path MX are verified at `send.getfunnl.com` (the sending subdomain)
+- Sender: `Funnl <team@getfunnl.com>`
+- Email template saved in Supabase → Auth → Email Templates
+- Gmail delivery: reaches **Primary inbox** ✓
+- iCloud delivery: **lands in Junk** — unresolved (not a DNS failure; SPF/DKIM pass)
+- Outlook: not yet tested
+
+The remaining item before inviting students is resolving the iCloud Junk placement and completing the Outlook test.
 
 ---
 
@@ -87,18 +94,18 @@ the specific record names and values; copying them from elsewhere risks mismatch
 DNS is correct when Resend.com → Domains shows the domain as **Verified** with all records
 passing. The Resend dashboard is the authoritative check — third-party tools are supplementary only.
 
-### Sending domain choice
+### Verified sending configuration (2026-07-13)
 
-Whether to use `getfunnl.com` or a subdomain such as `mail.getfunnl.com` as the sending domain
-should be based on what is actually configured and verified in Resend today:
+Funnl's sending domain is the subdomain `send.getfunnl.com` — not the root domain.
 
-- If the root domain is already Verified in Resend and aligned with Supabase's From address,
-  preserve it.
-- If the root domain is unverified, in conflict with other mail services, or not aligned with the
-  From address, a dedicated subdomain may improve reputation isolation.
+- **DKIM**: TXT record at `resend._domainkey.send.getfunnl.com` — verified
+- **SPF**: verified at `send.getfunnl.com`
+- **Return-path MX**: verified at `send.getfunnl.com`
+- **No root SPF record exists or is needed** — do not add one; SPF lives on the sending subdomain
 
-Do not switch sending domains without first reviewing the current Resend domain list. Changing
-domains without understanding the current configuration can make delivery worse.
+The sender From address is `Funnl <team@getfunnl.com>`. This From address is aligned with the
+root domain while Resend handles authentication through the `send.getfunnl.com` subdomain.
+Do not change the sending domain or add a root SPF record.
 
 ---
 
@@ -106,11 +113,14 @@ domains without understanding the current configuration can make delivery worse.
 
 The source template is at `supabase/templates/confirm-signup.html`.
 
+**Status: template saved in Supabase → Auth → Email Templates → Confirm signup (2026-07-13).
+Subject line is set. Do not re-apply unless the template source changes.**
+
 **This file is version-controlled source code. Committing it to the repository does NOT
 automatically update the Supabase email template.** It must be copied into the Supabase
 dashboard editor manually.
 
-### To apply the template
+### To apply the template (if re-applying after changes)
 
 1. Open `supabase/templates/confirm-signup.html` in a text editor.
 2. Select all and copy the complete HTML.
@@ -257,7 +267,13 @@ This is enforced server-side and requires no code changes.
 The migration `supabase/migrations/20260713185900_harden_handle_new_user.sql` revokes direct
 EXECUTE access on `public.handle_new_user()` from `PUBLIC`, `anon`, and `authenticated`.
 
-**Status: committed and reviewed. Not yet applied.**
+**Status: applied to production 2026-07-13 via `supabase db push`. Verified.**
+
+Post-migration verification confirmed:
+- `PUBLIC` absent from explicit ACL on `handle_new_user()`
+- `anon` and `authenticated` effective execute = `false`
+- `on_auth_user_created` trigger still enabled
+- Function owner, `SECURITY DEFINER`, and `search_path` unchanged
 
 `handle_new_user()` is a `SECURITY DEFINER` function that runs with its owner's privileges.
 It auto-creates a `profiles` row on user signup. It should only be invoked by the database
@@ -336,35 +352,37 @@ above has been followed and approval has been obtained.**
 ## Checklist (before inviting real students)
 
 ### Resend.com
-- [ ] Domain shows **Verified** in Resend.com → Domains
-- [ ] Sender email in Supabase SMTP matches the verified Resend domain
-- [ ] Recent confirmation emails in Resend Logs show `delivered`
+- [x] Domain `send.getfunnl.com` shows **Verified** in Resend.com → Domains
+- [x] Sender `Funnl <team@getfunnl.com>` confirmed; Supabase SMTP aligned
+- [x] Recent confirmation emails in Resend Logs show `delivered`
 
 ### Cloudflare DNS
-- [ ] SPF record matches Resend's required value exactly (copied from Resend, not from any other source)
-- [ ] DKIM record(s) match Resend's required values exactly (may be CNAME, not TXT)
-- [ ] No duplicate SPF record at the same hostname
-- [ ] DMARC record present with `p=none` and a monitored reporting address
-- [ ] Resend.com → Domains shows all records as passing
+- [x] SPF verified at `send.getfunnl.com` (sending subdomain — no root SPF record needed or present)
+- [x] DKIM TXT verified at `resend._domainkey.send.getfunnl.com`
+- [x] Return-path MX verified at `send.getfunnl.com`
+- [x] DMARC record present at `_dmarc.getfunnl.com` with `p=none` and reporting address
+- [x] Resend.com → Domains shows all records as passing
 
 ### Supabase
-- [ ] Custom SMTP enabled and test email delivered
-- [ ] Site URL = `https://www.getfunnl.com`
-- [ ] Redirect URLs include `https://www.getfunnl.com/welcome` and `https://www.getfunnl.com/**`
-- [ ] Confirm signup template updated from `supabase/templates/confirm-signup.html`
-- [ ] Subject set to: Confirm your email to start using Funnl
-- [ ] Leaked password protection enabled
+- [x] Custom SMTP enabled with Resend
+- [x] Site URL = `https://www.getfunnl.com`
+- [x] Redirect URLs include `https://www.getfunnl.com/welcome` and `https://www.getfunnl.com/**`
+- [x] Confirm signup template saved — `supabase/templates/confirm-signup.html` applied 2026-07-13
+- [x] Subject set to: Confirm your email to start using Funnl
+- [ ] Leaked password protection: confirm enabled in Supabase → Auth → Password Protection
 
 ### End-to-end delivery tests
-- [ ] Gmail test: confirmation email arrives in Inbox (not Spam) — SPF, DKIM, DMARC all pass
-- [ ] Outlook test: confirmation email arrives in Inbox (not Junk)
-- [ ] Confirmation link in email reaches `https://www.getfunnl.com/welcome`
-- [ ] Resend confirmation button shows 60-second countdown
-- [ ] Password-reset email also delivered successfully
+- [x] Gmail test: confirmation email arrives in **Primary inbox** — SPF, DKIM, DMARC pass
+- [ ] iCloud test: currently **lands in Junk** — unresolved (DNS is not the cause)
+- [ ] Outlook test: not yet tested
+- [x] Confirmation link in email reaches `https://www.getfunnl.com/welcome`
+- [x] Resend confirmation button shows 60-second countdown
+
+### Routing (code)
+- [x] `/welcome` and `/reset-password` always render full-screen, outside the Sidebar/BottomNav shell — fixed in App.jsx 2026-07-13
+- [x] `emailRedirectTo: welcomeRedirectUrl` in both `handleSignUp` and `handleResend`
 
 ### Security migration
-- [ ] `supabase migration list` shows migration as pending (local only)
-- [ ] `supabase db push --dry-run` reviewed and approved
-- [ ] `supabase db push` applied
-- [ ] Privilege verification queries pass (`has_execute = false` for anon and authenticated)
-- [ ] New signup creates a `profiles` row with correct fields
+- [x] `supabase db push` applied 2026-07-13
+- [x] Privilege verification: `has_execute = false` for `anon` and `authenticated`; `PUBLIC` absent from ACL
+- [ ] New signup test after migration: confirm `profiles` row created with correct fields

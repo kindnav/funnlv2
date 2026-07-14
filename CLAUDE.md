@@ -10,9 +10,9 @@ Keep this file current. When we make a durable decision, finish a feature, chang
 
 - Live at **https://www.getfunnl.com** (getfunnl.com redirects to www)
 - Deployed on Vercel, auto-deploys on push to `main`
-- Resend.com is the transactional email provider (existing, connected via Supabase SMTP). Confirmation emails frequently land in spam — deliverability has not yet been fixed; see Task 1 in Known future work.
-- Supabase URL configuration: Site URL and Redirect URLs need to be verified in the dashboard; see `docs/auth-email-setup.md` Part 4.
-- **Not yet shared with real students** — email deliverability (spam folder issue) needs to be resolved first; see Task 1 in Known future work
+- Resend.com is the transactional email provider (existing, connected via Supabase SMTP). Sending domain `send.getfunnl.com` is Verified; DKIM/SPF/MX all verified. Gmail delivery reaches Primary inbox. iCloud places in Junk (unresolved — not a DNS failure). Outlook not yet tested. See Task 1 in Known future work.
+- Supabase URL configuration: Site URL = `https://www.getfunnl.com`; Redirect URLs include `/welcome` and `/**`. Confirm signup template applied 2026-07-13.
+- **Not yet shared with real students** — iCloud Junk placement and Outlook test still pending; see Task 1 in Known future work
 
 ---
 
@@ -46,7 +46,7 @@ The data schema (notes as freeform text, tags/skills as text arrays) was deliber
 - **React Router v7** — client-side routing
 - **Vercel** — live at `https://www.getfunnl.com`. Connected to GitHub (kindnav/funnlv2), auto-deploys on push to `main`. Env vars (`VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `VITE_POSTHOG_KEY`, `VITE_POSTHOG_HOST`) set in Vercel project settings. `vercel.json` at project root rewrites all routes to `index.html` so direct URL visits don't 404. `git.deploymentEnabled` is set to `{ "main": true, "*": false }` — only `main` generates a Vercel deployment; non-main branches do not create preview deployments.
 - **PostHog** — product analytics. Project API key in `VITE_POSTHOG_KEY` (public/client-side key — safe to expose in frontend, unlike Anthropic/service-role keys). US region, host `https://us.i.posthog.com`. Autocapture disabled — only explicit events tracked. Wrapper at `src/lib/analytics.js`.
-- **Cloudflare DNS** — two CNAME records pointing `getfunnl.com` and `www.getfunnl.com` to Vercel, set to DNS-only (grey cloud). `getfunnl.com` redirects to `www.getfunnl.com`; www serves the application. Domain also used for Resend email authentication (DNS record status unverified — see Task 1 and `docs/auth-email-setup.md`).
+- **Cloudflare DNS** — two CNAME records pointing `getfunnl.com` and `www.getfunnl.com` to Vercel, set to DNS-only (grey cloud). `getfunnl.com` redirects to `www.getfunnl.com`; www serves the application. Resend email authentication records on `send.getfunnl.com` subdomain are verified (DKIM TXT at `resend._domainkey.send.getfunnl.com`, SPF, return-path MX). No root SPF record exists or should be added. DMARC at `_dmarc.getfunnl.com` with `p=none`.
 
 ---
 
@@ -423,23 +423,24 @@ Full review of every interactive element before first-student rollout. Only 3 is
 ## Known future work / tech debt
 
 ### ⚠️ Task 1 — Email deliverability (do BEFORE inviting real students)
-Confirmation emails currently land in recipients' spam/junk folders. Must be resolved before sharing widely, or students won't find their confirmation email and won't be able to sign in.
 
-**Fix process (follow `docs/auth-email-setup.md` for full detail):**
-1. **Audit existing Resend.com domain configuration** — open Resend.com → Domains and check whether the sending domain is Verified. The exact DNS record values required are shown by Resend for your account — do not use values from any other source.
-2. **Audit DNS records in Cloudflare** — compare the records Resend requires against what is currently in Cloudflare. Add or update only what is missing or mismatched. Do not invent SPF, DKIM, or DMARC values.
-3. **Apply the email template** — copy `supabase/templates/confirm-signup.html` into Supabase → Auth → Email Templates. Subject: "Confirm your email to start using Funnl". Do not use the Supabase "Send test email" button; test with a real signup.
-4. **Run Gmail and Outlook delivery tests** — create fresh test accounts; inspect email headers for SPF/DKIM/DMARC pass/fail; check Resend logs for delivered status.
-5. **Domain warm-up** — deliverability improves naturally over days/weeks as legitimate mail is sent and opened.
+**Verified as of 2026-07-13:**
+- Resend domain `send.getfunnl.com` Verified; DKIM/SPF/MX all pass
+- Confirm signup template applied; subject set
+- Gmail delivery: reaches **Primary inbox** ✓
+- `emailRedirectTo` wired in `SignInPage.jsx` for both `handleSignUp` and `handleResend`
 
-**None of these steps have been verified yet.** This is an operational task, not a code change.
+**Still open:**
+- iCloud: confirmation email lands in **Junk** — root cause unknown; DNS is not the failure point (SPF/DKIM pass). Possible causes: domain/IP reputation, content filtering, Apple's proprietary scoring. Try sending more legitimate mail, check Resend Logs for any spam signals, or test with a plain-text fallback.
+- Outlook: not yet tested — create a fresh Outlook address and run the signup flow; inspect headers.
+- Leaked password protection: confirm enabled in Supabase → Auth → Password Protection.
+- New signup test after the `harden_handle_new_user` migration: confirm `profiles` row is created correctly.
+- Domain warm-up: deliverability improves naturally over days/weeks as legitimate mail is sent and opened.
 
-### Task 2 — /welcome confirmation UX (polish, not a blocker)
-Currently, clicking the email confirmation link auto-logs the user in and drops them directly on the dashboard, skipping `/welcome`. The desired behavior is: land on the standalone `/welcome` page (no sidebar, no app shell), show the "You're all set" confirmation, then have the user click "Continue to sign in" and sign in manually.
+See `docs/auth-email-setup.md` for the full checklist.
 
-**Why it matters:** the `/welcome` page was built for this moment, but Supabase's default behavior creates a session immediately on confirmation click, so the app's auth gate sees a logged-in user and renders the full dashboard instead.
-
-**How to fix when ready:** In `WelcomePage.jsx`, call `supabase.auth.signOut()` on mount (before rendering), then show the page. This clears the auto-created session so the user arrives logged-out and signs in fresh. Small, self-contained change — revisit as a standalone task.
+### Task 2 — /welcome and /reset-password routing ✅ Fixed 2026-07-13
+`App.jsx` now uses React Router `useLocation` to detect these paths before either session branch. Both pages always render full-screen without the `Sidebar`/`BottomNav` shell, regardless of session state. `WelcomePage.jsx` already calls `supabase.auth.signOut()` when the user clicks "Continue to sign in" — no further change needed there.
 
 ### Before real launch (required)
 1. ~~**User profile (display name)**~~ — ✅ Done. `profiles` table + `/settings` page built. Sidebar shows saved display name. School field was removed from both the UI and the table.
