@@ -209,9 +209,7 @@ supabase/
 
 **Applied migrations:**
 - `supabase/migrations/20260713075431_add_activation_milestones.sql` — adds the four activation timestamp columns above to `profiles`, with backfill SQL for existing users. Applied to production 2026-07-13.
-
-**Pending migrations (committed, not yet applied):**
-- `supabase/migrations/20260713185900_harden_handle_new_user.sql` — revokes EXECUTE on `public.handle_new_user()` from `PUBLIC`, `anon`, and `authenticated`. Catalog queries verified 2026-07-13: function is SECURITY DEFINER, both API roles had execute privilege. Apply using `supabase db push` (not SQL Editor) after dry-run review and approval. Requires a real signup/profile creation test after application to confirm the trigger path is unaffected.
+- `supabase/migrations/20260713185900_harden_handle_new_user.sql` — revokes EXECUTE on `public.handle_new_user()` from `PUBLIC`, `anon`, and `authenticated`. Applied to production 2026-07-13 via `supabase db push`. Post-migration verification: PUBLIC absent from explicit ACL; `anon` and `authenticated` effective execute = false; trigger `on_auth_user_created` still enabled; function owner, SECURITY DEFINER, and search_path unchanged. Requires a real signup/profile creation test to confirm trigger path is unaffected.
 
 The original schema (contacts, interactions, profiles, RLS policies, triggers) was created manually in Supabase before the migration system was set up — no baseline migration file exists for it (known limitation).
 
