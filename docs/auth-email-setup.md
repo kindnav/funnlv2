@@ -17,8 +17,9 @@ User signs up → Supabase Auth issues a confirmation → Resend delivers the em
 ```
 
 **Deliverability status (as of 2026-07-13):**
-- Resend domain `send.getfunnl.com` is **Verified** in Resend.com → Domains
-- DKIM, SPF, and return-path MX are verified at `send.getfunnl.com` (the sending subdomain)
+- Resend domain `getfunnl.com` is **Verified** in Resend.com → Domains
+- DKIM TXT verified at `resend._domainkey.getfunnl.com`
+- SPF and return-path MX verified at `send.getfunnl.com` (custom return-path subdomain)
 - Sender: `Funnl <team@getfunnl.com>`
 - Email template saved in Supabase → Auth → Email Templates
 - Gmail delivery: reaches **Primary inbox** ✓
@@ -354,12 +355,12 @@ above has been followed and approval has been obtained.**
 ## Checklist (before inviting real students)
 
 ### Resend.com
-- [x] Domain `send.getfunnl.com` shows **Verified** in Resend.com → Domains
+- [x] Domain `getfunnl.com` shows **Verified** in Resend.com → Domains
 - [x] Sender `Funnl <team@getfunnl.com>` confirmed; Supabase SMTP aligned
 - [x] Recent confirmation emails in Resend Logs show `delivered`
 
 ### Cloudflare DNS
-- [x] SPF verified at `send.getfunnl.com` (sending subdomain — no root SPF record needed or present)
+- [x] SPF verified at `send.getfunnl.com` (custom return-path subdomain — no root SPF record needed or present)
 - [x] DKIM TXT verified at `resend._domainkey.getfunnl.com`
 - [x] Return-path MX verified at `send.getfunnl.com`
 - [x] DMARC record present at `_dmarc.getfunnl.com` with `p=none` and reporting address
