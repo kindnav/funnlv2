@@ -10,8 +10,8 @@ Keep this file current. When we make a durable decision, finish a feature, chang
 
 - Live at **https://getfunnl.com** (www redirects to it)
 - Deployed on Vercel, auto-deploys on push to `main`
-- Real email via Resend — confirmation emails send reliably from `noreply@getfunnl.com`
-- Supabase URL configuration set: Site URL = `https://getfunnl.com`, Redirect URLs include `/welcome` and `/**`
+- Resend.com is the transactional email provider (existing, connected via Supabase SMTP). Confirmation emails frequently land in spam — deliverability has not yet been fixed; see Task 1 in Known future work.
+- Supabase URL configuration: Site URL and Redirect URLs need to be verified in the dashboard; see `docs/auth-email-setup.md` Part 4.
 - **Not yet shared with real students** — email deliverability (spam folder issue) needs to be resolved first; see Task 1 in Known future work
 
 ---
@@ -81,7 +81,7 @@ src/
 index.html                 Google Fonts link tags (Plus Jakarta Sans, Space Grotesk, JetBrains Mono)
 CLAUDE.md                  This file — project reference, keep current
 docs/
-  auth-email-setup.md      Operational guide: Resend SMTP, Cloudflare DNS (SPF/DKIM/DMARC), Supabase URL config, email template, deliverability checklist, Leaked Password Protection, handle_new_user REVOKE migration
+  auth-email-setup.md      Operational guide: audit existing Resend.com config, DNS authentication (SPF/DKIM/DMARC — values from Resend only), Supabase URL config, apply email template, deliverability diagnosis (Gmail + Outlook tests, header inspection), Leaked Password Protection, handle_new_user migration CLI workflow
 supabase/
   templates/
     confirm-signup.html    Custom HTML email template for signup confirmation. MUST be pasted into Supabase → Auth → Email Templates → Confirm signup. Uses {{ .ConfirmationURL }} for the confirmation link.
@@ -209,7 +209,9 @@ supabase/
 
 **Applied migrations:**
 - `supabase/migrations/20260713075431_add_activation_milestones.sql` — adds the four activation timestamp columns above to `profiles`, with backfill SQL for existing users. Applied to production 2026-07-13.
-- `supabase/migrations/20260713185900_harden_handle_new_user.sql` — revokes EXECUTE on `public.handle_new_user()` from `PUBLIC`, `anon`, and `authenticated`. Verified 2026-07-13 via SQL catalog queries: function is SECURITY DEFINER, both API roles had execute privilege. The signup trigger (on_auth_user_created) is unaffected — SECURITY DEFINER execution does not depend on the caller having EXECUTE. **Must be applied in Supabase SQL Editor before going to production.**
+
+**Pending migrations (committed, not yet applied):**
+- `supabase/migrations/20260713185900_harden_handle_new_user.sql` — revokes EXECUTE on `public.handle_new_user()` from `PUBLIC`, `anon`, and `authenticated`. Catalog queries verified 2026-07-13: function is SECURITY DEFINER, both API roles had execute privilege. Apply using `supabase db push` (not SQL Editor) after dry-run review and approval. Requires a real signup/profile creation test after application to confirm the trigger path is unaffected.
 
 The original schema (contacts, interactions, profiles, RLS policies, triggers) was created manually in Supabase before the migration system was set up — no baseline migration file exists for it (known limitation).
 
@@ -311,8 +313,8 @@ The contacts page filter pills use `useSearchParams`. Active tag is stored as `?
 | Empty states (all screens) | ✅ Contacts zero-state has icon + "Start building your network" CTA; search/filter no-results has icon + clear-filters link; all other screens handled. |
 | **Full dark redesign** | ✅ **Complete** — all 8 screens restyled to the Funnl design system (dark palette, Space Grotesk/Jakarta Sans/JetBrains Mono, shared sidebar). |
 | **Robustness pass** | ✅ Error handling on all Supabase reads (dashboard, contact detail, follow-ups); local-timezone date logic consistent app-wide (sidebar badge, dashboard, contact detail, follow-ups all agree); avatar helpers extracted to `src/lib/avatarUtils.js`; AddContactDrawer rejects whitespace-only names and uses safe scroll-lock cleanup. |
-| **Real email / SMTP** | ✅ Resend connected via Supabase custom SMTP; sending from noreply@getfunnl.com; getfunnl.com verified on Cloudflare. |
-| **Email confirmation landing page** | ✅ `/welcome` — success screen (checkmark, "You're all set", "Continue to sign in"). No sidebar. Accessible logged-out. Supabase redirect URLs configured to point here. |
+| **Real email / SMTP** | ⚠️ Resend.com is the existing provider, connected via Supabase custom SMTP. Confirmation emails frequently land in spam. DNS authentication (SPF/DKIM/DMARC), template application, and deliverability testing are unverified — see `docs/auth-email-setup.md`. |
+| **Email confirmation landing page** | ✅ `/welcome` — success screen. No sidebar. Accessible logged-out. Code passes `emailRedirectTo` for `https://www.getfunnl.com/welcome`. Supabase Redirect URL allowlist needs verification in dashboard. |
 | **Deployed to production** | ✅ Live at getfunnl.com on Vercel. DNS on Cloudflare. Env vars set. SPA routing via vercel.json. Full sign-up → confirm → sign-in flow works end to end. |
 | **Mobile responsiveness** | ✅ BottomNav (4 tabs, follow-up badge, iPhone safe-area). Sidebar hidden on mobile. All 6 pages responsive at 375px. AddContactDrawer full-width on mobile. |
 | **Pre-rollout quality pass** | ✅ Password reset flow, LinkedIn URL normalization, error/empty-state collision fixed, import order fixed, interaction logged confirmation. |
@@ -425,12 +427,14 @@ Full review of every interactive element before first-student rollout. Only 3 is
 ### ⚠️ Task 1 — Email deliverability (do BEFORE inviting real students)
 Confirmation emails currently land in recipients' spam/junk folders. Must be resolved before sharing widely, or students won't find their confirmation email and won't be able to sign in.
 
-**Fixes, in order of impact:**
-1. **Add DMARC DNS record in Cloudflare** — Resend listed this as optional during domain verification and it was skipped. SPF and DKIM are already in place; DMARC completes email authentication and is the highest-impact fix. Add a `TXT` record for `_dmarc.getfunnl.com` with value `v=DMARC1; p=none; rua=mailto:navbir12345@gmail.com` (start with `p=none` to monitor, not block).
-2. **Domain warm-up** — Deliverability improves naturally over days/weeks as legitimate mail is sent and opened. Nothing to do; just takes time.
-3. **Train Gmail** — Marking test emails "Not spam" in Gmail helps train filters for other Gmail users.
+**Fix process (follow `docs/auth-email-setup.md` for full detail):**
+1. **Audit existing Resend.com domain configuration** — open Resend.com → Domains and check whether the sending domain is Verified. The exact DNS record values required are shown by Resend for your account — do not use values from any other source.
+2. **Audit DNS records in Cloudflare** — compare the records Resend requires against what is currently in Cloudflare. Add or update only what is missing or mismatched. Do not invent SPF, DKIM, or DMARC values.
+3. **Apply the email template** — copy `supabase/templates/confirm-signup.html` into Supabase → Auth → Email Templates. Subject: "Confirm your email to start using Funnl". Do not use the Supabase "Send test email" button; test with a real signup.
+4. **Run Gmail and Outlook delivery tests** — create fresh test accounts; inspect email headers for SPF/DKIM/DMARC pass/fail; check Resend logs for delivered status.
+5. **Domain warm-up** — deliverability improves naturally over days/weeks as legitimate mail is sent and opened.
 
-This is a DNS/configuration task, not a code change.
+**None of these steps have been verified yet.** This is an operational task, not a code change.
 
 ### Task 2 — /welcome confirmation UX (polish, not a blocker)
 Currently, clicking the email confirmation link auto-logs the user in and drops them directly on the dashboard, skipping `/welcome`. The desired behavior is: land on the standalone `/welcome` page (no sidebar, no app shell), show the "You're all set" confirmation, then have the user click "Continue to sign in" and sign in manually.

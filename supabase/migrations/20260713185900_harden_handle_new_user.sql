@@ -1,17 +1,61 @@
--- Prevent API-accessible roles from calling handle_new_user() directly.
+-- Revoke direct EXECUTE grants on handle_new_user() from API-accessible roles.
 --
 -- Verified via SQL catalog queries (2026-07-13):
---   - Function: public.handle_new_user(), takes no arguments
---   - Security: SECURITY DEFINER (runs as function owner, not caller)
---   - anon: has_execute = true  ← revoked by this migration
+--   - Function: public.handle_new_user(), no arguments
+--   - Security: SECURITY DEFINER — runs with the function owner's privileges, not the caller's
+--   - anon:          has_execute = true  ← revoked by this migration
 --   - authenticated: has_execute = true  ← revoked by this migration
 --
--- The trigger (on_auth_user_created ON auth.users AFTER INSERT) still fires
--- correctly after this change: SECURITY DEFINER execution does not depend on
--- the calling role having EXECUTE; the trigger fires via the Postgres superuser
--- role internally, bypassing the privilege check entirely.
+-- handle_new_user() auto-creates a profiles row on signup. It is invoked only by
+-- the trigger on_auth_user_created (ON auth.users AFTER INSERT). Because the
+-- function is SECURITY DEFINER, it runs with its owner's privileges regardless
+-- of which role initiated the database session. Direct EXECUTE grants to
+-- anon and authenticated are therefore unnecessary for the trigger path.
 --
 -- Effect: anon and authenticated clients can no longer call handle_new_user()
--- directly via a raw SQL statement or PostgREST RPC. The signup trigger path
--- is completely unaffected.
+-- directly via a raw SQL statement. The trigger path is expected to be
+-- unaffected, but must be verified with a real signup test after applying.
+--
+-- Apply using the Supabase CLI (not the SQL Editor):
+--   supabase migration list         -- confirm this migration is pending
+--   supabase db push --dry-run      -- preview before applying
+--   supabase db push                -- apply
+--
+-- Post-application verification queries (run in Supabase SQL Editor):
+--
+-- 1. Inspect explicit ACL grants (grantee IS NULL = the PUBLIC pseudo-role)
+-- SELECT
+--   p.proname AS function_name,
+--   CASE WHEN r.oid IS NULL THEN 'PUBLIC' ELSE r.rolname END AS grantee,
+--   e.privilege_type,
+--   e.is_grantable
+-- FROM pg_proc p
+-- JOIN pg_namespace n ON n.oid = p.pronamespace
+-- CROSS JOIN LATERAL aclexplode(
+--   COALESCE(p.proacl, acldefault('f'::"char", p.proowner))
+-- ) e
+-- LEFT JOIN pg_roles r ON r.oid = e.grantee
+-- WHERE p.proname = 'handle_new_user'
+--   AND n.nspname = 'public';
+--
+-- Expected: 'PUBLIC' does not appear as a grantee.
+--
+-- 2. Confirm effective execute permission for API roles
+-- SELECT
+--   r.rolname,
+--   has_function_privilege(r.oid, p.oid, 'execute') AS has_execute
+-- FROM pg_proc p
+-- JOIN pg_namespace n ON n.oid = p.pronamespace
+-- CROSS JOIN pg_roles r
+-- WHERE p.proname = 'handle_new_user'
+--   AND n.nspname = 'public'
+--   AND r.rolname IN ('anon', 'authenticated')
+-- ORDER BY r.rolname;
+--
+-- Expected: has_execute = false for both anon and authenticated.
+--
+-- After applying, complete a real signup and confirm:
+--   - profiles table contains a new row for the test user
+--   - ai_enabled = false
+--   - email column is populated
 REVOKE EXECUTE ON FUNCTION public.handle_new_user() FROM PUBLIC, anon, authenticated;

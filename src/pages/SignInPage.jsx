@@ -116,32 +116,47 @@ function SignInPage() {
 
   async function handleResend() {
     if (resendLoading || resendCooldown > 0) return
+
     setResendLoading(true)
     setResendStatus('idle')
     setResendError('')
-    const { error } = await supabase.auth.resend({
-      type: 'signup',
-      email,
-      options: { emailRedirectTo: welcomeRedirectUrl },
-    })
-    setResendLoading(false)
-    if (error) {
+
+    try {
+      const { error } = await supabase.auth.resend({
+        type: 'signup',
+        email,
+        options: { emailRedirectTo: welcomeRedirectUrl },
+      })
+
+      if (error) {
+        setResendStatus('error')
+        setResendError('Something went wrong. Please try again.')
+        return
+      }
+
+      setResendStatus('sent')
+      setResendCooldown(60)
+
+      if (resendTimerRef.current) {
+        clearInterval(resendTimerRef.current)
+      }
+
+      resendTimerRef.current = setInterval(() => {
+        setResendCooldown(prev => {
+          if (prev <= 1) {
+            clearInterval(resendTimerRef.current)
+            resendTimerRef.current = null
+            return 0
+          }
+          return prev - 1
+        })
+      }, 1000)
+    } catch {
       setResendStatus('error')
       setResendError('Something went wrong. Please try again.')
-      return
+    } finally {
+      setResendLoading(false)
     }
-    setResendStatus('sent')
-    setResendCooldown(60)
-    resendTimerRef.current = setInterval(() => {
-      setResendCooldown(prev => {
-        if (prev <= 1) {
-          clearInterval(resendTimerRef.current)
-          resendTimerRef.current = null
-          return 0
-        }
-        return prev - 1
-      })
-    }, 1000)
   }
 
   // ── Shared pieces ──────────────────────────────────────────────────────────
@@ -279,10 +294,10 @@ function SignInPage() {
               </button>
 
               {resendStatus === 'sent' && (
-                <p className="mt-2.5 text-[13px] text-success text-center">Sent — check your inbox and spam folder.</p>
+                <p aria-live="polite" className="mt-2.5 text-[13px] text-success text-center">Sent — check your inbox and spam folder.</p>
               )}
               {resendStatus === 'error' && (
-                <p className="mt-2.5 text-[13px] text-danger text-center">{resendError}</p>
+                <p role="alert" className="mt-2.5 text-[13px] text-danger text-center">{resendError}</p>
               )}
             </div>
 
