@@ -34,6 +34,15 @@ function Sidebar() {
   const [followUpCount, setFollowUpCount] = useState(0)
   const [tagCounts, setTagCounts] = useState([])
 
+  const fetchFollowUpCount = useCallback(async () => {
+    const { count } = await supabase
+      .from('interactions')
+      .select('id', { count: 'exact', head: true })
+      .not('follow_up_date', 'is', null)
+      .lte('follow_up_date', getLocalToday())
+    setFollowUpCount(count || 0)
+  }, [])
+
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => {
       setUser(data.user)
@@ -67,15 +76,6 @@ function Sidebar() {
       .slice(0, 8)
     setTagCounts(sorted)
   }
-
-  const fetchFollowUpCount = useCallback(async () => {
-    const { count } = await supabase
-      .from('interactions')
-      .select('id', { count: 'exact', head: true })
-      .not('follow_up_date', 'is', null)
-      .lte('follow_up_date', getLocalToday())
-    setFollowUpCount(count || 0)
-  }, [])
 
   function getInitials(email) {
     if (!email) return 'F'
