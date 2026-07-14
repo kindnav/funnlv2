@@ -42,7 +42,7 @@ The data schema (notes as freeform text, tags/skills as text arrays) was deliber
 
 - **Vite + React — JavaScript only, no TypeScript**
 - **Tailwind CSS v4** — custom tokens in `src/index.css` using `@theme {}` block (not a config file)
-- **Supabase** — PostgreSQL + auth; credentials in `.env` (never commit `.env`). URL config: Site URL = `https://getfunnl.com`, Redirect URLs include `https://getfunnl.com/welcome` and `https://getfunnl.com/**`.
+- **Supabase** — PostgreSQL + auth; credentials in `.env` (never commit `.env`). URL config: Site URL = `https://www.getfunnl.com`, Redirect URLs include `https://www.getfunnl.com/welcome` and `https://www.getfunnl.com/**`. Signup confirmation uses `emailRedirectTo: 'https://www.getfunnl.com/welcome'` (set explicitly in `handleSignUp` in `SignInPage.jsx`). Setup guide: `docs/auth-email-setup.md`.
 - **React Router v7** — client-side routing
 - **Vercel** — live at `https://getfunnl.com`. Connected to GitHub (kindnav/funnlv2), auto-deploys on push to `main`. Env vars (`VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `VITE_POSTHOG_KEY`, `VITE_POSTHOG_HOST`) set in Vercel project settings. `vercel.json` at project root rewrites all routes to `index.html` so direct URL visits don't 404. `git.deploymentEnabled` is set to `{ "main": true, "*": false }` — only `main` generates a Vercel deployment; non-main branches do not create preview deployments.
 - **PostHog** — product analytics. Project API key in `VITE_POSTHOG_KEY` (public/client-side key — safe to expose in frontend, unlike Anthropic/service-role keys). US region, host `https://us.i.posthog.com`. Autocapture disabled — only explicit events tracked. Wrapper at `src/lib/analytics.js`.
@@ -67,7 +67,7 @@ src/
     ContactDetailPage.jsx  Full contact profile: two-column on desktop, stacked on mobile
     LandingPage.jsx        Public marketing page at /; visible to logged-out users only; 11 sections; 3 tracked CTAs (nav/hero/bottom)
     SettingsPage.jsx       Account-card layout: display name input + Save; read-only email + joined date; sign out. Desktop only for v1.
-    SignInPage.jsx         Dark split-screen: sign-in mode + sign-up mode + email-confirmation pending state + forgot/reset-sent modes. Route-synchronized: /signin opens sign-in mode, /signup opens sign-up mode. After successful sign-in, navigate('/', { replace: true }) fires immediately to prevent blank screen at /signin.
+    SignInPage.jsx         Dark split-screen: sign-in mode + sign-up mode + email-confirmation pending state + forgot/reset-sent modes. Route-synchronized: /signin opens sign-in mode, /signup opens sign-up mode. After successful sign-in, navigate('/', { replace: true }) fires immediately to prevent blank screen at /signin. Module-level constants welcomeRedirectUrl and resetRedirectUrl use import.meta.env.PROD to target www.getfunnl.com in production and window.location.origin in dev. Pending state has Resend confirmation email button with 60-second client cooldown, loading state, and success/error feedback (supabase.auth.resend({ type: 'signup', email, options: { emailRedirectTo: welcomeRedirectUrl } })).
     WelcomePage.jsx        Email-confirmation landing page at /welcome — no sidebar, accessible to logged-out users
     ResetPasswordPage.jsx  Password recovery page at /reset-password — no sidebar, handles Supabase recovery link
     PrivacyPage.jsx        Plain-language privacy policy at /privacy — no sidebar, accessible logged-out and logged-in
@@ -80,6 +80,11 @@ src/
   main.jsx                 React entry; wraps App in ErrorBoundary + BrowserRouter; calls initAnalytics()
 index.html                 Google Fonts link tags (Plus Jakarta Sans, Space Grotesk, JetBrains Mono)
 CLAUDE.md                  This file — project reference, keep current
+docs/
+  auth-email-setup.md      Operational guide: Resend SMTP, Cloudflare DNS (SPF/DKIM/DMARC), Supabase URL config, email template, deliverability checklist, Leaked Password Protection, handle_new_user REVOKE migration
+supabase/
+  templates/
+    confirm-signup.html    Custom HTML email template for signup confirmation. MUST be pasted into Supabase → Auth → Email Templates → Confirm signup. Uses {{ .ConfirmationURL }} for the confirmation link.
 ```
 
 ---
@@ -202,7 +207,11 @@ CLAUDE.md                  This file — project reference, keep current
 | `activation_first_followup_at` | timestamptz | Nullable — set on first follow-up date set. Same idempotent write. |
 | `activation_completed_at` | timestamptz | Nullable — set when all three activation steps are complete. Same idempotent write. |
 
-**Applied migrations:** `supabase/migrations/20260713075431_add_activation_milestones.sql` — adds the four activation timestamp columns above to `profiles`, with backfill SQL for existing users. Applied to production 2026-07-13. The original schema (contacts, interactions, profiles, RLS policies, triggers) was created manually in Supabase before the migration system was set up — no baseline migration file exists for it (known limitation).
+**Applied migrations:**
+- `supabase/migrations/20260713075431_add_activation_milestones.sql` — adds the four activation timestamp columns above to `profiles`, with backfill SQL for existing users. Applied to production 2026-07-13.
+- `supabase/migrations/20260713185900_harden_handle_new_user.sql` — revokes EXECUTE on `public.handle_new_user()` from `PUBLIC`, `anon`, and `authenticated`. Verified 2026-07-13 via SQL catalog queries: function is SECURITY DEFINER, both API roles had execute privilege. The signup trigger (on_auth_user_created) is unaffected — SECURITY DEFINER execution does not depend on the caller having EXECUTE. **Must be applied in Supabase SQL Editor before going to production.**
+
+The original schema (contacts, interactions, profiles, RLS policies, triggers) was created manually in Supabase before the migration system was set up — no baseline migration file exists for it (known limitation).
 
 **Profile rows are auto-created on signup via a Postgres trigger** (`on_auth_user_created` on `auth.users`). The trigger function `public.handle_new_user()` runs `SECURITY DEFINER` (bypasses RLS) and inserts a row with `id`, `email`, `ai_enabled=false`, `display_name=null` the moment a new user signs up. `ON CONFLICT (id) DO NOTHING` makes it safe if a row somehow already exists.
 

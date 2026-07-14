@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Confirm your Funnl account</title>
+</head>
+<body style="margin:0;padding:0;background-color:#060608;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;">
+
+  <!-- Preheader (hidden, controls inbox preview text) -->
+  <div style="display:none;max-height:0;overflow:hidden;font-size:1px;color:#060608;">
+    Confirm your email and start keeping your networking follow-ups organized.
+    &nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;&zwnj;&nbsp;
+  </div>
+
+  <!-- Outer wrapper -->
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background-color:#060608;">
+    <tr>
+      <td align="center" style="padding:40px 16px;">
+
+        <!-- Email card -->
+        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="max-width:520px;background-color:#0B0B0E;border-radius:16px;border:1px solid rgba(255,255,255,0.07);">
+          <tr>
+            <td style="padding:40px 40px 32px 40px;">
+
+              <!-- Logo -->
+              <table role="presentation" cellspacing="0" cellpadding="0" border="0">
+                <tr>
+                  <td style="vertical-align:middle;">
+                    <div style="width:36px;height:36px;background-color:#4B3AF0;border-radius:10px;display:inline-block;text-align:center;line-height:36px;">
+                      <img src="data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTgiIGhlaWdodD0iMTgiIHZpZXdCb3g9IjAgMCAyNCAyNCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cGF0aCBkPSJNMyA0SDIxTDE1IDEyLjVWMjBIOVYxMi41WiIgZmlsbD0id2hpdGUiLz48L3N2Zz4=" width="18" height="18" alt="" style="display:block;margin:9px auto 0 auto;">
+                    </div>
+                  </td>
+                  <td style="vertical-align:middle;padding-left:10px;">
+                    <span style="font-family:'Segoe UI',Helvetica,Arial,sans-serif;font-size:20px;font-weight:700;color:#F4F3F8;letter-spacing:-0.3px;">Funnl</span>
+                  </td>
+                </tr>
+              </table>
+
+              <!-- Divider -->
+              <div style="height:1px;background-color:rgba(255,255,255,0.06);margin:28px 0;"></div>
+
+              <!-- Heading -->
+              <h1 style="margin:0 0 12px 0;font-family:'Segoe UI',Helvetica,Arial,sans-serif;font-size:26px;font-weight:700;color:#F4F3F8;letter-spacing:-0.4px;line-height:1.25;">
+                Confirm your email
+              </h1>
+
+              <!-- Body copy -->
+              <p style="margin:0 0 8px 0;font-size:15px;line-height:1.65;color:#9A9AA5;">
+                You're almost ready to start using Funnl — click the button below to verify your email address and activate your account.
+              </p>
+              <p style="margin:0 0 32px 0;font-size:15px;line-height:1.65;color:#9A9AA5;">
+                This link expires in 24 hours.
+              </p>
+
+              <!-- CTA button -->
+              <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
+                <tr>
+                  <td align="center">
+                    <a href="{{ .ConfirmationURL }}"
+                       target="_blank"
+                       style="display:inline-block;padding:14px 32px;background:linear-gradient(135deg,#8B7CFF,#5B45F0);color:#ffffff;font-family:'Segoe UI',Helvetica,Arial,sans-serif;font-size:15px;font-weight:700;text-decoration:none;border-radius:12px;letter-spacing:0.1px;">
+                      Confirm email address
+                    </a>
+                  </td>
+                </tr>
+              </table>
+
+              <!-- Divider -->
+              <div style="height:1px;background-color:rgba(255,255,255,0.06);margin:32px 0 24px 0;"></div>
+
+              <!-- Fallback URL -->
+              <p style="margin:0 0 6px 0;font-size:12.5px;color:#6C6C78;">
+                Button not working? Copy and paste this link into your browser:
+              </p>
+              <p style="margin:0;font-size:12px;color:#54545E;word-break:break-all;">
+                {{ .ConfirmationURL }}
+              </p>
+
+            </td>
+          </tr>
+
+          <!-- Footer -->
+          <tr>
+            <td style="padding:0 40px 32px 40px;">
+              <p style="margin:0;font-size:12px;color:#54545E;line-height:1.6;">
+                You're receiving this because someone used this email address to create a Funnl account.
+                If that wasn't you, you can safely ignore this email.
+              </p>
+            </td>
+          </tr>
+        </table>
+
+        <!-- Bottom wordmark -->
+        <p style="margin:20px 0 0 0;font-size:12px;color:#54545E;text-align:center;">
+          Funnl &mdash; networking for students
+        </p>
+
+      </td>
+    </tr>
+  </table>
+
+</body>
+</html>
