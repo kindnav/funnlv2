@@ -113,8 +113,8 @@ function LandingPage() {
           <div className="hidden md:block absolute top-[120px] right-[-30px] bg-[#141220] border border-[rgba(255,255,255,0.1)] rounded-[12px] px-[14px] py-[9px] shadow-[0_12px_28px_rgba(0,0,0,0.4)] z-[4] whitespace-nowrap">
             <span className="font-mono text-[11px] font-semibold text-[#FFC97A]">← follow-up reminders</span>
           </div>
-          <div className="hidden md:block absolute bottom-[30px] left-[-26px] bg-[#141220] border border-[rgba(255,255,255,0.1)] rounded-[12px] px-[14px] py-[9px] shadow-[0_12px_28px_rgba(0,0,0,0.4)] z-[4] whitespace-nowrap">
-            <span className="font-mono text-[11px] font-semibold text-[#7FE8D2]">conversation history →</span>
+          <div className="hidden md:block absolute bottom-[-18px] left-[32px] bg-[#141220] border border-[rgba(255,255,255,0.1)] rounded-[12px] px-[14px] py-[9px] shadow-[0_12px_28px_rgba(0,0,0,0.4)] z-[4] whitespace-nowrap">
+            <span className="font-mono text-[11px] font-semibold text-[#7FE8D2]">↑ conversation history</span>
           </div>
 
           {/* Product card */}
