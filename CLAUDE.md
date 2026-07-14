@@ -55,6 +55,7 @@ The data schema (notes as freeform text, tags/skills as text arrays) was deliber
 ```
 src/
   components/
+    ErrorBoundary.jsx      Global React error boundary mounted in main.jsx (wraps BrowserRouter). Catches all render crashes; shows Reload/Sign-out fallback; reports via trackError(error). Sign out: awaits supabase.auth.signOut(), then window.location.assign('/signin') in finally so the boundary state resets on full reload.
     Sidebar.jsx            Shared left nav (desktop only, hidden md:flex): logo, user card → /settings, nav links, YOUR TAGS dynamic section (top 8 user-tags by count, links to ?tag= filter), sign out. Fetches profile + tag counts on every route change.
     BottomNav.jsx          Mobile bottom tab bar (md:hidden): Home/Contacts/Follow-ups/Funnl AI, follow-up badge
     ContactListItem.jsx    Contact card in the 2-column grid (avatar tile, tags, relationship_type + how-met footer)
@@ -73,10 +74,10 @@ src/
   lib/
     supabase.js            Supabase client, reads VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY from .env
     avatarUtils.js         getAvatarColor(name) and getInitials(name) — single source of truth for avatar colors
-    analytics.js           PostHog wrapper: initAnalytics(), identifyUser(), track(), resetAnalytics()
+    analytics.js           PostHog wrapper: initAnalytics(), identifyUser(), track(), resetAnalytics(), trackError(error)
   App.jsx                  Auth gating, shared layout (Sidebar + main + BottomNav), all routes
   index.css                Tailwind import + @theme design tokens + @keyframes (slide-in-right, fade-in)
-  main.jsx                 React entry; wraps App in BrowserRouter; calls initAnalytics()
+  main.jsx                 React entry; wraps App in ErrorBoundary + BrowserRouter; calls initAnalytics()
 index.html                 Google Fonts link tags (Plus Jakarta Sans, Space Grotesk, JetBrains Mono)
 CLAUDE.md                  This file — project reference, keep current
 ```
@@ -140,6 +141,8 @@ CLAUDE.md                  This file — project reference, keep current
 | `activation_checklist_viewed` | DashboardPage on mount when checklist is shown | none | Onboarding engagement |
 | `activation_step_completed` | DashboardPage recordMilestones — once per step, idempotent | `{ step: 'five_contacts'\|'first_interaction'\|'first_followup' }` | Phase 2A activation tracking |
 | `activation_completed` | DashboardPage recordMilestones — once when all 3 steps done | `{ contacts_count: number }` | Phase 2A activation tracking |
+
+**PostHog error reporting (separate from the 15 custom product events):** `trackError(error)` in `src/lib/analytics.js` calls `posthog.captureException(error)`. This fires the PostHog system event `$exception` — it is NOT one of Funnl's 15 custom product events and must not be counted as such. It is called from `ErrorBoundary.componentDidCatch` on unhandled render crashes. componentStack is excluded. Safely no-ops when `VITE_POSTHOG_KEY` is absent.
 
 **What PostHog tracks automatically (no code needed):** pageviews, session start/end, returning users, browser/device/country.
 
