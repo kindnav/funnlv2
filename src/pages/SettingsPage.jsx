@@ -1,17 +1,21 @@
 import { useEffect, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 
 const iCls = 'flex-1 bg-input border border-[rgba(255,255,255,0.09)] rounded-xl px-[13px] py-[11px] text-[13.5px] text-hi placeholder-[#54545E] outline-none focus:border-[rgba(139,124,255,0.5)] transition-colors'
 const lCls = 'mb-[7px] block text-[12.5px] font-semibold text-mid'
 
 function SettingsPage() {
+  const navigate = useNavigate()
   const [user, setUser] = useState(null)
   const [displayName, setDisplayName] = useState('')
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
   const [error, setError] = useState('')
+  const [showDeleteModal, setShowDeleteModal] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+  const [deleteError, setDeleteError] = useState('')
 
   useEffect(() => {
     async function load() {
@@ -43,6 +47,19 @@ function SettingsPage() {
     if (error) { setError(error.message); return }
     setSaved(true)
     setTimeout(() => setSaved(false), 3000)
+  }
+
+  async function handleDeleteAccount() {
+    setDeleting(true)
+    setDeleteError('')
+    const { data, error } = await supabase.functions.invoke('delete-account')
+    if (error || !data?.success) {
+      setDeleteError('Something went wrong. Please try again.')
+      setDeleting(false)
+      return
+    }
+    await supabase.auth.signOut()
+    navigate('/signup', { replace: true })
   }
 
   function formatJoined(ts) {
@@ -144,7 +161,64 @@ function SettingsPage() {
           Privacy Policy
         </Link>
 
+        {/* Danger zone */}
+        <div className="mt-10 pt-8 border-t border-[rgba(255,255,255,0.06)]">
+          <p className="text-[11.5px] font-bold tracking-[1px] text-lower uppercase font-mono mb-3">Danger zone</p>
+          <p className="text-[13px] text-muted mb-4 leading-relaxed">
+            Permanently delete your account and all of your contacts, interactions, and notes. This cannot be undone.
+          </p>
+          <button
+            onClick={() => { setShowDeleteModal(true); setDeleteError('') }}
+            className="text-[13.5px] font-semibold text-danger border border-[rgba(255,107,138,0.3)] rounded-xl px-4 py-2.5 hover:bg-[rgba(255,107,138,0.08)] transition-colors"
+          >
+            Delete my account
+          </button>
+        </div>
+
       </div>
+
+      {/* Delete confirmation modal */}
+      {showDeleteModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div
+            className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+            onClick={() => !deleting && setShowDeleteModal(false)}
+          />
+          <div className="relative bg-card border border-[rgba(255,255,255,0.09)] rounded-2xl p-6 w-full max-w-[380px] shadow-2xl">
+            <div className="w-10 h-10 rounded-[11px] bg-[rgba(255,107,138,0.12)] flex items-center justify-center mb-4">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#FF6B8A" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
+              </svg>
+            </div>
+
+            <h2 className="font-display font-bold text-[19px] text-hi mb-2 tracking-[-0.3px]">Delete account?</h2>
+            <p className="text-[13.5px] text-muted leading-relaxed mb-5">
+              This permanently deletes your account and all contacts, interactions, and notes. There is no way to recover your data after this.
+            </p>
+
+            {deleteError && (
+              <p className="text-[13px] text-danger mb-4">{deleteError}</p>
+            )}
+
+            <div className="flex gap-2.5">
+              <button
+                onClick={() => setShowDeleteModal(false)}
+                disabled={deleting}
+                className="flex-1 py-2.5 rounded-xl border border-[rgba(255,255,255,0.09)] bg-elevated text-[14px] font-semibold text-mid hover:text-hi transition-colors disabled:opacity-40"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleDeleteAccount}
+                disabled={deleting}
+                className="flex-1 py-2.5 rounded-xl bg-danger text-[14px] font-bold text-white hover:opacity-90 transition-opacity disabled:opacity-50"
+              >
+                {deleting ? 'Deleting…' : 'Delete account'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
     </div>
   )
