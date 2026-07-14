@@ -1,7 +1,17 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { track } from '../lib/analytics'
+
+// Redirect URLs: www subdomain in production, current origin in local dev.
+// import.meta.env.PROD is true in Vite production builds, false in dev server.
+const welcomeRedirectUrl = import.meta.env.PROD
+  ? 'https://www.getfunnl.com/welcome'
+  : `${window.location.origin}/welcome`
+
+const resetRedirectUrl = import.meta.env.PROD
+  ? 'https://www.getfunnl.com/reset-password'
+  : `${window.location.origin}/reset-password`
 
 // Must be outside SignInPage to avoid remount on every keystroke
 function InputWrapper({ children }) {
@@ -21,6 +31,11 @@ function SignInPage() {
   const [confirmPassword, setConfirmPassword] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  const [resendLoading, setResendLoading] = useState(false)
+  const [resendCooldown, setResendCooldown] = useState(0)
+  const [resendStatus, setResendStatus] = useState('idle') // 'idle' | 'sent' | 'error'
+  const [resendError, setResendError] = useState('')
+  const resendTimerRef = useRef(null)
 
   // Captured once on mount — shows after arriving from /reset-password
   const [showResetBanner] = useState(!!location.state?.passwordReset)
@@ -40,12 +55,39 @@ function SignInPage() {
     if (mode === 'signup') track('signup_started')
   }, [mode])
 
+  // Clean up the resend countdown timer on unmount.
+  useEffect(() => {
+    return () => { if (resendTimerRef.current) clearInterval(resendTimerRef.current) }
+  }, [])
+
+  function startResendCooldown() {
+    if (resendTimerRef.current) clearInterval(resendTimerRef.current)
+    setResendCooldown(60)
+    resendTimerRef.current = setInterval(() => {
+      setResendCooldown(prev => {
+        if (prev <= 1) {
+          clearInterval(resendTimerRef.current)
+          resendTimerRef.current = null
+          return 0
+        }
+        return prev - 1
+      })
+    }, 1000)
+  }
+
   function switchMode(newMode) {
     setMode(newMode)
     setEmail('')
     setPassword('')
     setConfirmPassword('')
     setError('')
+    setResendStatus('idle')
+    setResendError('')
+    setResendCooldown(0)
+    if (resendTimerRef.current) {
+      clearInterval(resendTimerRef.current)
+      resendTimerRef.current = null
+    }
   }
 
   async function handleSignIn(e) {
@@ -64,10 +106,15 @@ function SignInPage() {
     if (password !== confirmPassword) { setError('Passwords do not match.'); return }
     if (password.length < 6) { setError('Password must be at least 6 characters.'); return }
     setLoading(true)
-    const { error } = await supabase.auth.signUp({ email, password })
+    const { error } = await supabase.auth.signUp({
+      email,
+      password,
+      options: { emailRedirectTo: welcomeRedirectUrl },
+    })
     setLoading(false)
     if (error) { setError(error.message); return }
     track('user_signed_up')
+    startResendCooldown()
     setMode('pending')
   }
 
@@ -76,11 +123,41 @@ function SignInPage() {
     setError('')
     setLoading(true)
     const { error } = await supabase.auth.resetPasswordForEmail(email, {
-      redirectTo: 'https://getfunnl.com/reset-password',
+      redirectTo: resetRedirectUrl,
     })
     setLoading(false)
     if (error) { setError(error.message); return }
     setMode('reset-sent')
+  }
+
+  async function handleResend() {
+    if (resendLoading || resendCooldown > 0) return
+
+    setResendLoading(true)
+    setResendStatus('idle')
+    setResendError('')
+
+    try {
+      const { error } = await supabase.auth.resend({
+        type: 'signup',
+        email,
+        options: { emailRedirectTo: welcomeRedirectUrl },
+      })
+
+      if (error) {
+        setResendStatus('error')
+        setResendError('Something went wrong. Please try again.')
+        return
+      }
+
+      setResendStatus('sent')
+      startResendCooldown()
+    } catch {
+      setResendStatus('error')
+      setResendError('Something went wrong. Please try again.')
+    } finally {
+      setResendLoading(false)
+    }
   }
 
   // ── Shared pieces ──────────────────────────────────────────────────────────
@@ -178,6 +255,7 @@ function SignInPage() {
   // ── Pending confirmation screen ────────────────────────────────────────────
 
   if (mode === 'pending') {
+    const resendDisabled = resendLoading || resendCooldown > 0
     return (
       <div className="flex min-h-screen">
         <div className="flex flex-1 flex-col justify-center bg-[#0A0A0C] px-6 md:px-[88px]">
@@ -186,21 +264,46 @@ function SignInPage() {
               {logoTileSmall}
               <span className="font-display font-bold text-[23px] text-hi tracking-[-0.5px]">Funnl</span>
             </div>
+
+            <div className="w-14 h-14 rounded-2xl bg-[rgba(139,124,255,0.12)] flex items-center justify-center mb-6">
+              <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#8B7CFF" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="3" y="5" width="18" height="14" rx="2.5"/><path d="m3 7 9 6 9-6"/>
+              </svg>
+            </div>
+
             <h1 className="font-display text-[32px] font-bold text-hi mb-3 tracking-[-0.5px]">Check your email</h1>
             <p className="text-[15px] leading-relaxed text-[#9A9AA5] mb-2">
               We sent a confirmation link to{' '}
               <span className="font-semibold text-hi">{email}</span>.
             </p>
             <p className="text-[15px] leading-relaxed text-[#9A9AA5] mb-8">
-              Click that link to verify your account, then come back here and sign in.
+              Click that link to verify your account. Check your spam or promotions folder if you don't see it.
             </p>
-            <p className="text-[13.5px] text-[#6C6C78] mb-8">
-              Didn't receive it? Check your spam folder, or{' '}
-              <button onClick={() => switchMode('signup')} className="text-accent underline hover:text-tag transition-colors">
-                try signing up again
-              </button>.
-            </p>
+
+            <div className="mb-8">
+              <button
+                type="button"
+                onClick={handleResend}
+                disabled={resendDisabled}
+                className="w-full py-3 rounded-xl border border-[rgba(255,255,255,0.09)] bg-elevated text-[14px] font-semibold text-mid hover:text-hi hover:border-[rgba(139,124,255,0.4)] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {resendLoading
+                  ? 'Sending…'
+                  : resendCooldown > 0
+                    ? `Resend in ${resendCooldown}s`
+                    : 'Resend confirmation email'}
+              </button>
+
+              {resendStatus === 'sent' && (
+                <p aria-live="polite" className="mt-2.5 text-[13px] text-success text-center">Sent — check your inbox and spam folder.</p>
+              )}
+              {resendStatus === 'error' && (
+                <p role="alert" className="mt-2.5 text-[13px] text-danger text-center">{resendError}</p>
+              )}
+            </div>
+
             <button
+              type="button"
               onClick={() => switchMode('signin')}
               className="w-full bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] text-white text-[15px] font-bold py-[14px] rounded-xl shadow-[0_8px_22px_rgba(91,69,240,0.4)] hover:opacity-90 transition-opacity"
             >

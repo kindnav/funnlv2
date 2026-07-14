@@ -8,11 +8,11 @@ Keep this file current. When we make a durable decision, finish a feature, chang
 
 **Funnl is a live, deployed, multi-user MVP.** The full sign-up → email confirmation → sign-in → app flow works end to end.
 
-- Live at **https://getfunnl.com** (www redirects to it)
+- Live at **https://www.getfunnl.com** (getfunnl.com redirects to www)
 - Deployed on Vercel, auto-deploys on push to `main`
-- Real email via Resend — confirmation emails send reliably from `noreply@getfunnl.com`
-- Supabase URL configuration set: Site URL = `https://getfunnl.com`, Redirect URLs include `/welcome` and `/**`
-- **Not yet shared with real students** — email deliverability (spam folder issue) needs to be resolved first; see Task 1 in Known future work
+- Resend.com is the transactional email provider (existing, connected via Supabase SMTP). Resend sending domain is `getfunnl.com` (Verified); DKIM at `resend._domainkey.getfunnl.com`, SPF and return-path MX at `send.getfunnl.com` — all verified. Gmail delivery reaches Primary inbox. iCloud places in Junk (unresolved — not a DNS failure). Outlook not yet tested. See Task 1 in Known future work.
+- Supabase URL configuration: Site URL = `https://www.getfunnl.com`; Redirect URLs include `/welcome` and `/**`. Confirm signup template applied 2026-07-13.
+- **Not yet shared with real students** — iCloud Junk placement and Outlook test still pending; see Task 1 in Known future work
 
 ---
 
@@ -42,11 +42,11 @@ The data schema (notes as freeform text, tags/skills as text arrays) was deliber
 
 - **Vite + React — JavaScript only, no TypeScript**
 - **Tailwind CSS v4** — custom tokens in `src/index.css` using `@theme {}` block (not a config file)
-- **Supabase** — PostgreSQL + auth; credentials in `.env` (never commit `.env`). URL config: Site URL = `https://getfunnl.com`, Redirect URLs include `https://getfunnl.com/welcome` and `https://getfunnl.com/**`.
+- **Supabase** — PostgreSQL + auth; credentials in `.env` (never commit `.env`). URL config: Site URL = `https://www.getfunnl.com`, Redirect URLs include `https://www.getfunnl.com/welcome` and `https://www.getfunnl.com/**`. Signup confirmation uses `emailRedirectTo: 'https://www.getfunnl.com/welcome'` (set explicitly in `handleSignUp` in `SignInPage.jsx`). Setup guide: `docs/auth-email-setup.md`.
 - **React Router v7** — client-side routing
-- **Vercel** — live at `https://getfunnl.com`. Connected to GitHub (kindnav/funnlv2), auto-deploys on push to `main`. Env vars (`VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `VITE_POSTHOG_KEY`, `VITE_POSTHOG_HOST`) set in Vercel project settings. `vercel.json` at project root rewrites all routes to `index.html` so direct URL visits don't 404. `git.deploymentEnabled` is set to `{ "main": true, "*": false }` — only `main` generates a Vercel deployment; non-main branches do not create preview deployments.
+- **Vercel** — live at `https://www.getfunnl.com`. Connected to GitHub (kindnav/funnlv2), auto-deploys on push to `main`. Env vars (`VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `VITE_POSTHOG_KEY`, `VITE_POSTHOG_HOST`) set in Vercel project settings. `vercel.json` at project root rewrites all routes to `index.html` so direct URL visits don't 404. `git.deploymentEnabled` is set to `{ "main": true, "*": false }` — only `main` generates a Vercel deployment; non-main branches do not create preview deployments.
 - **PostHog** — product analytics. Project API key in `VITE_POSTHOG_KEY` (public/client-side key — safe to expose in frontend, unlike Anthropic/service-role keys). US region, host `https://us.i.posthog.com`. Autocapture disabled — only explicit events tracked. Wrapper at `src/lib/analytics.js`.
-- **Cloudflare DNS** — two CNAME records pointing `getfunnl.com` and `www.getfunnl.com` to Vercel, set to DNS-only (grey cloud). `www` redirects to apex. Domain also used for Resend email verification (SPF + DKIM records present, DMARC pending — see Task 1).
+- **Cloudflare DNS** — two CNAME records pointing `getfunnl.com` and `www.getfunnl.com` to Vercel, set to DNS-only (grey cloud). `getfunnl.com` redirects to `www.getfunnl.com`; www serves the application. Resend sending domain is `getfunnl.com`; DKIM TXT at `resend._domainkey.getfunnl.com` verified. Custom return-path subdomain `send.getfunnl.com`: SPF and return-path MX verified. No root SPF record exists or should be added. DMARC at `_dmarc.getfunnl.com` with `p=none`.
 
 ---
 
@@ -67,7 +67,7 @@ src/
     ContactDetailPage.jsx  Full contact profile: two-column on desktop, stacked on mobile
     LandingPage.jsx        Public marketing page at /; visible to logged-out users only; 11 sections; 3 tracked CTAs (nav/hero/bottom)
     SettingsPage.jsx       Account-card layout: display name input + Save; read-only email + joined date; sign out. Desktop only for v1.
-    SignInPage.jsx         Dark split-screen: sign-in mode + sign-up mode + email-confirmation pending state + forgot/reset-sent modes. Route-synchronized: /signin opens sign-in mode, /signup opens sign-up mode. After successful sign-in, navigate('/', { replace: true }) fires immediately to prevent blank screen at /signin.
+    SignInPage.jsx         Dark split-screen: sign-in mode + sign-up mode + email-confirmation pending state + forgot/reset-sent modes. Route-synchronized: /signin opens sign-in mode, /signup opens sign-up mode. After successful sign-in, navigate('/', { replace: true }) fires immediately to prevent blank screen at /signin. Module-level constants welcomeRedirectUrl and resetRedirectUrl use import.meta.env.PROD to target www.getfunnl.com in production and window.location.origin in dev. Pending state has Resend confirmation email button with 60-second client cooldown, loading state, and success/error feedback (supabase.auth.resend({ type: 'signup', email, options: { emailRedirectTo: welcomeRedirectUrl } })).
     WelcomePage.jsx        Email-confirmation landing page at /welcome — no sidebar, accessible to logged-out users
     ResetPasswordPage.jsx  Password recovery page at /reset-password — no sidebar, handles Supabase recovery link
     PrivacyPage.jsx        Plain-language privacy policy at /privacy — no sidebar, accessible logged-out and logged-in
@@ -80,6 +80,11 @@ src/
   main.jsx                 React entry; wraps App in ErrorBoundary + BrowserRouter; calls initAnalytics()
 index.html                 Google Fonts link tags (Plus Jakarta Sans, Space Grotesk, JetBrains Mono)
 CLAUDE.md                  This file — project reference, keep current
+docs/
+  auth-email-setup.md      Operational guide: audit existing Resend.com config, DNS authentication (SPF/DKIM/DMARC — values from Resend only), Supabase URL config, apply email template, deliverability diagnosis (Gmail + Outlook tests, header inspection), Leaked Password Protection, handle_new_user migration CLI workflow
+supabase/
+  templates/
+    confirm-signup.html    Custom HTML email template for signup confirmation. MUST be pasted into Supabase → Auth → Email Templates → Confirm signup. Uses {{ .ConfirmationURL }} for the confirmation link.
 ```
 
 ---
@@ -105,7 +110,7 @@ CLAUDE.md                  This file — project reference, keep current
 | `/` | DashboardPage | Landing screen after login; activation checklist shown until all 3 steps complete |
 | `/contacts` | ContactsPage | Grid + search + filter; `?tag=recruiter` drives filter pills |
 | `/contacts/:id` | ContactDetailPage | Full profile + interaction timeline |
-| `/followups` | FollowUpsPage | Real data — overdue/today/upcoming buckets; Mark done/Snooze are Phase 3 |
+| `/followups` | FollowUpsPage | Real data — overdue/today/upcoming buckets; Mark Done, Snooze, Log Result complete |
 | `/ai` | FunnlAIPage | Working AI chat for Pro users; locked state for non-Pro |
 | `/settings` | SettingsPage | Display name + sign out; reads/writes `profiles` table |
 | `/welcome` | WelcomePage | Email-confirmation landing; no sidebar; accessible while authenticated |
@@ -202,7 +207,11 @@ CLAUDE.md                  This file — project reference, keep current
 | `activation_first_followup_at` | timestamptz | Nullable — set on first follow-up date set. Same idempotent write. |
 | `activation_completed_at` | timestamptz | Nullable — set when all three activation steps are complete. Same idempotent write. |
 
-**Applied migrations:** `supabase/migrations/20260713075431_add_activation_milestones.sql` — adds the four activation timestamp columns above to `profiles`, with backfill SQL for existing users. Applied to production 2026-07-13. The original schema (contacts, interactions, profiles, RLS policies, triggers) was created manually in Supabase before the migration system was set up — no baseline migration file exists for it (known limitation).
+**Applied migrations:**
+- `supabase/migrations/20260713075431_add_activation_milestones.sql` — adds the four activation timestamp columns above to `profiles`, with backfill SQL for existing users. Applied to production 2026-07-13.
+- `supabase/migrations/20260713185900_harden_handle_new_user.sql` — revokes EXECUTE on `public.handle_new_user()` from `PUBLIC`, `anon`, and `authenticated`. Applied to production 2026-07-13 via `supabase db push`. Post-migration verification: PUBLIC absent from explicit ACL; `anon` and `authenticated` effective execute = false; trigger `on_auth_user_created` still enabled; function owner, SECURITY DEFINER, and search_path unchanged. Requires a real signup/profile creation test to confirm trigger path is unaffected.
+
+The original schema (contacts, interactions, profiles, RLS policies, triggers) was created manually in Supabase before the migration system was set up — no baseline migration file exists for it (known limitation).
 
 **Profile rows are auto-created on signup via a Postgres trigger** (`on_auth_user_created` on `auth.users`). The trigger function `public.handle_new_user()` runs `SECURITY DEFINER` (bypasses RLS) and inserts a row with `id`, `email`, `ai_enabled=false`, `display_name=null` the moment a new user signs up. `ON CONFLICT (id) DO NOTHING` makes it safe if a row somehow already exists.
 
@@ -297,13 +306,13 @@ The contacts page filter pills use `useSearchParams`. Active tag is stored as `?
 | Dashboard with real stats + follow-up list | ✅ |
 | Add contact drawer (slide-in, Escape closes, scroll locked) | ✅ |
 | Per-user data isolation (RLS, two-user verified) | ✅ |
-| Follow-ups screen (`/followups`) | ✅ Real data — shows all interactions with a follow_up_date, bucketed into Overdue / Today / Upcoming with correct local-timezone date logic. Mark done / Snooze / Log Result are Phase 3. |
+| Follow-ups screen (`/followups`) | ✅ Real data — shows all interactions with a follow_up_date, bucketed into Overdue / Today / Upcoming with correct local-timezone date logic. Mark Done, Snooze/Reschedule, Log Result all complete (Phase 3). |
 | Funnl AI screen (`/ai`) | ✅ Working AI chat UI. Pro users get full multi-turn chat backed by Edge Function `ai-chat` (claude-sonnet-5). Non-Pro users see a locked state. react-markdown renders assistant replies. |
 | Empty states (all screens) | ✅ Contacts zero-state has icon + "Start building your network" CTA; search/filter no-results has icon + clear-filters link; all other screens handled. |
 | **Full dark redesign** | ✅ **Complete** — all 8 screens restyled to the Funnl design system (dark palette, Space Grotesk/Jakarta Sans/JetBrains Mono, shared sidebar). |
 | **Robustness pass** | ✅ Error handling on all Supabase reads (dashboard, contact detail, follow-ups); local-timezone date logic consistent app-wide (sidebar badge, dashboard, contact detail, follow-ups all agree); avatar helpers extracted to `src/lib/avatarUtils.js`; AddContactDrawer rejects whitespace-only names and uses safe scroll-lock cleanup. |
-| **Real email / SMTP** | ✅ Resend connected via Supabase custom SMTP; sending from noreply@getfunnl.com; getfunnl.com verified on Cloudflare. |
-| **Email confirmation landing page** | ✅ `/welcome` — success screen (checkmark, "You're all set", "Continue to sign in"). No sidebar. Accessible logged-out. Supabase redirect URLs configured to point here. |
+| **Real email / SMTP** | ⚠️ Resend.com is the existing provider, connected via Supabase custom SMTP. DKIM/SPF/return-path MX verified; confirmation template installed; Gmail reaches Primary inbox. iCloud lands in Junk (unresolved — not DNS). Outlook untested. Universal inbox delivery not verified. See `docs/auth-email-setup.md`. |
+| **Email confirmation landing page** | ✅ `/welcome` — success screen. No sidebar. Accessible logged-out and logged-in (always renders outside app shell). Code passes `emailRedirectTo: 'https://www.getfunnl.com/welcome'` in both `handleSignUp` and `handleResend`. Supabase Redirect URL allowlist not independently verified from code — confirm in dashboard. |
 | **Deployed to production** | ✅ Live at getfunnl.com on Vercel. DNS on Cloudflare. Env vars set. SPA routing via vercel.json. Full sign-up → confirm → sign-in flow works end to end. |
 | **Mobile responsiveness** | ✅ BottomNav (4 tabs, follow-up badge, iPhone safe-area). Sidebar hidden on mobile. All 6 pages responsive at 375px. AddContactDrawer full-width on mobile. |
 | **Pre-rollout quality pass** | ✅ Password reset flow, LinkedIn URL normalization, error/empty-state collision fixed, import order fixed, interaction logged confirmation. |
@@ -317,7 +326,7 @@ The contacts page filter pills use `useSearchParams`. Active tag is stored as `?
 | **Phase 2A — Guided activation checklist** | ✅ Three-step checklist on DashboardPage: (1) add or import 5 contacts, (2) log the first conversation, (3) schedule the first follow-up. Milestones stored as four nullable `timestamptz` columns on `profiles` (the fourth records overall activation completion). Written with `WHERE col IS NULL` conditional updates for idempotent deduplication across tabs and sessions. Backfill included in migration `20260713075431_add_activation_milestones.sql`. CSV import button accessible from dashboard in addition to contacts page. |
 | **Vercel main-only deployments** | ✅ `vercel.json` `git.deploymentEnabled: { main: true, "*": false }`. Preview deployments disabled for all non-main branches. |
 | Rule-based reminders / cold alerts | 🔵 Layer 2 |
-| **Phase 2B — Guided first-contact-to-interaction handoff** | ✅ After the first manual contact add from the Dashboard (`contactCount === 0`), navigates to that contact's detail page with Router state `{ openInteractionForm: true }`. ContactDetailPage reads this state on mount, calls `setShowForm(true)`, then immediately clears the state via `navigate(pathname, { replace: true, state: {} })` so refresh and Back do not reopen it. Scroll-into-view effect handles mobile: fires after both `showForm` becomes true AND `loading` becomes false (ref is null during the loading screen). `AddContactDrawer` now returns the new contact's `id` via `.select('id').single()` and passes it to `onSuccess?.(newContact?.id ?? null)`. Existing Phase 2A milestone tracking untouched. Phase 3 is next. |
+| **Phase 2B — Guided first-contact-to-interaction handoff** | ✅ After the first manual contact add from the Dashboard (`contactCount === 0`), navigates to that contact's detail page with Router state `{ openInteractionForm: true }`. ContactDetailPage reads this state on mount, calls `setShowForm(true)`, then immediately clears the state via `navigate(pathname, { replace: true, state: {} })` so refresh and Back do not reopen it. Scroll-into-view effect handles mobile: fires after both `showForm` becomes true AND `loading` becomes false (ref is null during the loading screen). `AddContactDrawer` now returns the new contact's `id` via `.select('id').single()` and passes it to `onSuccess?.(newContact?.id ?? null)`. Existing Phase 2A milestone tracking untouched. |
 | **Phase 3 — Complete follow-up loop** | ✅ Done — Mark Done, Snooze/Reschedule, Log Result on `/followups`. Badge synchronization via `funnl:followups-changed` custom event. try/finally ensures savingId clears. Row-match verification via `.select('id').single()`. Log Result carries `sourceFollowUpId` Router state → ContactDetailPage clears old follow-up after new interaction saves. Partial-failure path preserved. |
 | **Phase 4 — Remaining pilot analytics and launch work** | 🔵 Next |
 
@@ -414,21 +423,24 @@ Full review of every interactive element before first-student rollout. Only 3 is
 ## Known future work / tech debt
 
 ### ⚠️ Task 1 — Email deliverability (do BEFORE inviting real students)
-Confirmation emails currently land in recipients' spam/junk folders. Must be resolved before sharing widely, or students won't find their confirmation email and won't be able to sign in.
 
-**Fixes, in order of impact:**
-1. **Add DMARC DNS record in Cloudflare** — Resend listed this as optional during domain verification and it was skipped. SPF and DKIM are already in place; DMARC completes email authentication and is the highest-impact fix. Add a `TXT` record for `_dmarc.getfunnl.com` with value `v=DMARC1; p=none; rua=mailto:navbir12345@gmail.com` (start with `p=none` to monitor, not block).
-2. **Domain warm-up** — Deliverability improves naturally over days/weeks as legitimate mail is sent and opened. Nothing to do; just takes time.
-3. **Train Gmail** — Marking test emails "Not spam" in Gmail helps train filters for other Gmail users.
+**Verified as of 2026-07-13:**
+- Resend sending domain `getfunnl.com` Verified; DKIM at `resend._domainkey.getfunnl.com`, SPF and return-path MX at `send.getfunnl.com` — all pass
+- Confirm signup template applied; subject set
+- Gmail delivery: reaches **Primary inbox** ✓
+- `emailRedirectTo` wired in `SignInPage.jsx` for both `handleSignUp` and `handleResend`
 
-This is a DNS/configuration task, not a code change.
+**Still open:**
+- iCloud: confirmation email lands in **Junk** — root cause unknown; DNS is not the failure point (SPF/DKIM pass). Possible causes: domain/IP reputation, content filtering, Apple's proprietary scoring. Try sending more legitimate mail, check Resend Logs for any spam signals, or test with a plain-text fallback.
+- Outlook: not yet tested — create a fresh Outlook address and run the signup flow; inspect headers.
+- Leaked password protection: confirm enabled in Supabase → Auth → Password Protection.
+- New signup test after the `harden_handle_new_user` migration: confirm `profiles` row is created correctly.
+- Domain warm-up: deliverability improves naturally over days/weeks as legitimate mail is sent and opened.
 
-### Task 2 — /welcome confirmation UX (polish, not a blocker)
-Currently, clicking the email confirmation link auto-logs the user in and drops them directly on the dashboard, skipping `/welcome`. The desired behavior is: land on the standalone `/welcome` page (no sidebar, no app shell), show the "You're all set" confirmation, then have the user click "Continue to sign in" and sign in manually.
+See `docs/auth-email-setup.md` for the full checklist.
 
-**Why it matters:** the `/welcome` page was built for this moment, but Supabase's default behavior creates a session immediately on confirmation click, so the app's auth gate sees a logged-in user and renders the full dashboard instead.
-
-**How to fix when ready:** In `WelcomePage.jsx`, call `supabase.auth.signOut()` on mount (before rendering), then show the page. This clears the auto-created session so the user arrives logged-out and signs in fresh. Small, self-contained change — revisit as a standalone task.
+### Task 2 — /welcome and /reset-password routing ✅ Fixed 2026-07-13
+`App.jsx` now uses React Router `useLocation` to detect these paths before either session branch. Both pages always render full-screen without the `Sidebar`/`BottomNav` shell, regardless of session state. `WelcomePage.jsx` already calls `supabase.auth.signOut()` when the user clicks "Continue to sign in" — no further change needed there.
 
 ### Before real launch (required)
 1. ~~**User profile (display name)**~~ — ✅ Done. `profiles` table + `/settings` page built. Sidebar shows saved display name. School field was removed from both the UI and the table.
@@ -562,9 +574,9 @@ Recommended positioning:
 | # | Issue | File | Status |
 |---|---|---|---|
 | 1 | No public landing page | `App.jsx` — wildcard renders `SignInPage` for logged-out users | ✅ **Fixed — Phase 1.** `LandingPage.jsx` at `/` for logged-out users. |
-| 2 | Follow-up loop is incomplete | `FollowUpsPage.jsx` — display only, no Done/Snooze/Log | 🔵 **Phase 3 — not yet built.** |
+| 2 | Follow-up loop is incomplete | `FollowUpsPage.jsx` — display only, no Done/Snooze/Log | ✅ **Fixed — Phase 3.** Mark Done, Snooze, Log Result all complete. |
 | 3 | No Pro path to purchase or test | `FunnlAIPage.jsx` — locked state has no price or waitlist | 🔵 **Not yet built.** |
-| 4 | Email deliverability (spam) | Documented in Known future work → Task 1 | ⚠️ **Unverified operationally** — cannot be determined from code. |
+| 4 | Email deliverability (spam) | Documented in Known future work → Task 1 | ⚠️ **Partially verified** — DNS/DKIM/SPF verified; Gmail Primary ✓; iCloud Junk unresolved; Outlook untested. |
 
 ### Prioritized backlog (from audit — updated status)
 
@@ -573,7 +585,7 @@ Recommended positioning:
 | 1 | Public landing page (screenshots, differentiation, pricing test, CTA) | 5 | 2 | ✅ Done — Phase 1 |
 | 2 | Guided activation: contacts → log interaction → set follow-up | 5 | 3 | ✅ Done — Phase 2A |
 | 3 | Mark done / snooze / log-result on follow-ups | 5 | 3 | ✅ Done — Phase 3 |
-| 4 | Fix email deliverability / add Google OAuth | 5 | 2 | ⚠️ Unverified operationally |
+| 4 | Fix email deliverability / add Google OAuth | 5 | 2 | ⚠️ Partially verified — Gmail ✓, iCloud Junk unresolved, Outlook untested |
 | 5 | Run concierge pilot with 10 qualified students | 5 | 2 | 🔵 Not started |
 | 6 | Weekly reminder email + overdue notifications | 5 | 3 | 🔵 Not started |
 | 7 | Fix activation analytics (CSV-first users currently missed) | 4 | 2 | 🔵 Partially — 5 events added |
@@ -594,7 +606,7 @@ Recommended positioning:
 
 | # | Item | Status |
 |---|---|---|
-| 1 | Fix email confirmation deliverability (DMARC record) | ⚠️ Unverified — DNS change, not code |
+| 1 | Fix email confirmation deliverability | ⚠️ DNS/template verified; Gmail Primary ✓; iCloud Junk unresolved; Outlook untested |
 | 2 | Build public landing page | ✅ **Done — Phase 1** |
 | 3 | Remove "Join your peers already using Funnl" copy (overclaims traction) | ✅ **Done — Phase 1** |
 | 4 | Add CSV import CTA to empty-state dashboard | ✅ **Done — Phase 2A** |

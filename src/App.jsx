@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Routes, Route, Navigate } from 'react-router-dom'
+import { Routes, Route, Navigate, useLocation } from 'react-router-dom'
 import { supabase } from './lib/supabase'
 import { identifyUser, resetAnalytics } from './lib/analytics'
 import LandingPage from './pages/LandingPage'
@@ -17,6 +17,7 @@ import BottomNav from './components/BottomNav'
 import SettingsPage from './pages/SettingsPage'
 
 function App() {
+  const location = useLocation()
   const [session, setSession] = useState(null)
   const [checkingSession, setCheckingSession] = useState(true)
 
@@ -42,14 +43,23 @@ function App() {
     return <div className="min-h-screen bg-base"/>
   }
 
+  // These pages always render full-screen without the app shell, regardless of session state.
+  // WelcomePage calls signOut() itself; ResetPasswordPage checks for a recovery session internally.
+  if (location.pathname === '/welcome' || location.pathname === '/reset-password') {
+    return (
+      <Routes>
+        <Route path="/welcome" element={<WelcomePage />} />
+        <Route path="/reset-password" element={<ResetPasswordPage />} />
+      </Routes>
+    )
+  }
+
   if (!session) {
     return (
       <Routes>
         <Route path="/" element={<LandingPage />} />
         <Route path="/signin" element={<SignInPage />} />
         <Route path="/signup" element={<SignInPage />} />
-        <Route path="/welcome" element={<WelcomePage />} />
-        <Route path="/reset-password" element={<ResetPasswordPage />} />
         <Route path="/privacy" element={<PrivacyPage />} />
         <Route path="*" element={<Navigate to="/signin" replace />} />
       </Routes>
@@ -68,8 +78,6 @@ function App() {
           <Route path="/ai" element={<FunnlAIPage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/privacy" element={<PrivacyPage />} />
-          <Route path="/welcome" element={<WelcomePage />} />
-          <Route path="/reset-password" element={<ResetPasswordPage />} />
           <Route path="/signin" element={<Navigate to="/" replace />} />
           <Route path="/signup" element={<Navigate to="/" replace />} />
           <Route path="*" element={<Navigate to="/" replace />} />
