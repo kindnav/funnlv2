@@ -1,0 +1,17 @@
+-- Prevent API-accessible roles from calling handle_new_user() directly.
+--
+-- Verified via SQL catalog queries (2026-07-13):
+--   - Function: public.handle_new_user(), takes no arguments
+--   - Security: SECURITY DEFINER (runs as function owner, not caller)
+--   - anon: has_execute = true  ← revoked by this migration
+--   - authenticated: has_execute = true  ← revoked by this migration
+--
+-- The trigger (on_auth_user_created ON auth.users AFTER INSERT) still fires
+-- correctly after this change: SECURITY DEFINER execution does not depend on
+-- the calling role having EXECUTE; the trigger fires via the Postgres superuser
+-- role internally, bypassing the privilege check entirely.
+--
+-- Effect: anon and authenticated clients can no longer call handle_new_user()
+-- directly via a raw SQL statement or PostgREST RPC. The signup trigger path
+-- is completely unaffected.
+REVOKE EXECUTE ON FUNCTION public.handle_new_user() FROM PUBLIC, anon, authenticated;
