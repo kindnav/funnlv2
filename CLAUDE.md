@@ -10,7 +10,7 @@ Keep this file current. When we make a durable decision, finish a feature, chang
 
 - Live at **https://www.getfunnl.com** (getfunnl.com redirects to www)
 - Deployed on Vercel, auto-deploys on push to `main`
-- Resend.com is the transactional email provider (existing, connected via Supabase SMTP). Sending domain `send.getfunnl.com` is Verified; DKIM/SPF/MX all verified. Gmail delivery reaches Primary inbox. iCloud places in Junk (unresolved — not a DNS failure). Outlook not yet tested. See Task 1 in Known future work.
+- Resend.com is the transactional email provider (existing, connected via Supabase SMTP). Resend sending domain is `getfunnl.com` (Verified); DKIM at `resend._domainkey.getfunnl.com`, SPF and return-path MX at `send.getfunnl.com` — all verified. Gmail delivery reaches Primary inbox. iCloud places in Junk (unresolved — not a DNS failure). Outlook not yet tested. See Task 1 in Known future work.
 - Supabase URL configuration: Site URL = `https://www.getfunnl.com`; Redirect URLs include `/welcome` and `/**`. Confirm signup template applied 2026-07-13.
 - **Not yet shared with real students** — iCloud Junk placement and Outlook test still pending; see Task 1 in Known future work
 
@@ -46,7 +46,7 @@ The data schema (notes as freeform text, tags/skills as text arrays) was deliber
 - **React Router v7** — client-side routing
 - **Vercel** — live at `https://www.getfunnl.com`. Connected to GitHub (kindnav/funnlv2), auto-deploys on push to `main`. Env vars (`VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `VITE_POSTHOG_KEY`, `VITE_POSTHOG_HOST`) set in Vercel project settings. `vercel.json` at project root rewrites all routes to `index.html` so direct URL visits don't 404. `git.deploymentEnabled` is set to `{ "main": true, "*": false }` — only `main` generates a Vercel deployment; non-main branches do not create preview deployments.
 - **PostHog** — product analytics. Project API key in `VITE_POSTHOG_KEY` (public/client-side key — safe to expose in frontend, unlike Anthropic/service-role keys). US region, host `https://us.i.posthog.com`. Autocapture disabled — only explicit events tracked. Wrapper at `src/lib/analytics.js`.
-- **Cloudflare DNS** — two CNAME records pointing `getfunnl.com` and `www.getfunnl.com` to Vercel, set to DNS-only (grey cloud). `getfunnl.com` redirects to `www.getfunnl.com`; www serves the application. Resend email authentication records on `send.getfunnl.com` subdomain are verified (DKIM TXT at `resend._domainkey.send.getfunnl.com`, SPF, return-path MX). No root SPF record exists or should be added. DMARC at `_dmarc.getfunnl.com` with `p=none`.
+- **Cloudflare DNS** — two CNAME records pointing `getfunnl.com` and `www.getfunnl.com` to Vercel, set to DNS-only (grey cloud). `getfunnl.com` redirects to `www.getfunnl.com`; www serves the application. Resend sending domain is `getfunnl.com`; DKIM TXT at `resend._domainkey.getfunnl.com` verified. Custom return-path subdomain `send.getfunnl.com`: SPF and return-path MX verified. No root SPF record exists or should be added. DMARC at `_dmarc.getfunnl.com` with `p=none`.
 
 ---
 
@@ -311,8 +311,8 @@ The contacts page filter pills use `useSearchParams`. Active tag is stored as `?
 | Empty states (all screens) | ✅ Contacts zero-state has icon + "Start building your network" CTA; search/filter no-results has icon + clear-filters link; all other screens handled. |
 | **Full dark redesign** | ✅ **Complete** — all 8 screens restyled to the Funnl design system (dark palette, Space Grotesk/Jakarta Sans/JetBrains Mono, shared sidebar). |
 | **Robustness pass** | ✅ Error handling on all Supabase reads (dashboard, contact detail, follow-ups); local-timezone date logic consistent app-wide (sidebar badge, dashboard, contact detail, follow-ups all agree); avatar helpers extracted to `src/lib/avatarUtils.js`; AddContactDrawer rejects whitespace-only names and uses safe scroll-lock cleanup. |
-| **Real email / SMTP** | ⚠️ Resend.com is the existing provider, connected via Supabase custom SMTP. Confirmation emails frequently land in spam. DNS authentication (SPF/DKIM/DMARC), template application, and deliverability testing are unverified — see `docs/auth-email-setup.md`. |
-| **Email confirmation landing page** | ✅ `/welcome` — success screen. No sidebar. Accessible logged-out. Code passes `emailRedirectTo` for `https://www.getfunnl.com/welcome`. Supabase Redirect URL allowlist needs verification in dashboard. |
+| **Real email / SMTP** | ⚠️ Resend.com is the existing provider, connected via Supabase custom SMTP. DKIM/SPF/return-path MX verified; confirmation template installed; Gmail reaches Primary inbox. iCloud lands in Junk (unresolved — not DNS). Outlook untested. Universal inbox delivery not verified. See `docs/auth-email-setup.md`. |
+| **Email confirmation landing page** | ✅ `/welcome` — success screen. No sidebar. Accessible logged-out and logged-in (always renders outside app shell). Code passes `emailRedirectTo: 'https://www.getfunnl.com/welcome'` in both `handleSignUp` and `handleResend`. Supabase Redirect URL allowlist not independently verified from code — confirm in dashboard. |
 | **Deployed to production** | ✅ Live at getfunnl.com on Vercel. DNS on Cloudflare. Env vars set. SPA routing via vercel.json. Full sign-up → confirm → sign-in flow works end to end. |
 | **Mobile responsiveness** | ✅ BottomNav (4 tabs, follow-up badge, iPhone safe-area). Sidebar hidden on mobile. All 6 pages responsive at 375px. AddContactDrawer full-width on mobile. |
 | **Pre-rollout quality pass** | ✅ Password reset flow, LinkedIn URL normalization, error/empty-state collision fixed, import order fixed, interaction logged confirmation. |
@@ -425,7 +425,7 @@ Full review of every interactive element before first-student rollout. Only 3 is
 ### ⚠️ Task 1 — Email deliverability (do BEFORE inviting real students)
 
 **Verified as of 2026-07-13:**
-- Resend domain `send.getfunnl.com` Verified; DKIM/SPF/MX all pass
+- Resend sending domain `getfunnl.com` Verified; DKIM at `resend._domainkey.getfunnl.com`, SPF and return-path MX at `send.getfunnl.com` — all pass
 - Confirm signup template applied; subject set
 - Gmail delivery: reaches **Primary inbox** ✓
 - `emailRedirectTo` wired in `SignInPage.jsx` for both `handleSignUp` and `handleResend`
@@ -576,7 +576,7 @@ Recommended positioning:
 | 1 | No public landing page | `App.jsx` — wildcard renders `SignInPage` for logged-out users | ✅ **Fixed — Phase 1.** `LandingPage.jsx` at `/` for logged-out users. |
 | 2 | Follow-up loop is incomplete | `FollowUpsPage.jsx` — display only, no Done/Snooze/Log | ✅ **Fixed — Phase 3.** Mark Done, Snooze, Log Result all complete. |
 | 3 | No Pro path to purchase or test | `FunnlAIPage.jsx` — locked state has no price or waitlist | 🔵 **Not yet built.** |
-| 4 | Email deliverability (spam) | Documented in Known future work → Task 1 | ⚠️ **Unverified operationally** — cannot be determined from code. |
+| 4 | Email deliverability (spam) | Documented in Known future work → Task 1 | ⚠️ **Partially verified** — DNS/DKIM/SPF verified; Gmail Primary ✓; iCloud Junk unresolved; Outlook untested. |
 
 ### Prioritized backlog (from audit — updated status)
 
@@ -585,7 +585,7 @@ Recommended positioning:
 | 1 | Public landing page (screenshots, differentiation, pricing test, CTA) | 5 | 2 | ✅ Done — Phase 1 |
 | 2 | Guided activation: contacts → log interaction → set follow-up | 5 | 3 | ✅ Done — Phase 2A |
 | 3 | Mark done / snooze / log-result on follow-ups | 5 | 3 | ✅ Done — Phase 3 |
-| 4 | Fix email deliverability / add Google OAuth | 5 | 2 | ⚠️ Unverified operationally |
+| 4 | Fix email deliverability / add Google OAuth | 5 | 2 | ⚠️ Partially verified — Gmail ✓, iCloud Junk unresolved, Outlook untested |
 | 5 | Run concierge pilot with 10 qualified students | 5 | 2 | 🔵 Not started |
 | 6 | Weekly reminder email + overdue notifications | 5 | 3 | 🔵 Not started |
 | 7 | Fix activation analytics (CSV-first users currently missed) | 4 | 2 | 🔵 Partially — 5 events added |
@@ -606,7 +606,7 @@ Recommended positioning:
 
 | # | Item | Status |
 |---|---|---|
-| 1 | Fix email confirmation deliverability (DMARC record) | ⚠️ Unverified — DNS change, not code |
+| 1 | Fix email confirmation deliverability | ⚠️ DNS/template verified; Gmail Primary ✓; iCloud Junk unresolved; Outlook untested |
 | 2 | Build public landing page | ✅ **Done — Phase 1** |
 | 3 | Remove "Join your peers already using Funnl" copy (overclaims traction) | ✅ **Done — Phase 1** |
 | 4 | Add CSV import CTA to empty-state dashboard | ✅ **Done — Phase 2A** |

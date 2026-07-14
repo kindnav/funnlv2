@@ -96,16 +96,18 @@ passing. The Resend dashboard is the authoritative check — third-party tools a
 
 ### Verified sending configuration (2026-07-13)
 
-Funnl's sending domain is the subdomain `send.getfunnl.com` — not the root domain.
+Resend's registered sending domain for Funnl is **`getfunnl.com`** (the root domain). `send.getfunnl.com`
+is the custom return-path subdomain Resend uses for SPF and bounce handling — it is not the Resend
+sending domain itself.
 
-- **DKIM**: TXT record at `resend._domainkey.send.getfunnl.com` — verified
-- **SPF**: verified at `send.getfunnl.com`
-- **Return-path MX**: verified at `send.getfunnl.com`
-- **No root SPF record exists or is needed** — do not add one; SPF lives on the sending subdomain
+- **DKIM**: TXT record at `resend._domainkey.getfunnl.com` — verified
+- **SPF**: verified at `send.getfunnl.com` (custom return-path subdomain)
+- **Return-path MX**: verified at `send.getfunnl.com` (custom return-path subdomain)
+- **No root SPF record exists or is needed** — Resend's SPF lives on `send.getfunnl.com`; adding a
+  root SPF record would have no effect on Resend's sending path and could interfere with other mail
 
-The sender From address is `Funnl <team@getfunnl.com>`. This From address is aligned with the
-root domain while Resend handles authentication through the `send.getfunnl.com` subdomain.
-Do not change the sending domain or add a root SPF record.
+The sender From address is `Funnl <team@getfunnl.com>`. Do not add a root SPF record or change
+the Resend domain configuration.
 
 ---
 
@@ -358,7 +360,7 @@ above has been followed and approval has been obtained.**
 
 ### Cloudflare DNS
 - [x] SPF verified at `send.getfunnl.com` (sending subdomain — no root SPF record needed or present)
-- [x] DKIM TXT verified at `resend._domainkey.send.getfunnl.com`
+- [x] DKIM TXT verified at `resend._domainkey.getfunnl.com`
 - [x] Return-path MX verified at `send.getfunnl.com`
 - [x] DMARC record present at `_dmarc.getfunnl.com` with `p=none` and reporting address
 - [x] Resend.com → Domains shows all records as passing
