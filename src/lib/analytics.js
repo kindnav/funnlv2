@@ -4,9 +4,6 @@ export function initAnalytics() {
   const key  = import.meta.env.VITE_POSTHOG_KEY
   const host = import.meta.env.VITE_POSTHOG_HOST || 'https://us.i.posthog.com'
 
-  // TEMPORARY DIAGNOSTIC — remove once confirmed working in production
-  console.log('[Funnl analytics] key present:', !!key, '| starts with:', key?.slice(0, 6) ?? 'undefined')
-
   if (!key) {
     console.warn('[Funnl analytics] VITE_POSTHOG_KEY is not set — analytics will not run')
     return
@@ -37,4 +34,19 @@ export function track(event, properties = {}) {
 // sign-in starts a fresh anonymous session rather than merging with the old one.
 export function resetAnalytics() {
   posthog.reset()
+}
+
+// Report an unhandled render error to PostHog Error Tracking.
+// componentStack is excluded — it contains the component hierarchy and source
+// locations, which are not needed for crash diagnosis and are omitted to
+// minimize diagnostic data. Never pass contact names, notes, companies,
+// route state, Supabase data, or other user content.
+// Explicitly no-ops when VITE_POSTHOG_KEY is absent.
+export function trackError(error) {
+  if (!import.meta.env.VITE_POSTHOG_KEY) return
+  try {
+    posthog.captureException(error)
+  } catch {
+    // Error reporting must never break the fallback.
+  }
 }
