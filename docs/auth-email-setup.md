@@ -261,7 +261,7 @@ Supabase can refuse passwords that appear in known breach databases (Have I Been
 
 This is enforced server-side and requires no code changes.
 
-**Status: not verified. Confirm the setting is currently enabled in the Supabase dashboard.**
+**Status: this setting requires the Supabase Pro plan.** Open Supabase → Authentication → Password Protection. If the toggle is present, confirm it is enabled. If the toggle is absent entirely, the current plan does not include this feature — upgrade to Pro or leave it undone and note it as a known gap.
 
 ---
 
