@@ -97,6 +97,7 @@ function SignInPage() {
     const { error } = await supabase.auth.signInWithPassword({ email, password })
     setLoading(false)
     if (error) { setError(error.message); return }
+    track('user_signed_in')
     navigate('/', { replace: true })
   }
 
