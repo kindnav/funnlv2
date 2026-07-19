@@ -150,6 +150,15 @@ const HEADER_MAP = {
   'why they matter': 'relationship_note',
   'notes on relationship': 'relationship_note',
   'context': 'relationship_note',
+  // Generic notes column names — the most common names people use in spreadsheets
+  // NOT: 'description' (often a company/role description), 'details' (often contact details)
+  'notes': 'relationship_note',
+  'note': 'relationship_note',
+  'comments': 'relationship_note',
+  'comment': 'relationship_note',
+  'memo': 'relationship_note',
+  'additional notes': 'relationship_note',
+  'general notes': 'relationship_note',
 }
 
 function freshAssignment() {
@@ -197,6 +206,10 @@ function transformRow(rawRow, assignment) {
       // First non-empty value wins
       const raw = cols.map(col => (rawRow[col] || '').trim()).filter(Boolean)[0]
       if (raw) contact.linkedin_url = normalizeUrl(raw)
+    } else if (field === 'relationship_note') {
+      // Multiple note columns join with ' | ' so two freeform sentences stay readable
+      const combined = cols.map(col => (rawRow[col] || '').trim()).filter(Boolean).join(' | ')
+      if (combined) contact[field] = combined
     } else {
       // Text fields: chip order = join order; empty cells skipped, no double spaces
       const combined = cols.map(col => (rawRow[col] || '').trim()).filter(Boolean).join(' ')

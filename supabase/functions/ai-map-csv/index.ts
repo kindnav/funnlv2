@@ -104,7 +104,7 @@ The app stores these fields for each contact:
 - how_met: context for how the user met this person (e.g. "Career fair", "Coffee chat")
 - tags: informal labels for the relationship (e.g. "recruiter", "alumni", "mentor")
 - relationship_type: one of: Mentor, Collaborator, Referral path, Potential employer, Connector, Other
-- relationship_note: why this person matters or how they can help (freeform)
+- relationship_note: why this person matters or how they can help — also use this for any general notes, comments, or memo columns about the person (freeform)
 
 Given the CSV headers and sample values below, return a JSON object mapping CSV column names to Funnl fields.
 
