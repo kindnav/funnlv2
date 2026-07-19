@@ -1,10 +1,32 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
+import { identifyUser, track } from '../lib/analytics'
 
 function WelcomePage() {
   const navigate = useNavigate()
   const [signingOut, setSigningOut] = useState(false)
+
+  // Fire email_confirmed once per browser per user — fires only when Supabase has
+  // verified the session and the email_confirmed_at timestamp is set.
+  // localStorage prevents re-fires on refresh or repeat visits.
+  // No PII in event properties; identifyUser() links the event to the PostHog person.
+  useEffect(() => {
+    async function maybeTrackEmailConfirmed() {
+      try {
+        const { data: { session } } = await supabase.auth.getSession()
+        if (!session?.user?.email_confirmed_at) return
+        const userId = session.user.id
+        if (localStorage.getItem('funnl_confirmed_' + userId)) return
+        identifyUser(userId, session.user.email)
+        track('email_confirmed')
+        localStorage.setItem('funnl_confirmed_' + userId, '1')
+      } catch {
+        // analytics failure must never block the welcome page
+      }
+    }
+    maybeTrackEmailConfirmed()
+  }, [])
 
   async function handleContinue() {
     setSigningOut(true)

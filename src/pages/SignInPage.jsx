@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
-import { track } from '../lib/analytics'
+import { identifyUser, track } from '../lib/analytics'
 
 // Redirect URLs: www subdomain in production, current origin in local dev.
 // import.meta.env.PROD is true in Vite production builds, false in dev server.
@@ -94,9 +94,15 @@ function SignInPage() {
     e.preventDefault()
     setError('')
     setLoading(true)
-    const { error } = await supabase.auth.signInWithPassword({ email, password })
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password })
     setLoading(false)
     if (error) { setError(error.message); return }
+    try {
+      if (data.user) identifyUser(data.user.id, data.user.email)
+      track('user_signed_in')
+    } catch {
+      // Analytics must never block sign-in.
+    }
     navigate('/', { replace: true })
   }
 

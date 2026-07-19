@@ -45,7 +45,7 @@ The data schema (notes as freeform text, tags/skills as text arrays) was deliber
 - **Supabase** — PostgreSQL + auth; credentials in `.env` (never commit `.env`). URL config: Site URL = `https://www.getfunnl.com`, Redirect URLs include `https://www.getfunnl.com/welcome` and `https://www.getfunnl.com/**`. Signup confirmation uses `emailRedirectTo: 'https://www.getfunnl.com/welcome'` (set explicitly in `handleSignUp` in `SignInPage.jsx`). Setup guide: `docs/auth-email-setup.md`.
 - **React Router v7** — client-side routing
 - **Vercel** — live at `https://www.getfunnl.com`. Connected to GitHub (kindnav/funnlv2), auto-deploys on push to `main`. Env vars (`VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`, `VITE_POSTHOG_KEY`, `VITE_POSTHOG_HOST`) set in Vercel project settings. `vercel.json` at project root rewrites all routes to `index.html` so direct URL visits don't 404. `git.deploymentEnabled` is set to `{ "main": true, "*": false }` — only `main` generates a Vercel deployment; non-main branches do not create preview deployments.
-- **PostHog** — product analytics. Project API key in `VITE_POSTHOG_KEY` (public/client-side key — safe to expose in frontend, unlike Anthropic/service-role keys). US region, host `https://us.i.posthog.com`. Autocapture disabled — only explicit events tracked. Wrapper at `src/lib/analytics.js`.
+- **PostHog** — product analytics. Project API key in `VITE_POSTHOG_KEY` (public/client-side key — safe to expose in frontend, unlike Anthropic/service-role keys). US region, host `https://us.i.posthog.com`. DOM autocapture is disabled. `$pageview` and `$pageleave` remain enabled automatically; product events are explicitly captured. Wrapper at `src/lib/analytics.js`.
 - **Cloudflare DNS** — two CNAME records pointing `getfunnl.com` and `www.getfunnl.com` to Vercel, set to DNS-only (grey cloud). `getfunnl.com` redirects to `www.getfunnl.com`; www serves the application. Resend sending domain is `getfunnl.com`; DKIM TXT at `resend._domainkey.getfunnl.com` verified. Custom return-path subdomain `send.getfunnl.com`: SPF and return-path MX verified. No root SPF record exists or should be added. DMARC at `_dmarc.getfunnl.com` with `p=none`.
 
 ---
@@ -68,7 +68,7 @@ src/
     LandingPage.jsx        Public marketing page at /; visible to logged-out users only; 11 sections; 3 tracked CTAs (nav/hero/bottom)
     SettingsPage.jsx       Account-card layout: display name input + Save; read-only email + joined date; sign out. Desktop only for v1.
     SignInPage.jsx         Dark split-screen: sign-in mode + sign-up mode + email-confirmation pending state + forgot/reset-sent modes. Route-synchronized: /signin opens sign-in mode, /signup opens sign-up mode. After successful sign-in, navigate('/', { replace: true }) fires immediately to prevent blank screen at /signin. Module-level constants welcomeRedirectUrl and resetRedirectUrl use import.meta.env.PROD to target www.getfunnl.com in production and window.location.origin in dev. Pending state has Resend confirmation email button with 60-second client cooldown, loading state, and success/error feedback (supabase.auth.resend({ type: 'signup', email, options: { emailRedirectTo: welcomeRedirectUrl } })).
-    WelcomePage.jsx        Email-confirmation landing page at /welcome — no sidebar, accessible to logged-out users
+    WelcomePage.jsx        Email-confirmation landing page at /welcome — no sidebar, accessible to logged-out users. On mount: calls supabase.auth.getSession(), checks email_confirmed_at, identifies user via identifyUser(), fires email_confirmed, then writes the localStorage flag (funnl_confirmed_<userId>). Sign-out on continue.
     ResetPasswordPage.jsx  Password recovery page at /reset-password — no sidebar, handles Supabase recovery link
     PrivacyPage.jsx        Plain-language privacy policy at /privacy — no sidebar, accessible logged-out and logged-in
   lib/
@@ -82,6 +82,9 @@ index.html                 Google Fonts link tags (Plus Jakarta Sans, Space Grot
 CLAUDE.md                  This file — project reference, keep current
 docs/
   auth-email-setup.md      Operational guide: audit existing Resend.com config, DNS authentication (SPF/DKIM/DMARC — values from Resend only), Supabase URL config, apply email template, deliverability diagnosis (Gmail + Outlook tests, header inspection), Leaked Password Protection, handle_new_user migration CLI workflow
+  phase-4-pilot-plan.md    Pilot objective, target group, core session tasks, primary funnel, activation/retention definitions, feedback process, interview questions, founder checklist, decision rules
+  posthog-pilot-dashboard.md  Setup instructions for 12 PostHog insights: signup funnel, confirmation conversion trend, official activation funnel (email_confirmed → activation_completed), activation milestone diagnostic, first core-loop diagnostic, time to activation, WAU (Core product activity Action), follow-up loop, CSV adoption, AI adoption, 7-day retention (activation_completed cohort, 30%/25% thresholds), error monitoring
+  pilot-feedback-guide.md  5-minute observation checklist, non-leading questions, post-session questions, severity system (P0–P3), feature request frequency rule
 supabase/
   templates/
     confirm-signup.html    Custom HTML email template for signup confirmation. MUST be pasted into Supabase → Auth → Email Templates → Confirm signup. Uses {{ .ConfirmationURL }} for the confirmation link.
@@ -131,8 +134,8 @@ supabase/
 
 | Event | Where it fires | Properties | Purpose |
 |---|---|---|---|
-| `user_signed_up` | SignInPage after signUp() | none | Activation funnel step 1 |
-| `first_contact_added` | AddContactDrawer after insert (count===1) | none | Activation moment — THE key onboarding signal |
+| `user_signed_up` | SignInPage after signUp() | none | Signup funnel step 2 — signup request succeeded, confirmation email sent |
+| `first_contact_added` | AddContactDrawer after insert (count===1) | none | First-contact UX diagnostic |
 | `contact_added` | AddContactDrawer after insert | `{ via_ai_fill, has_tags, has_relationship_type }` — booleans only | Overall usage |
 | `interaction_logged` | ContactDetailPage handleLogInteraction | `{ interaction_type, has_follow_up, has_notes }` — controlled enum + booleans | Core value / retention signal |
 | `followup_set` | ContactDetailPage handleLogInteraction (when followUpDate set) | none | Feature usage |
@@ -142,19 +145,27 @@ supabase/
 | `ai_assistant_used` | FunnlAIPage sendMessage on success | none | AI feature usage |
 | `ai_fill_used` | AddContactDrawer handleAIParse on success | `{ fields_filled: number }` | AI feature usage |
 | `landing_cta_clicked` | LandingPage — all three CTA buttons | `{ location: 'nav'\|'hero'\|'bottom' }` | Acquisition / landing page conversion |
-| `signup_started` | SignInPage on mount when mode === 'signup' | none | Activation funnel step 0.5 |
+| `signup_started` | SignInPage on mount when mode === 'signup' | none | Signup funnel step 1 — user arrived at the signup form |
 | `activation_checklist_viewed` | DashboardPage on mount when checklist is shown | none | Onboarding engagement |
 | `activation_step_completed` | DashboardPage recordMilestones — once per step, idempotent | `{ step: 'five_contacts'\|'first_interaction'\|'first_followup' }` | Phase 2A activation tracking |
-| `activation_completed` | DashboardPage recordMilestones — once when all 3 steps done | `{ contacts_count: number }` | Phase 2A activation tracking |
+| `activation_completed` | DashboardPage recordMilestones — once when all 3 steps done | `{ contacts_count: number }` | Canonical durable activation event — fires once when all three profiles milestones are set (5 contacts + 1 interaction + 1 follow-up) |
+| `email_confirmed` | WelcomePage on mount — fires after `supabase.auth.getSession()` confirms `email_confirmed_at` is set | none | Signup funnel step 3 / activation funnel anchor |
+| `user_signed_in` | SignInPage `handleSignIn` after `signInWithPassword` succeeds | none | Acquisition funnel — sign-in step |
 
-**PostHog error reporting (separate from the 15 custom product events):** `trackError(error)` in `src/lib/analytics.js` calls `posthog.captureException(error)`. This fires the PostHog system event `$exception` — it is NOT one of Funnl's 15 custom product events and must not be counted as such. It is called from `ErrorBoundary.componentDidCatch` on unhandled render crashes. componentStack is excluded. Safely no-ops when `VITE_POSTHOG_KEY` is absent.
+**Deduplication note — `email_confirmed`:** Uses a `localStorage` flag keyed by user ID (`funnl_confirmed_<userId>`) to prevent re-fires on refresh or repeat visits to `/welcome`. This flag is per-browser: if the user confirms on one device and later visits `/welcome` on a different device or browser, the event may fire a second time on that device. PostHog deduplicates by distinct_id (user ID) across browsers for funnel purposes, so this cross-browser re-fire does not inflate unique-user counts in funnel reports. Raw event counts may appear slightly elevated.
+
+**PostHog error reporting (separate from the 17 custom product events):** `trackError(error)` in `src/lib/analytics.js` calls `posthog.captureException(error)`. This fires the PostHog system event `$exception` — it is NOT one of Funnl's 17 custom product events and must not be counted as such. It is called from `ErrorBoundary.componentDidCatch` on unhandled render crashes. Funnl deliberately omits React's `componentStack`; PostHog may collect the error name, message, and stack as diagnostic exception data. This diagnostic collection is disclosed in the privacy policy. Safely no-ops when `VITE_POSTHOG_KEY` is absent.
 
 **What PostHog tracks automatically (no code needed):** pageviews, session start/end, returning users, browser/device/country.
 
 **Key signals to build in PostHog:**
-- **Activation funnel** (Insights → Funnel): `user_signed_up` → `first_contact_added` → `interaction_logged`
-- **Retention / "second interaction"** (Insights → Retention): cohort event = `interaction_logged`, return event = `interaction_logged`, 30-day window. Shows what % of users who log their first interaction come back to log a second one on Day 1, 7, 14, 30. This is the core retention signal.
+- **Signup funnel** (Insights → Funnel): `signup_started` → `user_signed_up` → `email_confirmed`
+- **Official activation funnel** (Insights → Funnel): `email_confirmed` → `activation_completed`
+- **First core-loop diagnostic** (Insights → Funnel): `email_confirmed` → `first_contact_added` → `interaction_logged` → `followup_set` — UX diagnostic only, not the activation definition
+- **WAU** (Insights → Trend): unique users performing the Core product activity Action (contact_added / csv_import_used / interaction_logged / followup_set / followup_completed / followup_snoozed), weekly. Excludes pageviews and sign-ins.
+- **Day-7 retention** (Insights → Retention): cohort event = `activation_completed`; return event = Core product activity Action when supported, otherwise `interaction_logged` as the documented proxy. Target 30%+; warning below 25%; do not interpret before 5 eligible activated users have passed Day 7.
 - **Live verification:** PostHog left sidebar → Activity → Live events. Do an action; event appears within seconds.
+- See `docs/posthog-pilot-dashboard.md` for complete setup instructions for all 12 insights.
 
 **PostHog project API key** (`VITE_POSTHOG_KEY`) is intentionally public — safe in frontend code. It can only send events in, not read data. Completely different from Anthropic API key and Supabase service-role key (those must stay in Supabase secrets, never in frontend).
 
@@ -320,7 +331,7 @@ The contacts page filter pills use `useSearchParams`. Active tag is stored as `?
 | **CSV importer** | ✅ Import button on Contacts page opens a 3-step modal (upload → map → confirm). Mapping step: **pool-at-top UI** — unassigned columns shown prominently at the top as clickable chips ("click to place"); clicking a chip opens a field picker (1 click to assign). Field-first assignment also available via + Add on each field row. `normalizeHeader()` normalizes separators before lookup (first_name / first-name / first.name all match one HEADER_MAP entry). HEADER_MAP pruned of false-positive generic entries. Multiple columns combine in chip order (e.g. First Name + Last Name → "John Smith"). "— not assigned" placeholder on empty fields. Picker uses fixed-position viewport coords (not absolute) so scrollable container can't clip it. Tags: comma-separated cell values split into arrays. relationship_type and relationship_note are mappable fields. All-or-nothing bulk insert. `transformRow` AI seam intact. Known limitations: no duplicate detection, CSV-only, no cell-level editing. |
 | **Skills removed → relationship intent** | ✅ `skills` column dropped. `relationship_type` (preset select: Mentor/Collaborator/Referral path/Potential employer/Connector/Other) and `relationship_note` (freeform "why this person matters") added to contacts table, all forms, detail page, importer, and AI context. AI Fill extracts `relationship_note` from freeform text but never auto-selects `relationship_type` (deliberate user choice). |
 | **Dynamic sidebar YOUR TAGS** | ✅ Replaced hardcoded Pipeline section (Target firms/Recruiters/Alumni) with live user-tag groups. Queries contacts table on each nav change, counts tag occurrences in JS, sorts by count desc, caps at top 8. Deterministic dot colors per tag. Active tag highlighted. Empty state: "Tags you add to contacts will appear here." |
-| **Product analytics (PostHog)** | ✅ 15 events total (8 core + 2 Phase 1 + 3 Phase 2A + 2 Phase 3). Core: user_signed_up, first_contact_added, contact_added, interaction_logged, followup_set, csv_import_used, ai_assistant_used, ai_fill_used. Phase 1 additions: landing_cta_clicked, signup_started. Phase 2A additions: activation_checklist_viewed, activation_step_completed, activation_completed. Phase 3 additions: followup_completed, followup_snoozed. Autocapture off. Behavior only — no contact content. Users identified by Supabase ID. |
+| **Product analytics (PostHog)** | ✅ 17 events total (8 core + 2 Phase 1 + 3 Phase 2A + 2 Phase 3 + 2 Phase 4). Core: user_signed_up, first_contact_added, contact_added, interaction_logged, followup_set, csv_import_used, ai_assistant_used, ai_fill_used. Phase 1 additions: landing_cta_clicked, signup_started. Phase 2A additions: activation_checklist_viewed, activation_step_completed, activation_completed. Phase 3 additions: followup_completed, followup_snoozed. Phase 4 additions: email_confirmed (WelcomePage, localStorage-deduped per user per browser), user_signed_in (SignInPage handleSignIn). DOM autocapture disabled; $pageview and $pageleave remain enabled. Behavior only — no contact content. Users identified by Supabase ID. |
 | **Privacy policy** | ✅ `/privacy` — plain-language page covering data stored, all third parties (Supabase, Anthropic, PostHog, Resend, Vercel), analytics disclosure, user rights, contact email. Linked from sign-in page and settings. Accessible logged-out. |
 | **Phase 1 — Public landing page** | ✅ `LandingPage.jsx` at `/` for logged-out users. 11 sections: nav, hero with annotated product mock, marquee ticker, problem statement, feature rows (01–03), Funnl AI section, who-it's-for grid, comparison table, privacy note, final CTA, footer. `/signin` and `/signup` as separate routes, mode auto-detected from pathname. Post-sign-in `navigate('/', { replace: true })` prevents blank screen. All product claims verified against actual functionality. |
 | **Phase 2A — Guided activation checklist** | ✅ Three-step checklist on DashboardPage: (1) add or import 5 contacts, (2) log the first conversation, (3) schedule the first follow-up. Milestones stored as four nullable `timestamptz` columns on `profiles` (the fourth records overall activation completion). Written with `WHERE col IS NULL` conditional updates for idempotent deduplication across tabs and sessions. Backfill included in migration `20260713075431_add_activation_milestones.sql`. CSV import button accessible from dashboard in addition to contacts page. |
@@ -328,7 +339,7 @@ The contacts page filter pills use `useSearchParams`. Active tag is stored as `?
 | Rule-based reminders / cold alerts | 🔵 Layer 2 |
 | **Phase 2B — Guided first-contact-to-interaction handoff** | ✅ After the first manual contact add from the Dashboard (`contactCount === 0`), navigates to that contact's detail page with Router state `{ openInteractionForm: true }`. ContactDetailPage reads this state on mount, calls `setShowForm(true)`, then immediately clears the state via `navigate(pathname, { replace: true, state: {} })` so refresh and Back do not reopen it. Scroll-into-view effect handles mobile: fires after both `showForm` becomes true AND `loading` becomes false (ref is null during the loading screen). `AddContactDrawer` now returns the new contact's `id` via `.select('id').single()` and passes it to `onSuccess?.(newContact?.id ?? null)`. Existing Phase 2A milestone tracking untouched. |
 | **Phase 3 — Complete follow-up loop** | ✅ Done — Mark Done, Snooze/Reschedule, Log Result on `/followups`. Badge synchronization via `funnl:followups-changed` custom event. try/finally ensures savingId clears. Row-match verification via `.select('id').single()`. Log Result carries `sourceFollowUpId` Router state → ContactDetailPage clears old follow-up after new interaction saves. Partial-failure path preserved. |
-| **Phase 4 — Remaining pilot analytics and launch work** | 🔵 Next |
+| **Phase 4 — Pilot analytics and launch playbooks** | 🔵 In progress — `email_confirmed` + `user_signed_in` added. Pilot plan, PostHog dashboard guide, and feedback guide created in `docs/`. |
 
 ---
 
@@ -433,7 +444,7 @@ Full review of every interactive element before first-student rollout. Only 3 is
 **Still open:**
 - iCloud: confirmation email lands in **Junk** — root cause unknown; DNS is not the failure point (SPF/DKIM pass). Possible causes: domain/IP reputation, content filtering, Apple's proprietary scoring. Try sending more legitimate mail, check Resend Logs for any spam signals, or test with a plain-text fallback.
 - Outlook: not yet tested — create a fresh Outlook address and run the signup flow; inspect headers.
-- Leaked password protection: confirm enabled in Supabase → Auth → Password Protection.
+- Leaked password protection: the "Check passwords against known breached passwords" setting requires Supabase Pro plan. Current plan has not been confirmed to include it — check Supabase → Auth → Password Protection; if the toggle is absent, the current plan does not support it.
 - New signup test after the `harden_handle_new_user` migration: confirm `profiles` row is created correctly.
 - Domain warm-up: deliverability improves naturally over days/weeks as legitimate mail is sent and opened.
 
