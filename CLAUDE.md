@@ -63,7 +63,7 @@ src/
     ImportContactsModal.jsx  3-step CSV import modal (upload → map → confirm). PapaParse parses; auto-detects headers via HEADER_MAP; Pro users get AI-assisted column mapping (ai-map-csv Edge Function, one call per import); non-Pro users get unchanged manual mapping. transformRow() applies the final assignment to all rows.
   pages/
     DashboardPage.jsx      Landing screen after login: stats, follow-ups due, recent contacts
-    ContactsPage.jsx       Contacts grid + search (name/company/role/tag/skill) + URL-based tag filter (?tag=recruiter)
+    ContactsPage.jsx       Contacts grid/table + search (name/company/role/tag/skill) + URL-based tag filter (?tag=recruiter) + view toggle (cards/table, persisted to localStorage funnl_contacts_view)
     ContactDetailPage.jsx  Full contact profile: two-column on desktop, stacked on mobile
     LandingPage.jsx        Public marketing page at /; visible to logged-out users only; 11 sections; 3 tracked CTAs (nav/hero/bottom)
     SettingsPage.jsx       Account-card layout: display name input + Save; read-only email + joined date; sign out. Desktop only for v1.
@@ -111,7 +111,7 @@ supabase/
 | Path | Component | Notes |
 |---|---|---|
 | `/` | DashboardPage | Landing screen after login; activation checklist shown until all 3 steps complete |
-| `/contacts` | ContactsPage | Grid + search + filter; `?tag=recruiter` drives filter pills |
+| `/contacts` | ContactsPage | Grid/table + search + filter; `?tag=recruiter` drives filter pills; view toggle persists to `localStorage` |
 | `/contacts/:id` | ContactDetailPage | Full profile + interaction timeline |
 | `/followups` | FollowUpsPage | Real data — overdue/today/upcoming buckets; Mark Done, Snooze, Log Result complete |
 | `/ai` | FunnlAIPage | Working AI chat for Pro users; locked state for non-Pro |
