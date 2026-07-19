@@ -30,34 +30,32 @@ Determine whether Funnl creates enough value for actively-recruiting students to
 
 Give each pilot user these tasks in their first session, in order. Do not explain how to do them — observe whether they can figure it out.
 
-1. Add the 3 most recent people you've networked with (name, company, how you met, at least one tag).
+1. Add or import at least 5 contacts — real people you've networked with recently (name, company, how you met, at least one tag). If you already have a spreadsheet, use the CSV import option on the Contacts page.
 2. Log the conversation you had with one of them (type, date, a few notes).
 3. Set a follow-up date for that same person.
 4. Visit the Dashboard and the Follow-ups screen.
 
 If they reach task 4 without help, the core activation loop works. Note every place they hesitated, clicked the wrong thing, or asked a question.
 
+**Why 5 contacts:** Funnl's durable activation definition requires 5 contacts, 1 interaction, and 1 scheduled follow-up. A pilot user who only adds 3 contacts cannot reach `activation_completed` no matter how well they do the other tasks. Tasks 1–3 are designed so that completing them in order produces a confirmed activation signal.
+
 ---
 
 ## Primary funnel
 
 ```
-Visited /signup
+signup_started (arrived at the signup form — first measurable event)
     ↓
 user_signed_up (signup request succeeded, confirmation email sent)
     ↓
 email_confirmed (clicked the link, Supabase confirmed the session)
     ↓
-first_contact_added (logged their first contact)
+activation_completed (all three milestones met in the profiles table)
     ↓
-interaction_logged (logged their first conversation)
-    ↓
-followup_set (set their first follow-up date)
-    ↓
-[Return visit within 7 days]
+[Core product activity within 7 days]
 ```
 
-Each step is a PostHog funnel stage. Measure the drop-off at each step.
+Each step is a PostHog funnel stage. Measure the drop-off at each step. `activation_completed` is the single durable activation event; the individual milestone steps (`first_contact_added`, `interaction_logged`, `followup_set`) are UX diagnostics, not the activation definition. See `docs/posthog-pilot-dashboard.md` for how to build each insight.
 
 ---
 
@@ -77,13 +75,16 @@ Each step is a PostHog funnel stage. Measure the drop-off at each step.
 
 ## Retention definition
 
-**Day 7 retention:** Did the user open the app at least once in the 7 days following their signup date?
+**Day 7 retention:** Did the user perform a core product action within 7 days of activation?
 
-In PostHog: use the Retention insight with cohort event = `user_signed_up` (or `email_confirmed`), return event = any pageview, 7-day window.
+Core product activity is defined as any of: `contact_added`, `csv_import_used`, `interaction_logged`, `followup_set`, `followup_completed`, `followup_snoozed`. A user who opens the app but does nothing does not count as retained.
 
-**Target for pilot:** at least 50% of activated users return within 7 days without a direct prompt from you. If fewer than 3 of 10 activated users return on their own, the product is not yet creating a habit loop.
+In PostHog: use the Retention insight with cohort event = `activation_completed`, return event = `interaction_logged` (documented proxy for core product activity — PostHog Retention may not support Actions directly; if it does, use the Core product activity Action instead). 7-day window, weekly cohorts.
 
-**Minimum signal for decision:** You need at least 5 activated users with a 7-day observation window before this number means anything. Do not read retention from users who signed up fewer than 7 days ago.
+**Target for pilot:** 30%+ meaningful Day-7 retention.
+**Warning threshold:** below 25%.
+
+**Minimum signal for decision:** You need at least 5 activated users who have passed their 7-day window before this number means anything. Do not read retention from users who activated fewer than 7 days ago.
 
 ---
 
@@ -169,7 +170,7 @@ After 5 sessions:
 - Email confirmation is broken
 
 **Consider a pivot when (after 10+ sessions):**
-- Fewer than 3 of 10 activated users return in 7 days without prompting
+- Day-7 retention is below 25% and at least 5 activated users have passed the 7-day window
 - The value question produces the same answer as "I'd just use a spreadsheet"
 - No user independently mentions the Follow-ups screen as useful
 
