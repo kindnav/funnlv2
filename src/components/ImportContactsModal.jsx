@@ -521,7 +521,7 @@ export default function ImportContactsModal({ onClose, onImported }) {
           {step === 'map' && (
             <div>
 
-              {/* AI mapping banner — only visible for Pro users after a successful mapping call */}
+              {/* AI mapping banner — Pro users only, after a successful mapping call */}
               {aiMapped.applied && (
                 <div className="flex items-center gap-2.5 mb-4 px-3 py-2.5 bg-[rgba(139,124,255,0.08)] border border-[rgba(139,124,255,0.2)] rounded-xl">
                   <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#8B7CFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-none">
@@ -535,6 +535,18 @@ export default function ImportContactsModal({ onClose, onImported }) {
                       <p className="text-[11.5px] text-mid mt-0.5">{aiMapped.notes}</p>
                     )}
                   </div>
+                </div>
+              )}
+
+              {/* Soft upgrade prompt — non-Pro users only; mutually exclusive with the banner above */}
+              {!isProUser && (
+                <div className="flex items-center gap-2.5 mb-4 px-3 py-2.5 bg-[rgba(139,124,255,0.05)] border border-[rgba(139,124,255,0.12)] rounded-xl">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#6C6C78" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-none">
+                    <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+                  </svg>
+                  <p className="text-[12.5px] text-mid">
+                    Pro tip: AI can auto-map your columns in one click — available with Funnl Pro.
+                  </p>
                 </div>
               )}
 
