@@ -60,7 +60,7 @@ src/
     BottomNav.jsx          Mobile bottom tab bar (md:hidden): Home/Contacts/Follow-ups/Funnl AI, follow-up badge
     ContactListItem.jsx    Contact card in the 2-column grid (avatar tile, tags, relationship_type + how-met footer)
     AddContactDrawer.jsx   Right-side slide-in drawer for adding a contact; full-width on mobile, 452px on desktop; Escape/backdrop closes; scroll locked
-    ImportContactsModal.jsx  3-step CSV import modal (upload → map → confirm). PapaParse parses; auto-detects headers; transformRow() is the AI seam.
+    ImportContactsModal.jsx  3-step CSV import modal (upload → map → confirm). PapaParse parses; auto-detects headers via HEADER_MAP; Pro users get AI-assisted column mapping (ai-map-csv Edge Function, one call per import); non-Pro users get unchanged manual mapping. transformRow() applies the final assignment to all rows.
   pages/
     DashboardPage.jsx      Landing screen after login: stats, follow-ups due, recent contacts
     ContactsPage.jsx       Contacts grid + search (name/company/role/tag/skill) + URL-based tag filter (?tag=recruiter)
@@ -328,7 +328,7 @@ The contacts page filter pills use `useSearchParams`. Active tag is stored as `?
 | **Mobile responsiveness** | ✅ BottomNav (4 tabs, follow-up badge, iPhone safe-area). Sidebar hidden on mobile. All 6 pages responsive at 375px. AddContactDrawer full-width on mobile. |
 | **Pre-rollout quality pass** | ✅ Password reset flow, LinkedIn URL normalization, error/empty-state collision fixed, import order fixed, interaction logged confirmation. |
 | **Settings page** | ✅ `/settings` — account-card layout: display name (editable, saves to `profiles` table), email + joined date (read-only), sign out. School field removed from UI and table. |
-| **CSV importer** | ✅ Import button on Contacts page opens a 3-step modal (upload → map → confirm). Mapping step: **pool-at-top UI** — unassigned columns shown prominently at the top as clickable chips ("click to place"); clicking a chip opens a field picker (1 click to assign). Field-first assignment also available via + Add on each field row. `normalizeHeader()` normalizes separators before lookup (first_name / first-name / first.name all match one HEADER_MAP entry). HEADER_MAP pruned of false-positive generic entries. Multiple columns combine in chip order (e.g. First Name + Last Name → "John Smith"). "— not assigned" placeholder on empty fields. Picker uses fixed-position viewport coords (not absolute) so scrollable container can't clip it. Tags: comma-separated cell values split into arrays. relationship_type and relationship_note are mappable fields. All-or-nothing bulk insert. `transformRow` AI seam intact. Known limitations: no duplicate detection, CSV-only, no cell-level editing. |
+| **CSV importer** | ✅ Import button on Contacts page opens a 3-step modal (upload → map → confirm). Mapping step: **pool-at-top UI** — unassigned columns shown prominently at the top as clickable chips ("click to place"); clicking a chip opens a field picker (1 click to assign). Field-first assignment also available via + Add on each field row. `normalizeHeader()` normalizes separators before lookup (first_name / first-name / first.name all match one HEADER_MAP entry). HEADER_MAP pruned of false-positive generic entries. Multiple columns combine in chip order (e.g. First Name + Last Name → "John Smith"). "— not assigned" placeholder on empty fields. Picker uses fixed-position viewport coords (not absolute) so scrollable container can't clip it. Tags: comma-separated cell values split into arrays. relationship_type and relationship_note are mappable fields. All-or-nothing bulk insert. `csv_import_used` event gains `ai_assisted: boolean` property. Known limitations: no duplicate detection, CSV-only, no cell-level editing. **Smart import (Pro):** after upload, Pro users get one `ai-map-csv` Edge Function call (headers + 3 sample rows → mapping); the returned assignment pre-populates Step 2 with an "AI auto-mapped N columns" banner; user reviews/adjusts before importing; non-Pro users see unchanged manual flow; AI failure silently falls back to rule-based mapping. Phase B (split jammed combined columns, e.g. "John Smith, Goldman, analyst" in one cell) deferred — see Known future work. |
 | **Skills removed → relationship intent** | ✅ `skills` column dropped. `relationship_type` (preset select: Mentor/Collaborator/Referral path/Potential employer/Connector/Other) and `relationship_note` (freeform "why this person matters") added to contacts table, all forms, detail page, importer, and AI context. AI Fill extracts `relationship_note` from freeform text but never auto-selects `relationship_type` (deliberate user choice). |
 | **Dynamic sidebar YOUR TAGS** | ✅ Replaced hardcoded Pipeline section (Target firms/Recruiters/Alumni) with live user-tag groups. Queries contacts table on each nav change, counts tag occurrences in JS, sorts by count desc, caps at top 8. Deterministic dot colors per tag. Active tag highlighted. Empty state: "Tags you add to contacts will appear here." |
 | **Product analytics (PostHog)** | ✅ 17 events total (8 core + 2 Phase 1 + 3 Phase 2A + 2 Phase 3 + 2 Phase 4). Core: user_signed_up, first_contact_added, contact_added, interaction_logged, followup_set, csv_import_used, ai_assistant_used, ai_fill_used. Phase 1 additions: landing_cta_clicked, signup_started. Phase 2A additions: activation_checklist_viewed, activation_step_completed, activation_completed. Phase 3 additions: followup_completed, followup_snoozed. Phase 4 additions: email_confirmed (WelcomePage, localStorage-deduped per user per browser), user_signed_in (SignInPage handleSignIn). DOM autocapture disabled; $pageview and $pageleave remain enabled. Behavior only — no contact content. Users identified by Supabase ID. |
@@ -463,7 +463,7 @@ See `docs/auth-email-setup.md` for the full checklist.
 5. **CSV importer — known limitations (future improvements):**
    - **No duplicate detection** — importing the same file twice creates duplicate contacts. Detecting duplicates (by name+company, or email) is a future improvement.
    - **CSV only** — `.xlsx` and other formats not supported yet. Users must export to CSV first.
-   - **AI-assisted parsing** — messy spreadsheets (single column jammed with "John Smith, Goldman, analyst") require manual mapping. The `transformRow` seam in `ImportContactsModal.jsx` is where AI pre-processing will plug in later.
+   - **Smart import Phase B — jammed combined columns** — a single column containing combined data ("John Smith, Goldman, analyst") cannot be split across fields by the current AI mapping. Phase A (header name mapping) is done. Phase B would add split-template detection: AI infers the split pattern from sample values, code applies it to all rows — no per-row AI calls. Deferred until real-user CSVs confirm this is a common pattern. The `transformRow` seam in `ImportContactsModal.jsx` is where this will plug in.
 
 ### Layer 2 (next major phase)
 5. **Follow-ups enhancements** — `/followups` shows real data. Still needed: Snooze, Mark done actions, and "going cold" detection logic.
@@ -507,12 +507,14 @@ Every interaction logged now is training data for Layer 3. More data → better 
 
 #### AI vision — features to build after real users
 
-**1. AI-assisted CSV import** *(highest-value entry point)*
+**1. AI-assisted CSV import** *(Phase A done — Phase B deferred)*
 
-Students often have messy spreadsheets — one column jammed with "John Smith, Goldman, analyst" or inconsistent headers across exports. The CSV importer (a plain import screen) has a deliberate seam left for AI augmentation. When ready:
-- Parse raw rows and infer which text maps to which contact field (name, company, role, etc.)
-- Suggest tags and skills based on the content
-- Find and format LinkedIn URLs if present or inferrable
+Phase A (smart header mapping) is built: after upload, the `ai-map-csv` Edge Function (Haiku, one call per import) sees headers + 3 sample rows and returns an improved column assignment. Pro users see an "AI auto-mapped N columns" banner on the mapping step; they review and adjust before importing. Non-Pro users are unaffected.
+
+Phase B (jammed combined columns — "John Smith, Goldman, analyst" in one cell) is deferred until real-user CSVs confirm it's common. When ready:
+- AI sees sample values from the problematic column, returns a split template (e.g. [name, company, role])
+- Code applies the template to all rows — no per-row AI calls
+- The `transformRow` seam in `ImportContactsModal.jsx` is where this plugs in
 - Present a confirmation step so the user can review before committing
 
 This is the AI upgrade to the plain CSV importer — not a replacement of it.
@@ -636,7 +638,7 @@ Recommended positioning:
 
 | Layer | Name | Status | Description |
 |---|---|---|---|
-| **A** | Plumbing + Pro gate | ✅ Done | `ai_enabled` column + RLS fix. `src/lib/ai.js` canUseAI() Stripe-ready gate. Edge Function `ai-parse-contact` deployed. Gate tested: 403 for non-Pro, 200 for Pro. |
+| **A** | Plumbing + Pro gate | ✅ Done | `ai_enabled` column + RLS fix. `src/lib/ai.js` canUseAI() Stripe-ready gate. Edge Functions `ai-parse-contact` and `ai-map-csv` deployed. Gate tested: 403 for non-Pro, 200 for Pro. |
 | **B** | Contact from text | ✅ Done | AI Fill section added to AddContactDrawer. Pro-gated (hidden for non-Pro). Textarea → Parse → fields fill with purple highlight. Manual edits clear the highlight. Follow-up suggestion shown as reminder. Never auto-saves. |
 | **C** | AI Assistant | ✅ Done | Working chat UI on /ai (FunnlAIPage.jsx). Edge Function `ai-chat` deployed (claude-sonnet-5). Loads all contacts + interactions per call. Multi-turn conversation works. Extended thinking handled: `.find(b => b.type === 'text')` since claude-sonnet-5 sometimes returns a thinking block first. System prompt STYLE section: prose-first, no reflexive bullets/bolding, warm mentor voice. react-markdown renders assistant replies (bold/lists clean, raw HTML disabled). Typebox redesigned: pill shape, focus glow, send button with press feel. Pro-gated; non-Pro sees locked state. All stale "coming soon" copy updated across Sidebar, Dashboard, ContactDetail. |
 | **D** | Stripe billing | 🔵 Later | Replace manual `ai_enabled` flag with real subscription check. canUseAI() is the seam. |

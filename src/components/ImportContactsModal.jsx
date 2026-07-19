@@ -1,7 +1,8 @@
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import Papa from 'papaparse'
 import { supabase } from '../lib/supabase'
 import { track } from '../lib/analytics'
+import { canUseAI } from '../lib/ai'
 
 const FUNNL_FIELDS = [
   { value: 'name',              label: 'Name',              required: true },
@@ -251,6 +252,17 @@ export default function ImportContactsModal({ onClose, onImported }) {
   const [result, setResult]       = useState(null)
   const fileInputRef = useRef()
 
+  // Pro-gate: check once on mount — same pattern as AddContactDrawer
+  const [isProUser, setIsProUser]   = useState(false)
+  const [aiLoading, setAiLoading]   = useState(false)
+  const [aiMapped, setAiMapped]     = useState({ applied: false, count: 0, notes: '' })
+
+  useEffect(() => {
+    supabase.auth.getUser().then(({ data }) => {
+      if (data.user) canUseAI(data.user.id).then(setIsProUser)
+    })
+  }, [])
+
   // --- Derived ---
   const assignedSet  = new Set(Object.values(assignment).flat())
   const ignoredCols  = headers.filter(h => !assignedSet.has(h))
@@ -289,10 +301,49 @@ export default function ImportContactsModal({ onClose, onImported }) {
           setParseError('This CSV has headers but no data rows.')
           return
         }
-        setHeaders(results.meta.fields)
-        setRows(results.data)
-        setAssignment(buildInitialAssignment(results.meta.fields))
-        setStep('map')
+        const hdrs = results.meta.fields
+        const data = results.data
+        setHeaders(hdrs)
+        setRows(data)
+        setAssignment(buildInitialAssignment(hdrs))
+        setAiMapped({ applied: false, count: 0, notes: '' })
+
+        if (isProUser) {
+          // Pro users: call AI to infer column mapping from headers + 3 sample rows.
+          // One call per import — the returned mapping is applied in code to all rows,
+          // not by calling AI again per row.
+          setAiLoading(true)
+          ;(async () => {
+            try {
+              const { data: resp, error } = await supabase.functions.invoke('ai-map-csv', {
+                body: { headers: hdrs, sample_rows: data.slice(0, 3) },
+              })
+              if (error || !resp?.assignment) throw new Error('no assignment')
+
+              // Validate: only keep columns that actually exist in this CSV
+              const headerSet = new Set(hdrs)
+              const merged = freshAssignment()
+              let count = 0
+              for (const [field, cols] of Object.entries(resp.assignment)) {
+                if (!(field in merged)) continue
+                const valid = (cols ?? []).filter(c => typeof c === 'string' && headerSet.has(c))
+                if (valid.length > 0) {
+                  merged[field] = valid
+                  count += valid.length
+                }
+              }
+              setAssignment(merged)
+              setAiMapped({ applied: true, count, notes: resp.notes ?? '' })
+            } catch {
+              // Silent fallback — rule-based assignment is already set above
+            } finally {
+              setAiLoading(false)
+              setStep('map')
+            }
+          })()
+        } else {
+          setStep('map')
+        }
       },
       error: () => {
         setParseError("Couldn't read this file. Make sure it's a valid .csv and try again.")
@@ -313,6 +364,8 @@ export default function ImportContactsModal({ onClose, onImported }) {
     setAssignment(freshAssignment())
     setPicker(null)
     setParseError('')
+    setAiLoading(false)
+    setAiMapped({ applied: false, count: 0, notes: '' })
     if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
@@ -364,7 +417,7 @@ export default function ImportContactsModal({ onClose, onImported }) {
       setImportError(`Import failed: ${error.message}. No contacts were saved — please try again.`)
       return
     }
-    track('csv_import_used', { contacts_imported: toImport.length })
+    track('csv_import_used', { contacts_imported: toImport.length, ai_assisted: aiMapped.applied })
     setResult({ imported: toImport.length, skipped })
     setStep('done')
     onImported()
@@ -405,55 +458,85 @@ export default function ImportContactsModal({ onClose, onImported }) {
           {/* ── STEP 1: Upload ── */}
           {step === 'upload' && (
             <div>
-              <p className="text-[14px] text-muted mb-5 leading-relaxed">
-                Upload a CSV file exported from a spreadsheet. Each row becomes one contact.
-              </p>
-              <div
-                className={`border-2 border-dashed rounded-xl p-10 text-center cursor-pointer transition-colors ${
-                  dragging
-                    ? 'border-accent bg-[rgba(139,124,255,0.07)]'
-                    : 'border-[rgba(255,255,255,0.12)] hover:border-[rgba(255,255,255,0.22)] hover:bg-[rgba(255,255,255,0.02)]'
-                }`}
-                onClick={() => fileInputRef.current?.click()}
-                onDragOver={e => { e.preventDefault(); setDragging(true) }}
-                onDragLeave={() => setDragging(false)}
-                onDrop={handleDrop}
-              >
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept=".csv"
-                  className="hidden"
-                  onChange={e => handleFile(e.target.files[0])}
-                />
-                <div className="w-12 h-12 mx-auto mb-4 rounded-xl bg-elevated border border-[rgba(255,255,255,0.08)] flex items-center justify-center">
-                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#6C6C78" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                    <polyline points="17 8 12 3 7 8"/>
-                    <line x1="12" y1="3" x2="12" y2="15"/>
+              {aiLoading ? (
+                /* Pro users: show spinner while AI infers column mapping */
+                <div className="flex flex-col items-center justify-center py-16 gap-3">
+                  <svg className="animate-spin" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#8B7CFF" strokeWidth="2.5" strokeLinecap="round">
+                    <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
                   </svg>
+                  <p className="text-[14px] font-semibold text-mid">AI is analyzing your columns…</p>
+                  <p className="text-[12px] text-lower">Usually about 2 seconds</p>
                 </div>
-                <p className="text-[14px] font-semibold text-hi mb-1">Drop a CSV file here</p>
-                <p className="text-[13px] text-low">or click to browse · .csv files only</p>
-              </div>
-              {parseError && (
-                <div className="mt-4 flex items-start gap-2.5 px-4 py-3 bg-[rgba(255,107,138,0.08)] border border-[rgba(255,107,138,0.2)] rounded-xl">
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#FF6B8A" strokeWidth="2" strokeLinecap="round" className="flex-none mt-0.5">
-                    <circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/>
-                  </svg>
-                  <p className="text-[13px] text-danger">{parseError}</p>
-                </div>
+              ) : (
+                <>
+                  <p className="text-[14px] text-muted mb-5 leading-relaxed">
+                    Upload a CSV file exported from a spreadsheet. Each row becomes one contact.
+                  </p>
+                  <div
+                    className={`border-2 border-dashed rounded-xl p-10 text-center cursor-pointer transition-colors ${
+                      dragging
+                        ? 'border-accent bg-[rgba(139,124,255,0.07)]'
+                        : 'border-[rgba(255,255,255,0.12)] hover:border-[rgba(255,255,255,0.22)] hover:bg-[rgba(255,255,255,0.02)]'
+                    }`}
+                    onClick={() => fileInputRef.current?.click()}
+                    onDragOver={e => { e.preventDefault(); setDragging(true) }}
+                    onDragLeave={() => setDragging(false)}
+                    onDrop={handleDrop}
+                  >
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept=".csv"
+                      className="hidden"
+                      onChange={e => handleFile(e.target.files[0])}
+                    />
+                    <div className="w-12 h-12 mx-auto mb-4 rounded-xl bg-elevated border border-[rgba(255,255,255,0.08)] flex items-center justify-center">
+                      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#6C6C78" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                        <polyline points="17 8 12 3 7 8"/>
+                        <line x1="12" y1="3" x2="12" y2="15"/>
+                      </svg>
+                    </div>
+                    <p className="text-[14px] font-semibold text-hi mb-1">Drop a CSV file here</p>
+                    <p className="text-[13px] text-low">or click to browse · .csv files only</p>
+                  </div>
+                  {parseError && (
+                    <div className="mt-4 flex items-start gap-2.5 px-4 py-3 bg-[rgba(255,107,138,0.08)] border border-[rgba(255,107,138,0.2)] rounded-xl">
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#FF6B8A" strokeWidth="2" strokeLinecap="round" className="flex-none mt-0.5">
+                        <circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/>
+                      </svg>
+                      <p className="text-[13px] text-danger">{parseError}</p>
+                    </div>
+                  )}
+                  <p className="text-[12px] text-lower mt-5 leading-relaxed">
+                    Tip: in Google Sheets, go to File → Download → Comma Separated Values (.csv).
+                    In Excel, use File → Save As → CSV.
+                  </p>
+                </>
               )}
-              <p className="text-[12px] text-lower mt-5 leading-relaxed">
-                Tip: in Google Sheets, go to File → Download → Comma Separated Values (.csv).
-                In Excel, use File → Save As → CSV.
-              </p>
             </div>
           )}
 
           {/* ── STEP 2: Map columns ── */}
           {step === 'map' && (
             <div>
+
+              {/* AI mapping banner — only visible for Pro users after a successful mapping call */}
+              {aiMapped.applied && (
+                <div className="flex items-center gap-2.5 mb-4 px-3 py-2.5 bg-[rgba(139,124,255,0.08)] border border-[rgba(139,124,255,0.2)] rounded-xl">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#8B7CFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-none">
+                    <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+                  </svg>
+                  <div>
+                    <p className="text-[12.5px] text-accent font-semibold">
+                      AI auto-mapped {aiMapped.count} {aiMapped.count === 1 ? 'column' : 'columns'} — review and adjust before importing
+                    </p>
+                    {aiMapped.notes && (
+                      <p className="text-[11.5px] text-mid mt-0.5">{aiMapped.notes}</p>
+                    )}
+                  </div>
+                </div>
+              )}
 
               {/* Name required warning */}
               {!hasNameMapped && (
