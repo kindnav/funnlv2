@@ -69,7 +69,7 @@ Each step is a PostHog funnel stage. Measure the drop-off at each step. `activat
 
 **Activation_completed_at** is the timestamp of the final milestone. A user who finishes the first session with all three steps done counts as activated in that session.
 
-**Target for pilot:** 70%+ of users who finish session 1 reach activation. If the rate is below 50%, there is an onboarding problem to fix before wider sharing.
+**Target for pilot:** 60%+ of confirmed users reach activation. Warning/fix threshold: below 50%.
 
 ---
 
