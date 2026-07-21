@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
+import { useNavigate } from 'react-router-dom'
 import Papa from 'papaparse'
 import { supabase } from '../lib/supabase'
 import { track } from '../lib/analytics'
@@ -249,6 +250,7 @@ function calcPickerPos(e, estimatedHeight = 240) {
 }
 
 export default function ImportContactsModal({ onClose, onImported }) {
+  const navigate = useNavigate()
   const [step, setStep]           = useState('upload')
   const [dragging, setDragging]   = useState(false)
   const [parseError, setParseError] = useState('')
@@ -941,21 +943,61 @@ export default function ImportContactsModal({ onClose, onImported }) {
 
           {/* ── DONE ── */}
           {step === 'done' && result && (
-            <div className="py-6 text-center">
-              <div className="w-[56px] h-[56px] mx-auto mb-5 rounded-[18px] bg-[rgba(47,212,182,0.12)] border border-[rgba(47,212,182,0.25)] flex items-center justify-center">
-                <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#2FD4B6" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M20 6L9 17l-5-5"/>
-                </svg>
-              </div>
-              <p className="font-display font-bold text-[22px] text-hi mb-2">
-                Imported {result.imported} {result.imported === 1 ? 'contact' : 'contacts'}
-              </p>
-              {result.skipped > 0 && (
-                <p className="text-[13px] text-low mb-1">
-                  {result.skipped} {result.skipped === 1 ? 'row' : 'rows'} skipped — no name value
+            <div className="py-4">
+              <div className="text-center mb-6">
+                <div className="w-[56px] h-[56px] mx-auto mb-5 rounded-[18px] bg-[rgba(47,212,182,0.12)] border border-[rgba(47,212,182,0.25)] flex items-center justify-center">
+                  <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#2FD4B6" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M20 6L9 17l-5-5"/>
+                  </svg>
+                </div>
+                <p className="font-display font-bold text-[22px] text-hi mb-2">
+                  Imported {result.imported} {result.imported === 1 ? 'contact' : 'contacts'}
                 </p>
-              )}
-              <p className="text-[13.5px] text-muted mt-1">Your contacts list has been updated.</p>
+                {result.skipped > 0 && (
+                  <p className="text-[13px] text-low mb-1">
+                    {result.skipped} {result.skipped === 1 ? 'row' : 'rows'} skipped — no name value
+                  </p>
+                )}
+                <p className="text-[13.5px] text-muted mt-1">Your contacts list has been updated.</p>
+              </div>
+
+              {/* Part C: post-import activation handoff */}
+              <div className="border border-[rgba(255,255,255,0.07)] rounded-xl p-4 bg-elevated">
+                <p className="text-[13px] font-semibold text-hi mb-1">What would you like to do next?</p>
+                <p className="text-[12.5px] text-muted mb-4 leading-relaxed">
+                  Log a recent conversation with one of your contacts to start building your interaction history.
+                </p>
+                <div className="flex flex-col gap-2">
+                  {result.firstId && (
+                    <button
+                      onClick={() => {
+                        track('post_import_action_clicked', { action: 'log_outreach' })
+                        navigate(`/contacts/${result.firstId}`, { state: { openInteractionForm: true } })
+                        onClose()
+                      }}
+                      className="flex items-center justify-between gap-2 w-full bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] text-white text-[14px] font-bold px-5 py-[11px] rounded-[11px] shadow-[0_6px_18px_rgba(91,69,240,0.35)] hover:opacity-90 transition-opacity"
+                    >
+                      <span>Log recent outreach</span>
+                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5" strokeLinecap="round">
+                        <path d="M5 12h14M13 6l6 6-6 6"/>
+                      </svg>
+                    </button>
+                  )}
+                  <button
+                    onClick={() => {
+                      track('post_import_action_clicked', { action: 'view_contacts' })
+                      navigate('/contacts')
+                      onClose()
+                    }}
+                    className="flex items-center justify-between gap-2 w-full bg-card border border-[rgba(255,255,255,0.09)] text-hi text-[14px] font-semibold px-5 py-[11px] rounded-[11px] hover:bg-elevated transition-colors"
+                  >
+                    <span>View all contacts</span>
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                      <path d="M5 12h14M13 6l6 6-6 6"/>
+                    </svg>
+                  </button>
+                </div>
+              </div>
             </div>
           )}
 
@@ -1020,12 +1062,14 @@ export default function ImportContactsModal({ onClose, onImported }) {
             </>
           )}
           {step === 'done' && (
-            <button
-              onClick={onClose}
-              className="w-full bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] text-white text-[14px] font-bold px-6 py-[10px] rounded-[11px] shadow-[0_6px_18px_rgba(91,69,240,0.35)] hover:opacity-90 transition-opacity"
-            >
-              Done
-            </button>
+            <div className="w-full flex justify-center">
+              <button
+                onClick={onClose}
+                className="text-[14px] font-semibold text-low hover:text-hi transition-colors"
+              >
+                Close
+              </button>
+            </div>
           )}
         </div>
       </div>
