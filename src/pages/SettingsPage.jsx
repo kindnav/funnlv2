@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
+import { getTheme, setTheme } from '../lib/theme'
 
 const iCls = 'flex-1 bg-input border border-[rgba(255,255,255,0.09)] rounded-xl px-[13px] py-[11px] text-[13.5px] text-hi placeholder-[#54545E] outline-none focus:border-[rgba(139,124,255,0.5)] transition-colors'
 const lCls = 'mb-[7px] block text-[12.5px] font-semibold text-mid'
@@ -16,6 +17,7 @@ function SettingsPage() {
   const [showDeleteModal, setShowDeleteModal] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState('')
+  const [currentTheme, setCurrentTheme] = useState(() => getTheme())
 
   useEffect(() => {
     async function load() {
@@ -142,6 +144,36 @@ function SettingsPage() {
             </div>
           </div>
 
+        </div>
+
+        {/* Appearance */}
+        <div className="bg-card border border-[rgba(255,255,255,0.07)] rounded-2xl overflow-hidden mb-5">
+          <div className="p-6">
+            <p className="text-[11.5px] font-bold tracking-[1px] text-lower uppercase font-mono mb-4">Appearance</p>
+            <p className="text-[12.5px] text-muted mb-3">Choose how Funnl looks on this device.</p>
+            <div className="flex gap-2">
+              {[
+                { value: 'system', label: 'System' },
+                { value: 'light',  label: 'Light'  },
+                { value: 'dark',   label: 'Dark'   },
+              ].map(({ value, label }) => (
+                <button
+                  key={value}
+                  onClick={() => {
+                    setCurrentTheme(value)
+                    setTheme(value)
+                  }}
+                  className={`flex-1 py-2.5 rounded-xl text-[13px] font-semibold transition-colors ${
+                    currentTheme === value
+                      ? 'bg-accent text-white shadow-[0_4px_12px_rgba(139,124,255,0.35)]'
+                      : 'bg-elevated border border-[rgba(255,255,255,0.09)] text-mid hover:text-hi'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
 
         {/* Sign out */}

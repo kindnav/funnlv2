@@ -47,6 +47,78 @@
   }
 }
 
+/* ── Theme token overrides ────────────────────────────────────────────────────
+   Placed outside @layer base so unlayered specificity wins over layered rules.
+
+   `:root` === `html` in all browsers. `data-theme` is stamped on
+   document.documentElement (html) by src/lib/theme.js.
+
+   Precedence (highest to lowest):
+     1. :root[data-theme="light"] or :root[data-theme="dark"]  (explicit user choice)
+     2. @media (prefers-color-scheme: light) with :root:not([data-theme="dark"])
+        (system preference, not overridden by user)
+     3. @layer base defaults (dark)
+
+   Arbitrary-value classes (border-[rgba(...)], bg-[rgba(...)]) do NOT respond
+   to these token overrides — only the named token utilities like bg-card,
+   text-hi, bg-surface etc. automatically update. */
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    background-color: #F9F8FF;
+    color: #1C1829;
+    --color-base:     #F9F8FF;
+    --color-surface:  #F4F3FC;
+    --color-sidebar:  #EAE8F5;
+    --color-card:     #FFFFFF;
+    --color-elevated: #EEEDF7;
+    --color-input:    #FAFAFE;
+    --color-hi:       #1C1829;
+    --color-mid:      #52526A;
+    --color-muted:    #5E5E78;
+    --color-low:      #8C8CA4;
+    --color-lower:    #AAAABC;
+    --color-tag:      #5B45F0;
+    --color-skill:    #7A7A92;
+  }
+}
+
+:root[data-theme="light"] {
+  background-color: #F9F8FF;
+  color: #1C1829;
+  --color-base:     #F9F8FF;
+  --color-surface:  #F4F3FC;
+  --color-sidebar:  #EAE8F5;
+  --color-card:     #FFFFFF;
+  --color-elevated: #EEEDF7;
+  --color-input:    #FAFAFE;
+  --color-hi:       #1C1829;
+  --color-mid:      #52526A;
+  --color-muted:    #5E5E78;
+  --color-low:      #8C8CA4;
+  --color-lower:    #AAAABC;
+  --color-tag:      #5B45F0;
+  --color-skill:    #7A7A92;
+}
+
+:root[data-theme="dark"] {
+  background-color: #060608;
+  color: #F4F3F8;
+  --color-base:     #060608;
+  --color-surface:  #0B0B0E;
+  --color-sidebar:  #100F14;
+  --color-card:     #141419;
+  --color-elevated: #1A1A21;
+  --color-input:    #131318;
+  --color-hi:       #F4F3F8;
+  --color-mid:      #A0A0AD;
+  --color-muted:    #9A9AA5;
+  --color-low:      #6C6C78;
+  --color-lower:    #54545E;
+  --color-tag:      #B4A8FF;
+  --color-skill:    #9EA0AD;
+}
+
 @keyframes slide-in-right {
   from { transform: translateX(100%); }
   to   { transform: translateX(0); }

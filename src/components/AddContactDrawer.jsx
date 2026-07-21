@@ -168,7 +168,7 @@ function AddContactDrawer({ onClose, onSuccess }) {
   return (
     <form
       onSubmit={handleSubmit}
-      className="fixed inset-y-0 right-0 w-full md:w-[452px] bg-[#0E0E12] border-l border-[rgba(255,255,255,0.09)] z-50 flex flex-col shadow-[-30px_0_60px_rgba(0,0,0,0.5)]"
+      className="fixed inset-y-0 right-0 w-full md:w-[452px] bg-card border-l border-[rgba(255,255,255,0.09)] z-50 flex flex-col shadow-[-30px_0_60px_rgba(0,0,0,0.5)]"
       style={{ animation: 'slide-in-right 0.25s ease-out' }}
     >
       {/* Header */}
