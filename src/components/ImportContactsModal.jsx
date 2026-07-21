@@ -273,6 +273,12 @@ export default function ImportContactsModal({ onClose, onImported }) {
   // 'linkedin' | 'preamble' | null — drives the informational banner in Step 2
   const [csvDetection, setCsvDetection] = useState(null)
 
+  // Part B: AI tag/relationship suggestions (Pro users only)
+  const [aiSuggestedTags, setAiSuggestedTags] = useState([])
+  const [aiSuggestedRelType, setAiSuggestedRelType] = useState(null)
+  const [acceptedTags, setAcceptedTags] = useState([])
+  const [acceptedRelType, setAcceptedRelType] = useState(null)
+
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => {
       if (data.user) canUseAI(data.user.id).then(setIsProUser)
@@ -374,6 +380,10 @@ export default function ImportContactsModal({ onClose, onImported }) {
     setRows(dataRows)
     setAssignment(initialAssignment)
     setAiMapped({ applied: false, count: 0, notes: '' })
+    setAiSuggestedTags([])
+    setAiSuggestedRelType(null)
+    setAcceptedTags([])
+    setAcceptedRelType(null)
 
     if (isProUser) {
       // Only send unresolved columns to AI — don't let it override deterministic mappings
@@ -384,7 +394,11 @@ export default function ImportContactsModal({ onClose, onImported }) {
       ;(async () => {
         try {
           const { data: resp, error } = await supabase.functions.invoke('ai-map-csv', {
-            body: { headers: unresolvedHdrs, sample_rows: dataRows.slice(0, 3) },
+            body: {
+              headers: unresolvedHdrs,
+              sample_rows: dataRows.slice(0, 3),
+              infer_categories: true,
+            },
           })
           if (error || !resp?.assignment) throw new Error('no assignment')
 
@@ -406,6 +420,16 @@ export default function ImportContactsModal({ onClose, onImported }) {
           const totalMapped = Object.values(merged).flat().length
           setAssignment(merged)
           setAiMapped({ applied: true, count: totalMapped, notes: resp.notes ?? '' })
+
+          // Part B: store tag/relationship suggestions; pre-select all for user to review
+          if (Array.isArray(resp.suggested_tags) && resp.suggested_tags.length > 0) {
+            setAiSuggestedTags(resp.suggested_tags)
+            setAcceptedTags(resp.suggested_tags)
+          }
+          if (resp.suggested_relationship_type) {
+            setAiSuggestedRelType(resp.suggested_relationship_type)
+            setAcceptedRelType(resp.suggested_relationship_type)
+          }
         } catch {
           // Silent fallback — rule-based assignment already in state
         } finally {
@@ -434,6 +458,10 @@ export default function ImportContactsModal({ onClose, onImported }) {
     setAiLoading(false)
     setAiMapped({ applied: false, count: 0, notes: '' })
     setCsvDetection(null)
+    setAiSuggestedTags([])
+    setAiSuggestedRelType(null)
+    setAcceptedTags([])
+    setAcceptedRelType(null)
     if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
@@ -477,16 +505,33 @@ export default function ImportContactsModal({ onClose, onImported }) {
       setImporting(false)
       return
     }
-    const contacts = toImport.map(c => ({ ...c, user_id: user.id }))
-    // Single bulk insert — all-or-nothing at the database level.
-    const { error } = await supabase.from('contacts').insert(contacts)
+    const contacts = toImport.map(c => {
+      const contact = { ...c, user_id: user.id }
+      // Apply AI-suggested tags merged with any CSV-mapped tags
+      if (acceptedTags.length > 0) {
+        const existing = contact.tags || []
+        const merged = [...new Set([...existing, ...acceptedTags])]
+        contact.tags = merged
+      }
+      // Apply AI-suggested relationship type only if the CSV didn't already set one
+      if (acceptedRelType && !contact.relationship_type) {
+        contact.relationship_type = acceptedRelType
+      }
+      return contact
+    })
+    // Single bulk insert — all-or-nothing at the database level. Select id back for Part C handoff.
+    const { data: insertedRows, error } = await supabase.from('contacts').insert(contacts).select('id')
     setImporting(false)
     if (error) {
       setImportError(`Import failed: ${error.message}. No contacts were saved — please try again.`)
       return
     }
     track('csv_import_used', { contacts_imported: toImport.length, ai_assisted: aiMapped.applied })
-    setResult({ imported: toImport.length, skipped })
+    setResult({
+      imported: toImport.length,
+      skipped,
+      firstId: insertedRows?.[0]?.id ?? null,
+    })
     setStep('done')
     onImported()
   }
@@ -817,7 +862,70 @@ export default function ImportContactsModal({ onClose, onImported }) {
                   </div>
                 </div>
               </div>
-              <p className="text-[13px] text-low leading-relaxed mb-5">
+
+              {/* Part B: AI category suggestions (Pro users who got suggestions) */}
+              {isProUser && (aiSuggestedTags.length > 0 || aiSuggestedRelType) && (
+                <div className="mb-4 px-4 py-3.5 bg-[rgba(139,124,255,0.06)] border border-[rgba(139,124,255,0.2)] rounded-xl">
+                  <div className="flex items-center gap-2 mb-3">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="#8B7CFF">
+                      <path d="M12 3l1.7 5.3L19 10l-5.3 1.7L12 17l-1.7-5.3L5 10l5.3-1.7L12 3z"/>
+                    </svg>
+                    <p className="text-[12.5px] font-bold text-accent">AI suggestions — review before importing</p>
+                  </div>
+
+                  {aiSuggestedTags.length > 0 && (
+                    <div className="mb-3">
+                      <p className="text-[11.5px] text-low mb-1.5">Add tags to all contacts:</p>
+                      <div className="flex flex-wrap gap-1.5">
+                        {aiSuggestedTags.map(tag => {
+                          const on = acceptedTags.includes(tag)
+                          return (
+                            <button
+                              key={tag}
+                              type="button"
+                              onClick={() => setAcceptedTags(prev =>
+                                on ? prev.filter(t => t !== tag) : [...prev, tag]
+                              )}
+                              className={`text-[12px] font-mono font-semibold px-2.5 py-[5px] rounded-full border transition-colors ${
+                                on
+                                  ? 'bg-[rgba(139,124,255,0.15)] border-[rgba(139,124,255,0.4)] text-tag'
+                                  : 'bg-transparent border-[rgba(255,255,255,0.1)] text-lower line-through'
+                              }`}
+                            >
+                              {tag}
+                            </button>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {aiSuggestedRelType && (
+                    <div>
+                      <p className="text-[11.5px] text-low mb-1.5">Set relationship type for all contacts:</p>
+                      <div className="flex gap-2 flex-wrap">
+                        <button
+                          type="button"
+                          onClick={() => setAcceptedRelType(acceptedRelType ? null : aiSuggestedRelType)}
+                          className={`text-[12px] font-semibold px-3 py-[5px] rounded-full border transition-colors ${
+                            acceptedRelType
+                              ? 'bg-[rgba(139,124,255,0.15)] border-[rgba(139,124,255,0.4)] text-accent'
+                              : 'bg-transparent border-[rgba(255,255,255,0.1)] text-lower line-through'
+                          }`}
+                        >
+                          {aiSuggestedRelType}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  <p className="text-[11px] text-lower mt-3">
+                    Click to toggle on/off. Only applies to contacts where the field is empty.
+                  </p>
+                </div>
+              )}
+
+              <p className="text-[13px] text-low leading-relaxed mb-4">
                 This import is all-or-nothing — if anything fails, zero contacts will be saved and you'll see a clear error.
               </p>
               {importError && (
