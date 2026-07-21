@@ -3,6 +3,7 @@ import Papa from 'papaparse'
 import { supabase } from '../lib/supabase'
 import { track } from '../lib/analytics'
 import { canUseAI } from '../lib/ai'
+import { detectHeaderRow, isLinkedInExport } from '../lib/csvHeaderDetect.js'
 
 const FUNNL_FIELDS = [
   { value: 'name',              label: 'Name',              required: true },
@@ -269,6 +270,8 @@ export default function ImportContactsModal({ onClose, onImported }) {
   const [isProUser, setIsProUser]   = useState(false)
   const [aiLoading, setAiLoading]   = useState(false)
   const [aiMapped, setAiMapped]     = useState({ applied: false, count: 0, notes: '' })
+  // 'linkedin' | 'preamble' | null — drives the informational banner in Step 2
+  const [csvDetection, setCsvDetection] = useState(null)
 
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => {
@@ -294,74 +297,123 @@ export default function ImportContactsModal({ onClose, onImported }) {
     : { toImport: [], skipped: 0 }
 
   // --- File handling ---
-  function handleFile(file) {
+  async function handleFile(file) {
     if (!file) return
     setParseError('')
     if (!file.name.toLowerCase().endsWith('.csv')) {
       setParseError("Please select a .csv file. Other formats (like .xlsx) aren't supported yet.")
       return
     }
-    Papa.parse(file, {
-      header: true,
-      skipEmptyLines: true,
-      transformHeader: h => h.trim(),
-      complete: (results) => {
-        if (!results.meta.fields?.length) {
-          setParseError('This file has no columns — it may be empty or not a valid CSV.')
-          return
-        }
-        if (results.data.length === 0) {
-          setParseError('This CSV has headers but no data rows.')
-          return
-        }
-        const hdrs = results.meta.fields
-        const data = results.data
-        setHeaders(hdrs)
-        setRows(data)
-        setAssignment(buildInitialAssignment(hdrs))
-        setAiMapped({ applied: false, count: 0, notes: '' })
 
-        if (isProUser) {
-          // Pro users: call AI to infer column mapping from headers + 3 sample rows.
-          // One call per import — the returned mapping is applied in code to all rows,
-          // not by calling AI again per row.
-          setAiLoading(true)
-          ;(async () => {
-            try {
-              const { data: resp, error } = await supabase.functions.invoke('ai-map-csv', {
-                body: { headers: hdrs, sample_rows: data.slice(0, 3) },
-              })
-              if (error || !resp?.assignment) throw new Error('no assignment')
+    // Two-pass parsing: detect the real header row first, then build keyed objects
+    // from that row onward. Fixes exports (like LinkedIn's) that prepend a preamble
+    // before the actual header, which breaks single-pass header: true parsing.
+    let rawText
+    try {
+      rawText = await file.text()
+    } catch {
+      setParseError("Couldn't read this file. Make sure it's a valid .csv and try again.")
+      return
+    }
+    if (rawText.charCodeAt(0) === 0xFEFF) rawText = rawText.slice(1) // strip BOM
 
-              // Validate: only keep columns that actually exist in this CSV
-              const headerSet = new Set(hdrs)
-              const merged = freshAssignment()
-              let count = 0
-              for (const [field, cols] of Object.entries(resp.assignment)) {
-                if (!(field in merged)) continue
-                const valid = (cols ?? []).filter(c => typeof c === 'string' && headerSet.has(c))
-                if (valid.length > 0) {
-                  merged[field] = valid
-                  count += valid.length
-                }
-              }
-              setAssignment(merged)
-              setAiMapped({ applied: true, count, notes: resp.notes ?? '' })
-            } catch {
-              // Silent fallback — rule-based assignment is already set above
-            } finally {
-              setAiLoading(false)
-              setStep('map')
+    // Pass 1: parse all rows as arrays with no header inference
+    const rawResult = Papa.parse(rawText, { header: false, skipEmptyLines: 'greedy' })
+    const allRows = rawResult.data
+    const headerIdx = detectHeaderRow(allRows)
+
+    if (headerIdx === -1) {
+      setParseError("Couldn't find a contact header row. Make sure your CSV includes columns like Name, Company, or Email.")
+      return
+    }
+
+    // Extract and trim header cells; build an index → name map for keying data rows
+    const rawHeaderRow = allRows[headerIdx]
+    const indexedHeaders = rawHeaderRow
+      .map((h, i) => ({ name: (h || '').trim(), i }))
+      .filter(({ name }) => name.length > 0)
+    const hdrs = indexedHeaders.map(({ name }) => name)
+
+    // Pass 2: reconstruct data rows as keyed objects from everything below the header
+    const dataRows = allRows.slice(headerIdx + 1).map(cells =>
+      Object.fromEntries(indexedHeaders.map(({ name, i }) => [name, cells[i] ?? '']))
+    )
+
+    if (dataRows.length === 0) {
+      setParseError('This CSV has headers but no data rows.')
+      return
+    }
+
+    // Drive the informational banner in Step 2
+    setCsvDetection(
+      isLinkedInExport(rawHeaderRow) ? 'linkedin' : headerIdx > 0 ? 'preamble' : null
+    )
+
+    // Deterministic column assignment from header names
+    const initialAssignment = buildInitialAssignment(hdrs)
+
+    // Value-sniff: 'URL' / 'Link' are too generic for HEADER_MAP, but if sample values
+    // contain 'linkedin.com' it's safe to assign to linkedin_url (LinkedIn export pattern)
+    if (initialAssignment.linkedin_url.length === 0) {
+      const urlLikeCols = hdrs.filter(h => {
+        const n = h.toLowerCase().trim()
+        return n === 'url' || n === 'link' || n === 'profile url'
+      })
+      for (const col of urlLikeCols) {
+        const samples = dataRows.slice(0, 5).map(r => (r[col] || '').toLowerCase())
+        if (samples.some(v => v.includes('linkedin.com'))) {
+          initialAssignment.linkedin_url = [col]
+          break
+        }
+      }
+    }
+
+    setHeaders(hdrs)
+    setRows(dataRows)
+    setAssignment(initialAssignment)
+    setAiMapped({ applied: false, count: 0, notes: '' })
+
+    if (isProUser) {
+      // Only send unresolved columns to AI — don't let it override deterministic mappings
+      const assignedCols = new Set(Object.values(initialAssignment).flat())
+      const unresolvedHdrs = hdrs.filter(h => !assignedCols.has(h))
+
+      setAiLoading(true)
+      ;(async () => {
+        try {
+          const { data: resp, error } = await supabase.functions.invoke('ai-map-csv', {
+            body: { headers: unresolvedHdrs, sample_rows: dataRows.slice(0, 3) },
+          })
+          if (error || !resp?.assignment) throw new Error('no assignment')
+
+          const headerSet = new Set(hdrs)
+          const merged = { ...initialAssignment }
+          const alreadyAssigned = new Set(Object.values(merged).flat())
+          let aiCount = 0
+          for (const [field, cols] of Object.entries(resp.assignment)) {
+            if (!(field in merged)) continue
+            const valid = (cols ?? []).filter(
+              c => typeof c === 'string' && headerSet.has(c) && !alreadyAssigned.has(c)
+            )
+            if (valid.length > 0) {
+              merged[field] = [...merged[field], ...valid]
+              valid.forEach(c => alreadyAssigned.add(c))
+              aiCount += valid.length
             }
-          })()
-        } else {
+          }
+          const totalMapped = Object.values(merged).flat().length
+          setAssignment(merged)
+          setAiMapped({ applied: true, count: totalMapped, notes: resp.notes ?? '' })
+        } catch {
+          // Silent fallback — rule-based assignment already in state
+        } finally {
+          setAiLoading(false)
           setStep('map')
         }
-      },
-      error: () => {
-        setParseError("Couldn't read this file. Make sure it's a valid .csv and try again.")
-      },
-    })
+      })()
+    } else {
+      setStep('map')
+    }
   }
 
   function handleDrop(e) {
@@ -379,6 +431,7 @@ export default function ImportContactsModal({ onClose, onImported }) {
     setParseError('')
     setAiLoading(false)
     setAiMapped({ applied: false, count: 0, notes: '' })
+    setCsvDetection(null)
     if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
@@ -533,6 +586,21 @@ export default function ImportContactsModal({ onClose, onImported }) {
           {/* ── STEP 2: Map columns ── */}
           {step === 'map' && (
             <div>
+
+              {/* Detection banner — shown when preamble rows were skipped */}
+              {csvDetection && (
+                <div className="flex items-center gap-2.5 mb-4 px-3 py-2.5 bg-[rgba(47,212,182,0.08)] border border-[rgba(47,212,182,0.2)] rounded-xl">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#2FD4B6" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-none">
+                    <path d="M20 6L9 17l-5-5"/>
+                  </svg>
+                  <p className="text-[12.5px] text-success font-semibold">
+                    {csvDetection === 'linkedin'
+                      ? 'LinkedIn Connections export detected — skipped the introductory note and auto-mapped your columns below. Review the assignments before importing.'
+                      : 'Introductory text was found and skipped — reading contacts from the actual header row.'
+                    }
+                  </p>
+                </div>
+              )}
 
               {/* AI mapping banner — Pro users only, after a successful mapping call */}
               {aiMapped.applied && (
