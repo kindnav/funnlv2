@@ -323,6 +323,7 @@ export default function ImportContactsModal({ onClose, onImported }) {
     const headerIdx = detectHeaderRow(allRows)
 
     if (headerIdx === -1) {
+      track('csv_mapping_failed', { reason: 'no_header_detected' })
       setParseError("Couldn't find a contact header row. Make sure your CSV includes columns like Name, Company, or Email.")
       return
     }
@@ -331,7 +332,7 @@ export default function ImportContactsModal({ onClose, onImported }) {
     const rawHeaderRow = allRows[headerIdx]
     const indexedHeaders = rawHeaderRow
       .map((h, i) => ({ name: (h || '').trim(), i }))
-      .filter(({ name }) => name.length > 0)
+      .filter(({ name }) => name.length > 0 && name !== '__parsed_extra')
     const hdrs = indexedHeaders.map(({ name }) => name)
 
     // Pass 2: reconstruct data rows as keyed objects from everything below the header
@@ -340,6 +341,7 @@ export default function ImportContactsModal({ onClose, onImported }) {
     )
 
     if (dataRows.length === 0) {
+      track('csv_mapping_failed', { reason: 'no_data_rows' })
       setParseError('This CSV has headers but no data rows.')
       return
     }
@@ -867,7 +869,15 @@ export default function ImportContactsModal({ onClose, onImported }) {
                 ← Back
               </button>
               <button
-                onClick={() => { setImportError(''); setPicker(null); setStep('confirm') }}
+                onClick={() => {
+                  setImportError('')
+                  setPicker(null)
+                  track('csv_mapping_completed', {
+                    fields_mapped: Object.values(assignment).filter(v => v.length > 0).length,
+                    ai_assisted: aiMapped.applied,
+                  })
+                  setStep('confirm')
+                }}
                 disabled={!hasNameMapped}
                 className="bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] text-white text-[14px] font-bold px-6 py-[10px] rounded-[11px] shadow-[0_6px_18px_rgba(91,69,240,0.35)] hover:opacity-90 transition-opacity disabled:opacity-30 disabled:cursor-not-allowed"
               >

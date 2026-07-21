@@ -211,6 +211,66 @@ test('trimmed header cells produce correct assignment', () => {
   assert.deepStrictEqual(a.company, ['Company'])
 })
 
+// ── New alias coverage ────────────────────────────────────────────────────────
+console.log('\nNew alias coverage')
+
+test('"title" maps to role (Salesforce/HubSpot)', () => {
+  const a = buildInitialAssignment(['First Name', 'Last Name', 'Title', 'Company'])
+  assert.deepStrictEqual(a.role, ['Title'])
+})
+
+test('"display name" maps to name (Zoom/Teams)', () => {
+  const a = buildInitialAssignment(['Display Name', 'Email', 'Company', 'Role'])
+  assert.ok(a.name.includes('Display Name'))
+})
+
+test('"categories" maps to tags (Outlook)', () => {
+  const a = buildInitialAssignment(['Name', 'Email', 'Categories', 'Company'])
+  assert.deepStrictEqual(a.tags, ['Categories'])
+})
+
+test('"groups" maps to tags (Google Contacts)', () => {
+  const a = buildInitialAssignment(['Name', 'Email', 'Groups', 'Company'])
+  assert.deepStrictEqual(a.tags, ['Groups'])
+})
+
+test('"profile link" maps to linkedin_url', () => {
+  const a = buildInitialAssignment(['Name', 'Email', 'Profile Link', 'Company'])
+  assert.deepStrictEqual(a.linkedin_url, ['Profile Link'])
+})
+
+test('"current employer" maps to company', () => {
+  const a = buildInitialAssignment(['Name', 'Current Employer', 'Title', 'Email'])
+  assert.deepStrictEqual(a.company, ['Current Employer'])
+})
+
+test('__parsed_extra column produces no assignment', () => {
+  const headers = ['First Name', 'Last Name', 'Company', '__parsed_extra']
+  const a = buildInitialAssignment(headers)
+  const allAssigned = Object.values(a).flat()
+  assert.ok(!allAssigned.includes('__parsed_extra'), '__parsed_extra should not be assigned')
+})
+
+test('location/twitter/city columns score-recognized but not assigned', () => {
+  // These help scoring but should not appear in any field assignment
+  const headers = ['First Name', 'Last Name', 'Email', 'Company', 'Twitter', 'City']
+  const a = buildInitialAssignment(headers)
+  const allAssigned = Object.values(a).flat()
+  assert.ok(!allAssigned.includes('Twitter'))
+  assert.ok(!allAssigned.includes('City'))
+})
+
+// Fixture G — ragged rows (data rows have fewer cells than headers)
+const FIXTURE_G = [
+  ['Name', 'Company', 'Role', 'Email', 'LinkedIn URL'],
+  ['Alex Jordan', 'Example Capital', 'Analyst'],        // only 3 cells
+  ['Sam Doe', 'Acme', 'Engineer', 'sam@example.com'],   // 4 cells
+]
+
+test('Fixture G: ragged rows — header still detected at row 0', () => {
+  assert.strictEqual(detectHeaderRow(FIXTURE_G), 0)
+})
+
 // ── Summary ──────────────────────────────────────────────────────────────────
 console.log(`\n${passed} passed, ${failed} failed`)
 if (failed > 0) process.exit(1)
