@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
+import { getAvatarColor, getInitials } from '../lib/avatarUtils'
 import ContactListItem from '../components/ContactListItem'
 import AddContactDrawer from '../components/AddContactDrawer'
 import ImportContactsModal from '../components/ImportContactsModal'
@@ -12,7 +13,26 @@ const FILTER_OPTIONS = [
   { label: 'Alumni', value: 'alumni' },
 ]
 
+const TABLE_COLS = [
+  { key: 'name',              label: 'Name',         sortable: true },
+  { key: 'company',           label: 'Company',      sortable: true },
+  { key: 'role',              label: 'Role',         sortable: true },
+  { key: 'relationship_type', label: 'Relationship', sortable: true },
+  { key: 'tags',              label: 'Tags',         sortable: true },
+]
+
+function sortContacts(list, col, dir) {
+  if (!col) return list
+  return [...list].sort((a, b) => {
+    const aVal = col === 'tags' ? ((a.tags || [])[0] || '') : (a[col] || '')
+    const bVal = col === 'tags' ? ((b.tags || [])[0] || '') : (b[col] || '')
+    const cmp = aVal.toString().toLowerCase().localeCompare(bVal.toString().toLowerCase())
+    return dir === 'asc' ? cmp : -cmp
+  })
+}
+
 function ContactsPage() {
+  const navigate = useNavigate()
   const [contacts, setContacts] = useState([])
   const [loading, setLoading] = useState(true)
   const [fetchError, setFetchError] = useState('')
@@ -20,8 +40,15 @@ function ContactsPage() {
   const [importOpen, setImportOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
 
+  // View toggle — persisted to localStorage (same pattern as funnl_confirmed_ and funnl_activated_)
+  const [viewMode, setViewMode] = useState(() => localStorage.getItem('funnl_contacts_view') || 'cards')
+
+  // Table sort state — reset when switching view so each view starts clean
+  const [sortCol, setSortCol] = useState(null)
+  const [sortDir, setSortDir] = useState('asc')
+
   // Individual contact delete
-  const [confirmDeleteContact, setConfirmDeleteContact] = useState(null) // contact object | null
+  const [confirmDeleteContact, setConfirmDeleteContact] = useState(null)
   const [deletingContact, setDeletingContact] = useState(false)
   const [deleteContactError, setDeleteContactError] = useState('')
 
@@ -31,12 +58,28 @@ function ContactsPage() {
   const [deletingAll, setDeletingAll] = useState(false)
   const [deleteAllError, setDeleteAllError] = useState('')
 
-  // URL-based tag filter — sidebar Pipeline links drive this by linking to /contacts?tag=recruiter
+  // URL-based tag filter — sidebar YOUR TAGS links drive this by linking to /contacts?tag=recruiter
   const [searchParams, setSearchParams] = useSearchParams()
   const activeTag = searchParams.get('tag') || ''
 
   function setActiveTag(tag) {
     if (tag) setSearchParams({ tag }); else setSearchParams({})
+  }
+
+  function handleViewChange(mode) {
+    setViewMode(mode)
+    setSortCol(null)
+    setSortDir('asc')
+    localStorage.setItem('funnl_contacts_view', mode)
+  }
+
+  function handleSort(col) {
+    if (sortCol === col) {
+      setSortDir(d => d === 'asc' ? 'desc' : 'asc')
+    } else {
+      setSortCol(col)
+      setSortDir('asc')
+    }
   }
 
   useEffect(() => { fetchContacts() }, [])
@@ -100,6 +143,9 @@ function ContactsPage() {
         )
       })
 
+  // Sorted contacts for table view — card view uses filteredContacts directly (preserves created_at order)
+  const displayContacts = sortContacts(filteredContacts, sortCol, sortDir)
+
   return (
     <div className="min-h-screen bg-surface">
 
@@ -161,8 +207,8 @@ function ContactsPage() {
           )}
         </div>
 
-        {/* Filter pills */}
-        <div className="flex gap-2 flex-wrap mb-[22px]">
+        {/* Filter pills + view toggle */}
+        <div className="flex gap-2 flex-wrap mb-[22px] items-center">
           {FILTER_OPTIONS.map(option => (
             <button
               key={option.value}
@@ -176,9 +222,38 @@ function ContactsPage() {
               {option.value === '' ? `All · ${contacts.length}` : option.label}
             </button>
           ))}
+
+          {/* View toggle — cards / table, right-aligned */}
+          <div className="ml-auto flex items-center bg-elevated border border-[rgba(255,255,255,0.07)] rounded-[9px] p-[3px] gap-[2px]">
+            <button
+              onClick={() => handleViewChange('cards')}
+              title="Card view"
+              className={`w-[30px] h-[26px] rounded-[7px] flex items-center justify-center transition-colors ${
+                viewMode === 'cards' ? 'bg-[rgba(139,124,255,0.18)] text-accent' : 'text-low hover:text-mid'
+              }`}
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/>
+                <rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/>
+              </svg>
+            </button>
+            <button
+              onClick={() => handleViewChange('table')}
+              title="Table view"
+              className={`w-[30px] h-[26px] rounded-[7px] flex items-center justify-center transition-colors ${
+                viewMode === 'table' ? 'bg-[rgba(139,124,255,0.18)] text-accent' : 'text-low hover:text-mid'
+              }`}
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <line x1="3" y1="6" x2="21" y2="6"/>
+                <line x1="3" y1="12" x2="21" y2="12"/>
+                <line x1="3" y1="18" x2="21" y2="18"/>
+              </svg>
+            </button>
+          </div>
         </div>
 
-        {/* Contact grid */}
+        {/* Contact grid / table */}
         {loading ? (
           <p className="text-sm text-muted">Loading…</p>
         ) : fetchError ? (
@@ -234,7 +309,111 @@ function ContactsPage() {
               Clear filters
             </button>
           </div>
+        ) : viewMode === 'table' ? (
+
+          /* ── TABLE VIEW ── */
+          <div className="rounded-2xl border border-[rgba(255,255,255,0.07)] overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[560px]" style={{ borderCollapse: 'collapse' }}>
+                <thead>
+                  <tr className="bg-[rgba(255,255,255,0.02)] border-b border-[rgba(255,255,255,0.07)]">
+                    {TABLE_COLS.map(col => (
+                      <th
+                        key={col.key}
+                        onClick={() => col.sortable && handleSort(col.key)}
+                        className={`px-4 py-[10px] text-left text-[11px] font-bold tracking-[0.8px] font-mono uppercase select-none transition-colors ${
+                          col.sortable ? 'cursor-pointer' : ''
+                        } ${sortCol === col.key ? 'text-mid' : 'text-lower hover:text-mid'}`}
+                      >
+                        <span className="flex items-center gap-1">
+                          {col.label}
+                          {sortCol === col.key && (
+                            <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="#8B7CFF" strokeWidth="2.8" strokeLinecap="round" strokeLinejoin="round">
+                              {sortDir === 'asc'
+                                ? <polyline points="18 15 12 9 6 15"/>
+                                : <polyline points="6 9 12 15 18 9"/>
+                              }
+                            </svg>
+                          )}
+                        </span>
+                      </th>
+                    ))}
+                    {/* Delete column — header intentionally blank */}
+                    <th className="w-10 px-3"/>
+                  </tr>
+                </thead>
+                <tbody>
+                  {displayContacts.map(contact => (
+                    <tr
+                      key={contact.id}
+                      onClick={() => navigate(`/contacts/${contact.id}`)}
+                      className="group border-b border-[rgba(255,255,255,0.05)] last:border-0 cursor-pointer hover:bg-[rgba(255,255,255,0.025)] transition-colors"
+                    >
+                      {/* Name + mini avatar */}
+                      <td className="px-4 py-3">
+                        <div className="flex items-center gap-2.5">
+                          <div
+                            className="w-7 h-7 rounded-full flex-none flex items-center justify-center text-[10px] font-bold text-white"
+                            style={{ background: getAvatarColor(contact.name) }}
+                          >
+                            {getInitials(contact.name)}
+                          </div>
+                          <span className="text-[13.5px] font-semibold text-hi">{contact.name}</span>
+                        </div>
+                      </td>
+                      {/* Company */}
+                      <td className="px-4 py-3 text-[13.5px] text-muted">
+                        {contact.company || <span className="text-lower">—</span>}
+                      </td>
+                      {/* Role */}
+                      <td className="px-4 py-3 text-[13.5px] text-muted">
+                        {contact.role || <span className="text-lower">—</span>}
+                      </td>
+                      {/* Relationship type */}
+                      <td className="px-4 py-3">
+                        {contact.relationship_type
+                          ? <span className="text-[12.5px] font-semibold text-accent">{contact.relationship_type}</span>
+                          : <span className="text-[13px] text-lower">—</span>
+                        }
+                      </td>
+                      {/* Tags */}
+                      <td className="px-4 py-3">
+                        {contact.tags?.length > 0
+                          ? <div className="flex flex-wrap gap-1">
+                              {contact.tags.map(tag => (
+                                <span
+                                  key={tag}
+                                  className="text-[11px] font-semibold text-tag bg-[rgba(108,92,255,0.13)] border border-[rgba(108,92,255,0.22)] px-[8px] py-[2px] rounded-full"
+                                >
+                                  {tag}
+                                </span>
+                              ))}
+                            </div>
+                          : <span className="text-[13px] text-lower">—</span>
+                        }
+                      </td>
+                      {/* Delete — hover-reveal, same pattern as card view */}
+                      <td className="px-3 py-3 w-10">
+                        <button
+                          onClick={e => { e.stopPropagation(); setDeleteContactError(''); setConfirmDeleteContact(contact) }}
+                          title="Delete contact"
+                          className="w-7 h-7 rounded-lg flex items-center justify-center text-low hover:text-danger hover:bg-[rgba(255,107,138,0.08)] opacity-0 group-hover:opacity-100 transition"
+                        >
+                          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/>
+                          </svg>
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
         ) : (
+
+          /* ── CARD VIEW ── */
           <div className="grid grid-cols-1 md:grid-cols-2 gap-[14px]">
             {filteredContacts.map(contact => (
               <ContactListItem
@@ -244,7 +423,9 @@ function ContactsPage() {
               />
             ))}
           </div>
+
         )}
+
         {/* Delete all contacts — shown only when contacts exist and the list loaded cleanly */}
         {!loading && !fetchError && contacts.length > 0 && (
           <div className="mt-16 pt-5 border-t border-[rgba(255,255,255,0.05)] flex justify-center">
