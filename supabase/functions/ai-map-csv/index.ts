@@ -67,7 +67,6 @@ Deno.serve(async (req) => {
     const body = await req.json()
     const headers: unknown = body?.headers
     const sampleRows: unknown = body?.sample_rows
-    const inferCategories: boolean = body?.infer_categories === true
 
     if (
       !Array.isArray(headers) ||
@@ -94,20 +93,6 @@ Deno.serve(async (req) => {
     const samples = sampleRows.slice(0, 3)
     const sampleJson = JSON.stringify(samples, null, 2)
 
-    const categorySection = inferCategories ? `
-
-Additionally, look at the sample row VALUES (not just headers) to suggest tags and a relationship type for these contacts.
-
-Rules for category suggestions:
-- suggested_tags: informal relationship labels like "recruiter", "alumni", "target firm", "mentor". Only suggest if clearly inferrable from role/company values. Max 3 tags. Empty array if uncertain.
-- suggested_relationship_type: one of: Mentor, Collaborator, Referral path, Potential employer, Connector, Other — or null. Only suggest if the data strongly points to one type for the majority of contacts. Null if mixed or unclear.
-- Never infer political views, health status, demographics, or other sensitive personal attributes.
-- Conservative: it is better to suggest nothing than to suggest something wrong.
-
-Add to your JSON response:
-  "suggested_tags": [...],
-  "suggested_relationship_type": null or one of the allowed values` : ''
-
     const prompt = `You are mapping CSV column headers to fields in a contact management app called Funnl.
 
 The app stores these fields for each contact:
@@ -129,7 +114,7 @@ Rules:
 3. Only include a column if you are confident it belongs to that field — a wrong mapping is worse than leaving a column unassigned
 4. If a column is ambiguous or clearly belongs to none of the fields, omit it entirely
 5. Return ONLY a raw JSON object — no explanation, no markdown, no code fences
-${categorySection}
+
 Return format:
 {
   "assignment": {
@@ -143,9 +128,7 @@ Return format:
     "relationship_type": [...],
     "relationship_note": [...]
   },
-  "notes": "optional one-sentence note only if something is genuinely notable (e.g. a column appears to contain combined data that could not be cleanly mapped)"${inferCategories ? `,
-  "suggested_tags": [],
-  "suggested_relationship_type": null` : ''}
+  "notes": "optional one-sentence note only if something is genuinely notable (e.g. a column appears to contain combined data that could not be cleanly mapped)"
 }
 
 Only include fields that have at least one column. Omit "notes" entirely if there is nothing notable to say.
@@ -187,12 +170,7 @@ ${sampleJson}`
     }
 
     // ── 6. Parse Claude's response ─────────────────────────────────────────────
-    let parsed: {
-      assignment?: Record<string, unknown>,
-      notes?: unknown,
-      suggested_tags?: unknown,
-      suggested_relationship_type?: unknown,
-    }
+    let parsed: { assignment?: Record<string, unknown>, notes?: unknown }
     try {
       parsed = JSON.parse(rawContent)
     } catch {
@@ -230,43 +208,10 @@ ${sampleJson}`
       ? parsed.notes.trim()
       : undefined
 
-    // ── 8. Sanitize category suggestions (infer_categories path only) ──────────
-    const ALLOWED_REL_TYPES = new Set([
-      'Mentor', 'Collaborator', 'Referral path', 'Potential employer', 'Connector', 'Other'
-    ])
-
-    let suggestedTags: string[] | undefined
-    let suggestedRelType: string | null | undefined
-
-    if (inferCategories) {
-      // Tags: array of non-empty strings, max 5 each ≤ 50 chars (stops prompt injection via tag content)
-      if (Array.isArray(parsed.suggested_tags)) {
-        const rawTags = parsed.suggested_tags.filter(
-          (t: unknown): t is string =>
-            typeof t === 'string' && t.trim().length > 0 && t.trim().length <= 50
-        )
-        suggestedTags = rawTags.slice(0, 5).map((t: string) => t.trim().toLowerCase())
-      }
-
-      // Relationship type: must be one of the allowed enum values
-      if (
-        typeof parsed.suggested_relationship_type === 'string' &&
-        ALLOWED_REL_TYPES.has(parsed.suggested_relationship_type)
-      ) {
-        suggestedRelType = parsed.suggested_relationship_type
-      } else {
-        suggestedRelType = null
-      }
-    }
-
     return new Response(
       JSON.stringify({
         assignment: safeAssignment,
         ...(notes ? { notes } : {}),
-        ...(inferCategories ? {
-          suggested_tags: suggestedTags ?? [],
-          suggested_relationship_type: suggestedRelType ?? null,
-        } : {}),
       }),
       { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     )

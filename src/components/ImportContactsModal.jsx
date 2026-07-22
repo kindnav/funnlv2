@@ -34,25 +34,11 @@ function normalizeHeader(h) {
 //
 // Design principle: when NOT confident, leave unassigned — a wrong auto-guess that
 // needs correcting is worse than an unassigned column that takes one click to place.
-//
-// Pruned false positives vs previous version:
-//   'title'    → removed (Mr./Dr. vs job title — use 'job title' / 'current title')
-//   'type'     → removed (too generic — rarely means Funnl tags)
-//   'source'   → removed (lead source vs meeting context — ambiguous)
-//   'met'      → removed (too short/ambiguous)
-//   'label'    → removed (too generic)
-//   'org'      → removed (too short — often an ID or GitHub org)
-//   'category' → removed (too generic)
-//   'tech'     → removed (company sector vs skills list — ambiguous)
-//   'contact'  → removed (contact record ID vs person name — ambiguous)
-//
-// Normalization handles separator variants automatically, so 'first_name' /
-// 'first-name' / 'First.Name' all normalize to 'first name' and match that entry.
 const HEADER_MAP = {
   // ── Name ─────────────────────────────────────────────────────────────────────
   'name': 'name',
   'full name': 'name',
-  'fullname': 'name',        // camelCase without separator
+  'fullname': 'name',
   'contact name': 'name',
   'contactname': 'name',
   'person': 'name',
@@ -60,7 +46,7 @@ const HEADER_MAP = {
   'attendee': 'name',
   'attendee name': 'name',
   'contact person': 'name',
-  // Split first / last — auto-combine in chip order (First before Last)
+  'display name': 'name',
   'first name': 'name',
   'firstname': 'name',
   'fname': 'name',
@@ -81,8 +67,8 @@ const HEADER_MAP = {
   'employer name': 'company',
   'workplace': 'company',
   'current company': 'company',
+  'current employer': 'company',
   'firm': 'company',
-  // NOT: 'org' (ambiguous), 'work' (ambiguous)
 
   // ── Role ──────────────────────────────────────────────────────────────────────
   'role': 'role',
@@ -96,19 +82,18 @@ const HEADER_MAP = {
   'current position': 'role',
   'occupation': 'role',
   'designation': 'role',
-  // NOT: 'title' alone — ambiguous (Mr./Dr. salutation vs job title)
+  'title': 'role',
 
   // ── Email ─────────────────────────────────────────────────────────────────────
   'email': 'email',
   'email address': 'email',
   'emailaddress': 'email',
-  'e mail': 'email',         // 'e-mail' normalizes to 'e mail'
+  'e mail': 'email',
   'work email': 'email',
   'personal email': 'email',
   'professional email': 'email',
   'contact email': 'email',
   'email id': 'email',
-  // NOT: 'company email' (company's address or person's? — ambiguous)
 
   // ── LinkedIn URL ──────────────────────────────────────────────────────────────
   'linkedin': 'linkedin_url',
@@ -119,7 +104,7 @@ const HEADER_MAP = {
   'linkedin link': 'linkedin_url',
   'li url': 'linkedin_url',
   'li profile': 'linkedin_url',
-  // NOT: 'profile' alone, 'url' alone (too generic)
+  'profile link': 'linkedin_url',
 
   // ── How met ───────────────────────────────────────────────────────────────────
   'how met': 'how_met',
@@ -132,13 +117,13 @@ const HEADER_MAP = {
   'met at': 'how_met',
   'met via': 'how_met',
   'introduction': 'how_met',
-  // NOT: 'source' (ambiguous), 'met' alone (too short), 'context' alone (too generic)
 
   // ── Tags ──────────────────────────────────────────────────────────────────────
   'tags': 'tags',
   'tag': 'tags',
   'labels': 'tags',
-  // NOT: 'type' alone, 'label' alone, 'category'/'categories' alone (all too generic)
+  'categories': 'tags',
+  'groups': 'tags',
 
   // ── Relationship type ─────────────────────────────────────────────────────────
   'relationship type': 'relationship_type',
@@ -152,8 +137,6 @@ const HEADER_MAP = {
   'why they matter': 'relationship_note',
   'notes on relationship': 'relationship_note',
   'context': 'relationship_note',
-  // Generic notes column names — the most common names people use in spreadsheets
-  // NOT: 'description' (often a company/role description), 'details' (often contact details)
   'notes': 'relationship_note',
   'note': 'relationship_note',
   'comments': 'relationship_note',
@@ -189,31 +172,25 @@ function normalizeUrl(url) {
   return 'https://' + s
 }
 
-// AI SEAM: This is where future AI pre-processing plugs in.
-// A future AI step would transform rawRow before this function runs — e.g. splitting
-// "John Smith, Goldman, analyst" from a single jammed column into named fields,
-// or inferring tags/skills from freeform notes.
+// AI SEAM: A future AI step would transform rawRow before this function runs —
+// e.g. splitting "John Smith, Goldman, analyst" from a single jammed column.
 // This function stays unchanged; the AI step just pre-processes rawRow first.
 function transformRow(rawRow, assignment) {
   const contact = {}
   for (const [field, cols] of Object.entries(assignment)) {
     if (!cols || cols.length === 0) continue
     if (field === 'tags') {
-      // Each assigned column split on commas, merged into one flat array
       const values = cols.flatMap(col =>
         (rawRow[col] || '').trim().split(',').map(s => s.trim()).filter(Boolean)
       )
       if (values.length > 0) contact[field] = values
     } else if (field === 'linkedin_url') {
-      // First non-empty value wins
       const raw = cols.map(col => (rawRow[col] || '').trim()).filter(Boolean)[0]
       if (raw) contact.linkedin_url = normalizeUrl(raw)
     } else if (field === 'relationship_note') {
-      // Multiple note columns join with ' | ' so two freeform sentences stay readable
       const combined = cols.map(col => (rawRow[col] || '').trim()).filter(Boolean).join(' | ')
       if (combined) contact[field] = combined
     } else {
-      // Text fields: chip order = join order; empty cells skipped, no double spaces
       const combined = cols.map(col => (rawRow[col] || '').trim()).filter(Boolean).join(' ')
       if (combined) contact[field] = combined
     }
@@ -275,11 +252,17 @@ export default function ImportContactsModal({ onClose, onImported }) {
   // 'linkedin' | 'preamble' | null — drives the informational banner in Step 2
   const [csvDetection, setCsvDetection] = useState(null)
 
-  // Part B: AI tag/relationship suggestions (Pro users only)
-  const [aiSuggestedTags, setAiSuggestedTags] = useState([])
-  const [aiSuggestedRelType, setAiSuggestedRelType] = useState(null)
-  const [acceptedTags, setAcceptedTags] = useState([])
-  const [acceptedRelType, setAcceptedRelType] = useState(null)
+  // Per-contact AI suggestions (Pro only, computed and displayed in Step 3).
+  // normalizedContacts: processRows output with stable _rowId tags, set once when
+  // entering Step 3 via goToConfirm so IDs are stable across re-renders.
+  const [normalizedContacts, setNormalizedContacts] = useState([])
+  const [normalizedSkipped, setNormalizedSkipped] = useState(0)
+  // contactSuggestions: { [rowId]: { suggested_tags: string[], suggested_relationship_type: string|null } }
+  const [contactSuggestions, setContactSuggestions] = useState({})
+  // acceptedByRow: { [rowId]: { acceptedTags: string[], acceptedRelType: string|null } }
+  // Pre-populated when suggestions arrive; user toggles individual items off.
+  const [acceptedByRow, setAcceptedByRow] = useState({})
+  const [aiCategorizing, setAiCategorizing] = useState(false)
 
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => {
@@ -300,9 +283,11 @@ export default function ImportContactsModal({ onClose, onImported }) {
   ].slice(0, 5)
   const previewContacts = rows.slice(0, 5).map(row => transformRow(row, assignment))
 
-  const confirmData = step === 'confirm'
-    ? processRows(rows, assignment)
-    : { toImport: [], skipped: 0 }
+  // Contacts that received at least one AI suggestion — rendered in the per-row panel
+  const suggestedContactsList = normalizedContacts.filter(c => {
+    const s = contactSuggestions[c._rowId]
+    return s && (s.suggested_tags?.length > 0 || s.suggested_relationship_type)
+  })
 
   // --- File handling ---
   async function handleFile(file) {
@@ -382,10 +367,10 @@ export default function ImportContactsModal({ onClose, onImported }) {
     setRows(dataRows)
     setAssignment(initialAssignment)
     setAiMapped({ applied: false, count: 0, notes: '' })
-    setAiSuggestedTags([])
-    setAiSuggestedRelType(null)
-    setAcceptedTags([])
-    setAcceptedRelType(null)
+    setNormalizedContacts([])
+    setNormalizedSkipped(0)
+    setContactSuggestions({})
+    setAcceptedByRow({})
 
     if (isProUser) {
       // Only send unresolved columns to AI — don't let it override deterministic mappings
@@ -399,7 +384,6 @@ export default function ImportContactsModal({ onClose, onImported }) {
             body: {
               headers: unresolvedHdrs,
               sample_rows: dataRows.slice(0, 3),
-              infer_categories: true,
             },
           })
           if (error || !resp?.assignment) throw new Error('no assignment')
@@ -422,16 +406,6 @@ export default function ImportContactsModal({ onClose, onImported }) {
           const totalMapped = Object.values(merged).flat().length
           setAssignment(merged)
           setAiMapped({ applied: true, count: totalMapped, notes: resp.notes ?? '' })
-
-          // Part B: store tag/relationship suggestions; pre-select all for user to review
-          if (Array.isArray(resp.suggested_tags) && resp.suggested_tags.length > 0) {
-            setAiSuggestedTags(resp.suggested_tags)
-            setAcceptedTags(resp.suggested_tags)
-          }
-          if (resp.suggested_relationship_type) {
-            setAiSuggestedRelType(resp.suggested_relationship_type)
-            setAcceptedRelType(resp.suggested_relationship_type)
-          }
         } catch {
           // Silent fallback — rule-based assignment already in state
         } finally {
@@ -460,11 +434,91 @@ export default function ImportContactsModal({ onClose, onImported }) {
     setAiLoading(false)
     setAiMapped({ applied: false, count: 0, notes: '' })
     setCsvDetection(null)
-    setAiSuggestedTags([])
-    setAiSuggestedRelType(null)
-    setAcceptedTags([])
-    setAcceptedRelType(null)
+    setNormalizedContacts([])
+    setNormalizedSkipped(0)
+    setContactSuggestions({})
+    setAcceptedByRow({})
+    setAiCategorizing(false)
     if (fileInputRef.current) fileInputRef.current.value = ''
+  }
+
+  // Advance from Map → Confirm. Computes normalizedContacts once so row IDs are
+  // stable across re-renders; kicks off per-contact AI inference for Pro users.
+  function goToConfirm() {
+    setImportError('')
+    setPicker(null)
+    track('csv_mapping_completed', {
+      fields_mapped: Object.values(assignment).filter(v => v.length > 0).length,
+      ai_assisted: aiMapped.applied,
+    })
+    const { toImport, skipped } = processRows(rows, assignment)
+    const withIds = toImport.map((c, i) => ({ ...c, _rowId: `r${i}` }))
+    setNormalizedContacts(withIds)
+    setNormalizedSkipped(skipped)
+    setContactSuggestions({})
+    setAcceptedByRow({})
+    setStep('confirm')
+    if (isProUser && withIds.length > 0) {
+      runContactCategorization(withIds)
+    }
+  }
+
+  // Per-contact AI inference — calls ai-categorize-contacts with non-PII fields only
+  // (no names, emails, or LinkedIn URLs). Non-blocking: user can import while in flight.
+  async function runContactCategorization(contacts) {
+    setAiCategorizing(true)
+    try {
+      const payload = contacts.map(c => ({
+        row_id: c._rowId,
+        company: c.company || null,
+        role: c.role || null,
+        how_met: c.how_met || null,
+        relationship_note: c.relationship_note || null,
+        existing_tags: c.tags || [],
+        existing_relationship_type: c.relationship_type || null,
+      }))
+      const { data: resp, error } = await supabase.functions.invoke('ai-categorize-contacts', {
+        body: { contacts: payload },
+      })
+      if (error || !Array.isArray(resp?.suggestions)) return
+      const sugMap = {}
+      const accMap = {}
+      for (const s of resp.suggestions) {
+        if (!s.row_id) continue
+        const tags = Array.isArray(s.suggested_tags) ? s.suggested_tags : []
+        const relType = s.suggested_relationship_type || null
+        if (tags.length > 0 || relType) {
+          sugMap[s.row_id] = { suggested_tags: tags, suggested_relationship_type: relType }
+          accMap[s.row_id] = { acceptedTags: [...tags], acceptedRelType: relType }
+        }
+      }
+      setContactSuggestions(sugMap)
+      setAcceptedByRow(accMap)
+    } catch {
+      // Silent fallback — user continues without per-contact suggestions
+    } finally {
+      setAiCategorizing(false)
+    }
+  }
+
+  function toggleContactTag(rowId, tag) {
+    setAcceptedByRow(prev => {
+      const current = prev[rowId] || { acceptedTags: [], acceptedRelType: null }
+      const tags = current.acceptedTags.includes(tag)
+        ? current.acceptedTags.filter(t => t !== tag)
+        : [...current.acceptedTags, tag]
+      return { ...prev, [rowId]: { ...current, acceptedTags: tags } }
+    })
+  }
+
+  function toggleContactRelType(rowId, suggestedRelType) {
+    setAcceptedByRow(prev => {
+      const current = prev[rowId] || { acceptedTags: [], acceptedRelType: null }
+      return {
+        ...prev,
+        [rowId]: { ...current, acceptedRelType: current.acceptedRelType ? null : suggestedRelType },
+      }
+    })
   }
 
   // --- Assignment ---
@@ -501,23 +555,21 @@ export default function ImportContactsModal({ onClose, onImported }) {
       setImporting(false)
       return
     }
-    const { toImport, skipped } = processRows(rows, assignment)
-    if (toImport.length === 0) {
+    if (normalizedContacts.length === 0) {
       setImportError('No importable rows — every row is missing a name value.')
       setImporting(false)
       return
     }
-    const contacts = toImport.map(c => {
+    // Build the final contacts array: strip _rowId, add user_id, merge per-contact suggestions
+    const contacts = normalizedContacts.map(({ _rowId, ...c }) => {
       const contact = { ...c, user_id: user.id }
-      // Apply AI-suggested tags merged with any CSV-mapped tags
-      if (acceptedTags.length > 0) {
+      const acc = acceptedByRow[_rowId]
+      if (acc?.acceptedTags?.length > 0) {
         const existing = contact.tags || []
-        const merged = [...new Set([...existing, ...acceptedTags])]
-        contact.tags = merged
+        contact.tags = [...new Set([...existing, ...acc.acceptedTags])]
       }
-      // Apply AI-suggested relationship type only if the CSV didn't already set one
-      if (acceptedRelType && !contact.relationship_type) {
-        contact.relationship_type = acceptedRelType
+      if (acc?.acceptedRelType && !contact.relationship_type) {
+        contact.relationship_type = acc.acceptedRelType
       }
       return contact
     })
@@ -528,10 +580,10 @@ export default function ImportContactsModal({ onClose, onImported }) {
       setImportError(`Import failed: ${error.message}. No contacts were saved — please try again.`)
       return
     }
-    track('csv_import_used', { contacts_imported: toImport.length, ai_assisted: aiMapped.applied })
+    track('csv_import_used', { contacts_imported: contacts.length, ai_assisted: aiMapped.applied })
     setResult({
-      imported: toImport.length,
-      skipped,
+      imported: contacts.length,
+      skipped: normalizedSkipped,
       firstId: insertedRows?.[0]?.id ?? null,
     })
     setStep('done')
@@ -574,7 +626,6 @@ export default function ImportContactsModal({ onClose, onImported }) {
           {step === 'upload' && (
             <div>
               {aiLoading ? (
-                /* Pro users: show spinner while AI infers column mapping */
                 <div className="flex flex-col items-center justify-center py-16 gap-3">
                   <svg className="animate-spin" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#8B7CFF" strokeWidth="2.5" strokeLinecap="round">
                     <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
@@ -675,7 +726,7 @@ export default function ImportContactsModal({ onClose, onImported }) {
                     <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
                   </svg>
                   <p className="text-[12.5px] text-accent font-semibold">
-                    Pro tip: AI can auto-map your columns in one click — available with Funnl Pro.
+                    Pro tip: AI can auto-map your columns and suggest categories for each contact — available with Funnl Pro.
                   </p>
                 </div>
               )}
@@ -741,13 +792,10 @@ export default function ImportContactsModal({ onClose, onImported }) {
               <div className="divide-y divide-[rgba(255,255,255,0.05)] border border-[rgba(255,255,255,0.07)] rounded-xl overflow-hidden mb-5">
                 {FUNNL_FIELDS.map(field => (
                   <div key={field.value} className="flex items-start gap-3 px-4 py-3 bg-card">
-                    {/* Field label */}
                     <div className="w-[106px] flex-none pt-[7px]">
                       <span className="text-[13px] font-semibold text-hi">{field.label}</span>
                       {field.required && <span className="text-danger text-[12px] ml-0.5">*</span>}
                     </div>
-
-                    {/* Chips + controls */}
                     <div className="flex-1 flex flex-wrap items-center gap-1.5 pt-1.5 min-h-[32px]">
                       {assignment[field.value].map(col => (
                         <span
@@ -764,13 +812,9 @@ export default function ImportContactsModal({ onClose, onImported }) {
                           </button>
                         </span>
                       ))}
-
-                      {/* "— not assigned" placeholder so empty fields are visually obvious */}
                       {assignment[field.value].length === 0 && (
                         <span className="text-[12px] text-lower italic pt-[5px]">— not assigned</span>
                       )}
-
-                      {/* + Add: secondary field-first flow (when user knows the field, not the column) */}
                       {ignoredCols.length > 0 && (
                         <button
                           onClick={e => openFieldPicker(field.value, e)}
@@ -854,77 +898,95 @@ export default function ImportContactsModal({ onClose, onImported }) {
                   </div>
                   <div>
                     <p className="text-[16px] font-bold text-hi">
-                      About to import {confirmData.toImport.length} {confirmData.toImport.length === 1 ? 'contact' : 'contacts'}
+                      About to import {normalizedContacts.length} {normalizedContacts.length === 1 ? 'contact' : 'contacts'}
                     </p>
-                    {confirmData.skipped > 0 && (
+                    {normalizedSkipped > 0 && (
                       <p className="text-[12.5px] text-warning mt-0.5">
-                        {confirmData.skipped} {confirmData.skipped === 1 ? 'row' : 'rows'} will be skipped — no name value
+                        {normalizedSkipped} {normalizedSkipped === 1 ? 'row' : 'rows'} will be skipped — no name value
                       </p>
                     )}
                   </div>
                 </div>
               </div>
 
-              {/* Part B: AI category suggestions (Pro users who got suggestions) */}
-              {isProUser && (aiSuggestedTags.length > 0 || aiSuggestedRelType) && (
-                <div className="mb-4 px-4 py-3.5 bg-[rgba(139,124,255,0.06)] border border-[rgba(139,124,255,0.2)] rounded-xl">
-                  <div className="flex items-center gap-2 mb-3">
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="#8B7CFF">
-                      <path d="M12 3l1.7 5.3L19 10l-5.3 1.7L12 17l-1.7-5.3L5 10l5.3-1.7L12 3z"/>
-                    </svg>
-                    <p className="text-[12.5px] font-bold text-accent">AI suggestions — review before importing</p>
-                  </div>
+              {/* Per-contact AI category suggestions (Pro users only) */}
+              {isProUser && (
+                <>
+                  {/* Loading banner — shown while AI inference is in flight */}
+                  {aiCategorizing && (
+                    <div className="flex items-center gap-2.5 mb-4 px-3 py-2.5 bg-[rgba(139,124,255,0.06)] border border-[rgba(139,124,255,0.18)] rounded-xl">
+                      <svg className="animate-spin flex-none" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#8B7CFF" strokeWidth="2.5" strokeLinecap="round">
+                        <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
+                      </svg>
+                      <div>
+                        <p className="text-[12.5px] font-semibold text-accent">AI is suggesting categories for your contacts…</p>
+                        <p className="text-[11.5px] text-low mt-0.5">You can import now or wait to review suggestions.</p>
+                      </div>
+                    </div>
+                  )}
 
-                  {aiSuggestedTags.length > 0 && (
-                    <div className="mb-3">
-                      <p className="text-[11.5px] text-low mb-1.5">Add tags to all contacts:</p>
-                      <div className="flex flex-wrap gap-1.5">
-                        {aiSuggestedTags.map(tag => {
-                          const on = acceptedTags.includes(tag)
+                  {/* Suggestions panel — shown once AI returns results */}
+                  {suggestedContactsList.length > 0 && (
+                    <div className="mb-4 border border-[rgba(139,124,255,0.2)] rounded-xl overflow-hidden">
+                      <div className="flex items-center gap-2.5 px-4 py-3 bg-[rgba(139,124,255,0.06)] border-b border-[rgba(139,124,255,0.1)]">
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="#8B7CFF" className="flex-none">
+                          <path d="M12 3l1.7 5.3L19 10l-5.3 1.7L12 17l-1.7-5.3L5 10l5.3-1.7L12 3z"/>
+                        </svg>
+                        <p className="text-[12.5px] font-bold text-accent">
+                          AI suggested categories for {suggestedContactsList.length} of {normalizedContacts.length} {normalizedContacts.length === 1 ? 'contact' : 'contacts'}
+                        </p>
+                        <p className="text-[11.5px] text-low ml-auto flex-none">Click to remove</p>
+                      </div>
+                      <div className="divide-y divide-[rgba(255,255,255,0.04)] max-h-[240px] overflow-y-auto">
+                        {suggestedContactsList.map(c => {
+                          const sug = contactSuggestions[c._rowId]
+                          const acc = acceptedByRow[c._rowId] || { acceptedTags: [], acceptedRelType: null }
+                          const meta = [c.company, c.role].filter(Boolean).join(' · ')
                           return (
-                            <button
-                              key={tag}
-                              type="button"
-                              onClick={() => setAcceptedTags(prev =>
-                                on ? prev.filter(t => t !== tag) : [...prev, tag]
-                              )}
-                              className={`text-[12px] font-mono font-semibold px-2.5 py-[5px] rounded-full border transition-colors ${
-                                on
-                                  ? 'bg-[rgba(139,124,255,0.15)] border-[rgba(139,124,255,0.4)] text-tag'
-                                  : 'bg-transparent border-[rgba(255,255,255,0.1)] text-lower line-through'
-                              }`}
-                            >
-                              {tag}
-                            </button>
+                            <div key={c._rowId} className="px-4 py-2.5">
+                              <p className="text-[12.5px] font-semibold text-hi truncate mb-1.5">
+                                {c.name}
+                                {meta ? <span className="text-muted font-normal"> · {meta}</span> : null}
+                              </p>
+                              <div className="flex flex-wrap gap-1.5">
+                                {sug.suggested_tags?.map(tag => {
+                                  const on = acc.acceptedTags.includes(tag)
+                                  return (
+                                    <button
+                                      key={tag}
+                                      type="button"
+                                      onClick={() => toggleContactTag(c._rowId, tag)}
+                                      className={`text-[11.5px] font-mono font-semibold px-2 py-[4px] rounded-full border transition-colors ${
+                                        on
+                                          ? 'bg-[rgba(139,124,255,0.12)] border-[rgba(139,124,255,0.3)] text-tag'
+                                          : 'bg-transparent border-[rgba(255,255,255,0.07)] text-lower line-through'
+                                      }`}
+                                    >
+                                      {tag}
+                                    </button>
+                                  )
+                                })}
+                                {sug.suggested_relationship_type && (
+                                  <button
+                                    type="button"
+                                    onClick={() => toggleContactRelType(c._rowId, sug.suggested_relationship_type)}
+                                    className={`text-[11.5px] font-semibold px-2 py-[4px] rounded-full border transition-colors ${
+                                      acc.acceptedRelType
+                                        ? 'bg-[rgba(139,124,255,0.1)] border-[rgba(139,124,255,0.25)] text-accent'
+                                        : 'bg-transparent border-[rgba(255,255,255,0.07)] text-lower line-through'
+                                    }`}
+                                  >
+                                    {sug.suggested_relationship_type}
+                                  </button>
+                                )}
+                              </div>
+                            </div>
                           )
                         })}
                       </div>
                     </div>
                   )}
-
-                  {aiSuggestedRelType && (
-                    <div>
-                      <p className="text-[11.5px] text-low mb-1.5">Set relationship type for all contacts:</p>
-                      <div className="flex gap-2 flex-wrap">
-                        <button
-                          type="button"
-                          onClick={() => setAcceptedRelType(acceptedRelType ? null : aiSuggestedRelType)}
-                          className={`text-[12px] font-semibold px-3 py-[5px] rounded-full border transition-colors ${
-                            acceptedRelType
-                              ? 'bg-[rgba(139,124,255,0.15)] border-[rgba(139,124,255,0.4)] text-accent'
-                              : 'bg-transparent border-[rgba(255,255,255,0.1)] text-lower line-through'
-                          }`}
-                        >
-                          {aiSuggestedRelType}
-                        </button>
-                      </div>
-                    </div>
-                  )}
-
-                  <p className="text-[11px] text-lower mt-3">
-                    Click to toggle on/off. Only applies to contacts where the field is empty.
-                  </p>
-                </div>
+                </>
               )}
 
               <p className="text-[13px] text-low leading-relaxed mb-4">
@@ -1019,15 +1081,7 @@ export default function ImportContactsModal({ onClose, onImported }) {
                 ← Back
               </button>
               <button
-                onClick={() => {
-                  setImportError('')
-                  setPicker(null)
-                  track('csv_mapping_completed', {
-                    fields_mapped: Object.values(assignment).filter(v => v.length > 0).length,
-                    ai_assisted: aiMapped.applied,
-                  })
-                  setStep('confirm')
-                }}
+                onClick={goToConfirm}
                 disabled={!hasNameMapped}
                 className="bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] text-white text-[14px] font-bold px-6 py-[10px] rounded-[11px] shadow-[0_6px_18px_rgba(91,69,240,0.35)] hover:opacity-90 transition-opacity disabled:opacity-30 disabled:cursor-not-allowed"
               >
@@ -1038,7 +1092,14 @@ export default function ImportContactsModal({ onClose, onImported }) {
           {step === 'confirm' && (
             <>
               <button
-                onClick={() => setStep('map')}
+                onClick={() => {
+                  setStep('map')
+                  setNormalizedContacts([])
+                  setNormalizedSkipped(0)
+                  setContactSuggestions({})
+                  setAcceptedByRow({})
+                  setAiCategorizing(false)
+                }}
                 disabled={importing}
                 className="text-[14px] font-semibold text-low hover:text-hi transition-colors disabled:opacity-40"
               >
@@ -1046,7 +1107,7 @@ export default function ImportContactsModal({ onClose, onImported }) {
               </button>
               <button
                 onClick={handleImport}
-                disabled={importing || confirmData.toImport.length === 0}
+                disabled={importing || normalizedContacts.length === 0}
                 className="flex items-center gap-2 bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] text-white text-[14px] font-bold px-6 py-[10px] rounded-[11px] shadow-[0_6px_18px_rgba(91,69,240,0.35)] hover:opacity-90 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 {importing && (
@@ -1056,7 +1117,7 @@ export default function ImportContactsModal({ onClose, onImported }) {
                 )}
                 {importing
                   ? 'Importing…'
-                  : `Import ${confirmData.toImport.length} ${confirmData.toImport.length === 1 ? 'contact' : 'contacts'}`
+                  : `Import ${normalizedContacts.length} ${normalizedContacts.length === 1 ? 'contact' : 'contacts'}`
                 }
               </button>
             </>
@@ -1084,7 +1145,6 @@ export default function ImportContactsModal({ onClose, onImported }) {
             style={{ top: picker.pos.top, left: picker.pos.left }}
           >
             {picker.mode === 'field' ? (
-              // Field-first: list unassigned columns to pull into the open field
               ignoredCols.length === 0 ? (
                 <p className="px-3 py-2 text-[13px] text-lower">No columns available</p>
               ) : (
@@ -1099,7 +1159,6 @@ export default function ImportContactsModal({ onClose, onImported }) {
                 ))
               )
             ) : (
-              // Column-first: list Funnl fields to place the clicked column into
               FUNNL_FIELDS.map(field => (
                 <button
                   key={field.value}
