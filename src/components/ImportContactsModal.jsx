@@ -263,6 +263,9 @@ export default function ImportContactsModal({ onClose, onImported }) {
   // Pre-populated when suggestions arrive; user toggles individual items off.
   const [acceptedByRow, setAcceptedByRow] = useState({})
   const [aiCategorizing, setAiCategorizing] = useState(false)
+  // Non-blocking partial-failure state for batched AI inference
+  const [categorizationError, setCategorizationError] = useState('')
+  const [failedBatchContacts, setFailedBatchContacts] = useState([])
 
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => {
@@ -371,6 +374,8 @@ export default function ImportContactsModal({ onClose, onImported }) {
     setNormalizedSkipped(0)
     setContactSuggestions({})
     setAcceptedByRow({})
+    setCategorizationError('')
+    setFailedBatchContacts([])
 
     if (isProUser) {
       // Only send unresolved columns to AI — don't let it override deterministic mappings
@@ -439,6 +444,8 @@ export default function ImportContactsModal({ onClose, onImported }) {
     setContactSuggestions({})
     setAcceptedByRow({})
     setAiCategorizing(false)
+    setCategorizationError('')
+    setFailedBatchContacts([])
     if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
@@ -452,7 +459,7 @@ export default function ImportContactsModal({ onClose, onImported }) {
       ai_assisted: aiMapped.applied,
     })
     const { toImport, skipped } = processRows(rows, assignment)
-    const withIds = toImport.map((c, i) => ({ ...c, _rowId: `r${i}` }))
+    const withIds = toImport.map(c => ({ ...c, _rowId: crypto.randomUUID() }))
     setNormalizedContacts(withIds)
     setNormalizedSkipped(skipped)
     setContactSuggestions({})
@@ -463,42 +470,84 @@ export default function ImportContactsModal({ onClose, onImported }) {
     }
   }
 
-  // Per-contact AI inference — calls ai-categorize-contacts with non-PII fields only
-  // (no names, emails, or LinkedIn URLs). Non-blocking: user can import while in flight.
+  // Sends one batch of ≤20 contacts to ai-categorize-contacts.
+  // Returns the raw suggestions array on success; throws on failure.
+  // Non-PII only — no names, emails, or LinkedIn URLs.
+  async function invokeSingleBatch(batch) {
+    const payload = batch.map(c => ({
+      row_id: c._rowId,
+      company: c.company || null,
+      role: c.role || null,
+      how_met: c.how_met || null,
+      relationship_note: c.relationship_note || null,
+      existing_tags: c.tags || [],
+      existing_relationship_type: c.relationship_type || null,
+    }))
+    const { data: resp, error } = await supabase.functions.invoke('ai-categorize-contacts', {
+      body: { contacts: payload },
+    })
+    if (error || !Array.isArray(resp?.suggestions)) throw new Error('batch failed')
+    return resp.suggestions
+  }
+
+  // Per-contact AI inference — non-blocking: user can import while in flight.
+  // Splits contacts into batches of BATCH_SIZE; processes at most MAX_CONCURRENT
+  // batches at a time. Successful results merge into state; failed batches are
+  // surfaced as a non-blocking notice with an optional Retry action.
   async function runContactCategorization(contacts) {
+    const BATCH_SIZE = 20
+    const MAX_CONCURRENT = 2
+
     setAiCategorizing(true)
-    try {
-      const payload = contacts.map(c => ({
-        row_id: c._rowId,
-        company: c.company || null,
-        role: c.role || null,
-        how_met: c.how_met || null,
-        relationship_note: c.relationship_note || null,
-        existing_tags: c.tags || [],
-        existing_relationship_type: c.relationship_type || null,
-      }))
-      const { data: resp, error } = await supabase.functions.invoke('ai-categorize-contacts', {
-        body: { contacts: payload },
-      })
-      if (error || !Array.isArray(resp?.suggestions)) return
-      const sugMap = {}
-      const accMap = {}
-      for (const s of resp.suggestions) {
+    setCategorizationError('')
+
+    const batches = []
+    for (let i = 0; i < contacts.length; i += BATCH_SIZE) {
+      batches.push(contacts.slice(i, i + BATCH_SIZE))
+    }
+
+    const allSuggestions = []
+    const failed = []
+
+    for (let i = 0; i < batches.length; i += MAX_CONCURRENT) {
+      const group = batches.slice(i, i + MAX_CONCURRENT)
+      const results = await Promise.allSettled(group.map(b => invokeSingleBatch(b)))
+      for (let j = 0; j < results.length; j++) {
+        if (results[j].status === 'fulfilled') {
+          allSuggestions.push(...results[j].value)
+        } else {
+          failed.push(...group[j])
+        }
+      }
+    }
+
+    if (allSuggestions.length > 0) {
+      const newSugMap = {}
+      const newAccMap = {}
+      for (const s of allSuggestions) {
         if (!s.row_id) continue
         const tags = Array.isArray(s.suggested_tags) ? s.suggested_tags : []
         const relType = s.suggested_relationship_type || null
         if (tags.length > 0 || relType) {
-          sugMap[s.row_id] = { suggested_tags: tags, suggested_relationship_type: relType }
-          accMap[s.row_id] = { acceptedTags: [...tags], acceptedRelType: relType }
+          newSugMap[s.row_id] = { suggested_tags: tags, suggested_relationship_type: relType }
+          newAccMap[s.row_id] = { acceptedTags: [...tags], acceptedRelType: relType }
         }
       }
-      setContactSuggestions(sugMap)
-      setAcceptedByRow(accMap)
-    } catch {
-      // Silent fallback — user continues without per-contact suggestions
-    } finally {
-      setAiCategorizing(false)
+      // Merge into existing state so retry results don't erase prior successes
+      setContactSuggestions(prev => ({ ...prev, ...newSugMap }))
+      setAcceptedByRow(prev => ({ ...prev, ...newAccMap }))
     }
+
+    if (failed.length > 0) {
+      setFailedBatchContacts(failed)
+      setCategorizationError(
+        `AI suggestions unavailable for ${failed.length} ${failed.length === 1 ? 'contact' : 'contacts'} — a batch request failed.`
+      )
+    } else {
+      setFailedBatchContacts([])
+    }
+
+    setAiCategorizing(false)
   }
 
   function toggleContactTag(rowId, tag) {
@@ -925,6 +974,20 @@ export default function ImportContactsModal({ onClose, onImported }) {
                     </div>
                   )}
 
+                  {/* Partial-failure notice — shown when one or more batches failed */}
+                  {categorizationError && !aiCategorizing && (
+                    <div className="flex items-center justify-between gap-3 mb-4 px-3 py-2.5 bg-[rgba(255,184,77,0.07)] border border-[rgba(255,184,77,0.2)] rounded-xl">
+                      <p className="text-[12px] text-warning leading-snug">{categorizationError}</p>
+                      <button
+                        type="button"
+                        onClick={() => runContactCategorization(failedBatchContacts)}
+                        className="flex-none text-[12px] font-bold text-warning border border-[rgba(255,184,77,0.3)] px-2.5 py-1 rounded-lg hover:bg-[rgba(255,184,77,0.1)] transition-colors whitespace-nowrap"
+                      >
+                        Retry
+                      </button>
+                    </div>
+                  )}
+
                   {/* Suggestions panel — shown once AI returns results */}
                   {suggestedContactsList.length > 0 && (
                     <div className="mb-4 border border-[rgba(139,124,255,0.2)] rounded-xl overflow-hidden">
@@ -1099,6 +1162,8 @@ export default function ImportContactsModal({ onClose, onImported }) {
                   setContactSuggestions({})
                   setAcceptedByRow({})
                   setAiCategorizing(false)
+                  setCategorizationError('')
+                  setFailedBatchContacts([])
                 }}
                 disabled={importing}
                 className="text-[14px] font-semibold text-low hover:text-hi transition-colors disabled:opacity-40"

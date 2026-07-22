@@ -9,8 +9,8 @@ const ALLOWED_REL_TYPES = new Set([
   'Mentor', 'Collaborator', 'Referral path', 'Potential employer', 'Connector', 'Other',
 ])
 
-// Cap at 200 contacts per call to keep prompt size manageable
-const MAX_CONTACTS = 200
+// Cap at 20 contacts per call — client must batch larger imports
+const MAX_CONTACTS = 20
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
@@ -71,11 +71,18 @@ Deno.serve(async (req) => {
       )
     }
 
+    if (rawContacts.length > MAX_CONTACTS) {
+      return new Response(
+        JSON.stringify({ error: `Too many contacts — send at most ${MAX_CONTACTS} per call` }),
+        { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      )
+    }
+
     // ── 4. Sanitize input ─────────────────────────────────────────────────────
     // Only non-PII fields go to Claude. Names, emails, and LinkedIn URLs are
     // intentionally excluded — they are not needed for category inference.
     const validRowIds = new Set<string>()
-    const sanitized = (rawContacts as unknown[]).slice(0, MAX_CONTACTS).flatMap((c: unknown) => {
+    const sanitized = (rawContacts as unknown[]).flatMap((c: unknown) => {
       if (typeof c !== 'object' || c === null) return []
       const contact = c as Record<string, unknown>
       const rowId = typeof contact.row_id === 'string' ? contact.row_id.slice(0, 64) : null
