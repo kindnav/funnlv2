@@ -9,8 +9,39 @@ const ALLOWED_REL_TYPES = new Set([
   'Mentor', 'Collaborator', 'Referral path', 'Potential employer', 'Connector', 'Other',
 ])
 
-// Cap at 20 contacts per call — client must batch larger imports
+const ALLOWED_CONFIDENCE = new Set(['high', 'medium', 'low'])
+
+// Clients generate crypto.randomUUID() v4 UUIDs for row_id.
+// Validate strictly: no truncation, no mutation, no logging of IDs.
+const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+
+// Cap at 20 contacts per call — client batches larger imports.
+// Oversized requests are rejected with HTTP 400 (not silently sliced).
 const MAX_CONTACTS = 20
+
+// Normalize a tag string: trim, lowercase, reject empty or >50 chars.
+// Returns null for invalid inputs.
+function normalizeTag(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null
+  const t = raw.trim().toLowerCase()
+  if (t.length === 0 || t.length > 50) return null
+  return t
+}
+
+// Normalize an array of tags: strings only, trim, lowercase, dedup, max `limit`.
+function normalizeTags(rawTags: unknown[], limit: number): string[] {
+  const seen = new Set<string>()
+  const result: string[] = []
+  for (const raw of rawTags) {
+    const t = normalizeTag(raw)
+    if (t && !seen.has(t)) {
+      seen.add(t)
+      result.push(t)
+      if (result.length >= limit) break
+    }
+  }
+  return result
+}
 
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') {
@@ -60,7 +91,7 @@ Deno.serve(async (req) => {
       )
     }
 
-    // ── 3. Parse and validate input ────────────────────────────────────────────
+    // ── 3. Parse and size-check input ─────────────────────────────────────────
     const body = await req.json()
     const rawContacts: unknown = body?.contacts
 
@@ -78,17 +109,48 @@ Deno.serve(async (req) => {
       )
     }
 
-    // ── 4. Sanitize input ─────────────────────────────────────────────────────
-    // Only non-PII fields go to Claude. Names, emails, and LinkedIn URLs are
-    // intentionally excluded — they are not needed for category inference.
-    const validRowIds = new Set<string>()
-    const sanitized = (rawContacts as unknown[]).flatMap((c: unknown) => {
-      if (typeof c !== 'object' || c === null) return []
+    // ── 4. Validate and sanitize input ────────────────────────────────────────
+    // row_id: must be a valid UUID v4 — no truncation, not derived from contact data.
+    // Duplicate input row_ids are rejected outright so the output is always unambiguous.
+    // Names, emails, and LinkedIn URLs are excluded — not needed for category inference.
+    const seenInputIds = new Set<string>()
+
+    const sanitized: Array<{
+      row_id: string
+      company: string | null
+      role: string | null
+      how_met: string | null
+      relationship_note: string | null
+      existing_tags: string[]
+      existing_relationship_type: string | null
+    }> = []
+
+    for (const c of rawContacts as unknown[]) {
+      if (typeof c !== 'object' || c === null) continue
       const contact = c as Record<string, unknown>
-      const rowId = typeof contact.row_id === 'string' ? contact.row_id.slice(0, 64) : null
-      if (!rowId) return []
-      validRowIds.add(rowId)
-      return [{
+
+      // UUID v4 validation — no truncation, no .slice()
+      const rowId = typeof contact.row_id === 'string' ? contact.row_id : null
+      if (!rowId || !UUID_V4_RE.test(rowId)) {
+        return new Response(
+          JSON.stringify({ error: 'Each contact must include a valid UUID v4 row_id' }),
+          { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        )
+      }
+      if (seenInputIds.has(rowId)) {
+        return new Response(
+          JSON.stringify({ error: 'Duplicate row_id in request — each contact must have a unique row_id' }),
+          { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        )
+      }
+      seenInputIds.add(rowId)
+
+      // existing_tags: sanitize for use as context (trim, lowercase, cap) without
+      // mutating the contact's actual explicit CSV tags
+      const rawExistingTags = Array.isArray(contact.existing_tags) ? contact.existing_tags : []
+      const existingTags = normalizeTags(rawExistingTags as unknown[], 10)
+
+      sanitized.push({
         row_id: rowId,
         company: typeof contact.company === 'string' ? contact.company.slice(0, 200) : null,
         role: typeof contact.role === 'string' ? contact.role.slice(0, 200) : null,
@@ -96,16 +158,13 @@ Deno.serve(async (req) => {
         relationship_note: typeof contact.relationship_note === 'string'
           ? contact.relationship_note.slice(0, 400)
           : null,
-        existing_tags: Array.isArray(contact.existing_tags)
-          ? (contact.existing_tags as unknown[])
-              .filter((t): t is string => typeof t === 'string')
-              .slice(0, 10)
-          : [],
-        existing_relationship_type: typeof contact.existing_relationship_type === 'string'
+        existing_tags: existingTags,
+        existing_relationship_type: typeof contact.existing_relationship_type === 'string' &&
+          ALLOWED_REL_TYPES.has(contact.existing_relationship_type)
           ? contact.existing_relationship_type
           : null,
-      }]
-    })
+      })
+    }
 
     if (sanitized.length === 0) {
       return new Response(
@@ -120,22 +179,27 @@ Deno.serve(async (req) => {
     const prompt = `You are categorizing contacts in Funnl, a networking CRM for students recruiting for internships and jobs.
 
 For each contact below, suggest:
-- suggested_tags: informal relationship labels like "recruiter", "alumni", "mentor", "founder", "target firm". Max 3 per contact, lowercased. Only suggest if clearly inferable from the contact's role and company. Use [] if uncertain.
+- suggested_tags: informal relationship labels like "recruiter", "alumni", "mentor", "founder", "target firm". Max 5 per contact, lowercased. Only suggest if clearly inferable from the contact's role and company. Use [] if uncertain.
 - suggested_relationship_type: one of Mentor, Collaborator, Referral path, Potential employer, Connector, Other — or null. Only if the role/company strongly suggests one type.
+- confidence: exactly "high", "medium", or "low". Required on every entry.
+  - high: very clear from role and company (e.g. role=Recruiter → suggested_tags=["recruiter"])
+  - medium: probable but not certain
+  - low: speculative
 
 Rules:
 1. Return the SAME row_id you received — do not modify it
 2. Be conservative: a wrong suggestion is worse than no suggestion
 3. Do not suggest tags or types already listed in existing_tags or existing_relationship_type
 4. Never infer sensitive attributes (health, politics, religion, demographics)
-5. Return ONLY a valid JSON array — no markdown fences, no explanation
+5. You may omit contacts where you have no useful suggestions
+6. Return ONLY a valid JSON array — no markdown fences, no explanation
 
 Contacts to categorize:
 ${contactsJson}
 
-Return format — one entry per contact, in the same order:
+Return format — include only contacts where you have at least one suggestion:
 [
-  { "row_id": "...", "suggested_tags": [...], "suggested_relationship_type": null },
+  { "row_id": "...", "suggested_tags": [...], "suggested_relationship_type": null, "confidence": "high" },
   ...
 ]`
 
@@ -156,7 +220,8 @@ Return format — one entry per contact, in the same order:
     })
 
     if (!anthropicRes.ok) {
-      console.error('Anthropic API error:', await anthropicRes.text())
+      // Log status only — never log response body which may echo contact data
+      console.error('[ai-categorize-contacts] provider_error', anthropicRes.status)
       return new Response(
         JSON.stringify({ error: 'AI service error — please try again' }),
         { status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
@@ -175,7 +240,7 @@ Return format — one entry per contact, in the same order:
     try {
       parsed = JSON.parse(rawContent)
     } catch {
-      console.error('Failed to parse Claude output as JSON:', rawContent)
+      console.error('[ai-categorize-contacts] invalid_json')
       return new Response(
         JSON.stringify({ error: 'Could not parse AI response — please try again' }),
         { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
@@ -183,30 +248,36 @@ Return format — one entry per contact, in the same order:
     }
 
     if (!Array.isArray(parsed)) {
-      console.error('Claude returned non-array:', rawContent)
+      console.error('[ai-categorize-contacts] invalid_shape')
       return new Response(
         JSON.stringify({ error: 'Unexpected AI response format — please try again' }),
         { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       )
     }
 
-    // ── 8. Sanitize output ─────────────────────────────────────────────────────
-    // row_id must match one we sent; tags must be safe strings; relType must be
-    // one of the allowed enum values. Entries with nothing actionable are dropped.
+    // ── 8. Sanitize and deduplicate output ────────────────────────────────────
+    // - row_id must match one we sent; unknown IDs are discarded
+    // - first valid suggestion per row_id wins; later duplicates are ignored
+    // - confidence must be valid; invalid → entire suggestion discarded
+    // - tags: strings only, trim, lowercase, dedup, max 5, max 50 chars each
+    // - relType: must be one of the allowed values
+    const usedOutputIds = new Set<string>()
+
     const suggestions = (parsed as unknown[]).flatMap((entry: unknown) => {
       if (typeof entry !== 'object' || entry === null) return []
       const e = entry as Record<string, unknown>
 
       const rowId = typeof e.row_id === 'string' ? e.row_id : null
-      if (!rowId || !validRowIds.has(rowId)) return []
+      if (!rowId || !seenInputIds.has(rowId)) return [] // unknown or missing row_id
+      if (usedOutputIds.has(rowId)) return []            // duplicate output — first wins
+      usedOutputIds.add(rowId)
+
+      // confidence is required and must be a known value; discard the whole entry if invalid
+      if (!ALLOWED_CONFIDENCE.has(e.confidence as string)) return []
+      const confidence = e.confidence as 'high' | 'medium' | 'low'
 
       const rawTags = Array.isArray(e.suggested_tags) ? e.suggested_tags : []
-      const tags = (rawTags as unknown[])
-        .filter((t): t is string =>
-          typeof t === 'string' && t.trim().length > 0 && t.trim().length <= 50
-        )
-        .slice(0, 3)
-        .map(t => t.trim().toLowerCase())
+      const tags = normalizeTags(rawTags as unknown[], 5)
 
       const relType = typeof e.suggested_relationship_type === 'string' &&
         ALLOWED_REL_TYPES.has(e.suggested_relationship_type)
@@ -215,7 +286,7 @@ Return format — one entry per contact, in the same order:
 
       if (tags.length === 0 && !relType) return []
 
-      return [{ row_id: rowId, suggested_tags: tags, suggested_relationship_type: relType }]
+      return [{ row_id: rowId, suggested_tags: tags, suggested_relationship_type: relType, confidence }]
     })
 
     return new Response(
@@ -223,8 +294,8 @@ Return format — one entry per contact, in the same order:
       { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     )
 
-  } catch (err) {
-    console.error('Unexpected error:', err)
+  } catch {
+    console.error('[ai-categorize-contacts] unexpected_error')
     return new Response(
       JSON.stringify({ error: 'Something went wrong — please try again' }),
       { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
