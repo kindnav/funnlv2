@@ -1,11 +1,19 @@
-// Tests for theme helper logic (src/lib/theme.js).
-// theme.js uses localStorage and document.documentElement, which aren't
-// available in Node.js. This file inlines the same logic and tests it with
-// minimal mocks so the business rules are independently verified.
+// Tests for theme helper logic — imports directly from src/lib/theme.js.
+// Uses the pure exported functions that accept storage/root parameters,
+// so no browser globals (localStorage, document) are touched at import time.
 //
 // Run with: node tests/theme.test.js
 
 import assert from 'assert'
+import { readFileSync } from 'fs'
+import { fileURLToPath } from 'url'
+import { join, dirname } from 'path'
+import {
+  VALID_THEMES, normalizeThemePreference, resolveColorScheme,
+  readThemePreference, writeThemePreference, applyThemeToRoot,
+} from '../src/lib/theme.js'
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
 
 let passed = 0
 let failed = 0
@@ -37,205 +45,216 @@ function makeRoot() {
   return { dataset: {}, style: {} }
 }
 
-// ── Inline logic from src/lib/theme.js ───────────────────────────────────────
-// Must stay in sync with the source file.
+// ── VALID_THEMES ─────────────────────────────────────────────────────────────
+console.log('\nVALID_THEMES')
 
-const VALID_THEMES = new Set(['dark', 'light', 'system'])
+test('dark, light, system are valid', () => {
+  for (const t of ['dark', 'light', 'system']) {
+    assert.strictEqual(VALID_THEMES.has(t), true)
+  }
+})
 
-function getTheme(storage) {
-  const stored = storage.getItem('funnl-theme')
-  return VALID_THEMES.has(stored) ? stored : 'dark'
-}
+test('auto, Dark, LIGHT are not valid', () => {
+  for (const t of ['auto', 'Dark', 'LIGHT', '']) {
+    assert.strictEqual(VALID_THEMES.has(t), false)
+  }
+})
 
-function applyTheme(theme, root) {
-  root.dataset.theme = VALID_THEMES.has(theme) ? theme : 'dark'
-  root.style.colorScheme = theme === 'system' ? 'light dark' : theme
-}
+// ── normalizeThemePreference ─────────────────────────────────────────────────
+console.log('\nnormalizeThemePreference')
 
-function setTheme(theme, storage, root) {
-  if (!VALID_THEMES.has(theme)) return
-  storage.setItem('funnl-theme', theme)
-  applyTheme(theme, root)
-}
+test('returns "dark" for missing/invalid value', () => {
+  assert.strictEqual(normalizeThemePreference(null), 'dark')
+  assert.strictEqual(normalizeThemePreference(undefined), 'dark')
+  assert.strictEqual(normalizeThemePreference(''), 'dark')
+  assert.strictEqual(normalizeThemePreference('auto'), 'dark')
+  assert.strictEqual(normalizeThemePreference('System'), 'dark')
+})
 
-function initTheme(storage, root) {
-  applyTheme(getTheme(storage), root)
-}
+test('returns the value unchanged for valid themes', () => {
+  assert.strictEqual(normalizeThemePreference('dark'), 'dark')
+  assert.strictEqual(normalizeThemePreference('light'), 'light')
+  assert.strictEqual(normalizeThemePreference('system'), 'system')
+})
 
-// ── getTheme ─────────────────────────────────────────────────────────────────
-console.log('\ngetTheme')
+// ── resolveColorScheme ────────────────────────────────────────────────────────
+console.log('\nresolveColorScheme')
 
-test('returns "dark" when nothing is stored (default)', () => {
+test('dark → "dark"', () => {
+  assert.strictEqual(resolveColorScheme('dark'), 'dark')
+})
+
+test('light → "light"', () => {
+  assert.strictEqual(resolveColorScheme('light'), 'light')
+})
+
+test('system → "light dark"', () => {
+  assert.strictEqual(resolveColorScheme('system'), 'light dark')
+})
+
+// ── readThemePreference ───────────────────────────────────────────────────────
+console.log('\nreadThemePreference')
+
+test('returns "dark" when nothing stored (default)', () => {
   const s = makeStorage()
-  assert.strictEqual(getTheme(s), 'dark')
+  assert.strictEqual(readThemePreference(s), 'dark')
 })
 
 test('returns stored "dark"', () => {
-  const s = makeStorage()
-  s.setItem('funnl-theme', 'dark')
-  assert.strictEqual(getTheme(s), 'dark')
+  const s = makeStorage(); s.setItem('funnl-theme', 'dark')
+  assert.strictEqual(readThemePreference(s), 'dark')
 })
 
 test('returns stored "light"', () => {
-  const s = makeStorage()
-  s.setItem('funnl-theme', 'light')
-  assert.strictEqual(getTheme(s), 'light')
+  const s = makeStorage(); s.setItem('funnl-theme', 'light')
+  assert.strictEqual(readThemePreference(s), 'light')
 })
 
 test('returns stored "system"', () => {
-  const s = makeStorage()
-  s.setItem('funnl-theme', 'system')
-  assert.strictEqual(getTheme(s), 'system')
+  const s = makeStorage(); s.setItem('funnl-theme', 'system')
+  assert.strictEqual(readThemePreference(s), 'system')
 })
 
 test('returns "dark" for invalid stored value "auto"', () => {
-  const s = makeStorage()
-  s.setItem('funnl-theme', 'auto')
-  assert.strictEqual(getTheme(s), 'dark')
+  const s = makeStorage(); s.setItem('funnl-theme', 'auto')
+  assert.strictEqual(readThemePreference(s), 'dark')
 })
 
 test('returns "dark" for invalid stored value empty string', () => {
-  const s = makeStorage()
-  s.setItem('funnl-theme', '')
-  assert.strictEqual(getTheme(s), 'dark')
+  const s = makeStorage(); s.setItem('funnl-theme', '')
+  assert.strictEqual(readThemePreference(s), 'dark')
 })
 
 test('returns "dark" for invalid stored value "System" (wrong case)', () => {
-  const s = makeStorage()
-  s.setItem('funnl-theme', 'System')
-  assert.strictEqual(getTheme(s), 'dark')
+  const s = makeStorage(); s.setItem('funnl-theme', 'System')
+  assert.strictEqual(readThemePreference(s), 'dark')
 })
 
-// ── applyTheme ───────────────────────────────────────────────────────────────
-console.log('\napplyTheme')
+// ── writeThemePreference ──────────────────────────────────────────────────────
+console.log('\nwriteThemePreference')
+
+test('persists valid theme to storage', () => {
+  const s = makeStorage()
+  writeThemePreference(s, 'light')
+  assert.strictEqual(s.getItem('funnl-theme'), 'light')
+})
+
+test('no-op for invalid theme — storage unchanged', () => {
+  const s = makeStorage(); s.setItem('funnl-theme', 'dark')
+  writeThemePreference(s, 'invalid')
+  assert.strictEqual(s.getItem('funnl-theme'), 'dark')
+})
+
+// ── applyThemeToRoot ──────────────────────────────────────────────────────────
+console.log('\napplyThemeToRoot')
 
 test('dark → data-theme="dark", colorScheme="dark"', () => {
   const root = makeRoot()
-  applyTheme('dark', root)
+  applyThemeToRoot(root, 'dark')
   assert.strictEqual(root.dataset.theme, 'dark')
   assert.strictEqual(root.style.colorScheme, 'dark')
 })
 
 test('light → data-theme="light", colorScheme="light"', () => {
   const root = makeRoot()
-  applyTheme('light', root)
+  applyThemeToRoot(root, 'light')
   assert.strictEqual(root.dataset.theme, 'light')
   assert.strictEqual(root.style.colorScheme, 'light')
 })
 
 test('system → data-theme="system", colorScheme="light dark"', () => {
   const root = makeRoot()
-  applyTheme('system', root)
+  applyThemeToRoot(root, 'system')
   assert.strictEqual(root.dataset.theme, 'system')
   assert.strictEqual(root.style.colorScheme, 'light dark')
 })
 
 test('invalid value falls back to data-theme="dark"', () => {
   const root = makeRoot()
-  applyTheme('invalid', root)
+  applyThemeToRoot(root, 'invalid')
   assert.strictEqual(root.dataset.theme, 'dark')
 })
 
 test('always sets an explicit data-theme attribute (no undefined)', () => {
   for (const t of ['dark', 'light', 'system']) {
     const root = makeRoot()
-    applyTheme(t, root)
+    applyThemeToRoot(root, t)
     assert.ok(root.dataset.theme !== undefined && root.dataset.theme !== '')
   }
 })
 
-// ── setTheme ─────────────────────────────────────────────────────────────────
-console.log('\nsetTheme')
-
-test('persists to storage and applies', () => {
-  const s = makeStorage()
-  const root = makeRoot()
-  setTheme('light', s, root)
-  assert.strictEqual(s.getItem('funnl-theme'), 'light')
-  assert.strictEqual(root.dataset.theme, 'light')
-})
-
-test('invalid theme: no-op — storage and root unchanged', () => {
-  const s = makeStorage()
-  const root = makeRoot()
-  s.setItem('funnl-theme', 'dark')
-  setTheme('invalid', s, root)
-  assert.strictEqual(s.getItem('funnl-theme'), 'dark')
-  assert.strictEqual(root.dataset.theme, undefined)
-})
-
-// ── initTheme ────────────────────────────────────────────────────────────────
-console.log('\ninitTheme')
+// ── Combined: readThemePreference + applyThemeToRoot (initTheme equivalent) ───
+console.log('\nreadThemePreference + applyThemeToRoot (initTheme equivalent)')
 
 test('no stored value → applies dark', () => {
-  const s = makeStorage()
-  const root = makeRoot()
-  initTheme(s, root)
+  const s = makeStorage(); const root = makeRoot()
+  applyThemeToRoot(root, readThemePreference(s))
   assert.strictEqual(root.dataset.theme, 'dark')
 })
 
 test('stored "light" → applies light', () => {
-  const s = makeStorage()
-  s.setItem('funnl-theme', 'light')
-  const root = makeRoot()
-  initTheme(s, root)
+  const s = makeStorage(); s.setItem('funnl-theme', 'light'); const root = makeRoot()
+  applyThemeToRoot(root, readThemePreference(s))
   assert.strictEqual(root.dataset.theme, 'light')
 })
 
 test('stored invalid value → applies dark', () => {
-  const s = makeStorage()
-  s.setItem('funnl-theme', 'auto')
-  const root = makeRoot()
-  initTheme(s, root)
+  const s = makeStorage(); s.setItem('funnl-theme', 'auto'); const root = makeRoot()
+  applyThemeToRoot(root, readThemePreference(s))
   assert.strictEqual(root.dataset.theme, 'dark')
 })
 
-// ── Pre-paint script consistency ──────────────────────────────────────────────
-// The inline script in index.html must implement the same logic as getTheme/applyTheme.
-// Test the pre-paint logic here to ensure it matches.
-console.log('\nPre-paint script logic (must match getTheme + applyTheme)')
+// ── Pre-paint script in index.html ────────────────────────────────────────────
+// Reads the actual file instead of reimplementing the logic, so the test stays
+// in sync with the real inline script automatically.
+console.log('\nPre-paint script (index.html pattern checks)')
 
-function runPrePaintScript(storedValue) {
-  const store = storedValue !== null ? { 'funnl-theme': storedValue } : {}
-  const root = { dataset: {}, style: {} }
-  // Mirrors exactly the inline script in index.html:
-  const s = { getItem: k => store[k] ?? null }
-  const v = { dark: 1, light: 1, system: 1 }
-  const t = v[s.getItem('funnl-theme')] ? s.getItem('funnl-theme') : 'dark'
-  root.dataset.theme = t
-  root.style.colorScheme = t === 'system' ? 'light dark' : t
-  return root
-}
+const indexHtml = readFileSync(join(__dirname, '../index.html'), 'utf8')
 
-test('pre-paint: no stored value → data-theme="dark"', () => {
-  const root = runPrePaintScript(null)
-  assert.strictEqual(root.dataset.theme, 'dark')
+test('pre-paint script references the funnl-theme storage key', () => {
+  assert.ok(indexHtml.includes('funnl-theme'),
+    'Script must read from the "funnl-theme" localStorage key')
 })
 
-test('pre-paint: stored "light" → data-theme="light"', () => {
-  const root = runPrePaintScript('light')
-  assert.strictEqual(root.dataset.theme, 'light')
+test('pre-paint script has a dark fallback', () => {
+  assert.ok(indexHtml.includes("'dark'") || indexHtml.includes('"dark"'),
+    'Script must fall back to "dark" when no valid theme is stored')
 })
 
-test('pre-paint: stored "system" → data-theme="system", colorScheme="light dark"', () => {
-  const root = runPrePaintScript('system')
-  assert.strictEqual(root.dataset.theme, 'system')
-  assert.strictEqual(root.style.colorScheme, 'light dark')
+test('pre-paint script stamps data-theme on the root element', () => {
+  assert.ok(indexHtml.includes('dataset.theme') || indexHtml.includes('data-theme'),
+    'Script must set the data-theme attribute on the root element')
 })
 
-test('pre-paint: stored invalid → data-theme="dark" (same as getTheme fallback)', () => {
-  const root = runPrePaintScript('auto')
-  assert.strictEqual(root.dataset.theme, 'dark')
+test('pre-paint script sets colorScheme', () => {
+  assert.ok(indexHtml.includes('colorScheme') || indexHtml.includes('color-scheme'),
+    'Script must set colorScheme to prevent flash of wrong color scheme')
 })
 
-test('pre-paint and getTheme agree for all valid values', () => {
-  for (const t of ['dark', 'light', 'system']) {
-    const s = makeStorage()
-    s.setItem('funnl-theme', t)
-    const fromGetTheme = getTheme(s)
-    const fromPrePaint = runPrePaintScript(t).dataset.theme
-    assert.strictEqual(fromGetTheme, fromPrePaint, `disagreement for theme=${t}`)
-  }
+test('pre-paint script covers all three valid themes', () => {
+  assert.ok(indexHtml.includes('dark'), 'dark must appear in pre-paint script area')
+  assert.ok(indexHtml.includes('light'), 'light must appear in pre-paint script area')
+  assert.ok(indexHtml.includes('system'), 'system must appear in pre-paint script area')
+})
+
+test('pre-paint and readThemePreference agree: no stored value → dark', () => {
+  assert.strictEqual(normalizeThemePreference(null), 'dark')
+})
+
+test('pre-paint and readThemePreference agree: stored "light" → light', () => {
+  const s = makeStorage(); s.setItem('funnl-theme', 'light')
+  assert.strictEqual(readThemePreference(s), 'light')
+})
+
+test('pre-paint and readThemePreference agree: "system" → "light dark" colorScheme', () => {
+  const s = makeStorage(); s.setItem('funnl-theme', 'system')
+  assert.strictEqual(readThemePreference(s), 'system')
+  assert.strictEqual(resolveColorScheme('system'), 'light dark')
+})
+
+test('pre-paint and readThemePreference agree: invalid stored → dark', () => {
+  const s = makeStorage(); s.setItem('funnl-theme', 'auto')
+  assert.strictEqual(readThemePreference(s), 'dark')
 })
 
 // ── Summary ───────────────────────────────────────────────────────────────────

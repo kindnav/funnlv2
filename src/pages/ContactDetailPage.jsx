@@ -143,21 +143,15 @@ function ContactDetailPage() {
     if (loggedWarningTimerRef.current) clearTimeout(loggedWarningTimerRef.current)
   }, [])
 
-  // Auto-manage outreach tracking state when the interaction type changes.
-  // Email/Message → auto-enable tracking with "Awaiting response" default.
-  // Call/Other → manual only (clear to empty, user selects explicitly).
-  // Coffee chat/Event → no outreach tracking (clear and hide).
+  // Clear outreach tracking state when the interaction type changes.
+  // User must explicitly opt in via checkbox for Email/Message.
+  // Coffee chat/Event hide outreach tracking entirely.
   useEffect(() => {
     const prev = prevTypeRef.current
     if (prev === type) return
     prevTypeRef.current = type
-    if (type === 'Email' || type === 'Message') {
-      setTrackOutreach(true)
-      setOutreachStatus(o => o || 'awaiting_response')
-    } else {
-      setTrackOutreach(false)
-      setOutreachStatus('')
-    }
+    setTrackOutreach(false)
+    setOutreachStatus('')
   }, [type])
 
   const fetchContact = useCallback(async () => {
@@ -237,6 +231,7 @@ function ContactDetailPage() {
       type: interaction.type || 'Coffee chat', date: interaction.interaction_date,
       notes: interaction.notes || '', followUpDate: interaction.follow_up_date || '',
       outreachStatus: interaction.outreach_status || '',
+      trackOutreach: !!interaction.outreach_status,
       // Stored for analytics comparison in handleSaveInteraction — not saved to DB
       _originalOutreachStatus: interaction.outreach_status || '',
     })
@@ -245,17 +240,33 @@ function ContactDetailPage() {
 
   async function handleSaveInteraction(e) {
     e.preventDefault(); setSavingInteraction(true); setInteractionSaveError('')
+
+    // Type-aware effective outreach status — mirrors the new interaction form logic.
+    // Email/Message: only saved when user has opted in (trackOutreach checkbox).
+    // Call/Other: saved directly from the select (user chose explicitly).
+    // Coffee chat/Event: always null (no outreach tracking shown).
+    const editType = interactionEditForm.type
+    const effectiveOutreach = (() => {
+      if (editType === 'Email' || editType === 'Message') {
+        return interactionEditForm.trackOutreach ? interactionEditForm.outreachStatus || null : null
+      }
+      if (editType === 'Call' || editType === 'Other') {
+        return interactionEditForm.outreachStatus || null
+      }
+      return null
+    })()
+
     const { error } = await supabase.from('interactions').update({
       type: interactionEditForm.type, interaction_date: interactionEditForm.date,
       notes: interactionEditForm.notes || null, follow_up_date: interactionEditForm.followUpDate || null,
-      outreach_status: interactionEditForm.outreachStatus || null,
+      outreach_status: effectiveOutreach,
     }).eq('id', editingInteractionId)
     setSavingInteraction(false)
     if (error) { setInteractionSaveError(error.message); return }
 
     // Fire analytics when outreach_status actually changed (including cleared)
-    const prevStatus = interactionEditForm._originalOutreachStatus
-    const newStatus  = interactionEditForm.outreachStatus
+    const prevStatus = interactionEditForm._originalOutreachStatus || null
+    const newStatus  = effectiveOutreach
     if (newStatus !== prevStatus) {
       track('outreach_status_changed', {
         status: newStatus || 'cleared',
@@ -675,7 +686,7 @@ function ContactDetailPage() {
                     {/* Outreach tracking — behavior varies by interaction type */}
                     {(type === 'Email' || type === 'Message') && (
                       <div className="space-y-2.5">
-                        {/* Opt-in toggle — prominent for Email and Message */}
+                        {/* Explicit opt-in — user must mark this as outreach they sent */}
                         <label className="flex items-center gap-2.5 cursor-pointer select-none">
                           <input
                             type="checkbox"
@@ -687,8 +698,9 @@ function ContactDetailPage() {
                             }}
                             className="w-4 h-4 accent-[#8B7CFF] cursor-pointer"
                           />
-                          <span className="text-[13px] font-semibold text-hi">Track outreach response</span>
+                          <span className="text-[13px] font-semibold text-hi">This was outreach I sent</span>
                         </label>
+                        <p className="text-[12px] text-lower">Track the response manually. Automatic inbox syncing is not enabled.</p>
                         {trackOutreach && (
                           <select value={outreachStatus} onChange={e => setOutreachStatus(e.target.value)} className={sCls}>
                             <option value="awaiting_response">Awaiting response</option>
@@ -704,7 +716,7 @@ function ContactDetailPage() {
                       <div>
                         <label className={lCls}>
                           Outreach status
-                          <span className="text-lower font-normal ml-1">— Track the response manually. Automatic inbox syncing is not enabled.</span>
+                          <span className="text-lower font-normal ml-1">— Track the outcome manually. Automatic syncing is not enabled.</span>
                         </label>
                         <select value={outreachStatus} onChange={e => setOutreachStatus(e.target.value)} className={sCls}>
                           <option value="">— not set —</option>
@@ -757,7 +769,19 @@ function ContactDetailPage() {
                               <form onSubmit={handleSaveInteraction} className="space-y-3 bg-elevated border border-line-2 rounded-xl p-3 mb-1">
                                 <div>
                                   <label className={lCls}>Type</label>
-                                  <select value={interactionEditForm.type} onChange={e => setInteractionEditForm({ ...interactionEditForm, type: e.target.value })} className={sCls}>
+                                  <select
+                                    value={interactionEditForm.type}
+                                    onChange={e => {
+                                      const newType = e.target.value
+                                      const update = { ...interactionEditForm, type: newType }
+                                      if (newType === 'Coffee chat' || newType === 'Event') {
+                                        update.trackOutreach = false
+                                        update.outreachStatus = ''
+                                      }
+                                      setInteractionEditForm(update)
+                                    }}
+                                    className={sCls}
+                                  >
                                     {TYPE_OPTIONS.map(o => <option key={o}>{o}</option>)}
                                   </select>
                                 </div>
@@ -773,17 +797,54 @@ function ContactDetailPage() {
                                   <label className={lCls}>Follow-up date</label>
                                   <input type="date" value={interactionEditForm.followUpDate} onChange={e => setInteractionEditForm({ ...interactionEditForm, followUpDate: e.target.value })} className={iCls}/>
                                 </div>
-                                <div>
-                                  <label className={lCls}>Outreach status</label>
-                                  <select value={interactionEditForm.outreachStatus || ''} onChange={e => setInteractionEditForm({ ...interactionEditForm, outreachStatus: e.target.value })} className={sCls}>
-                                    <option value="">— not set —</option>
-                                    <option value="awaiting_response">Awaiting response</option>
-                                    <option value="responded">Responded</option>
-                                    <option value="meeting_booked">Meeting booked</option>
-                                    <option value="no_response">No response</option>
-                                    <option value="declined">Declined</option>
-                                  </select>
-                                </div>
+                                {/* Edit form: outreach tracking — type-aware */}
+                                {(interactionEditForm.type === 'Email' || interactionEditForm.type === 'Message') && (
+                                  <div className="space-y-2.5">
+                                    <label className="flex items-center gap-2.5 cursor-pointer select-none">
+                                      <input
+                                        type="checkbox"
+                                        checked={!!interactionEditForm.trackOutreach}
+                                        onChange={e => {
+                                          const checked = e.target.checked
+                                          setInteractionEditForm(prev => ({
+                                            ...prev,
+                                            trackOutreach: checked,
+                                            outreachStatus: checked ? (prev.outreachStatus || 'awaiting_response') : '',
+                                          }))
+                                        }}
+                                        className="w-4 h-4 accent-[#8B7CFF] cursor-pointer"
+                                      />
+                                      <span className="text-[13px] font-semibold text-hi">This was outreach I sent</span>
+                                    </label>
+                                    <p className="text-[12px] text-lower">Track the response manually. Automatic inbox syncing is not enabled.</p>
+                                    {interactionEditForm.trackOutreach && (
+                                      <select value={interactionEditForm.outreachStatus || ''} onChange={e => setInteractionEditForm({ ...interactionEditForm, outreachStatus: e.target.value })} className={sCls}>
+                                        <option value="awaiting_response">Awaiting response</option>
+                                        <option value="responded">Responded</option>
+                                        <option value="meeting_booked">Meeting booked</option>
+                                        <option value="no_response">No response</option>
+                                        <option value="declined">Declined</option>
+                                      </select>
+                                    )}
+                                  </div>
+                                )}
+                                {(interactionEditForm.type === 'Call' || interactionEditForm.type === 'Other') && (
+                                  <div>
+                                    <label className={lCls}>
+                                      Outreach status
+                                      <span className="text-lower font-normal ml-1">— Track the outcome manually. Automatic syncing is not enabled.</span>
+                                    </label>
+                                    <select value={interactionEditForm.outreachStatus || ''} onChange={e => setInteractionEditForm({ ...interactionEditForm, outreachStatus: e.target.value })} className={sCls}>
+                                      <option value="">— not set —</option>
+                                      <option value="awaiting_response">Awaiting response</option>
+                                      <option value="responded">Responded</option>
+                                      <option value="meeting_booked">Meeting booked</option>
+                                      <option value="no_response">No response</option>
+                                      <option value="declined">Declined</option>
+                                    </select>
+                                  </div>
+                                )}
+                                {/* Coffee chat and Event: no outreach tracking in edit form */}
                                 {interactionSaveError && <p className="text-sm text-danger">{interactionSaveError}</p>}
                                 <div className="flex gap-2">
                                   <button type="submit" disabled={savingInteraction} className="flex-1 bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] text-white text-[13px] font-bold py-2.5 rounded-[10px] hover:opacity-90 transition-opacity disabled:opacity-40">
