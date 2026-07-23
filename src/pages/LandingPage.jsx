@@ -1,4 +1,4 @@
-import { Link, useNavigate } from 'react-router-dom'
+﻿import { Link, useNavigate } from 'react-router-dom'
 import { track } from '../lib/analytics'
 
 function LandingPage() {
@@ -23,7 +23,7 @@ function LandingPage() {
       />
 
       {/* ── Nav ────────────────────────────────────────────────────────── */}
-      <nav className="sticky top-0 z-50 bg-[rgba(10,9,16,0.75)] backdrop-blur-[14px] border-b border-[rgba(255,255,255,0.07)]">
+      <nav className="sticky top-0 z-50 bg-[rgba(10,9,16,0.75)] backdrop-blur-[14px] border-b border-line-2">
         <div className="max-w-[1160px] mx-auto px-6 h-16 flex items-center justify-between">
           <div className="flex items-center gap-[9px]">
             <div className="w-[26px] h-[26px] rounded-[7px] bg-[#7C6BFF] flex items-center justify-center flex-none">
@@ -118,13 +118,13 @@ function LandingPage() {
           </div>
 
           {/* Product card */}
-          <div className="relative bg-[#141220] border border-[rgba(255,255,255,0.09)] rounded-[20px] p-[22px] shadow-[0_40px_90px_rgba(0,0,0,0.55)]">
+          <div className="relative bg-[#141220] border border-line-3 rounded-[20px] p-[22px] shadow-[0_40px_90px_rgba(0,0,0,0.55)]">
             <div className="flex items-center justify-between mb-[18px]">
               <span className="font-display font-bold text-[15px] text-[#F5F3FA]">This week</span>
               <span className="font-mono text-[10.5px] font-bold text-[#FFC97A] bg-[rgba(255,184,77,0.14)] rounded-[6px] px-2 py-1 whitespace-nowrap">3 follow-ups this week</span>
             </div>
             <div className="flex flex-col gap-0.5 mb-4">
-              <div className="flex items-center gap-3 py-[11px] border-b border-[rgba(255,255,255,0.07)]">
+              <div className="flex items-center gap-3 py-[11px] border-b border-line-2">
                 <div className="w-[34px] h-[34px] rounded-[10px] flex items-center justify-center text-[12px] font-bold text-white flex-none" style={{ background: 'linear-gradient(135deg,#FF6B8A,#F0A020)' }}>PS</div>
                 <div className="flex-1 min-w-0">
                   <p className="text-[13px] font-semibold text-[#F5F3FA] m-0">Priya Sharma</p>
@@ -141,7 +141,7 @@ function LandingPage() {
                 <span className="text-[10.5px] font-bold text-[#2FD4B6] bg-[rgba(47,212,182,0.15)] rounded-full px-[9px] py-[3px] flex-none whitespace-nowrap">On track</span>
               </div>
             </div>
-            <div className="pt-[10px] border-t border-[rgba(255,255,255,0.07)]">
+            <div className="pt-[10px] border-t border-line-2">
               <p className="text-[11.5px] font-semibold text-[#9C97AC] m-0 mb-[8px]">Upcoming follow-ups</p>
               <div className="flex items-center gap-[7px]">
                 <span className="w-[6px] h-[6px] rounded-full bg-[#FFB84D] flex-none"/>
@@ -153,7 +153,7 @@ function LandingPage() {
       </section>
 
       {/* ── Marquee ticker ──────────────────────────────────────────────── */}
-      <div className="relative z-[2] mt-[88px] border-t border-b border-[rgba(255,255,255,0.07)] bg-[#0F0D16] py-4 overflow-hidden">
+      <div className="relative z-[2] mt-[88px] border-t border-b border-line-2 bg-[#0F0D16] py-4 overflow-hidden">
         <div className="flex w-max animate-[funnl-marquee_26s_linear_infinite]">
           {[0, 1].map(i => (
             <div key={i} className="flex items-center gap-[14px] flex-none pr-[14px]">
@@ -181,14 +181,14 @@ function LandingPage() {
       <section id="how-it-works" className="relative z-[2] max-w-[1000px] mx-auto px-6 pb-10">
 
         {/* Row 01 */}
-        <div className="flex flex-col md:flex-row items-center gap-14 py-14 border-t border-[rgba(255,255,255,0.07)]">
+        <div className="flex flex-col md:flex-row items-center gap-14 py-14 border-t border-line-2">
           <div className="flex-1 w-full">
             <span className="font-mono text-[12px] font-bold text-[#635D74]">01</span>
             <h3 className="font-display font-bold text-[26px] tracking-[-0.5px] text-[#F5F3FA] mt-[10px] mb-3">Add a contact in seconds</h3>
             <p className="text-[14.5px] text-[#9C97AC] leading-[1.7] m-0 max-w-[360px]">Paste any text about a person or fill the form. Tag by relationship type so your network stays structured, not scattered.</p>
           </div>
           <div className="flex-1 w-full">
-            <div className="bg-[#141220] border border-[rgba(255,255,255,0.09)] rounded-[16px] p-5 shadow-[0_20px_50px_rgba(0,0,0,0.4)]">
+            <div className="bg-[#141220] border border-line-3 rounded-[16px] p-5 shadow-[0_20px_50px_rgba(0,0,0,0.4)]">
               <div className="flex items-start gap-3">
                 <div className="w-[38px] h-[38px] rounded-[10px] bg-[rgba(124,107,255,0.18)] flex items-center justify-center flex-none">
                   <span className="font-display font-bold text-[12.5px] text-[#B4A8FF]">PS</span>
@@ -207,14 +207,14 @@ function LandingPage() {
         </div>
 
         {/* Row 02 — reversed on desktop */}
-        <div className="flex flex-col md:flex-row-reverse items-center gap-14 py-14 border-t border-[rgba(255,255,255,0.07)]">
+        <div className="flex flex-col md:flex-row-reverse items-center gap-14 py-14 border-t border-line-2">
           <div className="flex-1 w-full">
             <span className="font-mono text-[12px] font-bold text-[#635D74]">02</span>
             <h3 className="font-display font-bold text-[26px] tracking-[-0.5px] text-[#F5F3FA] mt-[10px] mb-3">Log the conversation</h3>
             <p className="text-[14.5px] text-[#9C97AC] leading-[1.7] m-0 max-w-[360px]">Write notes, set a follow-up date. The conversation lives with the contact, not buried in your notes app.</p>
           </div>
           <div className="flex-1 w-full">
-            <div className="bg-[#141220] border border-[rgba(255,255,255,0.09)] rounded-[16px] p-5 shadow-[0_20px_50px_rgba(0,0,0,0.4)]">
+            <div className="bg-[#141220] border border-line-3 rounded-[16px] p-5 shadow-[0_20px_50px_rgba(0,0,0,0.4)]">
               <div className="flex items-center justify-between mb-[10px]">
                 <span className="text-[11px] font-semibold text-[#9C97AC] bg-[rgba(255,255,255,0.06)] rounded-full px-[10px] py-1">Coffee chat</span>
                 <span className="text-[11px] text-[#635D74]">Jul 8, 2026</span>
@@ -229,15 +229,15 @@ function LandingPage() {
         </div>
 
         {/* Row 03 */}
-        <div className="flex flex-col md:flex-row items-center gap-14 py-14 border-t border-b border-[rgba(255,255,255,0.07)]">
+        <div className="flex flex-col md:flex-row items-center gap-14 py-14 border-t border-b border-line-2">
           <div className="flex-1 w-full">
             <span className="font-mono text-[12px] font-bold text-[#635D74]">03</span>
             <h3 className="font-display font-bold text-[26px] tracking-[-0.5px] text-[#F5F3FA] mt-[10px] mb-3">Follow up on time</h3>
             <p className="text-[14.5px] text-[#9C97AC] leading-[1.7] m-0 max-w-[360px]">Your dashboard surfaces who's overdue and who's up next — no spreadsheet, no guessing.</p>
           </div>
           <div className="flex-1 w-full">
-            <div className="bg-[#141220] border border-[rgba(255,255,255,0.09)] rounded-[16px] p-5 shadow-[0_20px_50px_rgba(0,0,0,0.4)]">
-              <div className="flex items-center gap-[10px] py-[9px] border-b border-[rgba(255,255,255,0.07)]">
+            <div className="bg-[#141220] border border-line-3 rounded-[16px] p-5 shadow-[0_20px_50px_rgba(0,0,0,0.4)]">
+              <div className="flex items-center gap-[10px] py-[9px] border-b border-line-2">
                 <div className="w-[28px] h-[28px] rounded-full bg-[rgba(255,107,138,0.18)] flex items-center justify-center flex-none">
                   <span className="font-display font-bold text-[10px] text-[#FF8FA3]">JK</span>
                 </div>
@@ -295,7 +295,7 @@ function LandingPage() {
 
           {/* Right: chat mock */}
           <div className="flex-1 w-full">
-            <div className="bg-[#141220] border border-[rgba(255,255,255,0.09)] rounded-[16px] p-5 shadow-[0_20px_50px_rgba(0,0,0,0.4)]">
+            <div className="bg-[#141220] border border-line-3 rounded-[16px] p-5 shadow-[0_20px_50px_rgba(0,0,0,0.4)]">
               <div className="flex justify-end mb-3">
                 <div className="bg-[#7C6BFF] text-[#0A0910] text-[13px] font-semibold px-[14px] py-[10px] max-w-[80%]" style={{ borderRadius: '12px 12px 2px 12px' }}>
                   Who do I know at Goldman Sachs?
@@ -406,7 +406,7 @@ function LandingPage() {
       </section>
 
       {/* ── Footer ──────────────────────────────────────────────────────── */}
-      <footer className="relative z-[2] border-t border-[rgba(255,255,255,0.07)]">
+      <footer className="relative z-[2] border-t border-line-2">
         <div className="max-w-[1160px] mx-auto px-6 py-6 flex items-center justify-between gap-4 flex-wrap">
           <span className="text-[12.5px] text-[#635D74]">© 2026 Funnl</span>
           <Link to="/privacy" className="text-[12.5px] text-[#635D74] hover:text-[#9C97AC] transition-colors no-underline">

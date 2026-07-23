@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+﻿import { useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import { supabase } from '../lib/supabase'
 import { canUseAI } from '../lib/ai'
@@ -137,7 +137,7 @@ function FunnlAIPage() {
     >
 
       {/* ── Header ─────────────────────────────────────────────────────────────── */}
-      <div className="flex items-center gap-[11px] px-4 md:px-8 py-[22px] border-b border-[rgba(255,255,255,0.06)] flex-none">
+      <div className="flex items-center gap-[11px] px-4 md:px-8 py-[22px] border-b border-line-1 flex-none">
         <div className="w-9 h-9 rounded-[10px] bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] flex items-center justify-center shadow-[0_4px_16px_rgba(91,69,240,0.4)] flex-none text-white">
           <SparkleIcon size={19}/>
         </div>
@@ -174,7 +174,7 @@ function FunnlAIPage() {
                 <div className={`max-w-[80%] md:max-w-[68%] px-4 py-3 text-[14px] leading-relaxed rounded-2xl ${
                   msg.role === 'user'
                     ? 'bg-[rgba(139,124,255,0.14)] border border-[rgba(139,124,255,0.25)] text-hi rounded-tr-sm whitespace-pre-wrap'
-                    : 'bg-card border border-[rgba(255,255,255,0.07)] text-muted rounded-tl-sm'
+                    : 'bg-card border border-line-2 text-muted rounded-tl-sm'
                 }`}>
                   {msg.role === 'assistant' ? (
                     <ReactMarkdown components={mdComponents}>{msg.content}</ReactMarkdown>
@@ -206,7 +206,7 @@ function FunnlAIPage() {
                 <div className="w-[28px] h-[28px] rounded-[8px] bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] flex items-center justify-center flex-none mr-2.5 mt-0.5 text-white">
                   <SparkleIcon size={13}/>
                 </div>
-                <div className="bg-card border border-[rgba(255,255,255,0.07)] rounded-2xl rounded-tl-sm px-4 py-[14px]">
+                <div className="bg-card border border-line-2 rounded-2xl rounded-tl-sm px-4 py-[14px]">
                   <div className="flex gap-[5px] items-center">
                     <span className="w-[6px] h-[6px] rounded-full bg-low animate-bounce" style={{ animationDelay: '0ms' }}/>
                     <span className="w-[6px] h-[6px] rounded-full bg-low animate-bounce" style={{ animationDelay: '160ms' }}/>
@@ -244,10 +244,10 @@ function FunnlAIPage() {
       </div>
 
       {/* ── Input bar ───────────────────────────────────────────────────────────── */}
-      <div className="flex-none px-4 md:px-8 pb-6 pt-3 border-t border-[rgba(255,255,255,0.06)]">
+      <div className="flex-none px-4 md:px-8 pb-6 pt-3 border-t border-line-1">
         {isProUser ? (
           <>
-            <div className="flex items-end bg-input border border-[rgba(255,255,255,0.09)] rounded-[20px] focus-within:border-[rgba(139,124,255,0.45)] focus-within:shadow-[0_0_0_3px_rgba(139,124,255,0.07)] transition-all duration-150">
+            <div className="flex items-end bg-input border border-line-3 rounded-[20px] focus-within:border-[rgba(139,124,255,0.45)] focus-within:shadow-[0_0_0_3px_rgba(139,124,255,0.07)] transition-all duration-150">
               <textarea
                 ref={inputRef}
                 value={input}
@@ -271,7 +271,7 @@ function FunnlAIPage() {
             <p className="text-[11px] text-lower text-center mt-2.5">Enter to send · Shift+Enter for new line</p>
           </>
         ) : (
-          <div className="flex items-center bg-input border border-[rgba(255,255,255,0.07)] rounded-[20px] cursor-not-allowed opacity-40 select-none">
+          <div className="flex items-center bg-input border border-line-2 rounded-[20px] cursor-not-allowed opacity-40 select-none">
             <span className="flex-1 text-[14.5px] text-lower pl-5 py-[15px]">AI only available for Pro…</span>
             <div className="flex-none p-[10px]">
               <div className="w-9 h-9 rounded-[12px] bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] flex items-center justify-center">

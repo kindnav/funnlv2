@@ -1,4 +1,4 @@
-import { useNavigate } from 'react-router-dom'
+﻿import { useNavigate } from 'react-router-dom'
 import { getAvatarColor, getInitials } from '../lib/avatarUtils'
 
 function ContactListItem({ contact, onDeleteRequest }) {
@@ -10,7 +10,7 @@ function ContactListItem({ contact, onDeleteRequest }) {
   return (
     <div
       onClick={() => navigate(`/contacts/${contact.id}`)}
-      className="group bg-card border border-[rgba(255,255,255,0.07)] rounded-2xl p-[18px] cursor-pointer hover:border-[rgba(139,124,255,0.3)] transition-colors flex flex-col gap-[13px]"
+      className="group bg-card border border-line-2 rounded-2xl p-[18px] cursor-pointer hover:border-[rgba(139,124,255,0.3)] transition-colors flex flex-col gap-[13px]"
     >
       {/* Top row: avatar + name/role + icon buttons */}
       <div className="flex items-start gap-3">
@@ -37,7 +37,7 @@ function ContactListItem({ contact, onDeleteRequest }) {
               href={`mailto:${contact.email}`}
               onClick={(e) => e.stopPropagation()}
               title={contact.email}
-              className="w-8 h-8 rounded-[9px] bg-elevated border border-[rgba(255,255,255,0.07)] flex items-center justify-center hover:border-[rgba(139,124,255,0.4)] transition-colors"
+              className="w-8 h-8 rounded-[9px] bg-elevated border border-line-2 flex items-center justify-center hover:border-[rgba(139,124,255,0.4)] transition-colors"
             >
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#8A8A94" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
                 <rect x="3" y="5" width="18" height="14" rx="2.5"/><path d="m3 7 9 6 9-6"/>
@@ -46,7 +46,7 @@ function ContactListItem({ contact, onDeleteRequest }) {
           ) : (
             <div
               title="No email saved"
-              className="w-8 h-8 rounded-[9px] bg-elevated border border-[rgba(255,255,255,0.07)] flex items-center justify-center opacity-25"
+              className="w-8 h-8 rounded-[9px] bg-elevated border border-line-2 flex items-center justify-center opacity-25"
             >
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#8A8A94" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
                 <rect x="3" y="5" width="18" height="14" rx="2.5"/><path d="m3 7 9 6 9-6"/>
@@ -61,14 +61,14 @@ function ContactListItem({ contact, onDeleteRequest }) {
               rel="noopener noreferrer"
               onClick={(e) => e.stopPropagation()}
               title="Open LinkedIn"
-              className="w-8 h-8 rounded-[9px] bg-elevated border border-[rgba(255,255,255,0.07)] flex items-center justify-center hover:border-[rgba(139,124,255,0.4)] transition-colors text-[#8A8A94] text-[12px] font-bold font-mono"
+              className="w-8 h-8 rounded-[9px] bg-elevated border border-line-2 flex items-center justify-center hover:border-[rgba(139,124,255,0.4)] transition-colors text-[#8A8A94] text-[12px] font-bold font-mono"
             >
               in
             </a>
           ) : (
             <div
               title="No LinkedIn saved"
-              className="w-8 h-8 rounded-[9px] bg-elevated border border-[rgba(255,255,255,0.07)] flex items-center justify-center opacity-25 text-[#8A8A94] text-[12px] font-bold font-mono"
+              className="w-8 h-8 rounded-[9px] bg-elevated border border-line-2 flex items-center justify-center opacity-25 text-[#8A8A94] text-[12px] font-bold font-mono"
             >
               in
             </div>
@@ -80,7 +80,7 @@ function ContactListItem({ contact, onDeleteRequest }) {
           <button
             onClick={e => { e.stopPropagation(); onDeleteRequest(contact) }}
             title="Delete contact"
-            className="w-8 h-8 rounded-[9px] bg-elevated border border-[rgba(255,255,255,0.07)] flex items-center justify-center text-low hover:text-danger hover:border-[rgba(255,107,138,0.35)] opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto transition"
+            className="w-8 h-8 rounded-[9px] bg-elevated border border-line-2 flex items-center justify-center text-low hover:text-danger hover:border-[rgba(255,107,138,0.35)] opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto transition"
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
               <path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/>

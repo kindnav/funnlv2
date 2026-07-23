@@ -269,8 +269,7 @@ Return format — include only contacts where you have at least one suggestion:
 
       const rowId = typeof e.row_id === 'string' ? e.row_id : null
       if (!rowId || !seenInputIds.has(rowId)) return [] // unknown or missing row_id
-      if (usedOutputIds.has(rowId)) return []            // duplicate output — first wins
-      usedOutputIds.add(rowId)
+      if (usedOutputIds.has(rowId)) return []            // duplicate output — first valid wins
 
       // confidence is required and must be a known value; discard the whole entry if invalid
       if (!ALLOWED_CONFIDENCE.has(e.confidence as string)) return []
@@ -286,6 +285,9 @@ Return format — include only contacts where you have at least one suggestion:
 
       if (tags.length === 0 && !relType) return []
 
+      // Mark ID used only after all validation passes — first VALID suggestion wins,
+      // so a malformed entry cannot block a valid one with the same row_id.
+      usedOutputIds.add(rowId)
       return [{ row_id: rowId, suggested_tags: tags, suggested_relationship_type: relType, confidence }]
     })
 

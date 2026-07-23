@@ -34,6 +34,14 @@
   /* ── Tag / skill chip text ──────────────────────── */
   --color-tag: #B4A8FF;
   --color-skill: #9EA0AD;
+
+  /* ── Structural borders (theme-aware) ───────────────
+     line-1 / line-2 / line-3 replace dark-only arbitrary
+     border-[rgba(255,255,255,0.06/07/09)] usages.
+     Generates border-line-1, border-line-2, border-line-3 utilities. */
+  --color-line-1: rgba(255,255,255,0.06);
+  --color-line-2: rgba(255,255,255,0.07);
+  --color-line-3: rgba(255,255,255,0.09);
 }
 
 @layer base {
@@ -80,6 +88,9 @@
     --color-lower:    #AAAABC;
     --color-tag:      #5B45F0;
     --color-skill:    #7A7A92;
+    --color-line-1:   rgba(0,0,0,0.07);
+    --color-line-2:   rgba(0,0,0,0.08);
+    --color-line-3:   rgba(0,0,0,0.10);
   }
 }
 
@@ -99,6 +110,9 @@
   --color-lower:    #AAAABC;
   --color-tag:      #5B45F0;
   --color-skill:    #7A7A92;
+  --color-line-1:   rgba(0,0,0,0.07);
+  --color-line-2:   rgba(0,0,0,0.08);
+  --color-line-3:   rgba(0,0,0,0.10);
 }
 
 :root[data-theme="dark"] {
@@ -117,6 +131,9 @@
   --color-lower:    #54545E;
   --color-tag:      #B4A8FF;
   --color-skill:    #9EA0AD;
+  --color-line-1:   rgba(255,255,255,0.06);
+  --color-line-2:   rgba(255,255,255,0.07);
+  --color-line-3:   rgba(255,255,255,0.09);
 }
 
 @keyframes slide-in-right {

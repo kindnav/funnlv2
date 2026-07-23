@@ -1,9 +1,9 @@
-import { useEffect, useState } from 'react'
+﻿import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { getTheme, setTheme } from '../lib/theme'
 
-const iCls = 'flex-1 bg-input border border-[rgba(255,255,255,0.09)] rounded-xl px-[13px] py-[11px] text-[13.5px] text-hi placeholder-[#54545E] outline-none focus:border-[rgba(139,124,255,0.5)] transition-colors'
+const iCls = 'flex-1 bg-input border border-line-3 rounded-xl px-[13px] py-[11px] text-[13.5px] text-hi placeholder-[#54545E] outline-none focus:border-[rgba(139,124,255,0.5)] transition-colors'
 const lCls = 'mb-[7px] block text-[12.5px] font-semibold text-mid'
 
 function SettingsPage() {
@@ -93,7 +93,7 @@ function SettingsPage() {
       <div className="max-w-[480px]">
 
         {/* Combined account card */}
-        <div className="bg-card border border-[rgba(255,255,255,0.07)] rounded-2xl overflow-hidden mb-5">
+        <div className="bg-card border border-line-2 rounded-2xl overflow-hidden mb-5">
 
           {/* Profile section */}
           <div className="p-6">
@@ -147,7 +147,7 @@ function SettingsPage() {
         </div>
 
         {/* Appearance */}
-        <div className="bg-card border border-[rgba(255,255,255,0.07)] rounded-2xl overflow-hidden mb-5">
+        <div className="bg-card border border-line-2 rounded-2xl overflow-hidden mb-5">
           <div className="p-6">
             <p className="text-[11.5px] font-bold tracking-[1px] text-lower uppercase font-mono mb-4">Appearance</p>
             <p className="text-[12.5px] text-muted mb-3">Choose how Funnl looks on this device.</p>
@@ -166,7 +166,7 @@ function SettingsPage() {
                   className={`flex-1 py-2.5 rounded-xl text-[13px] font-semibold transition-colors ${
                     currentTheme === value
                       ? 'bg-accent text-white shadow-[0_4px_12px_rgba(139,124,255,0.35)]'
-                      : 'bg-elevated border border-[rgba(255,255,255,0.09)] text-mid hover:text-hi'
+                      : 'bg-elevated border border-line-3 text-mid hover:text-hi'
                   }`}
                 >
                   {label}
@@ -194,7 +194,7 @@ function SettingsPage() {
         </Link>
 
         {/* Danger zone */}
-        <div className="mt-10 pt-8 border-t border-[rgba(255,255,255,0.06)]">
+        <div className="mt-10 pt-8 border-t border-line-1">
           <p className="text-[11.5px] font-bold tracking-[1px] text-lower uppercase font-mono mb-3">Danger zone</p>
           <p className="text-[13px] text-muted mb-4 leading-relaxed">
             Permanently delete your account and all of your contacts, interactions, and notes. This cannot be undone.
@@ -216,7 +216,7 @@ function SettingsPage() {
             className="absolute inset-0 bg-black/60 backdrop-blur-sm"
             onClick={() => !deleting && setShowDeleteModal(false)}
           />
-          <div className="relative bg-card border border-[rgba(255,255,255,0.09)] rounded-2xl p-6 w-full max-w-[380px] shadow-2xl">
+          <div className="relative bg-card border border-line-3 rounded-2xl p-6 w-full max-w-[380px] shadow-2xl">
             <div className="w-10 h-10 rounded-[11px] bg-[rgba(255,107,138,0.12)] flex items-center justify-center mb-4">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#FF6B8A" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
                 <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
@@ -236,7 +236,7 @@ function SettingsPage() {
               <button
                 onClick={() => setShowDeleteModal(false)}
                 disabled={deleting}
-                className="flex-1 py-2.5 rounded-xl border border-[rgba(255,255,255,0.09)] bg-elevated text-[14px] font-semibold text-mid hover:text-hi transition-colors disabled:opacity-40"
+                className="flex-1 py-2.5 rounded-xl border border-line-3 bg-elevated text-[14px] font-semibold text-mid hover:text-hi transition-colors disabled:opacity-40"
               >
                 Cancel
               </button>

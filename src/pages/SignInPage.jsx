@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+﻿import { useEffect, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { identifyUser, track } from '../lib/analytics'
@@ -16,7 +16,7 @@ const resetRedirectUrl = import.meta.env.PROD
 // Must be outside SignInPage to avoid remount on every keystroke
 function InputWrapper({ children }) {
   return (
-    <div className="flex items-center gap-[10px] rounded-xl border border-[rgba(255,255,255,0.09)] bg-input px-[14px] py-[13px] focus-within:border-[rgba(139,124,255,0.5)] focus-within:shadow-[0_0_0_3px_rgba(108,92,255,0.12)] transition-[border-color,box-shadow] duration-150">
+    <div className="flex items-center gap-[10px] rounded-xl border border-line-3 bg-input px-[14px] py-[13px] focus-within:border-[rgba(139,124,255,0.5)] focus-within:shadow-[0_0_0_3px_rgba(108,92,255,0.12)] transition-[border-color,box-shadow] duration-150">
       {children}
     </div>
   )
@@ -291,7 +291,7 @@ function SignInPage() {
                 type="button"
                 onClick={handleResend}
                 disabled={resendDisabled}
-                className="w-full py-3 rounded-xl border border-[rgba(255,255,255,0.09)] bg-elevated text-[14px] font-semibold text-mid hover:text-hi hover:border-[rgba(139,124,255,0.4)] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                className="w-full py-3 rounded-xl border border-line-3 bg-elevated text-[14px] font-semibold text-mid hover:text-hi hover:border-[rgba(139,124,255,0.4)] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {resendLoading
                   ? 'Sending…'

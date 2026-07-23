@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+﻿import { useCallback, useEffect, useRef, useState } from 'react'
 import { useParams, Link, useLocation, useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { getAvatarColor, getInitials } from '../lib/avatarUtils'
@@ -57,7 +57,7 @@ function TypeIcon({ type, color }) {
 }
 
 // ── Shared form input styles ───────────────────────────────────────────────
-const iCls = 'w-full bg-input border border-[rgba(255,255,255,0.09)] rounded-xl px-[13px] py-[11px] text-[13.5px] text-hi placeholder-[#54545E] outline-none focus:border-[rgba(139,124,255,0.5)] transition-colors'
+const iCls = 'w-full bg-input border border-line-3 rounded-xl px-[13px] py-[11px] text-[13.5px] text-hi placeholder-[#54545E] outline-none focus:border-[rgba(139,124,255,0.5)] transition-colors'
 const lCls = 'mb-[7px] block text-[12.5px] font-semibold text-mid'
 const sCls = `${iCls} cursor-pointer`
 const TYPE_OPTIONS = ['Coffee chat', 'Email', 'Event', 'Call', 'Message', 'Other']
@@ -376,7 +376,7 @@ function ContactDetailPage() {
 
       {/* ── EDIT MODE: full edit form replacing hero + body ── */}
       {isEditing ? (
-        <div className="bg-card border border-[rgba(255,255,255,0.07)] rounded-[18px] p-6">
+        <div className="bg-card border border-line-2 rounded-[18px] p-6">
           <h2 className="font-display text-[19px] font-bold text-hi mb-5">Edit contact</h2>
           <form onSubmit={handleSave} className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="col-span-2">
@@ -429,7 +429,7 @@ function ContactDetailPage() {
               <button type="submit" disabled={saving} className="flex-1 bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] text-white text-[14px] font-bold py-3 rounded-[11px] shadow-[0_6px_18px_rgba(91,69,240,0.35)] hover:opacity-90 transition-opacity disabled:opacity-40">
                 {saving ? 'Saving…' : 'Save changes'}
               </button>
-              <button type="button" onClick={() => setIsEditing(false)} className="px-5 text-[14px] font-semibold text-mid bg-elevated border border-[rgba(255,255,255,0.09)] rounded-[11px] hover:text-hi transition-colors">
+              <button type="button" onClick={() => setIsEditing(false)} className="px-5 text-[14px] font-semibold text-mid bg-elevated border border-line-3 rounded-[11px] hover:text-hi transition-colors">
                 Cancel
               </button>
             </div>
@@ -438,7 +438,7 @@ function ContactDetailPage() {
       ) : (
         <>
           {/* ── HERO CARD ── */}
-          <div className="bg-card border border-[rgba(255,255,255,0.07)] rounded-[18px] p-[22px_24px] flex flex-col md:flex-row items-start justify-between gap-4 mb-3">
+          <div className="bg-card border border-line-2 rounded-[18px] p-[22px_24px] flex flex-col md:flex-row items-start justify-between gap-4 mb-3">
             {/* Avatar + name + tags */}
             <div className="flex gap-[18px] items-start flex-1 min-w-0">
               <div
@@ -479,18 +479,18 @@ function ContactDetailPage() {
               </button>
               <button
                 onClick={startEdit}
-                className="bg-elevated text-hi border border-[rgba(255,255,255,0.09)] rounded-[11px] px-4 py-[10px] text-[13.5px] font-semibold hover:border-[rgba(255,255,255,0.2)] transition-colors"
+                className="bg-elevated text-hi border border-line-3 rounded-[11px] px-4 py-[10px] text-[13.5px] font-semibold hover:border-[rgba(255,255,255,0.2)] transition-colors"
               >
                 Edit
               </button>
               {contact.email ? (
-                <a href={`mailto:${contact.email}`} title={contact.email} className="w-10 h-10 bg-elevated border border-[rgba(255,255,255,0.09)] rounded-[11px] flex items-center justify-center hover:border-[rgba(139,124,255,0.4)] transition-colors">
+                <a href={`mailto:${contact.email}`} title={contact.email} className="w-10 h-10 bg-elevated border border-line-3 rounded-[11px] flex items-center justify-center hover:border-[rgba(139,124,255,0.4)] transition-colors">
                   <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#8A8A94" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
                     <rect x="3" y="5" width="18" height="14" rx="2.5"/><path d="m3 7 9 6 9-6"/>
                   </svg>
                 </a>
               ) : (
-                <div title="No email saved" className="w-10 h-10 bg-elevated border border-[rgba(255,255,255,0.09)] rounded-[11px] flex items-center justify-center opacity-25">
+                <div title="No email saved" className="w-10 h-10 bg-elevated border border-line-3 rounded-[11px] flex items-center justify-center opacity-25">
                   <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#8A8A94" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
                     <rect x="3" y="5" width="18" height="14" rx="2.5"/><path d="m3 7 9 6 9-6"/>
                   </svg>
@@ -521,7 +521,7 @@ function ContactDetailPage() {
             <div className="flex flex-col gap-[18px]">
 
               {/* Details card */}
-              <div className="bg-card border border-[rgba(255,255,255,0.07)] rounded-2xl p-5">
+              <div className="bg-card border border-line-2 rounded-2xl p-5">
                 <p className="text-[11.5px] font-bold tracking-[1px] text-lower uppercase font-mono mb-4">Details</p>
                 {hasAnyDetails ? (
                   <div className="flex flex-col gap-[14px]">
@@ -620,7 +620,7 @@ function ContactDetailPage() {
               )}
 
               {/* Interactions card */}
-              <div className="bg-card border border-[rgba(255,255,255,0.07)] rounded-2xl p-5 flex-1">
+              <div className="bg-card border border-line-2 rounded-2xl p-5 flex-1">
                 <div className="flex items-center justify-between mb-4">
                   <p className="text-[11.5px] font-bold tracking-[1px] text-lower uppercase font-mono">Interactions</p>
                   <button
@@ -653,7 +653,7 @@ function ContactDetailPage() {
 
                 {/* Log interaction form */}
                 {showForm && (
-                  <form ref={interactionFormRef} onSubmit={handleLogInteraction} className="mb-5 space-y-3 bg-elevated border border-[rgba(255,255,255,0.07)] rounded-xl p-4">
+                  <form ref={interactionFormRef} onSubmit={handleLogInteraction} className="mb-5 space-y-3 bg-elevated border border-line-2 rounded-xl p-4">
                     <div>
                       <label className={lCls}>Type</label>
                       <select value={type} onChange={e => setType(e.target.value)} className={sCls}>
@@ -704,7 +704,7 @@ function ContactDetailPage() {
                       <div>
                         <label className={lCls}>
                           Outreach status
-                          <span className="text-lower font-normal ml-1">— track the outcome manually</span>
+                          <span className="text-lower font-normal ml-1">— Track the response manually. Automatic inbox syncing is not enabled.</span>
                         </label>
                         <select value={outreachStatus} onChange={e => setOutreachStatus(e.target.value)} className={sCls}>
                           <option value="">— not set —</option>
@@ -754,7 +754,7 @@ function ContactDetailPage() {
                           {/* Content */}
                           <div className={`flex-1 min-w-0 ${!isLast ? 'pb-5' : ''}`}>
                             {editingInteractionId === interaction.id ? (
-                              <form onSubmit={handleSaveInteraction} className="space-y-3 bg-elevated border border-[rgba(255,255,255,0.07)] rounded-xl p-3 mb-1">
+                              <form onSubmit={handleSaveInteraction} className="space-y-3 bg-elevated border border-line-2 rounded-xl p-3 mb-1">
                                 <div>
                                   <label className={lCls}>Type</label>
                                   <select value={interactionEditForm.type} onChange={e => setInteractionEditForm({ ...interactionEditForm, type: e.target.value })} className={sCls}>
@@ -789,7 +789,7 @@ function ContactDetailPage() {
                                   <button type="submit" disabled={savingInteraction} className="flex-1 bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] text-white text-[13px] font-bold py-2.5 rounded-[10px] hover:opacity-90 transition-opacity disabled:opacity-40">
                                     {savingInteraction ? 'Saving…' : 'Save'}
                                   </button>
-                                  <button type="button" onClick={() => setEditingInteractionId(null)} className="px-4 text-[13px] font-semibold text-mid bg-card border border-[rgba(255,255,255,0.09)] rounded-[10px] hover:text-hi transition-colors">
+                                  <button type="button" onClick={() => setEditingInteractionId(null)} className="px-4 text-[13px] font-semibold text-mid bg-card border border-line-3 rounded-[10px] hover:text-hi transition-colors">
                                     Cancel
                                   </button>
                                 </div>

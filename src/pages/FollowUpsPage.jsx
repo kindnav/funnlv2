@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+﻿import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { getAvatarColor, getInitials } from '../lib/avatarUtils'
@@ -116,7 +116,7 @@ function FollowUpRow({ interaction, today, isLast, isSaving, snoozeOpen, customD
             onClick={onSnoozeToggle}
             disabled={isSaving}
             aria-expanded={snoozeOpen}
-            className="flex items-center gap-1.5 text-[12px] font-semibold text-mid bg-elevated border border-[rgba(255,255,255,0.09)] px-3 py-[5px] rounded-[7px] hover:border-[rgba(255,255,255,0.18)] hover:text-hi transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            className="flex items-center gap-1.5 text-[12px] font-semibold text-mid bg-elevated border border-line-3 px-3 py-[5px] rounded-[7px] hover:border-[rgba(255,255,255,0.18)] hover:text-hi transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
           >
             {snoozeLabel}
             <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
@@ -141,13 +141,13 @@ function FollowUpRow({ interaction, today, isLast, isSaving, snoozeOpen, customD
                   {label}
                 </button>
               ))}
-              <div className="border-t border-[rgba(255,255,255,0.07)] pt-2 mt-1 px-1 space-y-1.5">
+              <div className="border-t border-line-2 pt-2 mt-1 px-1 space-y-1.5">
                 <input
                   type="date"
                   value={customDate}
                   onChange={e => onCustomDateChange(e.target.value)}
                   min={getLocalDateOffset(1)}
-                  className="w-full bg-input border border-[rgba(255,255,255,0.09)] rounded-lg px-3 py-[7px] text-[12.5px] text-hi outline-none focus:border-[rgba(139,124,255,0.5)] transition-colors"
+                  className="w-full bg-input border border-line-3 rounded-lg px-3 py-[7px] text-[12.5px] text-hi outline-none focus:border-[rgba(139,124,255,0.5)] transition-colors"
                 />
                 <button
                   type="button"
@@ -419,7 +419,7 @@ function FollowUpsPage() {
 
       {/* Today */}
       {todayItems.length > 0 && (
-        <div className="bg-card border border-[rgba(255,255,255,0.07)] rounded-2xl px-5 mb-4">
+        <div className="bg-card border border-line-2 rounded-2xl px-5 mb-4">
           <div className="pt-5 pb-2">
             <GroupHeading dot="#FFB84D" label="Today" count={todayItems.length}/>
           </div>
@@ -445,7 +445,7 @@ function FollowUpsPage() {
 
       {/* Upcoming */}
       {upcoming.length > 0 && (
-        <div className="bg-card border border-[rgba(255,255,255,0.07)] rounded-2xl px-5 mb-4">
+        <div className="bg-card border border-line-2 rounded-2xl px-5 mb-4">
           <div className="pt-5 pb-2">
             <GroupHeading dot="#8B7CFF" label="Upcoming" count={upcoming.length}/>
           </div>

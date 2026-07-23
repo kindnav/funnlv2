@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useMemo } from 'react'
+﻿import { useState, useRef, useEffect, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import Papa from 'papaparse'
 import { supabase } from '../lib/supabase'
@@ -249,6 +249,8 @@ export default function ImportContactsModal({ onClose, onImported }) {
   const [acceptedByRow, setAcceptedByRow] = useState({})
   // Per-row custom tag input values (controlled, cleared on add)
   const [tagInputsByRow, setTagInputsByRow] = useState({})
+  // Per-row tag validation messages (empty string = no error)
+  const [tagValidation, setTagValidation] = useState({})
   const [aiCategorizing, setAiCategorizing] = useState(false)
   const [categorizationError, setCategorizationError] = useState('')
   const [failedBatchContacts, setFailedBatchContacts] = useState([])
@@ -465,6 +467,7 @@ export default function ImportContactsModal({ onClose, onImported }) {
     setContactSuggestions({})
     setAcceptedByRow({})
     setTagInputsByRow({})
+    setTagValidation({})
     setAiCategorizing(false)
     setCategorizationError('')
     setFailedBatchContacts([])
@@ -525,7 +528,8 @@ export default function ImportContactsModal({ onClose, onImported }) {
   }
 
   // Sends one batch of ≤20 contacts to ai-categorize-contacts.
-  // Non-PII only: no names, emails, or LinkedIn URLs.
+  // Minimized contact context: company, role, how-met, relationship note, existing tags,
+  // and existing relationship type. Names, email addresses, and LinkedIn URLs are excluded.
   async function invokeSingleBatch(batch) {
     const payload = batch.map(c => ({
       row_id: c._rowId,
@@ -629,10 +633,23 @@ export default function ImportContactsModal({ onClose, onImported }) {
   function addCustomTag(rowId, rawTag) {
     const tag = rawTag.trim().toLowerCase()
     if (!tag) return
+    if (tag.length > 50) {
+      setTagValidation(prev => ({ ...prev, [rowId]: 'Tag must be 50 characters or fewer.' }))
+      return
+    }
+    const cur = acceptedByRow[rowId] || { acceptedTags: [], customTags: [], relTypeChoice: null }
+    if (cur.acceptedTags.includes(tag) || cur.customTags.includes(tag)) {
+      setTagValidation(prev => ({ ...prev, [rowId]: 'This tag is already added.' }))
+      return
+    }
+    if (cur.acceptedTags.length + cur.customTags.length >= 5) {
+      setTagValidation(prev => ({ ...prev, [rowId]: 'Maximum 5 tags per contact.' }))
+      return
+    }
+    setTagValidation(prev => ({ ...prev, [rowId]: '' }))
     setAcceptedByRow(prev => {
-      const cur = prev[rowId] || { acceptedTags: [], customTags: [], relTypeChoice: null }
-      if (cur.acceptedTags.includes(tag) || cur.customTags.includes(tag)) return prev
-      return { ...prev, [rowId]: { ...cur, customTags: [...cur.customTags, tag] } }
+      const c = prev[rowId] || { acceptedTags: [], customTags: [], relTypeChoice: null }
+      return { ...prev, [rowId]: { ...c, customTags: [...c.customTags, tag] } }
     })
     setTagInputsByRow(prev => ({ ...prev, [rowId]: '' }))
   }
@@ -699,7 +716,8 @@ export default function ImportContactsModal({ onClose, onImported }) {
       const contact = { ...c, user_id: user.id }
       const acc = acceptedByRow[_rowId]
       if (acc) {
-        const addedTags = [...(acc.acceptedTags || []), ...(acc.customTags || [])]
+        // Cap AI+custom tags at 5 to match the UI validation limit
+        const addedTags = [...(acc.acceptedTags || []), ...(acc.customTags || [])].slice(0, 5)
         if (addedTags.length > 0) {
           contact.tags = [...new Set([...(contact.tags || []), ...addedTags])]
         }
@@ -747,10 +765,10 @@ export default function ImportContactsModal({ onClose, onImported }) {
       <div className="absolute inset-0 bg-[rgba(0,0,0,0.65)]" onClick={onClose}/>
 
       {/* Modal panel */}
-      <div className="relative w-full max-w-[620px] max-h-[88vh] flex flex-col bg-card border border-[rgba(255,255,255,0.09)] rounded-2xl shadow-[0_24px_64px_rgba(0,0,0,0.7)]">
+      <div className="relative w-full max-w-[620px] max-h-[88vh] flex flex-col bg-card border border-line-3 rounded-2xl shadow-[0_24px_64px_rgba(0,0,0,0.7)]">
 
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-5 border-b border-[rgba(255,255,255,0.07)] flex-none">
+        <div className="flex items-center justify-between px-6 py-5 border-b border-line-2 flex-none">
           <div>
             <h2 className="font-display font-bold text-[18px] text-hi leading-tight">Import contacts</h2>
             <p className="text-[11.5px] text-lower font-mono mt-0.5">{STEP_LABEL[step]}</p>
@@ -929,7 +947,7 @@ export default function ImportContactsModal({ onClose, onImported }) {
                 Click a column above to assign it, or use + Add on any field.
                 Multiple columns combine in chip order — chip order matters for First + Last name.
               </p>
-              <div className="divide-y divide-[rgba(255,255,255,0.05)] border border-[rgba(255,255,255,0.07)] rounded-xl overflow-hidden mb-5">
+              <div className="divide-y divide-[rgba(255,255,255,0.05)] border border-line-2 rounded-xl overflow-hidden mb-5">
                 {FUNNL_FIELDS.map(field => (
                   <div key={field.value} className="flex items-start gap-3 px-4 py-3 bg-card">
                     <div className="w-[106px] flex-none pt-[7px]">
@@ -978,15 +996,15 @@ export default function ImportContactsModal({ onClose, onImported }) {
               </div>
 
               {/* Live preview */}
-              <div className="border-t border-[rgba(255,255,255,0.06)] pt-5">
+              <div className="border-t border-line-1 pt-5">
                 <p className="text-[11px] font-bold tracking-[1px] text-lower uppercase font-mono mb-1">Live preview</p>
                 <p className="text-[12px] text-lower mb-3">
                   First {Math.min(rows.length, 5)} of {rows.length} rows · updates instantly
                 </p>
-                <div className="overflow-x-auto rounded-xl border border-[rgba(255,255,255,0.07)]">
+                <div className="overflow-x-auto rounded-xl border border-line-2">
                   <table className="w-full text-[12px]" style={{ minWidth: previewFields.length * 130 }}>
                     <thead>
-                      <tr className="border-b border-[rgba(255,255,255,0.07)] bg-[rgba(255,255,255,0.02)]">
+                      <tr className="border-b border-line-2 bg-[rgba(255,255,255,0.02)]">
                         {previewFields.map(f => {
                           const fd = FUNNL_FIELDS.find(x => x.value === f)
                           return (
@@ -1023,7 +1041,7 @@ export default function ImportContactsModal({ onClose, onImported }) {
           {/* ── STEP 3: Confirm ── */}
           {step === 'confirm' && (
             <div>
-              <div className="bg-elevated border border-[rgba(255,255,255,0.07)] rounded-xl p-5 mb-4">
+              <div className="bg-elevated border border-line-2 rounded-xl p-5 mb-4">
                 <div className="flex items-center gap-4">
                   <div className="w-11 h-11 rounded-xl bg-[rgba(139,124,255,0.12)] border border-[rgba(139,124,255,0.2)] flex items-center justify-center flex-none">
                     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#8B7CFF" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
@@ -1114,6 +1132,7 @@ export default function ImportContactsModal({ onClose, onImported }) {
                           const confidence = sug?.confidence || 'medium'
                           const meta = [c.company, c.role].filter(Boolean).join(' · ')
                           const tagInput = tagInputsByRow[c._rowId] || ''
+                          const tagError = tagValidation[c._rowId] || ''
 
                           // Effective reltype for the dropdown default value
                           const dropdownValue = acc.relTypeChoice === null
@@ -1146,10 +1165,10 @@ export default function ImportContactsModal({ onClose, onImported }) {
                                 <div className="flex flex-wrap items-center gap-1 mb-2">
                                   <span className="text-[10.5px] text-lower font-mono flex-none">CSV:</span>
                                   {c.tags?.map(t => (
-                                    <span key={t} className="text-[11px] font-mono text-lower bg-[rgba(255,255,255,0.04)] border border-[rgba(255,255,255,0.07)] px-1.5 py-[3px] rounded-[4px]">{t}</span>
+                                    <span key={t} className="text-[11px] font-mono text-lower bg-[rgba(255,255,255,0.04)] border border-line-2 px-1.5 py-[3px] rounded-[4px]">{t}</span>
                                   ))}
                                   {c.relationship_type && (
-                                    <span className="text-[11px] font-mono text-lower bg-[rgba(255,255,255,0.04)] border border-[rgba(255,255,255,0.07)] px-1.5 py-[3px] rounded-[4px]">{c.relationship_type}</span>
+                                    <span className="text-[11px] font-mono text-lower bg-[rgba(255,255,255,0.04)] border border-line-2 px-1.5 py-[3px] rounded-[4px]">{c.relationship_type}</span>
                                   )}
                                 </div>
                               )}
@@ -1169,7 +1188,7 @@ export default function ImportContactsModal({ onClose, onImported }) {
                                         isAccepted
                                           ? 'bg-[rgba(139,124,255,0.12)] border-[rgba(139,124,255,0.3)] text-tag'
                                           : isLow
-                                            ? 'bg-transparent border-[rgba(255,255,255,0.06)] text-lower opacity-60'
+                                            ? 'bg-transparent border-line-1 text-lower opacity-60'
                                             : 'bg-transparent border-[rgba(255,255,255,0.1)] text-low hover:border-accent hover:text-accent'
                                       }`}
                                     >
@@ -1193,25 +1212,35 @@ export default function ImportContactsModal({ onClose, onImported }) {
                               </div>
 
                               {/* Add custom tag input */}
-                              <div className="flex items-center gap-1.5 mb-2">
-                                <input
-                                  type="text"
-                                  value={tagInput}
-                                  onChange={e => setTagInputsByRow(prev => ({ ...prev, [c._rowId]: e.target.value }))}
-                                  onKeyDown={e => {
-                                    if (e.key === 'Enter') { e.preventDefault(); addCustomTag(c._rowId, tagInput) }
-                                  }}
-                                  placeholder="+ add tag"
-                                  className="flex-1 min-w-0 bg-[rgba(0,0,0,0.2)] border border-[rgba(255,255,255,0.08)] rounded-lg px-2 py-[5px] text-[11.5px] text-hi placeholder-[#54545E] outline-none focus:border-[rgba(139,124,255,0.4)] transition-colors"
-                                />
-                                <button
-                                  type="button"
-                                  onClick={() => addCustomTag(c._rowId, tagInput)}
-                                  disabled={!tagInput.trim()}
-                                  className="text-[11px] font-semibold text-accent hover:text-hi transition-colors px-2 py-[5px] disabled:opacity-30"
-                                >
-                                  Add
-                                </button>
+                              <div className="mb-2">
+                                <div className="flex items-center gap-1.5">
+                                  <input
+                                    type="text"
+                                    value={tagInput}
+                                    onChange={e => {
+                                      setTagInputsByRow(prev => ({ ...prev, [c._rowId]: e.target.value }))
+                                      if (tagError) setTagValidation(prev => ({ ...prev, [c._rowId]: '' }))
+                                    }}
+                                    onKeyDown={e => {
+                                      if (e.key === 'Enter') { e.preventDefault(); addCustomTag(c._rowId, tagInput) }
+                                    }}
+                                    placeholder="+ add tag"
+                                    aria-label="Add a custom tag"
+                                    aria-describedby={tagError ? `tag-err-${c._rowId}` : undefined}
+                                    className="flex-1 min-w-0 bg-[rgba(0,0,0,0.2)] border border-[rgba(255,255,255,0.08)] rounded-lg px-2 py-[5px] text-[11.5px] text-hi placeholder-[#54545E] outline-none focus:border-[rgba(139,124,255,0.4)] transition-colors"
+                                  />
+                                  <button
+                                    type="button"
+                                    onClick={() => addCustomTag(c._rowId, tagInput)}
+                                    disabled={!tagInput.trim()}
+                                    className="text-[11px] font-semibold text-accent hover:text-hi transition-colors px-2 py-[5px] disabled:opacity-30"
+                                  >
+                                    Add
+                                  </button>
+                                </div>
+                                {tagError && (
+                                  <p id={`tag-err-${c._rowId}`} role="alert" aria-live="polite" className="text-[11px] text-danger mt-1 pl-0.5">{tagError}</p>
+                                )}
                               </div>
 
                               {/* Relationship type selector */}
@@ -1280,7 +1309,7 @@ export default function ImportContactsModal({ onClose, onImported }) {
                   </div>
 
                   {/* Post-import CTA */}
-                  <div className="border border-[rgba(255,255,255,0.07)] rounded-xl p-4 bg-elevated">
+                  <div className="border border-line-2 rounded-xl p-4 bg-elevated">
                     <p className="text-[13.5px] font-semibold text-hi mb-1">Log a recent conversation</p>
                     <p className="text-[12.5px] text-muted mb-4 leading-relaxed">
                       Choose someone you recently contacted so you can save what happened and decide what to do next.
@@ -1307,7 +1336,7 @@ export default function ImportContactsModal({ onClose, onImported }) {
                           navigate('/contacts')
                           onClose()
                         }}
-                        className="flex items-center justify-between gap-2 w-full bg-card border border-[rgba(255,255,255,0.09)] text-hi text-[14px] font-semibold px-5 py-[11px] rounded-[11px] hover:bg-elevated transition-colors"
+                        className="flex items-center justify-between gap-2 w-full bg-card border border-line-3 text-hi text-[14px] font-semibold px-5 py-[11px] rounded-[11px] hover:bg-elevated transition-colors"
                       >
                         <span>View all contacts</span>
                         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
@@ -1340,10 +1369,10 @@ export default function ImportContactsModal({ onClose, onImported }) {
                       onChange={e => setChooserSearch(e.target.value)}
                       placeholder="Search by name…"
                       autoFocus
-                      className="w-full mb-3 bg-input border border-[rgba(255,255,255,0.09)] rounded-xl px-[13px] py-[10px] text-[13.5px] text-hi placeholder-[#54545E] outline-none focus:border-[rgba(139,124,255,0.5)] transition-colors"
+                      className="w-full mb-3 bg-input border border-line-3 rounded-xl px-[13px] py-[10px] text-[13.5px] text-hi placeholder-[#54545E] outline-none focus:border-[rgba(139,124,255,0.5)] transition-colors"
                     />
                   )}
-                  <div className="border border-[rgba(255,255,255,0.07)] rounded-xl overflow-hidden max-h-[300px] overflow-y-auto">
+                  <div className="border border-line-2 rounded-xl overflow-hidden max-h-[300px] overflow-y-auto">
                     {filteredChooserContacts.length === 0 ? (
                       <p className="px-4 py-3 text-[13px] text-lower text-center">No matches for "{chooserSearch}"</p>
                     ) : filteredChooserContacts.map((c, i) => (
@@ -1373,7 +1402,7 @@ export default function ImportContactsModal({ onClose, onImported }) {
         </div>
 
         {/* Footer */}
-        <div className="px-6 py-4 border-t border-[rgba(255,255,255,0.07)] flex-none flex items-center justify-between gap-3">
+        <div className="px-6 py-4 border-t border-line-2 flex-none flex items-center justify-between gap-3">
           {step === 'upload' && (
             <>
               <div/>
