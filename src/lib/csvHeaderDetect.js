@@ -86,7 +86,11 @@ export const HEADER_MAP = {
   'linkedin link':        'linkedin_url',
   'li url':               'linkedin_url',
   'li profile':           'linkedin_url',
-  'profile link':         'linkedin_url',
+  // NOTE: 'profile link' is intentionally omitted from HEADER_MAP. It is too
+  // generic (could be a personal website, a portfolio, etc.) and must only be
+  // mapped to linkedin_url after value-sniffing confirms the column contains
+  // linkedin.com URLs. It appears in SCORE_EXTRA below so it still contributes
+  // to header-row scoring without creating a false auto-assignment.
 
   // How met
   'how met':         'how_met',
@@ -135,6 +139,7 @@ const SCORE_EXTRA = {
   'url':             'linkedin_url', // confirmed by value-sniffing; 'url' alone is too generic
   'link':            'linkedin_url',
   'profile url':     'linkedin_url',
+  'profile link':    'linkedin_url', // too generic for HEADER_MAP; value-sniffed by caller
   'connected on':    '_skip',  // LinkedIn-specific — not a Funnl field
   'date connected':  '_skip',
   'connection date': '_skip',

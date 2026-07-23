@@ -234,9 +234,23 @@ test('"groups" maps to tags (Google Contacts)', () => {
   assert.deepStrictEqual(a.tags, ['Groups'])
 })
 
-test('"profile link" maps to linkedin_url', () => {
+// 'profile link' must NOT auto-map to linkedin_url — it's too generic (could be
+// a portfolio site, personal site, etc.). It is handled by value-sniffing in
+// ImportContactsModal.handleFile when sample values contain 'linkedin.com'.
+test('"profile link" does NOT auto-map (requires value-sniffing by caller)', () => {
   const a = buildInitialAssignment(['Name', 'Email', 'Profile Link', 'Company'])
-  assert.deepStrictEqual(a.linkedin_url, ['Profile Link'])
+  assert.deepStrictEqual(a.linkedin_url, [])
+})
+
+// 'profile link' still contributes to header-row scoring (via SCORE_EXTRA)
+// so a CSV with that column still gets detected as a valid contact header.
+test('"profile link" contributes to header-row scoring via SCORE_EXTRA', () => {
+  // header with Name + Company + Profile Link — should score ≥ 3 and be detected
+  const rows = [
+    ['Name', 'Company', 'Profile Link', 'Email'],
+    ['Alex Jordan', 'Acme Corp', 'https://linkedin.com/in/alex', 'alex@acme.com'],
+  ]
+  assert.strictEqual(detectHeaderRow(rows), 0)
 })
 
 test('"current employer" maps to company', () => {
