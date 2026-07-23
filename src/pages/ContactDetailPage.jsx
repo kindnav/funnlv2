@@ -119,9 +119,10 @@ function ContactDetailPage() {
   const [followUpDate, setFollowUpDate] = useState('')
 
   const [outreachStatus, setOutreachStatus] = useState('')
-  // trackOutreach: whether user has opted in to tracking outreach for the current log form.
-  // Auto-enabled (true) when type is Email or Message; manual-only for Call/Other;
-  // not shown at all for Coffee chat/Event.
+  // trackOutreach: explicit opt-in flag for the new interaction log form.
+  // Email/Message: defaults false; user must check "This was outreach I sent" to enable.
+  // Call/Other: manual status select, no checkbox (trackOutreach stays false).
+  // Coffee chat/Event: outreach tracking hidden entirely; always saves null.
   const [trackOutreach, setTrackOutreach] = useState(false)
   const [loggedMsg, setLoggedMsg]         = useState(false)
   const [loggedWarning, setLoggedWarning] = useState('')
