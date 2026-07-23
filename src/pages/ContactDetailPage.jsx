@@ -119,6 +119,10 @@ function ContactDetailPage() {
   const [followUpDate, setFollowUpDate] = useState('')
 
   const [outreachStatus, setOutreachStatus] = useState('')
+  // trackOutreach: whether user has opted in to tracking outreach for the current log form.
+  // Auto-enabled (true) when type is Email or Message; manual-only for Call/Other;
+  // not shown at all for Coffee chat/Event.
+  const [trackOutreach, setTrackOutreach] = useState(false)
   const [loggedMsg, setLoggedMsg]         = useState(false)
   const [loggedWarning, setLoggedWarning] = useState('')
 
@@ -132,11 +136,29 @@ function ContactDetailPage() {
   const interactionFormRef    = useRef(null)
   const sourceFollowUpIdRef   = useRef(null)
   const loggedWarningTimerRef = useRef(null)
+  const prevTypeRef           = useRef(type)
 
   // Cleanup loggedWarning timer on unmount
   useEffect(() => () => {
     if (loggedWarningTimerRef.current) clearTimeout(loggedWarningTimerRef.current)
   }, [])
+
+  // Auto-manage outreach tracking state when the interaction type changes.
+  // Email/Message → auto-enable tracking with "Awaiting response" default.
+  // Call/Other → manual only (clear to empty, user selects explicitly).
+  // Coffee chat/Event → no outreach tracking (clear and hide).
+  useEffect(() => {
+    const prev = prevTypeRef.current
+    if (prev === type) return
+    prevTypeRef.current = type
+    if (type === 'Email' || type === 'Message') {
+      setTrackOutreach(true)
+      setOutreachStatus(o => o || 'awaiting_response')
+    } else {
+      setTrackOutreach(false)
+      setOutreachStatus('')
+    }
+  }, [type])
 
   const fetchContact = useCallback(async () => {
     const { data, error } = await supabase.from('contacts').select('*').eq('id', id).single()
@@ -215,6 +237,8 @@ function ContactDetailPage() {
       type: interaction.type || 'Coffee chat', date: interaction.interaction_date,
       notes: interaction.notes || '', followUpDate: interaction.follow_up_date || '',
       outreachStatus: interaction.outreach_status || '',
+      // Stored for analytics comparison in handleSaveInteraction — not saved to DB
+      _originalOutreachStatus: interaction.outreach_status || '',
     })
     setInteractionSaveError(''); setEditingInteractionId(interaction.id)
   }
@@ -228,6 +252,17 @@ function ContactDetailPage() {
     }).eq('id', editingInteractionId)
     setSavingInteraction(false)
     if (error) { setInteractionSaveError(error.message); return }
+
+    // Fire analytics when outreach_status actually changed (including cleared)
+    const prevStatus = interactionEditForm._originalOutreachStatus
+    const newStatus  = interactionEditForm.outreachStatus
+    if (newStatus !== prevStatus) {
+      track('outreach_status_changed', {
+        status: newStatus || 'cleared',
+        context: 'edit_interaction',
+      })
+    }
+
     setEditingInteractionId(null); fetchInteractions()
   }
 
@@ -238,10 +273,18 @@ function ContactDetailPage() {
 
   async function handleLogInteraction(e) {
     e.preventDefault(); setSubmitting(true); setFormError('')
+    // Effective outreach status: only save when opt-in is active (Email/Message)
+    // or when manually set (Call/Other). Not saved for Coffee chat/Event.
+    const effectiveOutreach = (() => {
+      if (type === 'Email' || type === 'Message') return trackOutreach ? outreachStatus || null : null
+      if (type === 'Call' || type === 'Other')    return outreachStatus || null
+      return null
+    })()
+
     const { error } = await supabase.from('interactions').insert([{
       contact_id: id, type, interaction_date: interactionDate,
       notes: notes || null, follow_up_date: followUpDate || null,
-      outreach_status: outreachStatus || null,
+      outreach_status: effectiveOutreach,
     }])
     setSubmitting(false)
     if (error) { setFormError(error.message); return }
@@ -254,7 +297,9 @@ function ContactDetailPage() {
       has_notes: !!notes,
     })
     if (followUpDate) track('followup_set')
-    if (outreachStatus) track('outreach_status_set', { status: outreachStatus })
+    if (effectiveOutreach) {
+      track('outreach_status_changed', { status: effectiveOutreach, context: 'new_interaction' })
+    }
 
     // Log Result flow: clear the old source follow-up date after the new interaction is saved
     const srcId = sourceFollowUpIdRef.current
@@ -277,7 +322,10 @@ function ContactDetailPage() {
       }
     }
 
-    setNotes(''); setFollowUpDate(''); setOutreachStatus(''); setShowForm(false); fetchInteractions()
+    // Reset form to clean state (type back to Coffee chat so trackOutreach auto-clears)
+    prevTypeRef.current = 'Coffee chat'
+    setType('Coffee chat'); setNotes(''); setFollowUpDate(''); setOutreachStatus(''); setTrackOutreach(false)
+    setShowForm(false); fetchInteractions()
     setLoggedMsg(true); setTimeout(() => setLoggedMsg(false), 3000)
   }
 
@@ -307,6 +355,11 @@ function ContactDetailPage() {
     .sort((a, b) => a.follow_up_date.localeCompare(b.follow_up_date))[0] || null
   const hasAnyDetails = contact.email || contact.linkedin_url || contact.how_met ||
     contact.relationship_type || contact.relationship_note
+  // Latest interaction with an outreach_status set — derived from already-loaded interactions,
+  // no extra query. Sorted by interaction_date descending so the most recent status shows.
+  const latestOutreach = interactions
+    .filter(i => i.outreach_status)
+    .sort((a, b) => b.interaction_date.localeCompare(a.interaction_date))[0] || null
 
   // ── Render ───────────────────────────────────────────────────────────────
 
@@ -504,9 +557,29 @@ function ContactDetailPage() {
                         <p className="text-[13.5px] font-medium text-hi leading-[1.5]">{contact.relationship_note}</p>
                       </div>
                     )}
+                    {latestOutreach && (
+                      <div>
+                        <p className="text-[12px] text-low mb-1.5">Latest outreach</p>
+                        <div className="flex items-center gap-2">
+                          <OutreachStatusBadge status={latestOutreach.outreach_status} />
+                          <span className="text-[11.5px] text-low">{relativeDate(latestOutreach.interaction_date)}</span>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 ) : (
-                  <p className="text-[13px] text-low">No details saved yet. Click <button onClick={startEdit} className="text-accent hover:text-tag transition-colors">Edit</button> to add more.</p>
+                  <>
+                    {latestOutreach && (
+                      <div className="mb-4">
+                        <p className="text-[12px] text-low mb-1.5">Latest outreach</p>
+                        <div className="flex items-center gap-2">
+                          <OutreachStatusBadge status={latestOutreach.outreach_status} />
+                          <span className="text-[11.5px] text-low">{relativeDate(latestOutreach.interaction_date)}</span>
+                        </div>
+                      </div>
+                    )}
+                    <p className="text-[13px] text-low">No details saved yet. Click <button onClick={startEdit} className="text-accent hover:text-tag transition-colors">Edit</button> to add more.</p>
+                  </>
                 )}
               </div>
 
@@ -599,17 +672,51 @@ function ContactDetailPage() {
                       <label className={lCls}>Follow-up date</label>
                       <input type="date" value={followUpDate} onChange={e => setFollowUpDate(e.target.value)} className={iCls}/>
                     </div>
-                    <div>
-                      <label className={lCls}>Outreach status <span className="text-lower font-normal">(optional)</span></label>
-                      <select value={outreachStatus} onChange={e => setOutreachStatus(e.target.value)} className={sCls}>
-                        <option value="">— not set —</option>
-                        <option value="awaiting_response">Awaiting response</option>
-                        <option value="responded">Responded</option>
-                        <option value="meeting_booked">Meeting booked</option>
-                        <option value="no_response">No response</option>
-                        <option value="declined">Declined</option>
-                      </select>
-                    </div>
+                    {/* Outreach tracking — behavior varies by interaction type */}
+                    {(type === 'Email' || type === 'Message') && (
+                      <div className="space-y-2.5">
+                        {/* Opt-in toggle — prominent for Email and Message */}
+                        <label className="flex items-center gap-2.5 cursor-pointer select-none">
+                          <input
+                            type="checkbox"
+                            checked={trackOutreach}
+                            onChange={e => {
+                              setTrackOutreach(e.target.checked)
+                              if (e.target.checked && !outreachStatus) setOutreachStatus('awaiting_response')
+                              if (!e.target.checked) setOutreachStatus('')
+                            }}
+                            className="w-4 h-4 accent-[#8B7CFF] cursor-pointer"
+                          />
+                          <span className="text-[13px] font-semibold text-hi">Track outreach response</span>
+                        </label>
+                        {trackOutreach && (
+                          <select value={outreachStatus} onChange={e => setOutreachStatus(e.target.value)} className={sCls}>
+                            <option value="awaiting_response">Awaiting response</option>
+                            <option value="responded">Responded</option>
+                            <option value="meeting_booked">Meeting booked</option>
+                            <option value="no_response">No response</option>
+                            <option value="declined">Declined</option>
+                          </select>
+                        )}
+                      </div>
+                    )}
+                    {(type === 'Call' || type === 'Other') && (
+                      <div>
+                        <label className={lCls}>
+                          Outreach status
+                          <span className="text-lower font-normal ml-1">— track the outcome manually</span>
+                        </label>
+                        <select value={outreachStatus} onChange={e => setOutreachStatus(e.target.value)} className={sCls}>
+                          <option value="">— not set —</option>
+                          <option value="awaiting_response">Awaiting response</option>
+                          <option value="responded">Responded</option>
+                          <option value="meeting_booked">Meeting booked</option>
+                          <option value="no_response">No response</option>
+                          <option value="declined">Declined</option>
+                        </select>
+                      </div>
+                    )}
+                    {/* Coffee chat and Event: no outreach tracking section */}
                     {formError && <p className="text-sm text-danger">{formError}</p>}
                     <button type="submit" disabled={submitting} className="w-full bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] text-white text-[13.5px] font-bold py-[11px] rounded-[11px] shadow-[0_6px_18px_rgba(91,69,240,0.35)] hover:opacity-90 transition-opacity disabled:opacity-40">
                       {submitting ? 'Saving…' : 'Save interaction'}
