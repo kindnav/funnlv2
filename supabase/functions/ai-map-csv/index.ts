@@ -209,10 +209,7 @@ ${sampleJson}`
       : undefined
 
     return new Response(
-      JSON.stringify({
-        assignment: safeAssignment,
-        ...(notes ? { notes } : {}),
-      }),
+      JSON.stringify({ assignment: safeAssignment, ...(notes ? { notes } : {}) }),
       { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     )
 

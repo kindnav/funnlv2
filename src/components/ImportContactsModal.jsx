@@ -5,6 +5,7 @@ import { supabase } from '../lib/supabase'
 import { track } from '../lib/analytics'
 import { canUseAI } from '../lib/ai'
 import { detectHeaderRow, isLinkedInExport } from '../lib/csvHeaderDetect.js'
+import { normalizeContactTag, mergeContactTags, splitContactBatches } from '../lib/contactCategorization.js'
 
 const FUNNL_FIELDS = [
   { value: 'name',              label: 'Name',              required: true },
@@ -528,15 +529,15 @@ export default function ImportContactsModal({ onClose, onImported }) {
   }
 
   // Sends one batch of ≤20 contacts to ai-categorize-contacts.
-  // Minimized contact context: company, role, how-met, relationship note, existing tags,
-  // and existing relationship type. Names, email addresses, and LinkedIn URLs are excluded.
+  // Minimized categorization context: company, role, how met, existing tags, and existing
+  // relationship type. Names, email addresses, LinkedIn URLs, and freeform relationship
+  // notes are excluded.
   async function invokeSingleBatch(batch) {
     const payload = batch.map(c => ({
       row_id: c._rowId,
       company: c.company || null,
       role: c.role || null,
       how_met: c.how_met || null,
-      relationship_note: c.relationship_note || null,
       existing_tags: c.tags || [],
       existing_relationship_type: c.relationship_type || null,
     }))
@@ -558,10 +559,7 @@ export default function ImportContactsModal({ onClose, onImported }) {
     setAiCategorizing(true)
     setCategorizationError('')
 
-    const batches = []
-    for (let i = 0; i < contacts.length; i += BATCH_SIZE) {
-      batches.push(contacts.slice(i, i + BATCH_SIZE))
-    }
+    const batches = splitContactBatches(contacts, BATCH_SIZE)
 
     const allSuggestions = []
     const failed = []
@@ -631,19 +629,17 @@ export default function ImportContactsModal({ onClose, onImported }) {
   }
 
   function addCustomTag(rowId, rawTag) {
-    const tag = rawTag.trim().toLowerCase()
-    if (!tag) return
-    if (tag.length > 50) {
-      setTagValidation(prev => ({ ...prev, [rowId]: 'Tag must be 50 characters or fewer.' }))
+    const tag = normalizeContactTag(rawTag)
+    if (!tag) {
+      // normalizeContactTag returns null for empty or >50 chars — show 50-char error if applicable
+      if ((rawTag || '').trim().length > 50) {
+        setTagValidation(prev => ({ ...prev, [rowId]: 'Tag must be 50 characters or fewer.' }))
+      }
       return
     }
     const cur = acceptedByRow[rowId] || { acceptedTags: [], customTags: [], relTypeChoice: null }
     if (cur.acceptedTags.includes(tag) || cur.customTags.includes(tag)) {
       setTagValidation(prev => ({ ...prev, [rowId]: 'This tag is already added.' }))
-      return
-    }
-    if (cur.acceptedTags.length + cur.customTags.length >= 5) {
-      setTagValidation(prev => ({ ...prev, [rowId]: 'Maximum 5 tags per contact.' }))
       return
     }
     setTagValidation(prev => ({ ...prev, [rowId]: '' }))
@@ -716,10 +712,11 @@ export default function ImportContactsModal({ onClose, onImported }) {
       const contact = { ...c, user_id: user.id }
       const acc = acceptedByRow[_rowId]
       if (acc) {
-        // Cap AI+custom tags at 5 to match the UI validation limit
-        const addedTags = [...(acc.acceptedTags || []), ...(acc.customTags || [])].slice(0, 5)
-        if (addedTags.length > 0) {
-          contact.tags = [...new Set([...(contact.tags || []), ...addedTags])]
+        // Merge CSV tags with accepted AI tags and custom user tags.
+        // No total count limit — all valid unique tags are retained.
+        const mergedTags = mergeContactTags(contact.tags || [], [], acc.acceptedTags || [], acc.customTags || [])
+        if (mergedTags.length > 0) {
+          contact.tags = mergedTags
         }
         // relTypeChoice: null = keep CSV value; '' = clear; string = override
         if (acc.relTypeChoice !== null && acc.relTypeChoice !== undefined) {

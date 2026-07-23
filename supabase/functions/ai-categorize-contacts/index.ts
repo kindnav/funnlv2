@@ -1,46 +1,9 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+import { UUID_V4_RE, MAX_CONTACTS, ALLOWED_REL_TYPES, normalizeTags, sanitizeOutput } from '../shared/categorization-helpers.js'
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-}
-
-const ALLOWED_REL_TYPES = new Set([
-  'Mentor', 'Collaborator', 'Referral path', 'Potential employer', 'Connector', 'Other',
-])
-
-const ALLOWED_CONFIDENCE = new Set(['high', 'medium', 'low'])
-
-// Clients generate crypto.randomUUID() v4 UUIDs for row_id.
-// Validate strictly: no truncation, no mutation, no logging of IDs.
-const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
-
-// Cap at 20 contacts per call — client batches larger imports.
-// Oversized requests are rejected with HTTP 400 (not silently sliced).
-const MAX_CONTACTS = 20
-
-// Normalize a tag string: trim, lowercase, reject empty or >50 chars.
-// Returns null for invalid inputs.
-function normalizeTag(raw: unknown): string | null {
-  if (typeof raw !== 'string') return null
-  const t = raw.trim().toLowerCase()
-  if (t.length === 0 || t.length > 50) return null
-  return t
-}
-
-// Normalize an array of tags: strings only, trim, lowercase, dedup, max `limit`.
-function normalizeTags(rawTags: unknown[], limit: number): string[] {
-  const seen = new Set<string>()
-  const result: string[] = []
-  for (const raw of rawTags) {
-    const t = normalizeTag(raw)
-    if (t && !seen.has(t)) {
-      seen.add(t)
-      result.push(t)
-      if (result.length >= limit) break
-    }
-  }
-  return result
 }
 
 Deno.serve(async (req) => {
@@ -112,7 +75,9 @@ Deno.serve(async (req) => {
     // ── 4. Validate and sanitize input ────────────────────────────────────────
     // row_id: must be a valid UUID v4 — no truncation, not derived from contact data.
     // Duplicate input row_ids are rejected outright so the output is always unambiguous.
-    // Names, emails, and LinkedIn URLs are excluded — not needed for category inference.
+    // Minimized categorization context: company, role, how met, existing tags, and existing
+    // relationship type. Names, email addresses, LinkedIn URLs, and freeform relationship
+    // notes are excluded.
     const seenInputIds = new Set<string>()
 
     const sanitized: Array<{
@@ -120,7 +85,6 @@ Deno.serve(async (req) => {
       company: string | null
       role: string | null
       how_met: string | null
-      relationship_note: string | null
       existing_tags: string[]
       existing_relationship_type: string | null
     }> = []
@@ -155,13 +119,10 @@ Deno.serve(async (req) => {
         company: typeof contact.company === 'string' ? contact.company.slice(0, 200) : null,
         role: typeof contact.role === 'string' ? contact.role.slice(0, 200) : null,
         how_met: typeof contact.how_met === 'string' ? contact.how_met.slice(0, 200) : null,
-        relationship_note: typeof contact.relationship_note === 'string'
-          ? contact.relationship_note.slice(0, 400)
-          : null,
         existing_tags: existingTags,
         existing_relationship_type: typeof contact.existing_relationship_type === 'string' &&
-          ALLOWED_REL_TYPES.has(contact.existing_relationship_type)
-          ? contact.existing_relationship_type
+          ALLOWED_REL_TYPES.has(contact.existing_relationship_type as string)
+          ? contact.existing_relationship_type as string
           : null,
       })
     }
@@ -176,31 +137,43 @@ Deno.serve(async (req) => {
     // ── 5. Build the prompt ────────────────────────────────────────────────────
     const contactsJson = JSON.stringify(sanitized, null, 2)
 
-    const prompt = `You are categorizing contacts in Funnl, a networking CRM for students recruiting for internships and jobs.
+    const prompt = `You are categorizing contacts in Funnl, a networking CRM for students recruiting for competitive internships and jobs.
 
-For each contact below, suggest:
-- suggested_tags: informal relationship labels like "recruiter", "alumni", "mentor", "founder", "target firm". Max 5 per contact, lowercased. Only suggest if clearly inferable from the contact's role and company. Use [] if uncertain.
-- suggested_relationship_type: one of Mentor, Collaborator, Referral path, Potential employer, Connector, Other — or null. Only if the role/company strongly suggests one type.
-- confidence: exactly "high", "medium", or "low". Required on every entry.
-  - high: very clear from role and company (e.g. role=Recruiter → suggested_tags=["recruiter"])
-  - medium: probable but not certain
-  - low: speculative
+For each contact, suggest tags and a relationship type based ONLY on the company and role fields.
+
+suggested_tags rules:
+- Maximum 5 suggestions per contact
+- Lowercase, concise networking labels
+- Prefer a consistent vocabulary: recruiter, alumni, mentor, founder, investor, hiring manager, target firm, referral source, connector
+- Only suggest what the company/role clearly supports — a wrong tag is worse than no tag
+- Do not create a company-name tag just because a company exists (unless it has strategic meaning like "target firm")
+- Do not duplicate information already in existing_tags or the relationship type
+- Avoid near-synonyms: recruiter vs recruiting, founder vs startup founder, alumni vs alumnus
+- Never infer sensitive attributes (health, race, religion, politics, sexuality, disability, financial status)
+
+suggested_relationship_type rules:
+- Must be one of: Mentor, Collaborator, Referral path, Potential employer, Connector, Other — or null
+- Only choose if the company/role strongly indicates it
+- Null is better than a speculative guess
+
+confidence rules:
+- high: very clear from role/company (e.g. role=Recruiter → ["recruiter"], high)
+- medium: probable but not certain
+- low: speculative — user must manually confirm before import
 
 Rules:
 1. Return the SAME row_id you received — do not modify it
 2. Be conservative: a wrong suggestion is worse than no suggestion
-3. Do not suggest tags or types already listed in existing_tags or existing_relationship_type
-4. Never infer sensitive attributes (health, politics, religion, demographics)
-5. You may omit contacts where you have no useful suggestions
-6. Return ONLY a valid JSON array — no markdown fences, no explanation
+3. Do not suggest tags/types already in existing_tags or existing_relationship_type
+4. Omit contacts where you have no useful suggestions
+5. Return ONLY a valid JSON array — no markdown fences, no explanation
 
-Contacts to categorize:
+Contacts:
 ${contactsJson}
 
-Return format — include only contacts where you have at least one suggestion:
+Return format (only contacts with at least one suggestion):
 [
-  { "row_id": "...", "suggested_tags": [...], "suggested_relationship_type": null, "confidence": "high" },
-  ...
+  { "row_id": "...", "suggested_tags": [...], "suggested_relationship_type": null, "confidence": "high" }
 ]`
 
     // ── 6. Call Anthropic Haiku ────────────────────────────────────────────────
@@ -247,49 +220,20 @@ Return format — include only contacts where you have at least one suggestion:
       )
     }
 
-    if (!Array.isArray(parsed)) {
+    // ── 8. Sanitize and deduplicate output via shared helper ──────────────────
+    // - row_id must match one we sent; unknown IDs are discarded
+    // - first valid suggestion per row_id wins; later duplicates are ignored
+    // - confidence must be valid; invalid → entire suggestion discarded
+    // - tags: strings only, trim, lowercase, dedup, max 5, max 50 chars each
+    // - relType: must be one of the allowed values
+    const suggestions = sanitizeOutput(parsed, seenInputIds)
+    if (suggestions === null) {
       console.error('[ai-categorize-contacts] invalid_shape')
       return new Response(
         JSON.stringify({ error: 'Unexpected AI response format — please try again' }),
         { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       )
     }
-
-    // ── 8. Sanitize and deduplicate output ────────────────────────────────────
-    // - row_id must match one we sent; unknown IDs are discarded
-    // - first valid suggestion per row_id wins; later duplicates are ignored
-    // - confidence must be valid; invalid → entire suggestion discarded
-    // - tags: strings only, trim, lowercase, dedup, max 5, max 50 chars each
-    // - relType: must be one of the allowed values
-    const usedOutputIds = new Set<string>()
-
-    const suggestions = (parsed as unknown[]).flatMap((entry: unknown) => {
-      if (typeof entry !== 'object' || entry === null) return []
-      const e = entry as Record<string, unknown>
-
-      const rowId = typeof e.row_id === 'string' ? e.row_id : null
-      if (!rowId || !seenInputIds.has(rowId)) return [] // unknown or missing row_id
-      if (usedOutputIds.has(rowId)) return []            // duplicate output — first valid wins
-
-      // confidence is required and must be a known value; discard the whole entry if invalid
-      if (!ALLOWED_CONFIDENCE.has(e.confidence as string)) return []
-      const confidence = e.confidence as 'high' | 'medium' | 'low'
-
-      const rawTags = Array.isArray(e.suggested_tags) ? e.suggested_tags : []
-      const tags = normalizeTags(rawTags as unknown[], 5)
-
-      const relType = typeof e.suggested_relationship_type === 'string' &&
-        ALLOWED_REL_TYPES.has(e.suggested_relationship_type)
-        ? e.suggested_relationship_type
-        : null
-
-      if (tags.length === 0 && !relType) return []
-
-      // Mark ID used only after all validation passes — first VALID suggestion wins,
-      // so a malformed entry cannot block a valid one with the same row_id.
-      usedOutputIds.add(rowId)
-      return [{ row_id: rowId, suggested_tags: tags, suggested_relationship_type: relType, confidence }]
-    })
 
     return new Response(
       JSON.stringify({ suggestions }),
