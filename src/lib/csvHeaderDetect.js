@@ -37,23 +37,26 @@ export const HEADER_MAP = {
   'lname':           'name',
   'surname':         'name',
   'family name':     'name',
+  'display name':    'name',   // Zoom / Teams / Google exports
 
   // Company
-  'company':         'company',
-  'company name':    'company',
-  'companyname':     'company',
-  'organization':    'company',
-  'organisation':    'company',
-  'employer':        'company',
-  'employer name':   'company',
-  'workplace':       'company',
-  'current company': 'company',
-  'firm':            'company',
+  'company':          'company',
+  'company name':     'company',
+  'companyname':      'company',
+  'organization':     'company',
+  'organisation':     'company',
+  'employer':         'company',
+  'employer name':    'company',
+  'workplace':        'company',
+  'current company':  'company',
+  'current employer': 'company',
+  'firm':             'company',
 
   // Role
   'role':             'role',
   'job title':        'role',
   'jobtitle':         'role',
+  'title':            'role',   // Salesforce / HubSpot standard field
   'position':         'role',
   'job position':     'role',
   'job role':         'role',
@@ -83,6 +86,11 @@ export const HEADER_MAP = {
   'linkedin link':        'linkedin_url',
   'li url':               'linkedin_url',
   'li profile':           'linkedin_url',
+  // NOTE: 'profile link' is intentionally omitted from HEADER_MAP. It is too
+  // generic (could be a personal website, a portfolio, etc.) and must only be
+  // mapped to linkedin_url after value-sniffing confirms the column contains
+  // linkedin.com URLs. It appears in SCORE_EXTRA below so it still contributes
+  // to header-row scoring without creating a false auto-assignment.
 
   // How met
   'how met':         'how_met',
@@ -97,9 +105,11 @@ export const HEADER_MAP = {
   'introduction':    'how_met',
 
   // Tags
-  'tags':   'tags',
-  'tag':    'tags',
-  'labels': 'tags',
+  'tags':       'tags',
+  'tag':        'tags',
+  'labels':     'tags',
+  'categories': 'tags',  // Outlook / Google Contacts
+  'groups':     'tags',  // Google Contacts
 
   // Relationship type
   'relationship type': 'relationship_type',
@@ -129,13 +139,22 @@ const SCORE_EXTRA = {
   'url':             'linkedin_url', // confirmed by value-sniffing; 'url' alone is too generic
   'link':            'linkedin_url',
   'profile url':     'linkedin_url',
+  'profile link':    'linkedin_url', // too generic for HEADER_MAP; value-sniffed by caller
   'connected on':    '_skip',  // LinkedIn-specific — not a Funnl field
   'date connected':  '_skip',
   'connection date': '_skip',
   'date added':      '_skip',
+  'member since':    '_skip',  // LinkedIn
+  'linkedin member since': '_skip',
   'phone':           '_skip',
   'phone number':    '_skip',
   'mobile':          '_skip',
+  'twitter':         '_skip',
+  'location':        '_skip',
+  'city':            '_skip',
+  'state':           '_skip',
+  'country':         '_skip',
+  'industry':        '_skip',
   'website':         '_skip',
 }
 

@@ -1,4 +1,4 @@
-import { Component } from 'react'
+﻿import { Component } from 'react'
 import { supabase } from '../lib/supabase'
 import { trackError } from '../lib/analytics'
 
@@ -37,7 +37,7 @@ class ErrorBoundary extends Component {
 
     return (
       <div role="alert" className="min-h-screen bg-base flex items-center justify-center p-6">
-        <div className="bg-card border border-[rgba(255,255,255,0.07)] rounded-2xl p-8 max-w-sm w-full text-center">
+        <div className="bg-card border border-line-2 rounded-2xl p-8 max-w-sm w-full text-center">
           <div className="w-12 h-12 rounded-full bg-[rgba(255,107,138,0.12)] flex items-center justify-center mx-auto mb-4">
             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#FF6B8A" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <circle cx="12" cy="12" r="9"/>
@@ -61,7 +61,7 @@ class ErrorBoundary extends Component {
               type="button"
               disabled={signingOut}
               onClick={() => this.handleSignOut()}
-              className="w-full py-2.5 rounded-xl bg-elevated border border-[rgba(255,255,255,0.07)] text-mid text-[14px] font-medium hover:text-hi transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              className="w-full py-2.5 rounded-xl bg-elevated border border-line-2 text-mid text-[14px] font-medium hover:text-hi transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {signingOut ? 'Signing out…' : 'Sign out'}
             </button>

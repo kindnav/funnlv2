@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+﻿import { useEffect, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import ContactListItem from '../components/ContactListItem'
@@ -119,7 +119,7 @@ function ContactsPage() {
           <div className="flex items-center gap-2 flex-none">
             <button
               onClick={() => setImportOpen(true)}
-              className="flex items-center gap-2 bg-elevated border border-[rgba(255,255,255,0.09)] text-mid hover:text-hi hover:border-[rgba(255,255,255,0.16)] text-[14px] font-semibold px-[12px] md:px-[14px] py-[10px] rounded-[11px] transition-colors"
+              className="flex items-center gap-2 bg-elevated border border-line-3 text-mid hover:text-hi hover:border-[rgba(255,255,255,0.16)] text-[14px] font-semibold px-[12px] md:px-[14px] py-[10px] rounded-[11px] transition-colors"
             >
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
@@ -141,7 +141,7 @@ function ContactsPage() {
         </div>
 
         {/* Search bar */}
-        <div className="flex items-center gap-[10px] bg-input border border-[rgba(255,255,255,0.09)] rounded-xl px-[14px] py-3 mb-[18px]">
+        <div className="flex items-center gap-[10px] bg-input border border-line-3 rounded-xl px-[14px] py-3 mb-[18px]">
           <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#6C6C78" strokeWidth="1.8" strokeLinecap="round">
             <circle cx="11" cy="11" r="7"/><path d="m20 20-3.4-3.4"/>
           </svg>
@@ -170,7 +170,7 @@ function ContactsPage() {
               className={`text-[12.5px] font-bold px-[14px] py-[7px] rounded-full transition-colors ${
                 activeTag === option.value
                   ? 'text-white bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)]'
-                  : 'text-mid bg-elevated border border-[rgba(255,255,255,0.07)] hover:text-hi'
+                  : 'text-mid bg-elevated border border-line-2 hover:text-hi'
               }`}
             >
               {option.value === '' ? `All · ${contacts.length}` : option.label}
@@ -218,7 +218,7 @@ function ContactsPage() {
           </div>
         ) : filteredContacts.length === 0 ? (
           <div className="flex flex-col items-center py-16 text-center">
-            <div className="w-12 h-12 mb-4 rounded-xl bg-elevated border border-[rgba(255,255,255,0.07)] flex items-center justify-center">
+            <div className="w-12 h-12 mb-4 rounded-xl bg-elevated border border-line-2 flex items-center justify-center">
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#6C6C78" strokeWidth="1.8" strokeLinecap="round">
                 <circle cx="11" cy="11" r="7"/><path d="m20 20-3.4-3.4"/>
               </svg>
@@ -289,7 +289,7 @@ function ContactsPage() {
             className="absolute inset-0 bg-[rgba(0,0,0,0.65)]"
             onClick={() => { if (!deletingContact) setConfirmDeleteContact(null) }}
           />
-          <div className="relative w-full max-w-[400px] bg-card border border-[rgba(255,255,255,0.09)] rounded-2xl p-6 shadow-[0_24px_64px_rgba(0,0,0,0.7)]">
+          <div className="relative w-full max-w-[400px] bg-card border border-line-3 rounded-2xl p-6 shadow-[0_24px_64px_rgba(0,0,0,0.7)]">
             <div className="w-10 h-10 rounded-xl bg-[rgba(255,107,138,0.1)] border border-[rgba(255,107,138,0.2)] flex items-center justify-center mb-4">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#FF6B8A" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/>
@@ -308,7 +308,7 @@ function ContactsPage() {
               <button
                 onClick={() => setConfirmDeleteContact(null)}
                 disabled={deletingContact}
-                className="flex-1 bg-elevated border border-[rgba(255,255,255,0.09)] text-mid text-[14px] font-semibold py-[11px] rounded-[11px] hover:text-hi transition-colors disabled:opacity-40"
+                className="flex-1 bg-elevated border border-line-3 text-mid text-[14px] font-semibold py-[11px] rounded-[11px] hover:text-hi transition-colors disabled:opacity-40"
               >
                 Cancel
               </button>
@@ -333,7 +333,7 @@ function ContactsPage() {
               if (!deletingAll) { setShowDeleteAll(false); setDeleteAllInput(''); setDeleteAllError('') }
             }}
           />
-          <div className="relative w-full max-w-[440px] bg-card border border-[rgba(255,255,255,0.09)] rounded-2xl p-6 shadow-[0_24px_64px_rgba(0,0,0,0.7)]">
+          <div className="relative w-full max-w-[440px] bg-card border border-line-3 rounded-2xl p-6 shadow-[0_24px_64px_rgba(0,0,0,0.7)]">
             <div className="w-10 h-10 rounded-xl bg-[rgba(255,107,138,0.1)] border border-[rgba(255,107,138,0.2)] flex items-center justify-center mb-4">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#FF6B8A" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
@@ -354,7 +354,7 @@ function ContactsPage() {
               onChange={e => setDeleteAllInput(e.target.value)}
               placeholder="delete all contacts"
               autoFocus
-              className="w-full bg-input border border-[rgba(255,255,255,0.09)] rounded-xl px-[13px] py-[11px] text-[13.5px] text-hi placeholder-[#54545E] outline-none focus:border-[rgba(255,107,138,0.4)] transition-colors mb-4"
+              className="w-full bg-input border border-line-3 rounded-xl px-[13px] py-[11px] text-[13.5px] text-hi placeholder-[#54545E] outline-none focus:border-[rgba(255,107,138,0.4)] transition-colors mb-4"
             />
             {deleteAllError && (
               <p className="text-[13px] text-danger mb-3">{deleteAllError}</p>
@@ -363,7 +363,7 @@ function ContactsPage() {
               <button
                 onClick={() => { setShowDeleteAll(false); setDeleteAllInput(''); setDeleteAllError('') }}
                 disabled={deletingAll}
-                className="flex-1 bg-elevated border border-[rgba(255,255,255,0.09)] text-mid text-[14px] font-semibold py-[11px] rounded-[11px] hover:text-hi transition-colors disabled:opacity-40"
+                className="flex-1 bg-elevated border border-line-3 text-mid text-[14px] font-semibold py-[11px] rounded-[11px] hover:text-hi transition-colors disabled:opacity-40"
               >
                 Cancel
               </button>

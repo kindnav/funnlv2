@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+﻿import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import AddContactDrawer from '../components/AddContactDrawer'
@@ -248,7 +248,7 @@ function DashboardPage() {
 
   // ── Checklist card (shared between zero-contact and full-dashboard views) ─
   const checklistCard = (
-    <div className="bg-card border border-[rgba(255,255,255,0.07)] rounded-2xl p-5">
+    <div className="bg-card border border-line-2 rounded-2xl p-5">
       <div className="flex items-start justify-between gap-3 mb-1">
         <h3 className="font-display text-[16px] font-bold text-hi leading-snug">Set up your networking workflow</h3>
         <span className="font-mono text-[11px] font-bold text-muted flex-none mt-0.5">{stepsCompleted}/3</span>
@@ -340,7 +340,7 @@ function DashboardPage() {
           {/* Stat cards */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-5">
 
-            <div className="bg-card border border-[rgba(255,255,255,0.07)] rounded-2xl p-5">
+            <div className="bg-card border border-line-2 rounded-2xl p-5">
               <div className="flex items-center gap-[10px] mb-[14px]">
                 <div className="w-[34px] h-[34px] rounded-[9px] bg-[rgba(108,92,255,0.15)] flex items-center justify-center">
                   <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#8B7CFF" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
@@ -355,7 +355,7 @@ function DashboardPage() {
               )}
             </div>
 
-            <div className="bg-card border border-[rgba(255,255,255,0.07)] rounded-2xl p-5">
+            <div className="bg-card border border-line-2 rounded-2xl p-5">
               <div className="flex items-center gap-[10px] mb-[14px]">
                 <div className="w-[34px] h-[34px] rounded-[9px] bg-[rgba(47,212,182,0.14)] flex items-center justify-center">
                   <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#2FD4B6" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
@@ -370,7 +370,7 @@ function DashboardPage() {
               )}
             </div>
 
-            <div className={`border rounded-2xl p-5 ${followUps.length > 0 ? 'bg-[rgba(245,166,35,0.06)] border-[rgba(245,166,35,0.22)]' : 'bg-card border-[rgba(255,255,255,0.07)]'}`}>
+            <div className={`border rounded-2xl p-5 ${followUps.length > 0 ? 'bg-[rgba(245,166,35,0.06)] border-[rgba(245,166,35,0.22)]' : 'bg-card border-line-2'}`}>
               <div className="flex items-center gap-[10px] mb-[14px]">
                 <div className="w-[34px] h-[34px] rounded-[9px] bg-[rgba(245,166,35,0.14)] flex items-center justify-center">
                   <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#FFB84D" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
@@ -407,7 +407,7 @@ function DashboardPage() {
           {/* Two-column body: follow-ups (left) + recent contacts (right) */}
           <div className="grid grid-cols-1 md:grid-cols-[1.25fr_1fr] gap-5">
 
-            <div className="bg-card border border-[rgba(255,255,255,0.07)] rounded-2xl p-5">
+            <div className="bg-card border border-line-2 rounded-2xl p-5">
               <div className="flex items-center justify-between mb-4">
                 <h3 className="text-[15px] font-bold text-hi">Follow-ups due</h3>
               </div>
@@ -449,7 +449,7 @@ function DashboardPage() {
               )}
             </div>
 
-            <div className="bg-card border border-[rgba(255,255,255,0.07)] rounded-2xl p-5">
+            <div className="bg-card border border-line-2 rounded-2xl p-5">
               <div className="flex items-center justify-between mb-4">
                 <h3 className="text-[15px] font-bold text-hi">Recent contacts</h3>
                 <Link to="/contacts" className="text-[12.5px] font-semibold text-accent hover:text-tag transition-colors no-underline">

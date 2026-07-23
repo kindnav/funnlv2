@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+﻿import { useEffect, useState } from 'react'
 import { supabase } from '../lib/supabase'
 import { canUseAI } from '../lib/ai'
 import { track } from '../lib/analytics'
@@ -10,7 +10,7 @@ function normalizeUrl(url) {
   return 'https://' + s
 }
 
-const iCls = 'w-full bg-input border border-[rgba(255,255,255,0.09)] rounded-xl px-[13px] py-[11px] text-[13.5px] text-hi placeholder-[#54545E] outline-none focus:border-[rgba(139,124,255,0.5)] transition-colors'
+const iCls = 'w-full bg-input border border-line-3 rounded-xl px-[13px] py-[11px] text-[13.5px] text-hi placeholder-[#54545E] outline-none focus:border-[rgba(139,124,255,0.5)] transition-colors'
 const iClsAI = 'w-full bg-[rgba(139,124,255,0.06)] border border-[rgba(139,124,255,0.35)] rounded-xl px-[13px] py-[11px] text-[13.5px] text-hi placeholder-[#54545E] outline-none focus:border-[rgba(139,124,255,0.5)] transition-colors'
 const sCls = `${iCls} cursor-pointer`
 const lCls = 'mb-[7px] block text-[12.5px] font-semibold text-mid'
@@ -168,11 +168,11 @@ function AddContactDrawer({ onClose, onSuccess }) {
   return (
     <form
       onSubmit={handleSubmit}
-      className="fixed inset-y-0 right-0 w-full md:w-[452px] bg-[#0E0E12] border-l border-[rgba(255,255,255,0.09)] z-50 flex flex-col shadow-[-30px_0_60px_rgba(0,0,0,0.5)]"
+      className="fixed inset-y-0 right-0 w-full md:w-[452px] bg-card border-l border-line-3 z-50 flex flex-col shadow-[-30px_0_60px_rgba(0,0,0,0.5)]"
       style={{ animation: 'slide-in-right 0.25s ease-out' }}
     >
       {/* Header */}
-      <div className="flex items-center justify-between px-[26px] py-[22px] border-b border-[rgba(255,255,255,0.06)] flex-none">
+      <div className="flex items-center justify-between px-[26px] py-[22px] border-b border-line-1 flex-none">
         <h2 className="font-display text-[19px] font-bold text-hi">Add contact</h2>
         <button
           type="button"
@@ -206,7 +206,7 @@ function AddContactDrawer({ onClose, onSuccess }) {
               onChange={e => setAiText(e.target.value)}
               placeholder="Paste anything about this person — name, company, where you met, skills, follow-up timing..."
               rows={3}
-              className="w-full bg-input border border-[rgba(255,255,255,0.09)] rounded-xl px-[13px] py-[11px] text-[13.5px] text-hi placeholder-[#54545E] outline-none focus:border-[rgba(139,124,255,0.5)] transition-colors resize-none"
+              className="w-full bg-input border border-line-3 rounded-xl px-[13px] py-[11px] text-[13.5px] text-hi placeholder-[#54545E] outline-none focus:border-[rgba(139,124,255,0.5)] transition-colors resize-none"
             />
 
             {/* Error */}
@@ -367,7 +367,7 @@ function AddContactDrawer({ onClose, onSuccess }) {
       </div>
 
       {/* Sticky footer */}
-      <div className="flex gap-[10px] px-[26px] py-[18px] border-t border-[rgba(255,255,255,0.06)] flex-none">
+      <div className="flex gap-[10px] px-[26px] py-[18px] border-t border-line-1 flex-none">
         <button
           type="button"
           onClick={onClose}

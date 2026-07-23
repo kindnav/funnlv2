@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+﻿import { useCallback, useEffect, useState } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 
@@ -57,7 +57,7 @@ function BottomNav() {
 
   return (
     <div
-      className="md:hidden fixed bottom-0 left-0 right-0 z-50 flex bg-sidebar border-t border-[rgba(255,255,255,0.07)]"
+      className="md:hidden fixed bottom-0 left-0 right-0 z-50 flex bg-sidebar border-t border-line-2"
       style={{ paddingBottom: 'env(safe-area-inset-bottom, 0px)' }}
     >
       <TabItem to="/" label="Home" active={isActive('/')}>
