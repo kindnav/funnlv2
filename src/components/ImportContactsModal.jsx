@@ -852,7 +852,7 @@ export default function ImportContactsModal({ onClose, onImported }) {
           {step === 'map' && (
             <div>
               {csvDetection && (
-                <div className="flex items-center gap-2.5 mb-4 px-3 py-2.5 bg-[rgba(47,212,182,0.08)] border border-[rgba(47,212,182,0.2)] rounded-xl">
+                <div className="flex items-center gap-2.5 mb-4 px-3 py-2.5 bg-[rgba(47,212,182,0.12)] border border-[rgba(47,212,182,0.40)] rounded-xl">
                   <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#2FD4B6" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-none">
                     <path d="M20 6L9 17l-5-5"/>
                   </svg>
@@ -865,7 +865,7 @@ export default function ImportContactsModal({ onClose, onImported }) {
                 </div>
               )}
               {aiMapped.applied && (
-                <div className="flex items-center gap-2.5 mb-4 px-3 py-2.5 bg-[rgba(139,124,255,0.08)] border border-[rgba(139,124,255,0.2)] rounded-xl">
+                <div className="flex items-center gap-2.5 mb-4 px-3 py-2.5 bg-[rgba(139,124,255,0.12)] border border-[rgba(139,124,255,0.40)] rounded-xl">
                   <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#8B7CFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-none">
                     <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
                   </svg>
@@ -880,7 +880,7 @@ export default function ImportContactsModal({ onClose, onImported }) {
                 </div>
               )}
               {!isProUser && (
-                <div className="flex items-center gap-2.5 mb-4 px-3 py-2.5 bg-[rgba(139,124,255,0.08)] border border-[rgba(139,124,255,0.2)] rounded-xl">
+                <div className="flex items-center gap-2.5 mb-4 px-3 py-2.5 bg-[rgba(139,124,255,0.12)] border border-[rgba(139,124,255,0.40)] rounded-xl">
                   <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#8B7CFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-none">
                     <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
                   </svg>
@@ -890,7 +890,7 @@ export default function ImportContactsModal({ onClose, onImported }) {
                 </div>
               )}
               {!hasNameMapped && (
-                <div className="flex items-center gap-2.5 mb-4 px-3 py-2.5 bg-[rgba(255,184,77,0.08)] border border-[rgba(255,184,77,0.25)] rounded-xl">
+                <div className="flex items-center gap-2.5 mb-4 px-3 py-2.5 bg-[rgba(255,184,77,0.12)] border border-[rgba(255,184,77,0.40)] rounded-xl">
                   <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#FFB84D" strokeWidth="2" strokeLinecap="round" className="flex-none">
                     <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
                     <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
@@ -904,7 +904,7 @@ export default function ImportContactsModal({ onClose, onImported }) {
               {/* Pool: unassigned columns */}
               <div className="mb-5">
                 {ignoredCols.length === 0 ? (
-                  <div className="flex items-center gap-2 px-4 py-3 bg-[rgba(47,212,182,0.07)] border border-[rgba(47,212,182,0.2)] rounded-xl">
+                  <div className="flex items-center gap-2 px-4 py-3 bg-[rgba(47,212,182,0.12)] border border-[rgba(47,212,182,0.40)] rounded-xl">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#2FD4B6" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
                       <path d="M20 6L9 17l-5-5"/>
                     </svg>
@@ -1066,7 +1066,7 @@ export default function ImportContactsModal({ onClose, onImported }) {
                 <>
                   {/* Loading banner — Import remains available while this runs */}
                   {aiCategorizing && (
-                    <div className="flex items-center gap-2.5 mb-4 px-3 py-2.5 bg-[rgba(139,124,255,0.06)] border border-[rgba(139,124,255,0.18)] rounded-xl">
+                    <div className="flex items-center gap-2.5 mb-4 px-3 py-2.5 bg-[rgba(139,124,255,0.12)] border border-[rgba(139,124,255,0.35)] rounded-xl">
                       <svg className="animate-spin flex-none" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#8B7CFF" strokeWidth="2.5" strokeLinecap="round">
                         <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
                       </svg>
@@ -1079,12 +1079,12 @@ export default function ImportContactsModal({ onClose, onImported }) {
 
                   {/* Partial-failure notice */}
                   {categorizationError && !aiCategorizing && (
-                    <div className="flex items-center justify-between gap-3 mb-4 px-3 py-2.5 bg-[rgba(255,184,77,0.07)] border border-[rgba(255,184,77,0.2)] rounded-xl">
+                    <div className="flex items-center justify-between gap-3 mb-4 px-3 py-2.5 bg-[rgba(255,184,77,0.12)] border border-[rgba(255,184,77,0.40)] rounded-xl">
                       <p className="text-[12px] text-warning leading-snug">{categorizationError}</p>
                       <button
                         type="button"
                         onClick={() => runContactCategorization(failedBatchContacts)}
-                        className="flex-none text-[12px] font-bold text-warning border border-[rgba(255,184,77,0.3)] px-2.5 py-1 rounded-lg hover:bg-[rgba(255,184,77,0.1)] transition-colors whitespace-nowrap"
+                        className="flex-none text-[12px] font-bold text-warning border border-[rgba(255,184,77,0.50)] px-2.5 py-1 rounded-lg hover:bg-[rgba(255,184,77,0.1)] transition-colors whitespace-nowrap"
                       >
                         Retry
                       </button>
@@ -1093,9 +1093,9 @@ export default function ImportContactsModal({ onClose, onImported }) {
 
                   {/* Editable suggestions panel */}
                   {suggestedContactsList.length > 0 && (
-                    <div className="mb-4 border border-[rgba(139,124,255,0.2)] rounded-xl overflow-hidden">
+                    <div className="mb-4 border border-[rgba(139,124,255,0.40)] rounded-xl overflow-hidden">
                       {/* Panel header */}
-                      <div className="px-4 py-3 bg-[rgba(139,124,255,0.06)] border-b border-[rgba(139,124,255,0.1)]">
+                      <div className="px-4 py-3 bg-[rgba(139,124,255,0.12)] border-b border-[rgba(139,124,255,0.25)]">
                         <div className="flex items-center gap-2 mb-2">
                           <svg width="13" height="13" viewBox="0 0 24 24" fill="#8B7CFF" className="flex-none">
                             <path d="M12 3l1.7 5.3L19 10l-5.3 1.7L12 17l-1.7-5.3L5 10l5.3-1.7L12 3z"/>

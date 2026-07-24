@@ -81,7 +81,7 @@ function BottomNav() {
             <circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>
           </svg>
           {followUpCount > 0 && (
-            <span className="absolute -top-1 -right-2 min-w-[16px] h-[16px] rounded-full bg-warning text-[9px] font-bold text-[#0B0B0E] flex items-center justify-center px-[3px] leading-none">
+            <span className="absolute -top-1 -right-2 min-w-[16px] h-[16px] rounded-full bg-[#FFB84D] text-[9px] font-bold text-[#0B0B0E] flex items-center justify-center px-[3px] leading-none">
               {followUpCount > 9 ? '9+' : followUpCount}
             </span>
           )}

@@ -219,7 +219,7 @@ function AddContactDrawer({ onClose, onSuccess }) {
               type="button"
               onClick={handleAIParse}
               disabled={aiLoading || !aiText.trim()}
-              className="mt-2.5 w-full flex items-center justify-center gap-2 bg-[rgba(139,124,255,0.1)] border border-[rgba(139,124,255,0.25)] text-accent text-[13px] font-bold rounded-[10px] py-2.5 hover:bg-[rgba(139,124,255,0.18)] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              className="mt-2.5 w-full flex items-center justify-center gap-2 bg-[rgba(139,124,255,0.14)] border border-[rgba(139,124,255,0.45)] text-accent text-[13px] font-bold rounded-[10px] py-2.5 hover:bg-[rgba(139,124,255,0.22)] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
             >
               {aiLoading ? (
                 <>

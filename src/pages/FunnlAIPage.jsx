@@ -145,7 +145,7 @@ function FunnlAIPage() {
           <div className="flex items-center gap-2">
             <span className="text-[16px] font-bold text-hi">Funnl AI</span>
             {isProUser && (
-              <span className="font-mono text-[9.5px] font-bold tracking-[0.5px] text-accent bg-[rgba(139,124,255,0.14)] px-1.5 py-0.5 rounded-[5px]">
+              <span className="font-mono text-[9.5px] font-bold tracking-[0.5px] text-accent bg-[rgba(139,124,255,0.22)] px-1.5 py-0.5 rounded-[5px]">
                 PRO
               </span>
             )}
@@ -173,7 +173,7 @@ function FunnlAIPage() {
                 )}
                 <div className={`max-w-[80%] md:max-w-[68%] px-4 py-3 text-[14px] leading-relaxed rounded-2xl ${
                   msg.role === 'user'
-                    ? 'bg-[rgba(139,124,255,0.14)] border border-[rgba(139,124,255,0.25)] text-hi rounded-tr-sm whitespace-pre-wrap'
+                    ? 'bg-[rgba(139,124,255,0.14)] border border-[rgba(139,124,255,0.45)] text-hi rounded-tr-sm whitespace-pre-wrap'
                     : 'bg-card border border-line-2 text-muted rounded-tl-sm'
                 }`}>
                   {msg.role === 'assistant' ? (
@@ -192,7 +192,7 @@ function FunnlAIPage() {
                   <button
                     key={prompt}
                     onClick={() => sendMessage(prompt)}
-                    className="text-[12.5px] text-mid bg-elevated border border-[rgba(255,255,255,0.08)] px-[13px] py-[7px] rounded-full hover:border-[rgba(139,124,255,0.35)] hover:text-hi transition-colors"
+                    className="text-[12.5px] text-mid bg-elevated border border-line-2 px-[13px] py-[7px] rounded-full hover:border-[rgba(139,124,255,0.45)] hover:text-hi transition-colors"
                   >
                     {prompt}
                   </button>

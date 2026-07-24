@@ -16,7 +16,7 @@ const resetRedirectUrl = import.meta.env.PROD
 // Must be outside SignInPage to avoid remount on every keystroke
 function InputWrapper({ children }) {
   return (
-    <div className="flex items-center gap-[10px] rounded-xl border border-line-3 bg-input px-[14px] py-[13px] focus-within:border-[rgba(139,124,255,0.5)] focus-within:shadow-[0_0_0_3px_rgba(108,92,255,0.12)] transition-[border-color,box-shadow] duration-150">
+    <div className="flex items-center gap-[10px] rounded-xl border border-[rgba(255,255,255,0.09)] bg-[#131318] px-[14px] py-[13px] focus-within:border-[rgba(139,124,255,0.5)] focus-within:shadow-[0_0_0_3px_rgba(108,92,255,0.12)] transition-[border-color,box-shadow] duration-150">
       {children}
     </div>
   )
@@ -188,7 +188,7 @@ function SignInPage() {
     </svg>
   )
 
-  const inputCls = 'flex-1 bg-transparent text-[14px] text-hi placeholder-[#54545E] outline-none'
+  const inputCls = 'flex-1 bg-transparent text-[14px] text-[#F4F3F8] placeholder-[#54545E] outline-none'
   const labelCls = 'block text-[13px] font-semibold text-[#C7C7D1] mb-2'
 
   // ── Shared right panel ─────────────────────────────────────────────────────
@@ -268,7 +268,7 @@ function SignInPage() {
           <div className="mx-auto w-full max-w-[400px]">
             <div className="flex items-center gap-[11px] mb-14">
               {logoTileSmall}
-              <span className="font-display font-bold text-[23px] text-hi tracking-[-0.5px]">Funnl</span>
+              <span className="font-display font-bold text-[23px] text-[#F4F3F8] tracking-[-0.5px]">Funnl</span>
             </div>
 
             <div className="w-14 h-14 rounded-2xl bg-[rgba(139,124,255,0.12)] flex items-center justify-center mb-6">
@@ -277,10 +277,10 @@ function SignInPage() {
               </svg>
             </div>
 
-            <h1 className="font-display text-[32px] font-bold text-hi mb-3 tracking-[-0.5px]">Check your email</h1>
+            <h1 className="font-display text-[32px] font-bold text-[#F4F3F8] mb-3 tracking-[-0.5px]">Check your email</h1>
             <p className="text-[15px] leading-relaxed text-[#9A9AA5] mb-2">
               We sent a confirmation link to{' '}
-              <span className="font-semibold text-hi">{email}</span>.
+              <span className="font-semibold text-[#F4F3F8]">{email}</span>.
             </p>
             <p className="text-[15px] leading-relaxed text-[#9A9AA5] mb-8">
               Click that link to verify your account. Check your spam or promotions folder if you don't see it.
@@ -291,7 +291,7 @@ function SignInPage() {
                 type="button"
                 onClick={handleResend}
                 disabled={resendDisabled}
-                className="w-full py-3 rounded-xl border border-line-3 bg-elevated text-[14px] font-semibold text-mid hover:text-hi hover:border-[rgba(139,124,255,0.4)] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                className="w-full py-3 rounded-xl border border-[rgba(255,255,255,0.09)] bg-[#1A1A21] text-[14px] font-semibold text-[#A0A0AD] hover:text-[#F4F3F8] hover:border-[rgba(139,124,255,0.4)] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {resendLoading
                   ? 'Sending…'
@@ -331,12 +331,12 @@ function SignInPage() {
           <div className="mx-auto w-full max-w-[400px]">
             <div className="flex items-center gap-[11px] mb-14">
               {logoTileSmall}
-              <span className="font-display font-bold text-[23px] text-hi tracking-[-0.5px]">Funnl</span>
+              <span className="font-display font-bold text-[23px] text-[#F4F3F8] tracking-[-0.5px]">Funnl</span>
             </div>
-            <h1 className="font-display text-[32px] font-bold text-hi mb-3 tracking-[-0.5px]">Check your email</h1>
+            <h1 className="font-display text-[32px] font-bold text-[#F4F3F8] mb-3 tracking-[-0.5px]">Check your email</h1>
             <p className="text-[15px] leading-relaxed text-[#9A9AA5] mb-2">
               We sent a password reset link to{' '}
-              <span className="font-semibold text-hi">{email}</span>.
+              <span className="font-semibold text-[#F4F3F8]">{email}</span>.
             </p>
             <p className="text-[15px] leading-relaxed text-[#9A9AA5] mb-8">
               Click that link to set a new password, then come back here and sign in.
@@ -370,7 +370,7 @@ function SignInPage() {
           {/* Logo lockup */}
           <div className="flex items-center gap-[11px] mb-14">
             {logoTileSmall}
-            <span className="font-display font-bold text-[23px] text-hi tracking-[-0.5px]">Funnl</span>
+            <span className="font-display font-bold text-[23px] text-[#F4F3F8] tracking-[-0.5px]">Funnl</span>
           </div>
 
           {/* Password reset success banner */}
@@ -384,7 +384,7 @@ function SignInPage() {
           )}
 
           {/* Heading + subtitle */}
-          <h1 className="font-display text-[34px] font-bold text-hi tracking-[-0.5px] mb-2">
+          <h1 className="font-display text-[34px] font-bold text-[#F4F3F8] tracking-[-0.5px] mb-2">
             {mode === 'signin' ? 'Welcome back' : mode === 'signup' ? 'Create account' : 'Reset your password'}
           </h1>
           {mode === 'signin' && (

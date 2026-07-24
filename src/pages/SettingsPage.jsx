@@ -127,7 +127,7 @@ function SettingsPage() {
             </form>
           </div>
 
-          <div className="h-px bg-[rgba(255,255,255,0.06)]"/>
+          <div className="h-px bg-line-1"/>
 
           {/* Account info — read-only */}
           <div className="p-6">
@@ -150,12 +150,14 @@ function SettingsPage() {
         <div className="bg-card border border-line-2 rounded-2xl overflow-hidden mb-5">
           <div className="p-6">
             <p className="text-[11.5px] font-bold tracking-[1px] text-lower uppercase font-mono mb-4">Appearance</p>
-            <p className="text-[12.5px] text-muted mb-3">Choose how Funnl looks on this device.</p>
+            <p className="text-[12.5px] text-muted mb-3">
+              Dark always uses the dark palette. Light always uses the light palette. System follows your device.
+            </p>
             <div className="flex gap-2">
               {[
-                { value: 'system', label: 'System' },
                 { value: 'light',  label: 'Light'  },
                 { value: 'dark',   label: 'Dark'   },
+                { value: 'system', label: 'System' },
               ].map(({ value, label }) => (
                 <button
                   key={value}
@@ -201,7 +203,7 @@ function SettingsPage() {
           </p>
           <button
             onClick={() => { setShowDeleteModal(true); setDeleteError('') }}
-            className="text-[13.5px] font-semibold text-danger border border-[rgba(255,107,138,0.3)] rounded-xl px-4 py-2.5 hover:bg-[rgba(255,107,138,0.08)] transition-colors"
+            className="text-[13.5px] font-semibold text-danger border border-[rgba(255,107,138,0.45)] rounded-xl px-4 py-2.5 hover:bg-[rgba(255,107,138,0.08)] transition-colors"
           >
             Delete my account
           </button>
