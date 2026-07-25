@@ -42,6 +42,13 @@
   --color-line-1: rgba(255,255,255,0.06);
   --color-line-2: rgba(255,255,255,0.07);
   --color-line-3: rgba(255,255,255,0.09);
+
+  /* ── AI/Pro banner text tokens ──────────────────────
+     Used in the Dashboard teaser and Sidebar promo card.
+     Dark: near-white heading, soft lavender body.
+     Light: overridden below to dark text on light surface. */
+  --color-banner-heading: #F4F3F8;
+  --color-banner-body: #B0A8C8;
 }
 
 @layer base {
@@ -53,6 +60,15 @@
     color: #F4F3F8;
     -webkit-font-smoothing: antialiased;
   }
+}
+
+/* ── Non-@theme banner vars (gradient + border) ──────────────────────────────
+   Default = dark. Light theme blocks override these below.
+   Used via inline style={{ background: 'var(--banner-gradient)', borderColor: 'var(--banner-border)' }}
+   because @theme does not accept gradient strings or rgba() values. */
+:root {
+  --banner-gradient: linear-gradient(135deg, #2A2140, #171227);
+  --banner-border: rgba(139, 124, 255, 0.28);
 }
 
 /* ── Theme token overrides ────────────────────────────────────────────────────
@@ -95,6 +111,11 @@
     --color-line-1:   rgba(0,0,0,0.07);
     --color-line-2:   rgba(0,0,0,0.08);
     --color-line-3:   rgba(0,0,0,0.10);
+    /* Banner tokens: light surface, dark text */
+    --color-banner-heading: #1C1829;
+    --color-banner-body:    #52526A;
+    --banner-gradient: linear-gradient(135deg, #EDE9FF, #E4E0F7);
+    --banner-border:   rgba(91, 69, 240, 0.25);
   }
 }
 
@@ -121,6 +142,11 @@
   --color-line-1:   rgba(0,0,0,0.07);
   --color-line-2:   rgba(0,0,0,0.08);
   --color-line-3:   rgba(0,0,0,0.10);
+  /* Banner tokens: light surface, dark text */
+  --color-banner-heading: #1C1829;
+  --color-banner-body:    #52526A;
+  --banner-gradient: linear-gradient(135deg, #EDE9FF, #E4E0F7);
+  --banner-border:   rgba(91, 69, 240, 0.25);
 }
 
 :root[data-theme="dark"] {
@@ -142,7 +168,25 @@
   --color-line-1:   rgba(255,255,255,0.06);
   --color-line-2:   rgba(255,255,255,0.07);
   --color-line-3:   rgba(255,255,255,0.09);
+  /* Banner tokens: dark defaults */
+  --color-banner-heading: #F4F3F8;
+  --color-banner-body:    #B0A8C8;
+  --banner-gradient: linear-gradient(135deg, #2A2140, #171227);
+  --banner-border:   rgba(139, 124, 255, 0.28);
 }
+
+/* ── Date picker: native calendar chrome tracks the active theme ─────────────
+   color-scheme tells the browser which OS chrome variant to render inside
+   input[type="date"]. Default is dark (matches the app default). */
+input[type="date"] {
+  color-scheme: dark;
+  cursor: pointer;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) input[type="date"] { color-scheme: light; }
+}
+:root[data-theme="light"] input[type="date"] { color-scheme: light; }
+:root[data-theme="dark"]  input[type="date"] { color-scheme: dark; }
 
 @keyframes slide-in-right {
   from { transform: translateX(100%); }

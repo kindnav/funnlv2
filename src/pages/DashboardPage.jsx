@@ -389,7 +389,10 @@ function DashboardPage() {
           </div>
 
           {/* Funnl AI teaser banner */}
-          <div className="flex items-center justify-between gap-4 bg-[linear-gradient(120deg,rgba(43,33,64,0.9),rgba(18,17,26,0.9))] border border-[rgba(139,124,255,0.3)] rounded-2xl px-5 py-4 mb-6 shadow-[0_0_40px_rgba(108,92,255,0.08)]">
+          <div
+            className="flex items-center justify-between gap-4 border rounded-2xl px-5 py-4 mb-6 shadow-[0_0_40px_rgba(108,92,255,0.08)]"
+            style={{ background: 'var(--banner-gradient)', borderColor: 'var(--banner-border)' }}
+          >
             <div className="flex items-center gap-[14px]">
               <div className="w-10 h-10 rounded-[11px] bg-[rgba(139,124,255,0.18)] flex items-center justify-center flex-none">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="#B4A8FF">
@@ -397,8 +400,8 @@ function DashboardPage() {
                 </svg>
               </div>
               <div>
-                <p className="text-[14px] font-bold text-hi">Funnl AI is live</p>
-                <p className="text-[13px] text-[#B0A8C8]">Ask anything about your network — who to reach, who's gone cold. Available with Pro.</p>
+                <p className="text-[14px] font-bold text-banner-heading">Funnl AI is live</p>
+                <p className="text-[13px] text-banner-body">Ask anything about your network — who to reach, who's gone cold. Available with Pro.</p>
               </div>
             </div>
             <span className="font-mono text-[10.5px] font-bold text-accent bg-[rgba(139,124,255,0.14)] px-2 py-1 rounded-[5px] flex-none">PRO</span>

@@ -596,14 +596,17 @@ function ContactDetailPage() {
               </div>
 
               {/* Funnl AI card — honest coming-soon placeholder */}
-              <div className="bg-[linear-gradient(150deg,rgba(43,33,64,0.7),rgba(18,17,26,0.7))] border border-[rgba(139,124,255,0.28)] rounded-2xl p-5">
+              <div
+                className="border rounded-2xl p-5"
+                style={{ background: 'var(--banner-gradient)', borderColor: 'var(--banner-border)' }}
+              >
                 <div className="flex items-center gap-2 mb-2">
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="#B4A8FF">
                     <path d="M12 3l1.7 5.3L19 10l-5.3 1.7L12 17l-1.7-5.3L5 10l5.3-1.7L12 3z"/>
                   </svg>
-                  <span className="text-[13px] font-bold text-hi">Funnl AI</span>
+                  <span className="text-[13px] font-bold text-banner-heading">Funnl AI</span>
                 </div>
-                <p className="text-[12.5px] leading-[1.6] text-[#C5BEDB]">
+                <p className="text-[12.5px] leading-[1.6] text-banner-body">
                   Ask anything about this contact — their history, what to follow up on, how they connect to others in your network.
                 </p>
                 <Link to="/ai" className="inline-block font-mono text-[10.5px] text-accent mt-3 hover:underline">Open Funnl AI →</Link>
