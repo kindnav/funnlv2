@@ -74,6 +74,11 @@ function FunnlAIPage() {
 
     const userMsg      = { role: 'user', content: trimmed }
     const nextMessages = [...messages, userMsg]
+    // Capture pre-send state so retry is clean after any error.
+    // setMessages(nextMessages) happens optimistically before the API call;
+    // on failure we revert and restore the input so the user can try again
+    // without creating consecutive user messages that Anthropic would reject.
+    const prevMessages = messages
 
     setMessages(nextMessages)
     setInput('')
@@ -90,7 +95,9 @@ function FunnlAIPage() {
       setLoading(false)
 
       if (fnError || data?.error) {
-        setError(fnError?.message || data?.error || 'Something went wrong — please try again.')
+        setMessages(prevMessages)
+        setInput(trimmed)
+        setError(data?.error || fnError?.message || 'Something went wrong — please try again.')
         return
       }
 
@@ -98,11 +105,14 @@ function FunnlAIPage() {
         track('ai_assistant_used')
         setMessages(prev => [...prev, { role: 'assistant', content: data.reply }])
       } else {
-        // Guard against a silent blank — data came back but reply is missing
+        setMessages(prevMessages)
+        setInput(trimmed)
         setError('No response received — please try again.')
       }
     } catch {
       setLoading(false)
+      setMessages(prevMessages)
+      setInput(trimmed)
       setError('Something went wrong — please try again.')
     }
   }

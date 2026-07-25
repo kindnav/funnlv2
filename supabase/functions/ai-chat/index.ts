@@ -1,70 +1,9 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+import { formatNetworkContext, getLocalToday } from './helpers.js'
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-}
-
-// Returns today's date in YYYY-MM-DD using local time (not UTC) to match
-// the same convention used throughout the rest of the app.
-function getLocalToday(): string {
-  const d = new Date()
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-}
-
-// Formats the user's contacts and interactions into a structured, readable
-// context block for Claude. Notes are capped at 300 characters so one long
-// note can't dominate the token budget. Overdue follow-ups are flagged
-// explicitly so the assistant can surface them naturally.
-function formatNetworkContext(contacts: any[], interactions: any[], today: string): string {
-  if (contacts.length === 0) {
-    return 'THE USER\'S NETWORK:\nNo contacts have been logged yet.'
-  }
-
-  // Group interactions by contact_id (DB query is already date-ordered ascending)
-  const byContact = new Map<string, any[]>()
-  for (const ix of interactions) {
-    const list = byContact.get(ix.contact_id) ?? []
-    list.push(ix)
-    byContact.set(ix.contact_id, list)
-  }
-
-  const lines: string[] = [`CONTACTS (${contacts.length} total):\n`]
-
-  for (let i = 0; i < contacts.length; i++) {
-    const c = contacts[i]
-    const cInteractions = byContact.get(c.id) ?? []
-
-    const meta: string[] = []
-    if (c.company)           meta.push(`Company: ${c.company}`)
-    if (c.role)              meta.push(`Role: ${c.role}`)
-    if (c.how_met)           meta.push(`How met: ${c.how_met}`)
-    if (c.relationship_type) meta.push(`Relationship type: ${c.relationship_type}`)
-
-    lines.push(`[${i + 1}] ${c.name}`)
-    if (meta.length)              lines.push(`  ${meta.join(' | ')}`)
-    if (c.tags?.length)           lines.push(`  Tags: ${c.tags.join(', ')}`)
-    if (c.relationship_note)      lines.push(`  Relationship note: ${c.relationship_note}`)
-    if (c.email)                  lines.push(`  Email: ${c.email}`)
-
-    if (cInteractions.length === 0) {
-      lines.push(`  No interactions logged`)
-    } else {
-      lines.push(`  Interactions (${cInteractions.length}):`)
-      for (const ix of cInteractions) {
-        const notes    = ix.notes
-          ? ` — ${ix.notes.slice(0, 300)}${ix.notes.length > 300 ? '…' : ''}`
-          : ''
-        const followUp = ix.follow_up_date
-          ? ` [Follow up: ${ix.follow_up_date}${ix.follow_up_date < today ? ' — OVERDUE' : ''}]`
-          : ''
-        lines.push(`    • ${ix.interaction_date} ${ix.type}${notes}${followUp}`)
-      }
-    }
-    lines.push('') // blank line between contacts for readability
-  }
-
-  return lines.join('\n')
 }
 
 const SYSTEM_PROMPT = `You are Funnl AI, a thinking partner built into Funnl — a CRM for students managing their networks during internship and job recruiting.
@@ -194,36 +133,78 @@ Deno.serve(async (req) => {
       .replace('{today}', today)
       .replace('{network_data}', networkData)
 
-    // ── 6. Call Claude ─────────────────────────────────────────────────────────
+    // ── 6. Call Claude with a 25-second request timeout ───────────────────────
     // ANTHROPIC_API_KEY is stored in Supabase secrets — never in any file in this repo.
-    const anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': Deno.env.get('ANTHROPIC_API_KEY') ?? '',
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-5',
-        max_tokens: 1024,
-        system: systemPrompt,
-        messages: anthropicMessages,
-      }),
-    })
+    // The AbortController caps wall-clock time well within Supabase's execution limit.
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 25_000)
+
+    let anthropicRes: Response
+    try {
+      anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': Deno.env.get('ANTHROPIC_API_KEY') ?? '',
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({
+          model: 'claude-sonnet-5',
+          max_tokens: 2048,
+          system: systemPrompt,
+          messages: anthropicMessages,
+        }),
+        signal: controller.signal,
+      })
+    } catch (fetchErr: any) {
+      if (fetchErr.name === 'AbortError') {
+        console.error('Anthropic API request timed out after 25s')
+        return new Response(
+          JSON.stringify({ error: 'AI response timed out — please try again' }),
+          { status: 504, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+        )
+      }
+      throw fetchErr
+    } finally {
+      clearTimeout(timer)
+    }
 
     if (!anthropicRes.ok) {
       const errText = await anthropicRes.text()
       console.error('Anthropic API error status:', anthropicRes.status)
       console.error('Anthropic API error body:', errText)
+
+      let errorMsg = 'AI service error — please try again'
+      if (anthropicRes.status === 429) {
+        errorMsg = 'AI is busy right now — please wait a moment and try again'
+      } else if (anthropicRes.status === 529) {
+        errorMsg = 'AI service is temporarily overloaded — please try again in a moment'
+      }
+
       return new Response(
-        JSON.stringify({ error: 'AI service error — please try again' }),
+        JSON.stringify({ error: errorMsg }),
         { status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       )
     }
 
     const anthropicData = await anthropicRes.json()
     const textBlock = anthropicData.content?.find((block: any) => block.type === 'text')
-    const reply = textBlock?.text ?? ''
+    const reply: string | undefined = textBlock?.text
+
+    // A successful HTTP 200 with no text block in the response is unexpected.
+    // Return an explicit error rather than an empty reply that silently becomes
+    // "No response received" on the frontend.
+    if (!reply) {
+      console.error(
+        'Anthropic returned 200 but no text block found.',
+        'stop_reason:', anthropicData.stop_reason,
+        'content block types:', (anthropicData.content ?? []).map((b: any) => b.type)
+      )
+      return new Response(
+        JSON.stringify({ error: 'AI did not return a response — please try again' }),
+        { status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      )
+    }
 
     return new Response(
       JSON.stringify({ reply }),
