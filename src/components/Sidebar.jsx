@@ -265,14 +265,17 @@ function Sidebar() {
       </div>
 
       {/* Funnl AI promo card */}
-      <div className="mx-[14px] mb-4 bg-[linear-gradient(160deg,#2A2140,#171227)] border border-[rgba(139,124,255,0.28)] rounded-2xl p-[15px]">
+      <div
+        className="mx-[14px] mb-4 border rounded-2xl p-[15px]"
+        style={{ background: 'var(--banner-gradient)', borderColor: 'var(--banner-border)' }}
+      >
         <div className="flex items-center gap-[7px] mb-[7px]">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="#B4A8FF">
             <path d="M12 3l1.7 5.3L19 10l-5.3 1.7L12 17l-1.7-5.3L5 10l5.3-1.7L12 3z"/>
           </svg>
-          <span className="text-[13px] font-bold text-hi">Funnl AI</span>
+          <span className="text-[13px] font-bold text-banner-heading">Funnl AI</span>
         </div>
-        <p className="text-[11.5px] leading-[1.5] text-[#B0A8C8] mb-3">
+        <p className="text-[11.5px] leading-[1.5] text-banner-body mb-3">
           {isProUser
             ? 'Ask anything about your contacts — who\'s gone cold, who you know somewhere, what to follow up on next.'
             : 'Funnl AI reads your network — unlock it with Pro access.'}

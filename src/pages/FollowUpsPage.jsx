@@ -125,7 +125,7 @@ function FollowUpRow({ interaction, today, isLast, isSaving, snoozeOpen, customD
           </button>
 
           {snoozeOpen && (
-            <div className="absolute top-full left-0 mt-1.5 w-[192px] bg-[#1A1A24] border border-[rgba(255,255,255,0.1)] rounded-xl shadow-[0_8px_32px_rgba(0,0,0,0.5)] z-10 p-2 space-y-0.5">
+            <div className="absolute top-full left-0 mt-1.5 w-[192px] bg-elevated border border-line-2 rounded-xl shadow-[0_8px_32px_rgba(0,0,0,0.5)] z-10 p-2 space-y-0.5">
               {[
                 { label: 'Tomorrow',  opt: 'tomorrow'   },
                 { label: 'In 3 days', opt: 'three_days' },
