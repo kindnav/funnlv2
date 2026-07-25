@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+﻿import { useCallback, useEffect, useState } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 
@@ -106,7 +106,7 @@ function Sidebar() {
   const activeTag = new URLSearchParams(location.search).get('tag')
 
   return (
-    <div className="hidden md:flex w-[248px] min-w-[248px] h-screen flex-col bg-sidebar border-r border-[rgba(255,255,255,0.06)] overflow-y-auto">
+    <div className="hidden md:flex w-[248px] min-w-[248px] h-screen flex-col bg-sidebar border-r border-line-1 overflow-y-auto">
 
       {/* Logo */}
       <div className="flex items-center gap-[10px] px-[18px] pt-[18px] pb-5">

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+﻿import { useCallback, useEffect, useState } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 
@@ -57,7 +57,7 @@ function BottomNav() {
 
   return (
     <div
-      className="md:hidden fixed bottom-0 left-0 right-0 z-50 flex bg-sidebar border-t border-[rgba(255,255,255,0.07)]"
+      className="md:hidden fixed bottom-0 left-0 right-0 z-50 flex bg-sidebar border-t border-line-2"
       style={{ paddingBottom: 'env(safe-area-inset-bottom, 0px)' }}
     >
       <TabItem to="/" label="Home" active={isActive('/')}>
@@ -81,7 +81,7 @@ function BottomNav() {
             <circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>
           </svg>
           {followUpCount > 0 && (
-            <span className="absolute -top-1 -right-2 min-w-[16px] h-[16px] rounded-full bg-warning text-[9px] font-bold text-[#0B0B0E] flex items-center justify-center px-[3px] leading-none">
+            <span className="absolute -top-1 -right-2 min-w-[16px] h-[16px] rounded-full bg-[#FFB84D] text-[9px] font-bold text-[#0B0B0E] flex items-center justify-center px-[3px] leading-none">
               {followUpCount > 9 ? '9+' : followUpCount}
             </span>
           )}

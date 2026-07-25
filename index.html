@@ -15,6 +15,17 @@
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   </head>
   <body>
+    <!-- Pre-paint theme init: must run before React to prevent dark→light flash.
+         Mirrors the logic in src/lib/theme.js exactly. -->
+    <script>
+      (function () {
+        var s = localStorage.getItem('funnl-theme')
+        var v = { dark: 1, light: 1, system: 1 }
+        var t = v[s] ? s : 'dark'
+        document.documentElement.dataset.theme = t
+        document.documentElement.style.colorScheme = t === 'system' ? 'light dark' : t
+      })()
+    </script>
     <div id="root"></div>
     <script type="module" src="/src/main.jsx"></script>
   </body>

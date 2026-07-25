@@ -5,7 +5,9 @@ import './index.css'
 import App from './App.jsx'
 import ErrorBoundary from './components/ErrorBoundary.jsx'
 import { initAnalytics } from './lib/analytics'
+import { initTheme } from './lib/theme'
 
+initTheme()
 initAnalytics()
 
 createRoot(document.getElementById('root')).render(
