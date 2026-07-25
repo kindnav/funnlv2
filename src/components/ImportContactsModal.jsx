@@ -1,11 +1,11 @@
-﻿import { useState, useRef, useEffect, useMemo } from 'react'
+import { useState, useRef, useEffect, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import Papa from 'papaparse'
 import { supabase } from '../lib/supabase'
 import { track } from '../lib/analytics'
 import { canUseAI } from '../lib/ai'
 import { detectHeaderRow, isLinkedInExport } from '../lib/csvHeaderDetect.js'
-import { normalizeContactTag, mergeContactTags, splitContactBatches } from '../lib/contactCategorization.js'
+import { normalizeContactTag, mergeContactTags, splitContactBatches, splitTagsFromCsv } from '../lib/contactCategorization.js'
 
 const FUNNL_FIELDS = [
   { value: 'name',              label: 'Name',              required: true },
@@ -18,8 +18,6 @@ const FUNNL_FIELDS = [
   { value: 'relationship_type', label: 'Relationship type' },
   { value: 'relationship_note', label: 'Why they matter' },
 ]
-
-const REL_TYPE_OPTIONS = ['Mentor', 'Collaborator', 'Referral path', 'Potential employer', 'Connector', 'Other']
 
 function normalizeHeader(h) {
   return h
@@ -171,8 +169,9 @@ function transformRow(rawRow, assignment) {
   for (const [field, cols] of Object.entries(assignment)) {
     if (!cols || cols.length === 0) continue
     if (field === 'tags') {
+      // Split on commas, semicolons, pipes, and line breaks; then normalize each tag
       const values = cols.flatMap(col =>
-        (rawRow[col] || '').trim().split(',').map(s => s.trim()).filter(Boolean)
+        splitTagsFromCsv(rawRow[col] || '').map(normalizeContactTag).filter(Boolean)
       )
       if (values.length > 0) contact[field] = values
     } else if (field === 'linkedin_url') {
@@ -203,7 +202,7 @@ function processRows(rows, assignment) {
   return { toImport, skipped }
 }
 
-const STEP_LABEL = { upload: 'Step 1 of 3', map: 'Step 2 of 3', confirm: 'Step 3 of 3', done: 'Done' }
+const STEP_LABEL = { upload: 'Step 1 of 2', map: 'Step 2 of 2', done: 'Done' }
 
 function calcPickerPos(e, estimatedHeight = 240) {
   const rect = e.currentTarget.getBoundingClientRect()
@@ -217,16 +216,16 @@ function calcPickerPos(e, estimatedHeight = 240) {
 
 export default function ImportContactsModal({ onClose, onImported }) {
   const navigate = useNavigate()
-  const [step, setStep]           = useState('upload')
-  const [dragging, setDragging]   = useState(false)
+  const [step, setStep]             = useState('upload')
+  const [dragging, setDragging]     = useState(false)
   const [parseError, setParseError] = useState('')
-  const [headers, setHeaders]     = useState([])
-  const [rows, setRows]           = useState([])
+  const [headers, setHeaders]       = useState([])
+  const [rows, setRows]             = useState([])
   const [assignment, setAssignment] = useState(freshAssignment)
-  const [picker, setPicker]       = useState(null)
-  const [importing, setImporting] = useState(false)
+  const [picker, setPicker]         = useState(null)
+  const [importing, setImporting]   = useState(false)
   const [importError, setImportError] = useState('')
-  const [result, setResult]       = useState(null)
+  const [result, setResult]         = useState(null)
   const fileInputRef = useRef()
 
   // Pro-gate
@@ -237,36 +236,21 @@ export default function ImportContactsModal({ onClose, onImported }) {
   // Tracks how many columns were auto-assigned by HEADER_MAP (for analytics mapping_mode)
   const [autoMappedCount, setAutoMappedCount] = useState(0)
 
-  // Per-contact AI suggestions
-  // normalizedContacts: processRows output with stable crypto.randomUUID() _rowId
-  const [normalizedContacts, setNormalizedContacts] = useState([])
-  const [normalizedSkipped, setNormalizedSkipped] = useState(0)
-  // contactSuggestions: { [rowId]: { suggested_tags, suggested_relationship_type, confidence } }
-  const [contactSuggestions, setContactSuggestions] = useState({})
-  // acceptedByRow: { [rowId]: { acceptedTags: string[], customTags: string[], relTypeChoice: string|null } }
-  // acceptedTags: AI tags the user accepted (starts pre-selected for high-confidence)
-  // customTags: tags the user typed manually
-  // relTypeChoice: null = use CSV value; '' = clear reltype; 'Mentor' etc = override
-  const [acceptedByRow, setAcceptedByRow] = useState({})
-  // Per-row custom tag input values (controlled, cleared on add)
-  const [tagInputsByRow, setTagInputsByRow] = useState({})
-  // Per-row tag validation messages (empty string = no error)
-  const [tagValidation, setTagValidation] = useState({})
-  const [aiCategorizing, setAiCategorizing] = useState(false)
-  const [categorizationError, setCategorizationError] = useState('')
-  const [failedBatchContacts, setFailedBatchContacts] = useState([])
-  // Search within the suggestions panel
-  const [suggestionsSearch, setSuggestionsSearch] = useState('')
+  // AI enrichment during import (Pro only)
+  const [aiEnrichEnabled, setAiEnrichEnabled] = useState(true)
+  // Progress state while importing with AI: null when idle, { categorized, total } while running
+  const [importProgress, setImportProgress] = useState(null)
+  // Warning shown in done step if some AI categorization batches failed
+  const [categorizationWarning, setCategorizationWarning] = useState('')
+
   // Post-import chooser
-  const [showChooser, setShowChooser] = useState(false)
+  const [showChooser, setShowChooser]   = useState(false)
   const [chooserSearch, setChooserSearch] = useState('')
   const [importedContacts, setImportedContacts] = useState([]) // [{id, name}]
 
   // Stale-request prevention refs
   const inferenceRunIdRef = useRef(0)   // incremented before each new run; old runs check this
   const isMountedRef = useRef(true)     // set false on unmount; guards all post-await state updates
-  // Cache refs for avoiding redundant AI calls on Back/Confirm without mapping change
-  const cachedMappingSignatureRef = useRef(null)
   const hasFiredMappingAnalyticsRef = useRef(null)
 
   useEffect(() => {
@@ -281,8 +265,8 @@ export default function ImportContactsModal({ onClose, onImported }) {
   }, [])
 
   // Derived
-  const assignedSet  = new Set(Object.values(assignment).flat())
-  const ignoredCols  = headers.filter(h => !assignedSet.has(h))
+  const assignedSet   = new Set(Object.values(assignment).flat())
+  const ignoredCols   = headers.filter(h => !assignedSet.has(h))
   const hasNameMapped = assignment.name.length > 0
 
   const previewFields = [
@@ -293,19 +277,16 @@ export default function ImportContactsModal({ onClose, onImported }) {
   ].slice(0, 5)
   const previewContacts = rows.slice(0, 5).map(row => transformRow(row, assignment))
 
-  // Contacts with at least one AI suggestion, filtered by suggestions search
-  const suggestedContactsList = useMemo(() => {
-    const q = suggestionsSearch.trim().toLowerCase()
-    return normalizedContacts.filter(c => {
-      const s = contactSuggestions[c._rowId]
-      if (!s) return false
-      if (!(s.suggested_tags?.length > 0 || s.suggested_relationship_type)) return false
-      if (q && !(c.name || '').toLowerCase().includes(q)) return false
-      return true
-    })
-  }, [normalizedContacts, contactSuggestions, suggestionsSearch])
+  // Count importable rows reactively for the Step 2 Import button label
+  const importableCount = useMemo(() => {
+    if (!rows.length || !assignment.name.length) return 0
+    return rows.filter(row => {
+      const nameParts = assignment.name.map(col => (row[col] || '').trim()).filter(Boolean)
+      return nameParts.join(' ').trim().length > 0
+    }).length
+  }, [rows, assignment])
 
-  // Stable mapping signature: used to detect changes between goToConfirm calls
+  // Stable mapping signature: used to detect changes between Import calls (analytics dedup)
   function computeMappingSignature() {
     return JSON.stringify(
       Object.fromEntries(Object.entries(assignment).map(([k, v]) => [k, [...v]]))
@@ -384,19 +365,11 @@ export default function ImportContactsModal({ onClose, onImported }) {
     setRows(dataRows)
     setAssignment(initialAssignment)
     setAiMapped({ applied: false, count: 0, notes: '' })
+    setImportError('')
 
-    // File change → invalidate all cached inference state
+    // File change → invalidate stale inference runs and analytics dedup
     inferenceRunIdRef.current++
-    cachedMappingSignatureRef.current = null
     hasFiredMappingAnalyticsRef.current = null
-    setNormalizedContacts([])
-    setNormalizedSkipped(0)
-    setContactSuggestions({})
-    setAcceptedByRow({})
-    setTagInputsByRow({})
-    setCategorizationError('')
-    setFailedBatchContacts([])
-    setSuggestionsSearch('')
 
     if (isProUser) {
       const assignedCols = new Set(Object.values(initialAssignment).flat())
@@ -416,7 +389,6 @@ export default function ImportContactsModal({ onClose, onImported }) {
           const headerSet = new Set(hdrs)
           const merged = { ...initialAssignment }
           const alreadyAssigned = new Set(Object.values(merged).flat())
-          let aiCount = 0
           for (const [field, cols] of Object.entries(resp.assignment)) {
             if (!(field in merged)) continue
             const valid = (cols ?? []).filter(
@@ -425,7 +397,6 @@ export default function ImportContactsModal({ onClose, onImported }) {
             if (valid.length > 0) {
               merged[field] = [...merged[field], ...valid]
               valid.forEach(c => alreadyAssigned.add(c))
-              aiCount += valid.length
             }
           }
           const totalMapped = Object.values(merged).flat().length
@@ -450,9 +421,7 @@ export default function ImportContactsModal({ onClose, onImported }) {
   }
 
   function goBackToUpload() {
-    // File change: invalidate everything including inference cache
     inferenceRunIdRef.current++
-    cachedMappingSignatureRef.current = null
     hasFiredMappingAnalyticsRef.current = null
     setStep('upload')
     setHeaders([])
@@ -460,72 +429,13 @@ export default function ImportContactsModal({ onClose, onImported }) {
     setAssignment(freshAssignment())
     setPicker(null)
     setParseError('')
+    setImportError('')
     setAiLoading(false)
     setAiMapped({ applied: false, count: 0, notes: '' })
     setCsvDetection(null)
-    setNormalizedContacts([])
-    setNormalizedSkipped(0)
-    setContactSuggestions({})
-    setAcceptedByRow({})
-    setTagInputsByRow({})
-    setTagValidation({})
-    setAiCategorizing(false)
-    setCategorizationError('')
-    setFailedBatchContacts([])
-    setSuggestionsSearch('')
+    setImportProgress(null)
+    setCategorizationWarning('')
     if (fileInputRef.current) fileInputRef.current.value = ''
-  }
-
-  // Advance Map → Confirm. Checks mapping signature to decide whether to re-run AI.
-  // Back from Confirm does NOT clear state — this function detects a signature match
-  // and reuses cached inference results (no new AI call, no new UUIDs).
-  function goToConfirm() {
-    const sig = computeMappingSignature()
-    const sigChanged = sig !== cachedMappingSignatureRef.current
-
-    setImportError('')
-    setPicker(null)
-
-    let contactsForStep
-    if (sigChanged || normalizedContacts.length === 0) {
-      // Mapping changed or first visit: recompute contacts with fresh UUIDs, re-run AI
-      const { toImport, skipped } = processRows(rows, assignment)
-      const withIds = toImport.map(c => ({ ...c, _rowId: crypto.randomUUID() }))
-      setNormalizedContacts(withIds)
-      setNormalizedSkipped(skipped)
-      setContactSuggestions({})
-      setAcceptedByRow({})
-      setTagInputsByRow({})
-      setCategorizationError('')
-      setFailedBatchContacts([])
-      setSuggestionsSearch('')
-      cachedMappingSignatureRef.current = sig
-      contactsForStep = withIds
-
-      if (isProUser && withIds.length > 0) {
-        runContactCategorization(withIds)
-      }
-    } else {
-      // Mapping unchanged: reuse cached contacts, suggestions, and UUIDs
-      contactsForStep = normalizedContacts
-    }
-
-    // Fire csv_mapping_completed once per unique mapping state (not on Back/re-Confirm)
-    if (sig !== hasFiredMappingAnalyticsRef.current) {
-      const mapping_mode = aiMapped.applied ? 'ai_assisted'
-        : autoMappedCount > 0 ? 'deterministic'
-        : 'manual'
-      track('csv_mapping_completed', {
-        mapping_mode,
-        detected_format: csvDetection === 'linkedin' ? 'linkedin' : 'generic',
-        contact_count: contactsForStep.length,
-        inferred_tags_enabled: isProUser,
-        inferred_relationships_enabled: isProUser,
-      })
-      hasFiredMappingAnalyticsRef.current = sig
-    }
-
-    setStep('confirm')
   }
 
   // Sends one batch of ≤20 contacts to ai-categorize-contacts.
@@ -548,121 +458,38 @@ export default function ImportContactsModal({ onClose, onImported }) {
     return resp.suggestions
   }
 
-  // Per-contact AI inference — non-blocking.
-  // Batches of BATCH_SIZE, at most MAX_CONCURRENT batches concurrently.
-  // Uses inferenceRunIdRef + isMountedRef to guard all post-await state updates.
-  async function runContactCategorization(contacts) {
+  // Runs AI categorization for all contacts and returns { suggestionsMap, failedCount }.
+  // Returns null if the run was cancelled (stale inference ID or component unmounted).
+  // Calls onProgress(processed, total) after each batch group settles.
+  async function runCategorizationForImport(contacts, runId, onProgress) {
     const BATCH_SIZE = 20
     const MAX_CONCURRENT = 2
-    const runId = ++inferenceRunIdRef.current  // capture before first await
-
-    setAiCategorizing(true)
-    setCategorizationError('')
-
     const batches = splitContactBatches(contacts, BATCH_SIZE)
-
-    const allSuggestions = []
-    const failed = []
+    const suggestionsMap = {}
+    let failedCount = 0
+    let processed = 0
 
     for (let i = 0; i < batches.length; i += MAX_CONCURRENT) {
       const group = batches.slice(i, i + MAX_CONCURRENT)
       const results = await Promise.allSettled(group.map(b => invokeSingleBatch(b)))
 
-      // Stale check: new inference started (file change, mapping change, modal close)
-      if (runId !== inferenceRunIdRef.current || !isMountedRef.current) return
+      if (runId !== inferenceRunIdRef.current || !isMountedRef.current) return null
 
       for (let j = 0; j < results.length; j++) {
+        const batchSize = group[j].length
         if (results[j].status === 'fulfilled') {
-          allSuggestions.push(...results[j].value)
-        } else {
-          failed.push(...group[j])
-        }
-      }
-    }
-
-    if (runId !== inferenceRunIdRef.current || !isMountedRef.current) return
-
-    if (allSuggestions.length > 0) {
-      const newSugMap = {}
-      const newAccMap = {}
-      for (const s of allSuggestions) {
-        if (!s.row_id) continue
-        const tags = Array.isArray(s.suggested_tags) ? s.suggested_tags : []
-        const relType = s.suggested_relationship_type || null
-        const confidence = s.confidence || 'medium'
-        if (tags.length > 0 || relType) {
-          newSugMap[s.row_id] = { suggested_tags: tags, suggested_relationship_type: relType, confidence }
-          // High confidence → pre-select tags and reltype; medium/low → shown but not pre-selected
-          newAccMap[s.row_id] = {
-            acceptedTags: confidence === 'high' ? [...tags] : [],
-            customTags: [],
-            relTypeChoice: confidence === 'high' ? relType : null,
+          for (const s of results[j].value) {
+            if (s.row_id) suggestionsMap[s.row_id] = s
           }
+        } else {
+          failedCount += batchSize
         }
+        processed += batchSize
+        onProgress(processed, contacts.length)
       }
-      setContactSuggestions(prev => ({ ...prev, ...newSugMap }))
-      setAcceptedByRow(prev => ({ ...prev, ...newAccMap }))
     }
 
-    if (runId !== inferenceRunIdRef.current || !isMountedRef.current) return
-
-    if (failed.length > 0) {
-      setFailedBatchContacts(failed)
-      setCategorizationError(
-        `AI suggestions unavailable for ${failed.length} ${failed.length === 1 ? 'contact' : 'contacts'} — a batch request failed.`
-      )
-    } else {
-      setFailedBatchContacts([])
-    }
-    setAiCategorizing(false)
-  }
-
-  // Tag editing helpers
-  function toggleAcceptedTag(rowId, tag) {
-    setAcceptedByRow(prev => {
-      const cur = prev[rowId] || { acceptedTags: [], customTags: [], relTypeChoice: null }
-      const accepted = cur.acceptedTags.includes(tag)
-        ? cur.acceptedTags.filter(t => t !== tag)
-        : [...cur.acceptedTags, tag]
-      return { ...prev, [rowId]: { ...cur, acceptedTags: accepted } }
-    })
-  }
-
-  function addCustomTag(rowId, rawTag) {
-    const tag = normalizeContactTag(rawTag)
-    if (!tag) {
-      // normalizeContactTag returns null for empty or >50 chars — show 50-char error if applicable
-      if ((rawTag || '').trim().length > 50) {
-        setTagValidation(prev => ({ ...prev, [rowId]: 'Tag must be 50 characters or fewer.' }))
-      }
-      return
-    }
-    const cur = acceptedByRow[rowId] || { acceptedTags: [], customTags: [], relTypeChoice: null }
-    if (cur.acceptedTags.includes(tag) || cur.customTags.includes(tag)) {
-      setTagValidation(prev => ({ ...prev, [rowId]: 'This tag is already added.' }))
-      return
-    }
-    setTagValidation(prev => ({ ...prev, [rowId]: '' }))
-    setAcceptedByRow(prev => {
-      const c = prev[rowId] || { acceptedTags: [], customTags: [], relTypeChoice: null }
-      return { ...prev, [rowId]: { ...c, customTags: [...c.customTags, tag] } }
-    })
-    setTagInputsByRow(prev => ({ ...prev, [rowId]: '' }))
-  }
-
-  function removeCustomTag(rowId, tag) {
-    setAcceptedByRow(prev => {
-      const cur = prev[rowId] || { acceptedTags: [], customTags: [], relTypeChoice: null }
-      return { ...prev, [rowId]: { ...cur, customTags: cur.customTags.filter(t => t !== tag) } }
-    })
-  }
-
-  function setRelTypeChoice(rowId, value) {
-    setAcceptedByRow(prev => {
-      const cur = prev[rowId] || { acceptedTags: [], customTags: [], relTypeChoice: null }
-      // null = keep CSV; '' = clear; 'Mentor' etc = override
-      return { ...prev, [rowId]: { ...cur, relTypeChoice: value === '__keep__' ? null : value } }
-    })
+    return { suggestionsMap, failedCount }
   }
 
   // Assignment UI helpers
@@ -687,49 +514,107 @@ export default function ImportContactsModal({ onClose, onImported }) {
     setPicker({ mode: 'col', key: col, pos: calcPickerPos(e, 320) })
   }
 
-  // Import
+  // Import: runs AI categorization (if Pro + enabled), then bulk-inserts contacts.
+  // High-confidence AI suggestions are auto-applied; medium/low are ignored.
+  // Import continues even if AI categorization fails — contacts land with CSV data.
   async function handleImport() {
-    // Invalidate any in-flight categorization: stale run checks will stop it
     inferenceRunIdRef.current++
-    setAiCategorizing(false)
+    const runId = inferenceRunIdRef.current
 
     setImporting(true)
     setImportError('')
+    setImportProgress(null)
+    setCategorizationWarning('')
+
     const { data: { user } } = await supabase.auth.getUser()
     if (!user) {
       setImportError('Not signed in. Please refresh the page and try again.')
       setImporting(false)
       return
     }
-    if (normalizedContacts.length === 0) {
+
+    const { toImport, skipped } = processRows(rows, assignment)
+    if (toImport.length === 0) {
       setImportError('No importable rows — every row is missing a name value.')
       setImporting(false)
       return
     }
 
-    // Build final contacts: strip _rowId, add user_id, merge per-contact suggestion choices
-    const contacts = normalizedContacts.map(({ _rowId, ...c }) => {
-      const contact = { ...c, user_id: user.id }
-      const acc = acceptedByRow[_rowId]
-      if (acc) {
-        // Merge CSV tags with accepted AI tags and custom user tags.
-        // No total count limit — all valid unique tags are retained.
-        const mergedTags = mergeContactTags(contact.tags || [], [], acc.acceptedTags || [], acc.customTags || [])
-        if (mergedTags.length > 0) {
-          contact.tags = mergedTags
-        }
-        // relTypeChoice: null = keep CSV value; '' = clear; string = override
-        if (acc.relTypeChoice !== null && acc.relTypeChoice !== undefined) {
-          contact.relationship_type = acc.relTypeChoice || null
-        }
-      }
-      return contact
-    })
+    const withIds = toImport.map(c => ({ ...c, _rowId: crypto.randomUUID() }))
 
-    // Select id and name only — name is used for the post-import chooser display
+    // Fire mapping analytics once per unique mapping state
+    const sig = computeMappingSignature()
+    if (sig !== hasFiredMappingAnalyticsRef.current) {
+      const mapping_mode = aiMapped.applied ? 'ai_assisted'
+        : autoMappedCount > 0 ? 'deterministic'
+        : 'manual'
+      track('csv_mapping_completed', {
+        mapping_mode,
+        detected_format: csvDetection === 'linkedin' ? 'linkedin' : 'generic',
+        contact_count: withIds.length,
+        inferred_tags_enabled: isProUser && aiEnrichEnabled,
+        inferred_relationships_enabled: isProUser && aiEnrichEnabled,
+      })
+      hasFiredMappingAnalyticsRef.current = sig
+    }
+
+    let finalContacts
+    let catWarning = ''
+
+    if (isProUser && aiEnrichEnabled && withIds.length > 0) {
+      setImportProgress({ categorized: 0, total: withIds.length })
+
+      const catResult = await runCategorizationForImport(
+        withIds,
+        runId,
+        (categorized, total) => {
+          if (runId === inferenceRunIdRef.current && isMountedRef.current) {
+            setImportProgress({ categorized, total })
+          }
+        }
+      )
+
+      if (!isMountedRef.current) return
+      if (catResult === null) {
+        // Stale run — another import was started; abort silently
+        setImporting(false)
+        return
+      }
+
+      const { suggestionsMap, failedCount } = catResult
+
+      // Auto-apply only high-confidence suggestions.
+      // CSV relationship_type is never overwritten by AI.
+      finalContacts = withIds.map(({ _rowId, ...c }) => {
+        const contact = { ...c, user_id: user.id }
+        const sug = suggestionsMap[_rowId]
+
+        if (sug && sug.confidence === 'high') {
+          const aiTags = Array.isArray(sug.suggested_tags) ? sug.suggested_tags : []
+          const merged = mergeContactTags(contact.tags || [], [], aiTags, [])
+          if (merged.length > 0) contact.tags = merged
+          else delete contact.tags
+
+          if (sug.suggested_relationship_type && !contact.relationship_type) {
+            contact.relationship_type = sug.suggested_relationship_type
+          }
+        }
+
+        return contact
+      })
+
+      if (failedCount > 0) {
+        catWarning = `Your contacts were imported, but Funnl could not automatically categorize ${failedCount} of them.`
+      }
+
+      setImportProgress(null)
+    } else {
+      finalContacts = withIds.map(({ _rowId, ...c }) => ({ ...c, user_id: user.id }))
+    }
+
     const { data: insertedRows, error } = await supabase
       .from('contacts')
-      .insert(contacts)
+      .insert(finalContacts)
       .select('id, name')
 
     setImporting(false)
@@ -738,11 +623,15 @@ export default function ImportContactsModal({ onClose, onImported }) {
       return
     }
 
-    track('csv_import_used', { contacts_imported: contacts.length, ai_assisted: aiMapped.applied })
+    track('csv_import_used', {
+      contacts_imported: finalContacts.length,
+      ai_assisted: aiMapped.applied || (isProUser && aiEnrichEnabled),
+    })
 
     const imported = (insertedRows || []).map(r => ({ id: r.id, name: r.name || '' }))
     setImportedContacts(imported)
-    setResult({ imported: contacts.length, skipped: normalizedSkipped })
+    setCategorizationWarning(catWarning)
+    setResult({ imported: finalContacts.length, skipped })
     setStep('done')
     onImported()
   }
@@ -850,443 +739,255 @@ export default function ImportContactsModal({ onClose, onImported }) {
 
           {/* ── STEP 2: Map columns ── */}
           {step === 'map' && (
-            <div>
-              {csvDetection && (
-                <div className="flex items-center gap-2.5 mb-4 px-3 py-2.5 bg-[rgba(47,212,182,0.12)] border border-[rgba(47,212,182,0.40)] rounded-xl">
-                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#2FD4B6" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-none">
-                    <path d="M20 6L9 17l-5-5"/>
-                  </svg>
-                  <p className="text-[12.5px] text-success font-semibold">
-                    {csvDetection === 'linkedin'
-                      ? 'LinkedIn Connections export detected — skipped the introductory note and auto-mapped your columns below. Review the assignments before importing.'
-                      : 'Introductory text was found and skipped — reading contacts from the actual header row.'
-                    }
-                  </p>
-                </div>
-              )}
-              {aiMapped.applied && (
-                <div className="flex items-center gap-2.5 mb-4 px-3 py-2.5 bg-[rgba(139,124,255,0.12)] border border-[rgba(139,124,255,0.40)] rounded-xl">
-                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#8B7CFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-none">
-                    <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
-                  </svg>
-                  <div>
-                    <p className="text-[12.5px] text-accent font-semibold">
-                      AI auto-mapped {aiMapped.count} {aiMapped.count === 1 ? 'column' : 'columns'} — review and adjust before importing
+            importing ? (
+              /* Import in progress — show progress view instead of mapping UI */
+              <div className="flex flex-col items-center justify-center py-16 gap-3">
+                <svg className="animate-spin" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#8B7CFF" strokeWidth="2.5" strokeLinecap="round">
+                  <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
+                </svg>
+                {importProgress !== null ? (
+                  <>
+                    <p className="text-[14px] font-semibold text-hi">Organizing your contacts with Funnl AI…</p>
+                    <p className="text-[13px] text-mid">
+                      Categorized {importProgress.categorized} of {importProgress.total} contacts
                     </p>
-                    {aiMapped.notes && (
-                      <p className="text-[11.5px] text-mid mt-0.5">{aiMapped.notes}</p>
-                    )}
-                  </div>
-                </div>
-              )}
-              {!isProUser && (
-                <div className="flex items-center gap-2.5 mb-4 px-3 py-2.5 bg-[rgba(139,124,255,0.12)] border border-[rgba(139,124,255,0.40)] rounded-xl">
-                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#8B7CFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-none">
-                    <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
-                  </svg>
-                  <p className="text-[12.5px] text-accent font-semibold">
-                    Pro tip: AI can auto-map your columns and suggest categories for each contact — available with Funnl Pro.
-                  </p>
-                </div>
-              )}
-              {!hasNameMapped && (
-                <div className="flex items-center gap-2.5 mb-4 px-3 py-2.5 bg-[rgba(255,184,77,0.12)] border border-[rgba(255,184,77,0.40)] rounded-xl">
-                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#FFB84D" strokeWidth="2" strokeLinecap="round" className="flex-none">
-                    <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
-                    <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
-                  </svg>
-                  <p className="text-[12.5px] text-warning">
-                    Assign at least one column to <strong>Name</strong> to continue — it's required.
-                  </p>
-                </div>
-              )}
-
-              {/* Pool: unassigned columns */}
-              <div className="mb-5">
-                {ignoredCols.length === 0 ? (
-                  <div className="flex items-center gap-2 px-4 py-3 bg-[rgba(47,212,182,0.12)] border border-[rgba(47,212,182,0.40)] rounded-xl">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#2FD4B6" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                  </>
+                ) : (
+                  <p className="text-[14px] font-semibold text-mid">Importing your contacts…</p>
+                )}
+              </div>
+            ) : (
+              <div>
+                {csvDetection && (
+                  <div className="flex items-center gap-2.5 mb-4 px-3 py-2.5 bg-[rgba(47,212,182,0.12)] border border-[rgba(47,212,182,0.40)] rounded-xl">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#2FD4B6" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-none">
                       <path d="M20 6L9 17l-5-5"/>
                     </svg>
-                    <p className="text-[12.5px] text-success font-medium">All columns placed — check the preview below.</p>
-                  </div>
-                ) : (
-                  <div className="px-4 py-3.5 bg-elevated border border-[rgba(255,255,255,0.08)] rounded-xl">
-                    <p className="text-[11px] font-bold tracking-[1px] text-lower uppercase font-mono mb-3">
-                      Not yet assigned — click a column to place it
+                    <p className="text-[12.5px] text-success font-semibold">
+                      {csvDetection === 'linkedin'
+                        ? 'LinkedIn Connections export detected — skipped the introductory note and auto-mapped your columns below. Review the assignments before importing.'
+                        : 'Introductory text was found and skipped — reading contacts from the actual header row.'
+                      }
                     </p>
-                    <div className="flex flex-wrap gap-1.5">
-                      {ignoredCols.map(col => (
-                        <button
-                          key={col}
-                          type="button"
-                          onClick={e => openColPicker(col, e)}
-                          className={`inline-flex items-center gap-1.5 border text-[12px] font-mono px-2.5 py-[6px] rounded-lg transition-colors ${
-                            picker?.mode === 'col' && picker.key === col
-                              ? 'bg-[rgba(139,124,255,0.15)] border-accent text-hi'
-                              : 'bg-card border-[rgba(255,255,255,0.11)] text-mid hover:border-[rgba(139,124,255,0.4)] hover:text-hi'
-                          }`}
-                        >
-                          {col}
-                          <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-                            <path d="M6 9l6 6 6-6"/>
-                          </svg>
-                        </button>
-                      ))}
+                  </div>
+                )}
+                {aiMapped.applied && (
+                  <div className="flex items-center gap-2.5 mb-4 px-3 py-2.5 bg-[rgba(139,124,255,0.12)] border border-[rgba(139,124,255,0.40)] rounded-xl">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#8B7CFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-none">
+                      <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+                    </svg>
+                    <div>
+                      <p className="text-[12.5px] text-accent font-semibold">
+                        AI auto-mapped {aiMapped.count} {aiMapped.count === 1 ? 'column' : 'columns'} — review and adjust before importing
+                      </p>
+                      {aiMapped.notes && (
+                        <p className="text-[11.5px] text-mid mt-0.5">{aiMapped.notes}</p>
+                      )}
                     </div>
                   </div>
                 )}
-              </div>
+                {!isProUser && (
+                  <div className="flex items-center gap-2.5 mb-4 px-3 py-2.5 bg-[rgba(139,124,255,0.12)] border border-[rgba(139,124,255,0.40)] rounded-xl">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#8B7CFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-none">
+                      <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+                    </svg>
+                    <p className="text-[12.5px] text-accent font-semibold">
+                      Pro tip: AI can auto-map your columns and suggest categories for each contact — available with Funnl Pro.
+                    </p>
+                  </div>
+                )}
+                {!hasNameMapped && (
+                  <div className="flex items-center gap-2.5 mb-4 px-3 py-2.5 bg-[rgba(255,184,77,0.12)] border border-[rgba(255,184,77,0.40)] rounded-xl">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#FFB84D" strokeWidth="2" strokeLinecap="round" className="flex-none">
+                      <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+                      <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+                    </svg>
+                    <p className="text-[12.5px] text-warning">
+                      Assign at least one column to <strong>Name</strong> to continue — it's required.
+                    </p>
+                  </div>
+                )}
 
-              {/* Field assignment table */}
-              <p className="text-[11px] font-bold tracking-[1px] text-lower uppercase font-mono mb-1">Funnl fields</p>
-              <p className="text-[12px] text-lower mb-3">
-                Click a column above to assign it, or use + Add on any field.
-                Multiple columns combine in chip order — chip order matters for First + Last name.
-              </p>
-              <div className="divide-y divide-[rgba(255,255,255,0.05)] border border-line-2 rounded-xl overflow-hidden mb-5">
-                {FUNNL_FIELDS.map(field => (
-                  <div key={field.value} className="flex items-start gap-3 px-4 py-3 bg-card">
-                    <div className="w-[106px] flex-none pt-[7px]">
-                      <span className="text-[13px] font-semibold text-hi">{field.label}</span>
-                      {field.required && <span className="text-danger text-[12px] ml-0.5">*</span>}
-                    </div>
-                    <div className="flex-1 flex flex-wrap items-center gap-1.5 pt-1.5 min-h-[32px]">
-                      {assignment[field.value].map(col => (
-                        <span
-                          key={col}
-                          className="inline-flex items-center gap-1 bg-[rgba(139,124,255,0.12)] border border-[rgba(139,124,255,0.22)] text-tag text-[12px] font-mono px-2 py-[5px] rounded-lg leading-none"
-                        >
-                          {col}
-                          <button
-                            type="button"
-                            onClick={() => removeColumn(field.value, col)}
-                            title="Remove"
-                            className="text-[rgba(180,168,255,0.45)] hover:text-danger transition-colors ml-0.5 leading-none text-[14px]"
-                          >
-                            ×
-                          </button>
-                        </span>
-                      ))}
-                      {assignment[field.value].length === 0 && (
-                        <span className="text-[12px] text-lower italic pt-[5px]">— not assigned</span>
-                      )}
-                      {ignoredCols.length > 0 && (
-                        <button
-                          type="button"
-                          onClick={e => openFieldPicker(field.value, e)}
-                          className={`inline-flex items-center gap-1 text-[12px] font-semibold px-2 py-[5px] rounded-lg transition-colors leading-none ${
-                            picker?.mode === 'field' && picker.key === field.value
-                              ? 'text-accent bg-[rgba(139,124,255,0.12)]'
-                              : 'text-low hover:text-accent hover:bg-[rgba(139,124,255,0.08)]'
-                          }`}
-                        >
-                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-                            <path d="M12 5v14M5 12h14"/>
-                          </svg>
-                          Add
-                        </button>
-                      )}
+                {/* AI enrichment toggle — Pro users only */}
+                {isProUser && (
+                  <div className="flex items-start gap-3 mb-4 px-4 py-3.5 bg-elevated border border-line-2 rounded-xl">
+                    <input
+                      type="checkbox"
+                      id="ai-enrich-toggle"
+                      checked={aiEnrichEnabled}
+                      onChange={e => setAiEnrichEnabled(e.target.checked)}
+                      className="mt-[3px] w-4 h-4 accent-[#8B7CFF] cursor-pointer flex-none"
+                    />
+                    <div className="flex-1">
+                      <label htmlFor="ai-enrich-toggle" className="text-[13px] font-semibold text-hi cursor-pointer leading-snug">
+                        Automatically organize contacts with Funnl AI
+                      </label>
+                      <p className="text-[12px] text-muted mt-0.5 leading-relaxed">
+                        Adds relevant tags and relationship categories based on the information in your file. You can edit them later.
+                      </p>
                     </div>
                   </div>
-                ))}
-              </div>
+                )}
 
-              {/* Live preview */}
-              <div className="border-t border-line-1 pt-5">
-                <p className="text-[11px] font-bold tracking-[1px] text-lower uppercase font-mono mb-1">Live preview</p>
+                {/* Pool: unassigned columns */}
+                <div className="mb-5">
+                  {ignoredCols.length === 0 ? (
+                    <div className="flex items-center gap-2 px-4 py-3 bg-[rgba(47,212,182,0.12)] border border-[rgba(47,212,182,0.40)] rounded-xl">
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#2FD4B6" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M20 6L9 17l-5-5"/>
+                      </svg>
+                      <p className="text-[12.5px] text-success font-medium">All columns placed — check the preview below.</p>
+                    </div>
+                  ) : (
+                    <div className="px-4 py-3.5 bg-elevated border border-[rgba(255,255,255,0.08)] rounded-xl">
+                      <p className="text-[11px] font-bold tracking-[1px] text-lower uppercase font-mono mb-3">
+                        Not yet assigned — click a column to place it
+                      </p>
+                      <div className="flex flex-wrap gap-1.5">
+                        {ignoredCols.map(col => (
+                          <button
+                            key={col}
+                            type="button"
+                            onClick={e => openColPicker(col, e)}
+                            className={`inline-flex items-center gap-1.5 border text-[12px] font-mono px-2.5 py-[6px] rounded-lg transition-colors ${
+                              picker?.mode === 'col' && picker.key === col
+                                ? 'bg-[rgba(139,124,255,0.15)] border-accent text-hi'
+                                : 'bg-card border-[rgba(255,255,255,0.11)] text-mid hover:border-[rgba(139,124,255,0.4)] hover:text-hi'
+                            }`}
+                          >
+                            {col}
+                            <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                              <path d="M6 9l6 6 6-6"/>
+                            </svg>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Field assignment table */}
+                <p className="text-[11px] font-bold tracking-[1px] text-lower uppercase font-mono mb-1">Funnl fields</p>
                 <p className="text-[12px] text-lower mb-3">
-                  First {Math.min(rows.length, 5)} of {rows.length} rows · updates instantly
+                  Click a column above to assign it, or use + Add on any field.
+                  Multiple columns combine in chip order — chip order matters for First + Last name.
                 </p>
-                <div className="overflow-x-auto rounded-xl border border-line-2">
-                  <table className="w-full text-[12px]" style={{ minWidth: previewFields.length * 130 }}>
-                    <thead>
-                      <tr className="border-b border-line-2 bg-[rgba(255,255,255,0.02)]">
-                        {previewFields.map(f => {
-                          const fd = FUNNL_FIELDS.find(x => x.value === f)
-                          return (
-                            <th key={f} className="px-3 py-2 text-left text-lower font-mono font-bold whitespace-nowrap">
-                              {fd.label}
-                            </th>
-                          )
-                        })}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {previewContacts.map((contact, i) => (
-                        <tr key={i} className="border-b border-[rgba(255,255,255,0.04)] last:border-0">
+                <div className="divide-y divide-[rgba(255,255,255,0.05)] border border-line-2 rounded-xl overflow-hidden mb-5">
+                  {FUNNL_FIELDS.map(field => (
+                    <div key={field.value} className="flex items-start gap-3 px-4 py-3 bg-card">
+                      <div className="w-[106px] flex-none pt-[7px]">
+                        <span className="text-[13px] font-semibold text-hi">{field.label}</span>
+                        {field.required && <span className="text-danger text-[12px] ml-0.5">*</span>}
+                      </div>
+                      <div className="flex-1 flex flex-wrap items-center gap-1.5 pt-1.5 min-h-[32px]">
+                        {assignment[field.value].map(col => (
+                          <span
+                            key={col}
+                            className="inline-flex items-center gap-1 bg-[rgba(139,124,255,0.12)] border border-[rgba(139,124,255,0.22)] text-tag text-[12px] font-mono px-2 py-[5px] rounded-lg leading-none"
+                          >
+                            {col}
+                            <button
+                              type="button"
+                              onClick={() => removeColumn(field.value, col)}
+                              title="Remove"
+                              className="text-[rgba(180,168,255,0.45)] hover:text-danger transition-colors ml-0.5 leading-none text-[14px]"
+                            >
+                              ×
+                            </button>
+                          </span>
+                        ))}
+                        {assignment[field.value].length === 0 && (
+                          <span className="text-[12px] text-lower italic pt-[5px]">— not assigned</span>
+                        )}
+                        {ignoredCols.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={e => openFieldPicker(field.value, e)}
+                            className={`inline-flex items-center gap-1 text-[12px] font-semibold px-2 py-[5px] rounded-lg transition-colors leading-none ${
+                              picker?.mode === 'field' && picker.key === field.value
+                                ? 'text-accent bg-[rgba(139,124,255,0.12)]'
+                                : 'text-low hover:text-accent hover:bg-[rgba(139,124,255,0.08)]'
+                            }`}
+                          >
+                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                              <path d="M12 5v14M5 12h14"/>
+                            </svg>
+                            Add
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Live preview */}
+                <div className="border-t border-line-1 pt-5">
+                  <p className="text-[11px] font-bold tracking-[1px] text-lower uppercase font-mono mb-1">Live preview</p>
+                  <p className="text-[12px] text-lower mb-3">
+                    First {Math.min(rows.length, 5)} of {rows.length} rows · updates instantly
+                  </p>
+                  <div className="overflow-x-auto rounded-xl border border-line-2">
+                    <table className="w-full text-[12px]" style={{ minWidth: previewFields.length * 130 }}>
+                      <thead>
+                        <tr className="border-b border-line-2 bg-[rgba(255,255,255,0.02)]">
                           {previewFields.map(f => {
-                            const val = f === 'tags' ? (contact[f] || []).join(', ') : (contact[f] || '')
+                            const fd = FUNNL_FIELDS.find(x => x.value === f)
                             return (
-                              <td key={f} className="px-3 py-2 max-w-[160px]">
-                                {val
-                                  ? <span className="text-muted block truncate">{val}</span>
-                                  : <span className="text-lower">—</span>
-                                }
-                              </td>
+                              <th key={f} className="px-3 py-2 text-left text-lower font-mono font-bold whitespace-nowrap">
+                                {fd.label}
+                              </th>
                             )
                           })}
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                      </thead>
+                      <tbody>
+                        {previewContacts.map((contact, i) => (
+                          <tr key={i} className="border-b border-[rgba(255,255,255,0.04)] last:border-0">
+                            {previewFields.map(f => {
+                              const val = f === 'tags' ? (contact[f] || []).join(', ') : (contact[f] || '')
+                              return (
+                                <td key={f} className="px-3 py-2 max-w-[160px]">
+                                  {val
+                                    ? <span className="text-muted block truncate">{val}</span>
+                                    : <span className="text-lower">—</span>
+                                  }
+                                </td>
+                              )
+                            })}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
-              </div>
-            </div>
-          )}
 
-          {/* ── STEP 3: Confirm ── */}
-          {step === 'confirm' && (
-            <div>
-              <div className="bg-elevated border border-line-2 rounded-xl p-5 mb-4">
-                <div className="flex items-center gap-4">
-                  <div className="w-11 h-11 rounded-xl bg-[rgba(139,124,255,0.12)] border border-[rgba(139,124,255,0.2)] flex items-center justify-center flex-none">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#8B7CFF" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
-                      <circle cx="9" cy="7" r="4"/>
-                      <path d="M23 21v-2a4 4 0 0 0-3-3.87"/>
-                      <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+                {/* Import error (shown after a failed attempt while staying on step 2) */}
+                {importError && (
+                  <div className="mt-5 flex items-start gap-2.5 px-4 py-3 bg-[rgba(255,107,138,0.08)] border border-[rgba(255,107,138,0.2)] rounded-xl">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#FF6B8A" strokeWidth="2" strokeLinecap="round" className="flex-none mt-0.5">
+                      <circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/>
                     </svg>
+                    <p className="text-[13px] text-danger">{importError}</p>
                   </div>
-                  <div>
-                    <p className="text-[16px] font-bold text-hi">
-                      About to import {normalizedContacts.length} {normalizedContacts.length === 1 ? 'contact' : 'contacts'}
-                    </p>
-                    {normalizedSkipped > 0 && (
-                      <p className="text-[12.5px] text-warning mt-0.5">
-                        {normalizedSkipped} {normalizedSkipped === 1 ? 'row' : 'rows'} will be skipped — no name value
-                      </p>
-                    )}
-                  </div>
-                </div>
+                )}
               </div>
-
-              {/* Per-contact AI suggestions (Pro users only) */}
-              {isProUser && (
-                <>
-                  {/* Loading banner — Import remains available while this runs */}
-                  {aiCategorizing && (
-                    <div className="flex items-center gap-2.5 mb-4 px-3 py-2.5 bg-[rgba(139,124,255,0.12)] border border-[rgba(139,124,255,0.35)] rounded-xl">
-                      <svg className="animate-spin flex-none" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#8B7CFF" strokeWidth="2.5" strokeLinecap="round">
-                        <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
-                      </svg>
-                      <div>
-                        <p className="text-[12.5px] font-semibold text-accent">AI is suggesting categories for your contacts…</p>
-                        <p className="text-[11.5px] text-low mt-0.5">You can import now or wait to review suggestions.</p>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Partial-failure notice */}
-                  {categorizationError && !aiCategorizing && (
-                    <div className="flex items-center justify-between gap-3 mb-4 px-3 py-2.5 bg-[rgba(255,184,77,0.12)] border border-[rgba(255,184,77,0.40)] rounded-xl">
-                      <p className="text-[12px] text-warning leading-snug">{categorizationError}</p>
-                      <button
-                        type="button"
-                        onClick={() => runContactCategorization(failedBatchContacts)}
-                        className="flex-none text-[12px] font-bold text-warning border border-[rgba(255,184,77,0.50)] px-2.5 py-1 rounded-lg hover:bg-[rgba(255,184,77,0.1)] transition-colors whitespace-nowrap"
-                      >
-                        Retry
-                      </button>
-                    </div>
-                  )}
-
-                  {/* Editable suggestions panel */}
-                  {suggestedContactsList.length > 0 && (
-                    <div className="mb-4 border border-[rgba(139,124,255,0.40)] rounded-xl overflow-hidden">
-                      {/* Panel header */}
-                      <div className="px-4 py-3 bg-[rgba(139,124,255,0.12)] border-b border-[rgba(139,124,255,0.25)]">
-                        <div className="flex items-center gap-2 mb-2">
-                          <svg width="13" height="13" viewBox="0 0 24 24" fill="#8B7CFF" className="flex-none">
-                            <path d="M12 3l1.7 5.3L19 10l-5.3 1.7L12 17l-1.7-5.3L5 10l5.3-1.7L12 3z"/>
-                          </svg>
-                          <p className="text-[12.5px] font-bold text-accent flex-1">
-                            AI suggested categories for {suggestedContactsList.length} of {normalizedContacts.length} {normalizedContacts.length === 1 ? 'contact' : 'contacts'}
-                          </p>
-                        </div>
-                        <p className="text-[11px] text-low leading-relaxed">
-                          AI suggestions are based only on information in your file. Review them before importing.
-                        </p>
-                        {/* Search — shown when list is long enough to benefit */}
-                        {normalizedContacts.length > 6 && (
-                          <input
-                            type="text"
-                            value={suggestionsSearch}
-                            onChange={e => setSuggestionsSearch(e.target.value)}
-                            placeholder="Search contacts…"
-                            className="mt-2 w-full bg-[rgba(0,0,0,0.2)] border border-[rgba(139,124,255,0.2)] rounded-lg px-3 py-1.5 text-[12px] text-hi placeholder-[#54545E] outline-none focus:border-[rgba(139,124,255,0.4)] transition-colors"
-                          />
-                        )}
-                      </div>
-
-                      {/* Scrollable contact list */}
-                      <div className="divide-y divide-[rgba(255,255,255,0.04)] max-h-[300px] overflow-y-auto">
-                        {suggestedContactsList.length === 0 && suggestionsSearch ? (
-                          <p className="px-4 py-3 text-[12px] text-lower text-center">No matches for "{suggestionsSearch}"</p>
-                        ) : suggestedContactsList.map(c => {
-                          const sug = contactSuggestions[c._rowId]
-                          const acc = acceptedByRow[c._rowId] || { acceptedTags: [], customTags: [], relTypeChoice: null }
-                          const confidence = sug?.confidence || 'medium'
-                          const meta = [c.company, c.role].filter(Boolean).join(' · ')
-                          const tagInput = tagInputsByRow[c._rowId] || ''
-                          const tagError = tagValidation[c._rowId] || ''
-
-                          // Effective reltype for the dropdown default value
-                          const dropdownValue = acc.relTypeChoice === null
-                            ? '__keep__'
-                            : acc.relTypeChoice === ''
-                              ? ''
-                              : acc.relTypeChoice
-
-                          return (
-                            <div key={c._rowId} className="px-4 py-3">
-                              {/* Contact name + meta + confidence badge */}
-                              <div className="flex items-center gap-2 mb-2">
-                                <p className="text-[12.5px] font-semibold text-hi truncate flex-1">
-                                  {c.name}
-                                  {meta ? <span className="text-muted font-normal"> · {meta}</span> : null}
-                                </p>
-                                {confidence === 'high' && (
-                                  <span className="flex-none text-[10px] font-mono font-bold text-success bg-[rgba(47,212,182,0.12)] border border-[rgba(47,212,182,0.2)] px-1.5 py-0.5 rounded-[4px]">HIGH</span>
-                                )}
-                                {confidence === 'medium' && (
-                                  <span className="flex-none text-[10px] font-mono font-bold text-warning bg-[rgba(255,184,77,0.1)] border border-[rgba(255,184,77,0.2)] px-1.5 py-0.5 rounded-[4px]">MED</span>
-                                )}
-                                {confidence === 'low' && (
-                                  <span className="flex-none text-[10px] font-mono font-bold text-lower bg-[rgba(255,255,255,0.04)] border border-[rgba(255,255,255,0.08)] px-1.5 py-0.5 rounded-[4px]">LOW</span>
-                                )}
-                              </div>
-
-                              {/* CSV explicit values (read-only context) */}
-                              {(c.tags?.length > 0 || c.relationship_type) && (
-                                <div className="flex flex-wrap items-center gap-1 mb-2">
-                                  <span className="text-[10.5px] text-lower font-mono flex-none">CSV:</span>
-                                  {c.tags?.map(t => (
-                                    <span key={t} className="text-[11px] font-mono text-lower bg-[rgba(255,255,255,0.04)] border border-line-2 px-1.5 py-[3px] rounded-[4px]">{t}</span>
-                                  ))}
-                                  {c.relationship_type && (
-                                    <span className="text-[11px] font-mono text-lower bg-[rgba(255,255,255,0.04)] border border-line-2 px-1.5 py-[3px] rounded-[4px]">{c.relationship_type}</span>
-                                  )}
-                                </div>
-                              )}
-
-                              {/* AI suggested tags */}
-                              <div className="flex flex-wrap gap-1 mb-2">
-                                {sug?.suggested_tags?.map(tag => {
-                                  const isAccepted = acc.acceptedTags.includes(tag)
-                                  const isLow = confidence === 'low'
-                                  return (
-                                    <button
-                                      key={tag}
-                                      type="button"
-                                      onClick={() => toggleAcceptedTag(c._rowId, tag)}
-                                      title={isAccepted ? 'Click to remove' : 'Click to add'}
-                                      className={`text-[11.5px] font-mono font-semibold px-2 py-[4px] rounded-full border transition-colors ${
-                                        isAccepted
-                                          ? 'bg-[rgba(139,124,255,0.12)] border-[rgba(139,124,255,0.3)] text-tag'
-                                          : isLow
-                                            ? 'bg-transparent border-line-1 text-lower opacity-60'
-                                            : 'bg-transparent border-[rgba(255,255,255,0.1)] text-low hover:border-accent hover:text-accent'
-                                      }`}
-                                    >
-                                      {isAccepted ? '× ' : '+ '}{tag}
-                                    </button>
-                                  )
-                                })}
-
-                                {/* User-added custom tags */}
-                                {acc.customTags?.map(tag => (
-                                  <button
-                                    key={`custom-${tag}`}
-                                    type="button"
-                                    onClick={() => removeCustomTag(c._rowId, tag)}
-                                    title="Click to remove"
-                                    className="text-[11.5px] font-mono font-semibold px-2 py-[4px] rounded-full border bg-[rgba(47,212,182,0.1)] border-[rgba(47,212,182,0.25)] text-success transition-colors"
-                                  >
-                                    × {tag}
-                                  </button>
-                                ))}
-                              </div>
-
-                              {/* Add custom tag input */}
-                              <div className="mb-2">
-                                <div className="flex items-center gap-1.5">
-                                  <input
-                                    type="text"
-                                    value={tagInput}
-                                    onChange={e => {
-                                      setTagInputsByRow(prev => ({ ...prev, [c._rowId]: e.target.value }))
-                                      if (tagError) setTagValidation(prev => ({ ...prev, [c._rowId]: '' }))
-                                    }}
-                                    onKeyDown={e => {
-                                      if (e.key === 'Enter') { e.preventDefault(); addCustomTag(c._rowId, tagInput) }
-                                    }}
-                                    placeholder="+ add tag"
-                                    aria-label="Add a custom tag"
-                                    aria-describedby={tagError ? `tag-err-${c._rowId}` : undefined}
-                                    className="flex-1 min-w-0 bg-[rgba(0,0,0,0.2)] border border-[rgba(255,255,255,0.08)] rounded-lg px-2 py-[5px] text-[11.5px] text-hi placeholder-[#54545E] outline-none focus:border-[rgba(139,124,255,0.4)] transition-colors"
-                                  />
-                                  <button
-                                    type="button"
-                                    onClick={() => addCustomTag(c._rowId, tagInput)}
-                                    disabled={!tagInput.trim()}
-                                    className="text-[11px] font-semibold text-accent hover:text-hi transition-colors px-2 py-[5px] disabled:opacity-30"
-                                  >
-                                    Add
-                                  </button>
-                                </div>
-                                {tagError && (
-                                  <p id={`tag-err-${c._rowId}`} role="alert" aria-live="polite" className="text-[11px] text-danger mt-1 pl-0.5">{tagError}</p>
-                                )}
-                              </div>
-
-                              {/* Relationship type selector */}
-                              <div className="flex items-center gap-2">
-                                <span className="text-[10.5px] text-lower font-mono flex-none">Type:</span>
-                                <select
-                                  value={dropdownValue}
-                                  onChange={e => setRelTypeChoice(c._rowId, e.target.value)}
-                                  className="flex-1 min-w-0 bg-[rgba(0,0,0,0.2)] border border-[rgba(255,255,255,0.08)] rounded-lg px-2 py-[5px] text-[11.5px] text-hi outline-none focus:border-[rgba(139,124,255,0.4)] transition-colors cursor-pointer"
-                                >
-                                  <option value="__keep__">
-                                    {c.relationship_type ? `Keep: ${c.relationship_type}` : '— not set —'}
-                                  </option>
-                                  {REL_TYPE_OPTIONS.map(opt => (
-                                    <option key={opt} value={opt}>{opt}</option>
-                                  ))}
-                                  <option value="">— clear —</option>
-                                </select>
-                              </div>
-
-                              {confidence === 'low' && (
-                                <p className="text-[10.5px] text-lower mt-1.5">Low confidence — verify these suggestions before importing.</p>
-                              )}
-                            </div>
-                          )
-                        })}
-                      </div>
-                    </div>
-                  )}
-                </>
-              )}
-
-              <p className="text-[13px] text-low leading-relaxed mb-4">
-                This import is all-or-nothing — if anything fails, zero contacts will be saved and you'll see a clear error.
-              </p>
-              {importError && (
-                <div className="flex items-start gap-2.5 px-4 py-3 bg-[rgba(255,107,138,0.08)] border border-[rgba(255,107,138,0.2)] rounded-xl">
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#FF6B8A" strokeWidth="2" strokeLinecap="round" className="flex-none mt-0.5">
-                    <circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/>
-                  </svg>
-                  <p className="text-[13px] text-danger">{importError}</p>
-                </div>
-              )}
-            </div>
+            )
           )}
 
           {/* ── DONE ── */}
           {step === 'done' && result && (
             <div className="py-2">
+              {/* Categorization warning if some AI batches failed */}
+              {categorizationWarning && (
+                <div className="flex items-start gap-2.5 mb-4 px-4 py-3 bg-[rgba(255,184,77,0.12)] border border-[rgba(255,184,77,0.40)] rounded-xl">
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#FFB84D" strokeWidth="2" strokeLinecap="round" className="flex-none mt-[2px]">
+                    <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+                    <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+                  </svg>
+                  <p className="text-[12.5px] text-warning leading-relaxed">{categorizationWarning}</p>
+                </div>
+              )}
+
               {!showChooser ? (
                 <>
                   {/* Success header */}
@@ -1410,25 +1111,9 @@ export default function ImportContactsModal({ onClose, onImported }) {
           )}
           {step === 'map' && (
             <>
-              <button type="button" onClick={goBackToUpload} className="text-[14px] font-semibold text-low hover:text-hi transition-colors">
-                ← Back
-              </button>
               <button
                 type="button"
-                onClick={goToConfirm}
-                disabled={!hasNameMapped}
-                className="bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] text-white text-[14px] font-bold px-6 py-[10px] rounded-[11px] shadow-[0_6px_18px_rgba(91,69,240,0.35)] hover:opacity-90 transition-opacity disabled:opacity-30 disabled:cursor-not-allowed"
-              >
-                Next →
-              </button>
-            </>
-          )}
-          {step === 'confirm' && (
-            <>
-              {/* Back does NOT clear cached inference — mapping signature check handles reuse */}
-              <button
-                type="button"
-                onClick={() => setStep('map')}
+                onClick={goBackToUpload}
                 disabled={importing}
                 className="text-[14px] font-semibold text-low hover:text-hi transition-colors disabled:opacity-40"
               >
@@ -1437,18 +1122,19 @@ export default function ImportContactsModal({ onClose, onImported }) {
               <button
                 type="button"
                 onClick={handleImport}
-                disabled={importing || normalizedContacts.length === 0}
-                className="flex items-center gap-2 bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] text-white text-[14px] font-bold px-6 py-[10px] rounded-[11px] shadow-[0_6px_18px_rgba(91,69,240,0.35)] hover:opacity-90 transition-opacity disabled:opacity-40 disabled:cursor-not-allowed"
+                disabled={!hasNameMapped || importing}
+                className="flex items-center gap-2 bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] text-white text-[14px] font-bold px-6 py-[10px] rounded-[11px] shadow-[0_6px_18px_rgba(91,69,240,0.35)] hover:opacity-90 transition-opacity disabled:opacity-30 disabled:cursor-not-allowed"
               >
-                {importing && (
-                  <svg className="animate-spin" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5" strokeLinecap="round">
-                    <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
-                  </svg>
+                {importing ? (
+                  <>
+                    <svg className="animate-spin" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5" strokeLinecap="round">
+                      <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
+                    </svg>
+                    Importing…
+                  </>
+                ) : (
+                  `Import ${importableCount} ${importableCount === 1 ? 'contact' : 'contacts'}`
                 )}
-                {importing
-                  ? 'Importing…'
-                  : `Import ${normalizedContacts.length} ${normalizedContacts.length === 1 ? 'contact' : 'contacts'}`
-                }
               </button>
             </>
           )}
