@@ -16,21 +16,49 @@ export function normalizeContactTag(raw) {
 }
 
 /**
+ * Split a raw tag input on commas, semicolons, pipes, carriage returns, and newlines.
+ * Trims each segment and removes empty values.
+ * Accepts either a string (splits it) or an array (splits each element).
+ * Returns a flat array of non-empty trimmed strings. Normalization is NOT applied here.
+ *
+ * @param {string|string[]} input
+ * @returns {string[]}
+ */
+export function splitTagsFromCsv(input) {
+  if (Array.isArray(input)) {
+    return input.flatMap(item =>
+      typeof item === 'string' ? item.split(/[,;|\r\n]+/).map(s => s.trim()).filter(Boolean) : []
+    )
+  }
+  if (typeof input === 'string') {
+    return input.split(/[,;|\r\n]+/).map(s => s.trim()).filter(Boolean)
+  }
+  return []
+}
+
+/**
  * Merge tags from multiple sources with case-insensitive deduplication.
  * Priority order: CSV/existing first, then AI-suggested, then custom user-added.
  * No total count limit — all valid, unique tags are retained.
  * Invalid tags (non-string, empty after trim, longer than 50 chars) are silently dropped.
+ * Each source may be a delimited string or an array; splitTagsFromCsv is applied to each.
  *
- * @param {string[]} csvTags      - Tags from the CSV file
- * @param {string[]} existingTags - Existing contact tags (reserved for future use, pass [])
- * @param {string[]} aiTags       - Tags suggested by AI and accepted by the user
- * @param {string[]} customTags   - Tags manually added by the user in the UI
+ * @param {string|string[]} csvTags      - Tags from the CSV file (string or array)
+ * @param {string|string[]} existingTags - Existing contact tags (reserved for future use, pass [])
+ * @param {string|string[]} aiTags       - Tags suggested by AI (high-confidence only)
+ * @param {string|string[]} customTags   - Tags manually added by the user in the UI
  * @returns {string[]}
  */
 export function mergeContactTags(csvTags = [], existingTags = [], aiTags = [], customTags = []) {
   const seen = new Set()
   const result = []
-  for (const raw of [...csvTags, ...existingTags, ...aiTags, ...customTags]) {
+  const sources = [
+    ...splitTagsFromCsv(csvTags),
+    ...splitTagsFromCsv(existingTags),
+    ...splitTagsFromCsv(aiTags),
+    ...splitTagsFromCsv(customTags),
+  ]
+  for (const raw of sources) {
     const t = normalizeContactTag(raw)
     if (t && !seen.has(t)) {
       seen.add(t)

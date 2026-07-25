@@ -9,7 +9,7 @@ import {
   normalizeTag, normalizeTags, sanitizeOutput,
 } from '../supabase/functions/shared/categorization-helpers.js'
 import {
-  normalizeContactTag, mergeContactTags, splitContactBatches,
+  normalizeContactTag, mergeContactTags, splitContactBatches, splitTagsFromCsv,
 } from '../src/lib/contactCategorization.js'
 
 let passed = 0
@@ -336,6 +336,83 @@ test('returns empty array when all inputs are empty', () => {
 test('non-string entries in any source are silently dropped', () => {
   const result = mergeContactTags([null, 'recruiter', 42, 'alumni'], [], [undefined], [])
   assert.deepStrictEqual(result, ['recruiter', 'alumni'])
+})
+
+// ── splitTagsFromCsv (production contactCategorization module) ─────────────────
+console.log('\nsplitTagsFromCsv (production module)')
+
+test('splits comma-separated tags', () => {
+  assert.deepStrictEqual(splitTagsFromCsv('alumni, recruiter, mentor'), ['alumni', 'recruiter', 'mentor'])
+})
+
+test('splits semicolon-separated tags', () => {
+  assert.deepStrictEqual(splitTagsFromCsv('alumni; recruiter; mentor'), ['alumni', 'recruiter', 'mentor'])
+})
+
+test('splits pipe-separated tags', () => {
+  assert.deepStrictEqual(splitTagsFromCsv('alumni|recruiter|mentor'), ['alumni', 'recruiter', 'mentor'])
+})
+
+test('splits newline-separated tags', () => {
+  assert.deepStrictEqual(splitTagsFromCsv('alumni\nrecruiter\nmentor'), ['alumni', 'recruiter', 'mentor'])
+})
+
+test('splits mixed delimiters', () => {
+  const result = splitTagsFromCsv('alumni; investment banking, technology | coffee chat\nhigh priority')
+  assert.deepStrictEqual(result, ['alumni', 'investment banking', 'technology', 'coffee chat', 'high priority'])
+})
+
+test('trims whitespace from each segment', () => {
+  assert.deepStrictEqual(splitTagsFromCsv('  alumni  ;  recruiter  '), ['alumni', 'recruiter'])
+})
+
+test('removes empty segments from consecutive delimiters', () => {
+  assert.deepStrictEqual(splitTagsFromCsv('alumni,,recruiter'), ['alumni', 'recruiter'])
+  assert.deepStrictEqual(splitTagsFromCsv(';alumni;;recruiter;'), ['alumni', 'recruiter'])
+})
+
+test('returns empty array for non-string non-array input', () => {
+  assert.deepStrictEqual(splitTagsFromCsv(null), [])
+  assert.deepStrictEqual(splitTagsFromCsv(undefined), [])
+  assert.deepStrictEqual(splitTagsFromCsv(42), [])
+})
+
+test('accepts an array of strings and splits each element', () => {
+  const result = splitTagsFromCsv(['alumni; recruiter', 'mentor, connector'])
+  assert.deepStrictEqual(result, ['alumni', 'recruiter', 'mentor', 'connector'])
+})
+
+test('array elements that are not strings are skipped', () => {
+  const result = splitTagsFromCsv(['alumni', null, 42, 'recruiter'])
+  assert.deepStrictEqual(result, ['alumni', 'recruiter'])
+})
+
+// ── mergeContactTags — delimited string input ─────────────────────────────────
+console.log('\nmergeContactTags — delimited string input')
+
+test('accepts a semicolon-delimited string as csvTags', () => {
+  const result = mergeContactTags('alumni; investment banking; technology', [], [], [])
+  assert.deepStrictEqual(result, ['alumni', 'investment banking', 'technology'])
+})
+
+test('accepts a comma-delimited string as csvTags', () => {
+  const result = mergeContactTags('recruiter, alumni, mentor', [], [], [])
+  assert.deepStrictEqual(result, ['recruiter', 'alumni', 'mentor'])
+})
+
+test('deduplicates case-insensitively across split string tags', () => {
+  const result = mergeContactTags('Alumni; ALUMNI; alumni', [], ['alumNI'], [])
+  assert.deepStrictEqual(result, ['alumni'])
+})
+
+test('preserves CSV string tags when AI array returns nothing (AI failure simulation)', () => {
+  const result = mergeContactTags('recruiter; alumni', [], [], [])
+  assert.deepStrictEqual(result, ['recruiter', 'alumni'])
+})
+
+test('merges split CSV string with AI array tags correctly', () => {
+  const result = mergeContactTags('recruiter; alumni', [], ['mentor', 'connector'], [])
+  assert.deepStrictEqual(result, ['recruiter', 'alumni', 'mentor', 'connector'])
 })
 
 // ── Summary ───────────────────────────────────────────────────────────────────
