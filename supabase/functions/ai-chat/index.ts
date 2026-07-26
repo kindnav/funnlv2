@@ -1,16 +1,7 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { formatNetworkContext, resolveToday } from './helpers.js'
-import { parseProviderResponse } from './parseProviderResponse.js'
 import { normalizeMessages } from './normalizeMessages.js'
-import {
-  MODEL,
-  PRIMARY_MAX_TOKENS, PRIMARY_THINKING, PRIMARY_EFFORT,
-  FALLBACK_MAX_TOKENS, FALLBACK_THINKING, FALLBACK_EFFORT,
-  PROVIDER_TIMEOUT_MS,
-  shouldRetryForBlankReply,
-  buildAttemptLog,
-  buildRequestSummaryLog,
-} from './providerCall.js'
+import { runProviderAttempts } from './providerCall.js'
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -227,167 +218,28 @@ Deno.serve(async (req) => {
       .replace('{today}', today)
       .replace('{network_data}', networkData)
 
-    // ── 6. Call Claude (with one bounded fallback attempt) ─────────────────────
-    //
-    // Primary attempt: adaptive thinking at medium effort + 8192 max_tokens.
-    // This gives the model room for hidden reasoning AND a complete visible
-    // response. The earlier 2048 limit allowed adaptive thinking (default on
-    // Sonnet 5) to consume the entire output budget before emitting any text.
-    //
-    // Fallback attempt (only when primary returns HTTP 200 but no visible text):
-    // thinking disabled + 4096 max_tokens. All output budget goes to visible text.
-    //
-    // One AbortController covers both attempts. The overall deadline is
-    // PROVIDER_TIMEOUT_MS — NOT two independent per-attempt timeouts.
-    //
-    // ANTHROPIC_API_KEY is stored in Supabase secrets — never in any file.
-    const controller = new AbortController()
+    // ── 6. Run the provider call (primary + bounded fallback if needed) ────────
+    // requestStart is recorded here so runProviderAttempts can compute elapsed
+    // time for the remaining-time check before the fallback attempt.
     const requestStart = Date.now()
-    const timer = setTimeout(() => controller.abort(), PROVIDER_TIMEOUT_MS)
+    const result = await runProviderAttempts({
+      systemPrompt,
+      messages: validatedMessages,
+      requestId,
+      passUsed,
+      requestStart,
+      anthropicApiKey: Deno.env.get('ANTHROPIC_API_KEY') ?? '',
+      // fetchImpl, now, makeSignalFn, logAttempt, logSummary — production defaults
+    })
 
-    // Two configs: primary then fallback. The loop runs at most twice.
-    const attemptConfigs = [
-      { max_tokens: PRIMARY_MAX_TOKENS, thinking: PRIMARY_THINKING, effort: PRIMARY_EFFORT },
-      { max_tokens: FALLBACK_MAX_TOKENS, thinking: FALLBACK_THINKING, effort: FALLBACK_EFFORT },
-    ]
-
-    let finalReply: string | null = null
-    let finalTruncated = false
-    let finalErrorCode: string | null = null
-    let attempts = 0
-
-    try {
-      for (const config of attemptConfigs) {
-        attempts++
-        const attemptStart = Date.now()
-
-        // Build the provider request body. Include output_config for both primary
-        // and fallback as specified — effort conveys the desired response quality
-        // even when thinking is disabled.
-        const providerBody: Record<string, any> = {
-          model: MODEL,
-          max_tokens: config.max_tokens,
-          thinking: config.thinking,
-          output_config: { effort: config.effort },
-          system: systemPrompt,
-          messages: validatedMessages,
-        }
-
-        let anthropicRes: Response
-        try {
-          anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'x-api-key': Deno.env.get('ANTHROPIC_API_KEY') ?? '',
-              'anthropic-version': '2023-06-01',
-            },
-            body: JSON.stringify(providerBody),
-            signal: controller.signal,
-          })
-        } catch (fetchErr: any) {
-          // AbortError means the overall PROVIDER_TIMEOUT_MS deadline fired.
-          // Log what we have and stop — no retry after a timeout.
-          console.log(JSON.stringify(buildAttemptLog({
-            requestId, attempt: attempts, model: MODEL,
-            max_tokens: config.max_tokens,
-            thinking_mode: config.thinking.type,
-            effort: config.effort,
-            providerStatus: null, providerRequestId: null,
-            stop_reason: null, contentBlockTypes: [], usage: null,
-            durationMs: Date.now() - attemptStart,
-            contextPass: passUsed, replyPresent: false,
-          })))
-          if (fetchErr?.name === 'AbortError') {
-            finalErrorCode = 'provider_timeout'
-            break
-          }
-          throw fetchErr
-        }
-
-        const durationMs = Date.now() - attemptStart
-        const providerRequestId = anthropicRes.headers.get('x-request-id')
-
-        // ── Handle non-2xx provider responses ────────────────────────────────
-        // Non-2xx errors (rate-limited, overloaded, auth, server error) are not
-        // blank-reply failures and must not be retried with the fallback config.
-        if (!anthropicRes.ok) {
-          const providerStatus = anthropicRes.status
-          console.log(JSON.stringify(buildAttemptLog({
-            requestId, attempt: attempts, model: MODEL,
-            max_tokens: config.max_tokens,
-            thinking_mode: config.thinking.type,
-            effort: config.effort,
-            providerStatus, providerRequestId,
-            stop_reason: null, contentBlockTypes: [], usage: null,
-            durationMs, contextPass: passUsed, replyPresent: false,
-          })))
-          if (providerStatus === 429) finalErrorCode = 'provider_rate_limited'
-          else if (providerStatus === 529) finalErrorCode = 'provider_unavailable'
-          else finalErrorCode = 'provider_error'
-          break
-        }
-
-        // ── Parse the provider response ──────────────────────────────────────
-        const anthropicData = await anthropicRes.json()
-        const { reply: parsedReply, stop_reason, truncated: isTruncated, error: parseError } =
-          parseProviderResponse(anthropicData)
-        const contentBlockTypes: string[] = (anthropicData?.content ?? []).map((b: any) => b?.type)
-        const usage = anthropicData?.usage
-
-        // Log safe attempt metadata — never response text or prompt content.
-        console.log(JSON.stringify(buildAttemptLog({
-          requestId, attempt: attempts, model: MODEL,
-          max_tokens: config.max_tokens,
-          thinking_mode: config.thinking.type,
-          effort: config.effort,
-          providerStatus: 200, providerRequestId,
-          stop_reason: stop_reason ?? null,
-          contentBlockTypes,
-          usage,
-          durationMs, contextPass: passUsed, replyPresent: parsedReply !== null,
-        })))
-
-        if (!parseError) {
-          // Usable visible reply — return it (even if truncated, the partial text is useful).
-          finalReply = parsedReply
-          finalTruncated = isTruncated
-          break
-        }
-
-        // No visible text. Retry only when this is the first attempt AND the blank
-        // is consistent with thinking exhaustion. Refusals always produce text, so
-        // parseError is null for them and this branch is never reached.
-        if (attempts >= 2 || !shouldRetryForBlankReply(200, parseError, stop_reason, contentBlockTypes)) {
-          finalErrorCode = 'empty_provider_response'
-          break
-        }
-        // Continue to fallback config (loop iteration 2).
-      }
-    } finally {
-      clearTimeout(timer)
-      // Log a safe request summary regardless of how the loop exited —
-      // including unexpected throws caught by the outer catch.
-      console.log(JSON.stringify(buildRequestSummaryLog({
-        requestId,
-        success: finalReply !== null,
-        attempts,
-        finalErrorCode,
-        totalDurationMs: Date.now() - requestStart,
-      })))
-    }
-
-    // ── 7. Return the response ─────────────────────────────────────────────────
-    if (finalReply !== null) {
-      // Truncated partial responses (stop_reason=max_tokens with text present) are
-      // returned rather than rejected: the partial text is still useful. The
-      // truncated flag lets the frontend surface an optional note to the user.
-      const successBody: Record<string, any> = { reply: finalReply, request_id: requestId }
-      if (finalTruncated) successBody.truncated = true
+    // ── 7. Return the structured response ─────────────────────────────────────
+    if (result.ok) {
+      const successBody: Record<string, any> = { reply: result.reply, request_id: requestId }
+      if (result.truncated) successBody.truncated = true
       return jsonResponse(successBody, 200)
     }
 
-    switch (finalErrorCode) {
+    switch (result.errorCode) {
       case 'provider_timeout':
         return errorResponse('provider_timeout', 'AI response timed out — please try again', true, requestId, 504)
       case 'provider_rate_limited':
