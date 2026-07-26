@@ -2,6 +2,15 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { formatNetworkContext, resolveToday } from './helpers.js'
 import { parseProviderResponse } from './parseProviderResponse.js'
 import { normalizeMessages } from './normalizeMessages.js'
+import {
+  MODEL,
+  PRIMARY_MAX_TOKENS, PRIMARY_THINKING, PRIMARY_EFFORT,
+  FALLBACK_MAX_TOKENS, FALLBACK_THINKING, FALLBACK_EFFORT,
+  PROVIDER_TIMEOUT_MS,
+  shouldRetryForBlankReply,
+  buildAttemptLog,
+  buildRequestSummaryLog,
+} from './providerCall.js'
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -198,7 +207,7 @@ Deno.serve(async (req) => {
     // resolveToday() validates the value and falls back to UTC if missing or invalid.
     // The timezone string is never logged or included in any response body.
     const today = resolveToday(rawBody?.timezone)
-    const { context: networkData, tooLarge } = formatNetworkContext(
+    const { context: networkData, tooLarge, passUsed } = formatNetworkContext(
       contactsResult.data ?? [],
       interactionsResult.data ?? [],
       today
@@ -218,116 +227,178 @@ Deno.serve(async (req) => {
       .replace('{today}', today)
       .replace('{network_data}', networkData)
 
-    // ── 6. Call Claude ─────────────────────────────────────────────────────────
-    // Timeout: 45 seconds.
+    // ── 6. Call Claude (with one bounded fallback attempt) ─────────────────────
     //
-    // Rationale: at max context (80,000 chars network + 20,000 chars history) and
-    // max output (2,048 tokens), claude-sonnet-5 at typical throughput (~80 tok/s)
-    // needs ~25 seconds for output alone, plus input processing time. 25 seconds
-    // was too low. 45 seconds provides headroom for large requests while keeping
-    // user-facing latency bounded. Supabase Edge Function wall-clock limit is at
-    // least 150 seconds (free tier), so 45s is well within platform limits.
+    // Primary attempt: adaptive thinking at medium effort + 8192 max_tokens.
+    // This gives the model room for hidden reasoning AND a complete visible
+    // response. The earlier 2048 limit allowed adaptive thinking (default on
+    // Sonnet 5) to consume the entire output budget before emitting any text.
     //
-    // PROVISIONAL: this timeout has not been verified against production traffic.
-    // Adjust if smoke testing reveals legitimate requests are being aborted.
+    // Fallback attempt (only when primary returns HTTP 200 but no visible text):
+    // thinking disabled + 4096 max_tokens. All output budget goes to visible text.
+    //
+    // One AbortController covers both attempts. The overall deadline is
+    // PROVIDER_TIMEOUT_MS — NOT two independent per-attempt timeouts.
     //
     // ANTHROPIC_API_KEY is stored in Supabase secrets — never in any file.
     const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), 45_000)
+    const requestStart = Date.now()
+    const timer = setTimeout(() => controller.abort(), PROVIDER_TIMEOUT_MS)
 
-    let anthropicRes: Response
+    // Two configs: primary then fallback. The loop runs at most twice.
+    const attemptConfigs = [
+      { max_tokens: PRIMARY_MAX_TOKENS, thinking: PRIMARY_THINKING, effort: PRIMARY_EFFORT },
+      { max_tokens: FALLBACK_MAX_TOKENS, thinking: FALLBACK_THINKING, effort: FALLBACK_EFFORT },
+    ]
+
+    let finalReply: string | null = null
+    let finalTruncated = false
+    let finalErrorCode: string | null = null
+    let attempts = 0
+
     try {
-      anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': Deno.env.get('ANTHROPIC_API_KEY') ?? '',
-          'anthropic-version': '2023-06-01',
-        },
-        body: JSON.stringify({
-          model: 'claude-sonnet-5',
-          max_tokens: 2048,
+      for (const config of attemptConfigs) {
+        attempts++
+        const attemptStart = Date.now()
+
+        // Build the provider request body. Include output_config for both primary
+        // and fallback as specified — effort conveys the desired response quality
+        // even when thinking is disabled.
+        const providerBody: Record<string, any> = {
+          model: MODEL,
+          max_tokens: config.max_tokens,
+          thinking: config.thinking,
+          output_config: { effort: config.effort },
           system: systemPrompt,
           messages: validatedMessages,
-        }),
-        signal: controller.signal,
-      })
-    } catch (fetchErr: any) {
-      if (fetchErr?.name === 'AbortError') {
-        // Log only safe metadata — no user content or request details.
-        console.error('ai-chat provider-timeout', { requestId })
-        return errorResponse(
-          'provider_timeout',
-          'AI response timed out — please try again',
-          true,
-          requestId,
-          504
-        )
+        }
+
+        let anthropicRes: Response
+        try {
+          anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-api-key': Deno.env.get('ANTHROPIC_API_KEY') ?? '',
+              'anthropic-version': '2023-06-01',
+            },
+            body: JSON.stringify(providerBody),
+            signal: controller.signal,
+          })
+        } catch (fetchErr: any) {
+          // AbortError means the overall PROVIDER_TIMEOUT_MS deadline fired.
+          // Log what we have and stop — no retry after a timeout.
+          console.log(JSON.stringify(buildAttemptLog({
+            requestId, attempt: attempts, model: MODEL,
+            max_tokens: config.max_tokens,
+            thinking_mode: config.thinking.type,
+            effort: config.effort,
+            providerStatus: null, providerRequestId: null,
+            stop_reason: null, contentBlockTypes: [], usage: null,
+            durationMs: Date.now() - attemptStart,
+            contextPass: passUsed, replyPresent: false,
+          })))
+          if (fetchErr?.name === 'AbortError') {
+            finalErrorCode = 'provider_timeout'
+            break
+          }
+          throw fetchErr
+        }
+
+        const durationMs = Date.now() - attemptStart
+        const providerRequestId = anthropicRes.headers.get('x-request-id')
+
+        // ── Handle non-2xx provider responses ────────────────────────────────
+        // Non-2xx errors (rate-limited, overloaded, auth, server error) are not
+        // blank-reply failures and must not be retried with the fallback config.
+        if (!anthropicRes.ok) {
+          const providerStatus = anthropicRes.status
+          console.log(JSON.stringify(buildAttemptLog({
+            requestId, attempt: attempts, model: MODEL,
+            max_tokens: config.max_tokens,
+            thinking_mode: config.thinking.type,
+            effort: config.effort,
+            providerStatus, providerRequestId,
+            stop_reason: null, contentBlockTypes: [], usage: null,
+            durationMs, contextPass: passUsed, replyPresent: false,
+          })))
+          if (providerStatus === 429) finalErrorCode = 'provider_rate_limited'
+          else if (providerStatus === 529) finalErrorCode = 'provider_unavailable'
+          else finalErrorCode = 'provider_error'
+          break
+        }
+
+        // ── Parse the provider response ──────────────────────────────────────
+        const anthropicData = await anthropicRes.json()
+        const { reply: parsedReply, stop_reason, truncated: isTruncated, error: parseError } =
+          parseProviderResponse(anthropicData)
+        const contentBlockTypes: string[] = (anthropicData?.content ?? []).map((b: any) => b?.type)
+        const usage = anthropicData?.usage
+
+        // Log safe attempt metadata — never response text or prompt content.
+        console.log(JSON.stringify(buildAttemptLog({
+          requestId, attempt: attempts, model: MODEL,
+          max_tokens: config.max_tokens,
+          thinking_mode: config.thinking.type,
+          effort: config.effort,
+          providerStatus: 200, providerRequestId,
+          stop_reason: stop_reason ?? null,
+          contentBlockTypes,
+          usage,
+          durationMs, contextPass: passUsed, replyPresent: parsedReply !== null,
+        })))
+
+        if (!parseError) {
+          // Usable visible reply — return it (even if truncated, the partial text is useful).
+          finalReply = parsedReply
+          finalTruncated = isTruncated
+          break
+        }
+
+        // No visible text. Retry only when this is the first attempt AND the blank
+        // is consistent with thinking exhaustion. Refusals always produce text, so
+        // parseError is null for them and this branch is never reached.
+        if (attempts >= 2 || !shouldRetryForBlankReply(200, parseError, stop_reason, contentBlockTypes)) {
+          finalErrorCode = 'empty_provider_response'
+          break
+        }
+        // Continue to fallback config (loop iteration 2).
       }
-      throw fetchErr
     } finally {
       clearTimeout(timer)
+      // Log a safe request summary regardless of how the loop exited —
+      // including unexpected throws caught by the outer catch.
+      console.log(JSON.stringify(buildRequestSummaryLog({
+        requestId,
+        success: finalReply !== null,
+        attempts,
+        finalErrorCode,
+        totalDurationMs: Date.now() - requestStart,
+      })))
     }
 
-    // ── 7. Handle non-2xx provider responses ──────────────────────────────────
-    if (!anthropicRes.ok) {
-      // Log only provider metadata — never the response body (may contain
-      // request-related content) and never user data.
-      console.error('ai-chat provider-error', {
-        requestId,
-        providerStatus: anthropicRes.status,
-        providerRequestId: anthropicRes.headers.get('x-request-id'),
-      })
-
-      if (anthropicRes.status === 429) {
-        return errorResponse(
-          'provider_rate_limited',
-          'AI is busy right now — please wait a moment and try again',
-          true,
-          requestId,
-          429
-        )
-      }
-      if (anthropicRes.status === 529) {
-        return errorResponse(
-          'provider_unavailable',
-          'AI service is temporarily overloaded — please try again in a moment',
-          true,
-          requestId,
-          503
-        )
-      }
-      // All other non-2xx responses: 4xx auth errors, 5xx server errors, etc.
-      return errorResponse('provider_error', 'AI service error — please try again', true, requestId, 502)
+    // ── 7. Return the response ─────────────────────────────────────────────────
+    if (finalReply !== null) {
+      // Truncated partial responses (stop_reason=max_tokens with text present) are
+      // returned rather than rejected: the partial text is still useful. The
+      // truncated flag lets the frontend surface an optional note to the user.
+      const successBody: Record<string, any> = { reply: finalReply, request_id: requestId }
+      if (finalTruncated) successBody.truncated = true
+      return jsonResponse(successBody, 200)
     }
 
-    // ── 8. Parse provider response ─────────────────────────────────────────────
-    const anthropicData = await anthropicRes.json()
-    const { reply, stop_reason, truncated, error: parseError } = parseProviderResponse(anthropicData)
-
-    if (parseError) {
-      // Log safe metadata only — no response text, content data, or user content.
-      console.error('ai-chat empty-provider-response', {
-        requestId,
-        stop_reason,
-        contentBlockTypes: (anthropicData?.content ?? []).map((b: any) => b?.type),
-      })
-      return errorResponse(
-        'empty_provider_response',
-        'AI did not return a response — please try again',
-        true,
-        requestId,
-        502
-      )
+    switch (finalErrorCode) {
+      case 'provider_timeout':
+        return errorResponse('provider_timeout', 'AI response timed out — please try again', true, requestId, 504)
+      case 'provider_rate_limited':
+        return errorResponse('provider_rate_limited', 'AI is busy right now — please wait a moment and try again', true, requestId, 429)
+      case 'provider_unavailable':
+        return errorResponse('provider_unavailable', 'AI service is temporarily overloaded — please try again in a moment', true, requestId, 503)
+      case 'provider_error':
+        return errorResponse('provider_error', 'AI service error — please try again', true, requestId, 502)
+      default:
+        return errorResponse('empty_provider_response', 'AI did not return a response — please try again', true, requestId, 502)
     }
-
-    // Truncated partial responses (stop_reason=max_tokens) are returned rather than
-    // rejected: the partial text is still useful. The truncated flag lets the
-    // frontend surface an optional note to the user.
-    const successBody: Record<string, any> = { reply, request_id: requestId }
-    if (truncated) successBody.truncated = true
-
-    return jsonResponse(successBody, 200)
 
   } catch (err: any) {
     // Log only the error name — err.message and err.stack may contain user data
