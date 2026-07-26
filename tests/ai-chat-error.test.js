@@ -168,6 +168,31 @@ await test('returns null when both fnError and data are null', async () => {
   assert.strictEqual(r, null)
 })
 
+// ── Backward compatibility: new frontend calling old Edge Function ─────────────
+// The old Edge Function returned { reply, request_id } on success (no error field).
+// extractInvokeError must return null for these shapes so the success path is taken.
+console.log('\nextractInvokeError — backward compat: new frontend + old Edge Function')
+
+await test('old Edge Function success shape { reply } without structured error field is treated as success', async () => {
+  // Old Edge Function returns { reply: 'Here is your answer.' } — no error key
+  const r = await extractInvokeError(null, { reply: 'Here is your answer.' })
+  assert.strictEqual(r, null)
+})
+
+await test('old Edge Function success shape without request_id is treated as success', async () => {
+  // Old Edge Function may have returned { reply: 'text' } without request_id — still no error
+  const r = await extractInvokeError(null, { reply: 'text' })
+  assert.strictEqual(r, null)
+})
+
+await test('old Edge Function empty reply {} without error field returns null (empty reply caught by caller, not here)', async () => {
+  // Old Edge Function returned { reply: '' } when text block was absent.
+  // extractInvokeError sees no error field → returns null.
+  // FunnlAIPage's `if (!data?.reply)` guard is what catches the empty string.
+  const r = await extractInvokeError(null, { reply: '' })
+  assert.strictEqual(r, null)
+})
+
 // ── results ───────────────────────────────────────────────────────────────────
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed\n`)
 if (failed > 0) process.exit(1)

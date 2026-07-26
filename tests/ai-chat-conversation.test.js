@@ -222,6 +222,27 @@ test('INITIAL_MESSAGE-style localOnly message at index 0 is not retry-eligible',
   assert.strictEqual(isRetryEligible(msgs, 0), false)
 })
 
+// ── Backward compatibility: new frontend + old Edge Function ───────────────────
+// When the old Edge Function is deployed, the new frontend must not break.
+// The key invariant: buildProviderMessages always produces user-first provider messages
+// because INITIAL_MESSAGE has localOnly: true and is therefore never sent to the Edge Function.
+console.log('\nbuildProviderMessages — backward compat: new frontend + old Edge Function')
+
+test('provider messages always start with user role when INITIAL_MESSAGE is localOnly (compatible with old Edge Function)', () => {
+  // Old Edge Function accepted user-first message sequences (always did).
+  // New frontend marks INITIAL_MESSAGE localOnly → buildProviderMessages filters it.
+  // Result: first provider message is always from user → compatible with both old and new Edge Function.
+  const msgs = [
+    { role: 'assistant', content: 'Your network is loaded. Ask me anything.', localOnly: true },
+    { role: 'user', content: 'Who should I follow up with?' },
+    { role: 'assistant', content: 'You should follow up with...' },
+    { role: 'user', content: 'Thanks!' },
+  ]
+  const result = buildProviderMessages(msgs)
+  assert.ok(result.length > 0, 'should produce at least one message')
+  assert.strictEqual(result[0].role, 'user', 'first provider message must be user (old Edge Function requirement)')
+})
+
 // ── results ───────────────────────────────────────────────────────────────────
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed\n`)
 if (failed > 0) process.exit(1)

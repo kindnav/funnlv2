@@ -863,7 +863,9 @@ Text: "<user input>"
 
 ### Layer C reliability spec — ai-chat Edge Function (branch review/ai-chat-reliability, PR #18)
 
-**Root cause confirmed:** HTTP 200 from Anthropic where the `content` array contains NO text block (empty array, thinking-only, whitespace-only, or missing) → the original `.find(b => b.type === 'text')` returned `undefined` → `reply = undefined` → returned `{ reply: '' }` → frontend `if (data?.reply)` treated it as falsy → "No response received" shown. Note: `.find()` scans the entire array, so a thinking block BEFORE a text block is NOT a failure condition — `.find()` would still locate the later text block. The failure path is specifically the case where no text block exists at all. Now produces `{ error: { code: 'empty_provider_response', ... } }` instead.
+**Confirmed defective path:** HTTP 200 from Anthropic where the `content` array contains NO usable text block (empty array, thinking-only, whitespace-only, or missing) → the original `.find(b => b.type === 'text')` returned `undefined` → `reply = undefined` → returned `{ reply: '' }` → frontend `if (data?.reply)` treated it as falsy → "No response received" shown. Now produces `{ error: { code: 'empty_provider_response', ... } }` instead.
+
+**Important clarification:** `.find()` scans the entire array, so a thinking block BEFORE a text block is NOT a failure condition — `.find()` would still locate the later text block. The defective condition is specifically when no text block exists at all. The exact provider response body from the historical incident was not captured, so it cannot be proven which specific input (thinking-only, empty, missing, etc.) triggered that individual failure. The fix addresses all usable-text-absent cases. A thinking block appearing before a text block is handled correctly by both the old and new code.
 
 **Module: `supabase/functions/ai-chat/parseProviderResponse.js`**
 - Collects ALL text blocks (not just first); skips `type: 'thinking'` blocks; joins with `\n\n`
@@ -948,9 +950,29 @@ Note: profile DB query failure → `internal_error` (retryable), NOT `pro_requir
 - `buildProviderMessages(msgs)` — filters `localOnly` and `error` messages, maps to `{ role, content }` only
 - `isRetryEligible(messages, index)` — returns `true` only if `index === messages.length - 1` (failed message is the last message, guaranteeing valid provider sequence on retry)
 
-**Test totals after overhaul: 268 total (37 csv-header + 62 ai-helpers + 33 theme + 15 parse-provider-response + 18 normalize-messages + 16 ai-chat-error + 67 ai-chat + 20 ai-chat-conversation)**
+**Test totals after overhaul: 272 total (37 csv-header + 62 ai-helpers + 33 theme + 15 parse-provider-response + 18 normalize-messages + 19 ai-chat-error + 67 ai-chat + 21 ai-chat-conversation)**
 
-**Deployment status:** Edge Function and frontend NOT yet deployed. Deployment is a separate step requiring `npx supabase functions deploy ai-chat` and a Vercel push to `main`.
+**Deployment status:** Edge Function and frontend NOT yet deployed. Deployment is a separate step — and the **order matters**.
+
+**Compatibility matrix:**
+
+| Frontend version | Edge Function version | Result |
+|---|---|---|
+| **New** (localOnly filter) | **Old** | ✅ Compatible — provider messages start with `user`; old function accepts them; `timezone` field ignored; old `{ reply }` shape handled by `if (!data?.reply)` |
+| **New** (localOnly filter) | **New** | ✅ Compatible — full structured error contract, timezone validated, `request_id` flows through |
+| **Old** (sends INITIAL_MESSAGE as assistant) | **New** | ❌ **Incompatible** — old frontend sends INITIAL_MESSAGE as the first message with `role: 'assistant'`; new Edge Function rejects any leading assistant role with `invalid_request`; all Pro AI requests break immediately |
+
+**Required deployment order (frontend first):**
+
+1. Merge PR #18 → Vercel auto-deploys new frontend from `main` (wait for build to complete)
+2. Smoke test: new frontend vs old Edge Function — confirm AI still works for Pro users
+3. `npx supabase functions deploy ai-chat --linked` — deploys new Edge Function
+4. Smoke test: new frontend vs new Edge Function — confirm structured errors, retry, timezone
+5. If Edge Function smoke test fails: redeploy previous Edge Function version from Supabase dashboard (Functions → Deployment history)
+
+**Rollback procedure:**
+- Edge Function failure: Supabase dashboard → Edge Functions → `ai-chat` → Deployment history → activate previous version. Frontend stays on new version (compatible with old Edge Function per the matrix above).
+- Frontend failure (unlikely — it is backward-compatible): revert commit on `main` and push; Vercel redeploys within minutes.
 
 ---
 
