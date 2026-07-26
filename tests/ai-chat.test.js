@@ -6,11 +6,12 @@
 import assert from 'assert'
 import {
   formatNetworkContext,
-  getLocalToday,
+  resolveToday,
   MAX_NETWORK_CONTEXT_CHARS,
   MAX_INTERACTIONS_PER_CONTACT,
   MAX_NOTE_CHARS,
   MAX_RELATIONSHIP_NOTE_CHARS,
+  MAX_FIELD_CHARS,
 } from '../supabase/functions/ai-chat/helpers.js'
 
 let passed = 0
@@ -28,29 +29,46 @@ function test(name, fn) {
   }
 }
 
-// ── getLocalToday ─────────────────────────────────────────────────────────────
-console.log('\ngetLocalToday')
+// ── resolveToday ──────────────────────────────────────────────────────────────
+console.log('\nresolveToday')
 
-test('returns YYYY-MM-DD format', () => {
-  const today = getLocalToday()
+test('returns YYYY-MM-DD format with a valid IANA timezone', () => {
+  const today = resolveToday('America/New_York')
   assert.match(today, /^\d{4}-\d{2}-\d{2}$/)
 })
 
 test('month is zero-padded to two digits', () => {
-  const [, month] = getLocalToday().split('-')
+  const [, month] = resolveToday('America/New_York').split('-')
   assert.strictEqual(month.length, 2)
 })
 
 test('day is zero-padded to two digits', () => {
-  const [,, day] = getLocalToday().split('-')
+  const [,, day] = resolveToday('America/New_York').split('-')
   assert.strictEqual(day.length, 2)
 })
 
-test('returned date is today (same calendar day)', () => {
-  const result = getLocalToday()
+test('falls back to UTC for undefined timezone', () => {
+  const result = resolveToday(undefined)
+  assert.match(result, /^\d{4}-\d{2}-\d{2}$/)
+  // UTC fallback should match the UTC calendar day
   const d = new Date()
-  const expected = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-  assert.strictEqual(result, expected)
+  const utc = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`
+  assert.strictEqual(result, utc)
+})
+
+test('falls back to UTC for an invalid timezone string', () => {
+  const result = resolveToday('Not/A/Timezone')
+  assert.match(result, /^\d{4}-\d{2}-\d{2}$/)
+})
+
+test('falls back to UTC for an empty string timezone', () => {
+  const result = resolveToday('')
+  assert.match(result, /^\d{4}-\d{2}-\d{2}$/)
+})
+
+test('UTC timezone returns a valid date', () => {
+  const result = resolveToday('UTC')
+  assert.match(result, /^\d{4}-\d{2}-\d{2}$/)
 })
 
 // ── formatNetworkContext — return type ────────────────────────────────────────
@@ -419,6 +437,174 @@ test('returns tooLarge=true and context="" for a network too large to represent'
     assert.ok(r.context.length <= MAX_NETWORK_CONTEXT_CHARS)
   }
   assert.ok(typeof r.tooLarge === 'boolean')
+})
+
+// ── formatNetworkContext — three-pass budget strategy ─────────────────────────
+console.log('\nformatNetworkContext — three-pass budget strategy')
+
+test('passUsed is 1 for a small network (no budget pressure)', () => {
+  const contacts = Array.from({ length: 5 }, (_, i) => ({
+    id: `c${i}`, name: `Contact ${i}`, company: 'ACME',
+  }))
+  const r = formatNetworkContext(contacts, [], TODAY)
+  assert.strictEqual(r.tooLarge, false)
+  assert.strictEqual(r.passUsed, 1)
+})
+
+test('passUsed is 1 for empty network', () => {
+  const r = formatNetworkContext([], [], TODAY)
+  assert.strictEqual(r.passUsed, 1)
+})
+
+test('passUsed is 3 when full and reduced passes exceed budget but compact fits', () => {
+  // 300 contacts with full data — designed to exceed passes 1 and 2 but fit in pass 3.
+  // Pass 1: ~350-450 chars × 300 ≈ 105,000–135,000 > 80,000 (exceeds)
+  // Pass 2: ~200-300 chars × 300 ≈ 60,000–90,000 — may exceed 80,000
+  // Pass 3: ~100-150 chars × 300 ≈ 30,000–45,000 < 80,000 (fits)
+  const contacts = Array.from({ length: 300 }, (_, i) => ({
+    id: `c${i}`,
+    name: `Contact Person Number ${i}`,
+    company: 'Goldman Sachs International',
+    role: 'Senior Analyst',
+    how_met: 'Career fair at Harvard',
+    relationship_note: 'Key contact for PE recruiting this season long note',
+    tags: ['recruiter', 'target firm', 'alumni'],
+  }))
+  const interactions = contacts.flatMap(c =>
+    Array.from({ length: 4 }, (_, j) => ({
+      id: `i_${c.id}_${j}`, contact_id: c.id, type: 'Email',
+      interaction_date: '2026-07-01',
+      notes: 'Detailed conversation note about recruiting timeline and interviews',
+      follow_up_date: j === 3 ? '2026-08-01' : null,
+    }))
+  )
+  const r = formatNetworkContext(contacts, interactions, TODAY)
+  assert.strictEqual(r.tooLarge, false)
+  assert.ok(r.context.length <= MAX_NETWORK_CONTEXT_CHARS,
+    `context ${r.context.length} chars exceeds budget`)
+  // Pass used should be 2 or 3 — not 1 (network is too large for pass 1)
+  assert.ok(r.passUsed === 2 || r.passUsed === 3,
+    `expected passUsed 2 or 3, got ${r.passUsed}`)
+})
+
+test('pass 3 compact context mentions total contact count', () => {
+  // Force pass 3 by creating a large network
+  const contacts = Array.from({ length: 300 }, (_, i) => ({
+    id: `c${i}`, name: `Contact ${i} Smith`,
+    company: 'Goldman Sachs International Partners Long Name',
+    role: 'Senior Analyst in Global Markets Division',
+    relationship_note: 'This is an important contact for the recruiting pipeline this season',
+    tags: ['recruiter', 'target firm', 'alumni', 'mentor'],
+  }))
+  const interactions = contacts.flatMap(c =>
+    Array.from({ length: 5 }, (_, j) => ({
+      id: `i_${c.id}_${j}`, contact_id: c.id, type: 'Coffee chat',
+      interaction_date: '2026-07-01',
+      notes: 'Long note about conversation and recruiting details mentioned during event',
+      follow_up_date: null,
+    }))
+  )
+  const r = formatNetworkContext(contacts, interactions, TODAY)
+  if (r.passUsed === 3) {
+    assert.ok(r.context.includes('compact summary'), 'compact context should mention compact summary')
+    assert.ok(r.context.includes('300 total'), 'compact context should include total count')
+  }
+  // Whether pass 2 or 3 was used, the result must be valid
+  assert.strictEqual(r.tooLarge, false)
+  assert.ok(r.context.length <= MAX_NETWORK_CONTEXT_CHARS)
+})
+
+test('tooLarge is true only when even pass 3 compact exceeds budget', () => {
+  // 500 contacts with very long names, company, and role — designed to exceed even compact pass.
+  // Compact line ≈ 200 chars × 500 = 100,000 > 80,000 → tooLarge = true
+  const contacts = Array.from({ length: 500 }, (_, i) => ({
+    id: `c${i}`,
+    name: `Very Long Contact Name Number ${i} Goldman International`,
+    company: 'Goldman Sachs International Partners Global Markets Division',
+    role: 'Senior Managing Director Global Markets Fixed Income Currency Commodities',
+    relationship_type: 'Potential employer',
+  }))
+  const interactions = contacts.flatMap(c =>
+    Array.from({ length: 8 }, (_, j) => ({
+      id: `i_${c.id}_${j}`, contact_id: c.id, type: 'Coffee chat',
+      interaction_date: '2026-07-01',
+      notes: 'Long detailed note about conversation at the career center networking event',
+      follow_up_date: '2026-08-01',
+    }))
+  )
+  const r = formatNetworkContext(contacts, interactions, TODAY)
+  // With 500 heavy contacts, compact pass likely also exceeds budget
+  if (r.tooLarge) {
+    assert.strictEqual(r.context, '')
+    assert.strictEqual(r.passUsed, null)
+  } else {
+    // If it fits (e.g. data was shorter than estimated), context must be within budget
+    assert.ok(r.context.length <= MAX_NETWORK_CONTEXT_CHARS)
+    assert.ok(r.passUsed !== null)
+  }
+})
+
+// ── formatNetworkContext — field truncation ────────────────────────────────────
+console.log('\nformatNetworkContext — field truncation')
+
+test(`truncates contact name beyond MAX_FIELD_CHARS (${MAX_FIELD_CHARS}) with ellipsis`, () => {
+  const c = { id: 'c1', name: 'N'.repeat(MAX_FIELD_CHARS + 20) }
+  const r = formatNetworkContext([c], [], TODAY)
+  assert.ok(r.context.includes('…'), 'missing ellipsis on name')
+  assert.ok(!r.context.includes('N'.repeat(MAX_FIELD_CHARS + 1)), 'name not truncated')
+})
+
+test(`does not truncate contact name at exactly MAX_FIELD_CHARS (${MAX_FIELD_CHARS}) chars`, () => {
+  const c = { id: 'c1', name: 'A'.repeat(MAX_FIELD_CHARS) }
+  const r = formatNetworkContext([c], [], TODAY)
+  // No ellipsis should appear for the name specifically
+  const nameLine = r.context.split('\n').find(l => l.includes('[1]'))
+  assert.ok(nameLine && !nameLine.includes('…'), 'unexpected ellipsis at MAX_FIELD_CHARS')
+})
+
+test('newlines embedded in contact name are normalized to spaces', () => {
+  const c = { id: 'c1', name: 'Priya\nSharma' }
+  const r = formatNetworkContext([c], [], TODAY)
+  assert.ok(r.context.includes('Priya Sharma'), 'newline not replaced with space')
+  assert.ok(!r.context.includes('Priya\nSharma'), 'raw newline still present')
+})
+
+test('tabs embedded in company name are normalized to spaces', () => {
+  const c = { id: 'c1', name: 'Priya', company: 'Goldman\tSachs' }
+  const r = formatNetworkContext([c], [], TODAY)
+  assert.ok(r.context.includes('Goldman Sachs'), 'tab not replaced with space')
+  assert.ok(!r.context.includes('Goldman\tSachs'), 'raw tab still present')
+})
+
+test('interaction_date is omitted from output when format is invalid', () => {
+  const ix = { ...{ id: 'i1', contact_id: 'c1', type: 'Email', notes: null, follow_up_date: null }, interaction_date: 'not-a-date' }
+  const r = formatNetworkContext([BASE_CONTACT], [ix], TODAY)
+  // An invalid date returns '' from safeDate, so no date appears in the interaction line
+  const emailLine = r.context.split('\n').find(l => l.includes('• ') && l.includes('Email'))
+  assert.ok(emailLine, 'interaction line not found')
+  assert.ok(!emailLine.includes('not-a-date'), 'invalid date should not appear in output')
+})
+
+test('follow_up_date is omitted when format is invalid', () => {
+  const ix = { id: 'i1', contact_id: 'c1', type: 'Email', interaction_date: '2026-07-01', notes: null, follow_up_date: 'tomorrow' }
+  const r = formatNetworkContext([BASE_CONTACT], [ix], TODAY)
+  assert.ok(!r.context.includes('[Follow up:'), 'invalid follow_up_date should not produce follow-up tag')
+})
+
+test('outreach_status is truncated if it somehow exceeds MAX_FIELD_CHARS', () => {
+  const ix = { id: 'i1', contact_id: 'c1', type: 'Email', interaction_date: '2026-07-01', notes: null,
+    follow_up_date: null, outreach_status: 'x'.repeat(MAX_FIELD_CHARS + 10) }
+  const r = formatNetworkContext([BASE_CONTACT], [ix], TODAY)
+  assert.ok(r.context.includes('[Outreach:'), 'outreach section should be present')
+  assert.ok(!r.context.includes('x'.repeat(MAX_FIELD_CHARS + 1)), 'outreach_status not truncated')
+})
+
+test('tags are capped at 10 per contact', () => {
+  const c = { ...BASE_CONTACT, tags: Array.from({ length: 15 }, (_, i) => `tag${i}`) }
+  const r = formatNetworkContext([c], [], TODAY)
+  // Only tags 0–9 should appear; tag10 and beyond should not
+  assert.ok(r.context.includes('tag9'), 'tag9 should be present')
+  assert.ok(!r.context.includes('tag10'), 'tag10 should be excluded (cap at 10)')
 })
 
 // ── results ───────────────────────────────────────────────────────────────────

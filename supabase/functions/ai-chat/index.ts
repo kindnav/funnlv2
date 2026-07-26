@@ -1,5 +1,5 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
-import { formatNetworkContext, getLocalToday } from './helpers.js'
+import { formatNetworkContext, resolveToday } from './helpers.js'
 import { parseProviderResponse } from './parseProviderResponse.js'
 import { normalizeMessages } from './normalizeMessages.js'
 
@@ -15,7 +15,7 @@ const corsHeaders = {
 //   Error:   { error: { code: string, message: string, retryable: boolean, request_id: string } }
 //
 // This contract is consumed by src/lib/ai-chat-error.js on the frontend.
-// Do not change either shape without updating both files.
+// Do not change either shape without updating both files and the CLAUDE.md table.
 
 function jsonResponse(body: object, status: number): Response {
   return new Response(JSON.stringify(body), {
@@ -81,7 +81,7 @@ Deno.serve(async (req) => {
 
   // A unique ID is generated per invocation and included in all responses.
   // It is safe to show to users as a support reference and to log as a
-  // correlation key. It does not contain any user data.
+  // correlation key. It never contains user data.
   const requestId = crypto.randomUUID()
 
   try {
@@ -110,11 +110,28 @@ Deno.serve(async (req) => {
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
     )
 
-    const { data: profile } = await supabaseAdmin
+    const { data: profile, error: profileError } = await supabaseAdmin
       .from('profiles')
       .select('ai_enabled')
       .eq('id', user.id)
       .maybeSingle()
+
+    // A database/network failure on the profile query is a retriable service error,
+    // NOT an access-denied signal. If we treated it as pro_required (non-retryable),
+    // a transient DB issue would permanently block the user's request.
+    if (profileError) {
+      console.error('ai-chat profile-query-failed', {
+        requestId,
+        code: profileError.code,
+      })
+      return errorResponse(
+        'internal_error',
+        'Could not verify access — please try again',
+        true,
+        requestId,
+        500
+      )
+    }
 
     if (!profile?.ai_enabled) {
       return errorResponse(
@@ -135,8 +152,9 @@ Deno.serve(async (req) => {
     }
 
     // normalizeMessages validates roles and content, enforces per-message and
-    // total character limits, strips the frontend's synthetic opening assistant
-    // message, and ensures the sequence is valid for the Anthropic API.
+    // total character limits, and ensures the sequence starts with user and ends
+    // with user. It rejects any leading assistant message — the frontend's
+    // buildProviderMessages() already excludes localOnly messages.
     const { messages: validatedMessages, errorCode: msgError } = normalizeMessages(rawBody?.messages)
     if (msgError || !validatedMessages) {
       return errorResponse('invalid_request', 'Invalid or missing messages', false, requestId, 400)
@@ -175,7 +193,11 @@ Deno.serve(async (req) => {
     }
 
     // ── 5. Build bounded network context ──────────────────────────────────────
-    const today = getLocalToday()
+    // The browser's IANA timezone is sent in rawBody.timezone so that today's date
+    // is computed in the user's local calendar, not the Edge Function's UTC clock.
+    // resolveToday() validates the value and falls back to UTC if missing or invalid.
+    // The timezone string is never logged or included in any response body.
+    const today = resolveToday(rawBody?.timezone)
     const { context: networkData, tooLarge } = formatNetworkContext(
       contactsResult.data ?? [],
       interactionsResult.data ?? [],
@@ -196,10 +218,22 @@ Deno.serve(async (req) => {
       .replace('{today}', today)
       .replace('{network_data}', networkData)
 
-    // ── 6. Call Claude with a 25-second request timeout ───────────────────────
+    // ── 6. Call Claude ─────────────────────────────────────────────────────────
+    // Timeout: 45 seconds.
+    //
+    // Rationale: at max context (80,000 chars network + 20,000 chars history) and
+    // max output (2,048 tokens), claude-sonnet-5 at typical throughput (~80 tok/s)
+    // needs ~25 seconds for output alone, plus input processing time. 25 seconds
+    // was too low. 45 seconds provides headroom for large requests while keeping
+    // user-facing latency bounded. Supabase Edge Function wall-clock limit is at
+    // least 150 seconds (free tier), so 45s is well within platform limits.
+    //
+    // PROVISIONAL: this timeout has not been verified against production traffic.
+    // Adjust if smoke testing reveals legitimate requests are being aborted.
+    //
     // ANTHROPIC_API_KEY is stored in Supabase secrets — never in any file.
     const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), 25_000)
+    const timer = setTimeout(() => controller.abort(), 45_000)
 
     let anthropicRes: Response
     try {
@@ -263,7 +297,8 @@ Deno.serve(async (req) => {
           503
         )
       }
-      return errorResponse('internal_error', 'AI service error — please try again', true, requestId, 502)
+      // All other non-2xx responses: 4xx auth errors, 5xx server errors, etc.
+      return errorResponse('provider_error', 'AI service error — please try again', true, requestId, 502)
     }
 
     // ── 8. Parse provider response ─────────────────────────────────────────────
@@ -286,10 +321,9 @@ Deno.serve(async (req) => {
       )
     }
 
-    // Truncated partial responses (stop_reason=max_tokens) are returned to the user
-    // rather than rejected: the partial text is still useful. The truncated flag lets
-    // the frontend surface an optional note. Max tokens is currently 2048 — increasing
-    // it requires evidence that longer responses improve the experience.
+    // Truncated partial responses (stop_reason=max_tokens) are returned rather than
+    // rejected: the partial text is still useful. The truncated flag lets the
+    // frontend surface an optional note to the user.
     const successBody: Record<string, any> = { reply, request_id: requestId }
     if (truncated) successBody.truncated = true
 

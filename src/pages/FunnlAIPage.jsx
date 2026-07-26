@@ -4,6 +4,7 @@ import { supabase } from '../lib/supabase'
 import { canUseAI } from '../lib/ai'
 import { track } from '../lib/analytics'
 import { extractInvokeError } from '../lib/ai-chat-error'
+import { buildProviderMessages, isRetryEligible } from '../lib/ai-chat-conversation'
 
 // Markdown component overrides — applied only to assistant messages.
 // Raw HTML is not rendered (react-markdown default, kept intentionally).
@@ -27,15 +28,10 @@ const STARTER_PROMPTS = [
 const INITIAL_MESSAGE = {
   role: 'assistant',
   content: "Your network is loaded. Ask me anything about your contacts — who you know somewhere, who's gone quiet, what your follow-up situation looks like, or whatever you're wondering about.",
-}
-
-// Builds the message array to send to the Edge Function.
-// Filters out messages that have an inline error (failed, unretried turns).
-// INITIAL_MESSAGE is included — the Edge Function's normalizeMessages strips it.
-function buildProviderMessages(msgs) {
-  return msgs
-    .filter(m => !m.error)
-    .map(m => ({ role: m.role, content: m.content }))
+  // localOnly: this greeting is frontend-only and must never be sent to the provider.
+  // buildProviderMessages() in ai-chat-conversation.js filters it out before invocation.
+  // The Edge Function rejects any conversation that starts with an assistant message.
+  localOnly: true,
 }
 
 const SparkleIcon = ({ size = 13 }) => (
@@ -95,10 +91,13 @@ function FunnlAIPage() {
 
     try {
       const { data, error: fnError } = await supabase.functions.invoke('ai-chat', {
-        body: { messages: buildProviderMessages(nextMessages) },
+        body: {
+          messages: buildProviderMessages(nextMessages),
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        },
       })
 
-      const invokeError = extractInvokeError(fnError, data)
+      const invokeError = await extractInvokeError(fnError, data)
       if (invokeError) {
         track('ai_assistant_failed', { code: invokeError.code, retryable: invokeError.retryable })
         setMessages(prev => {
@@ -159,10 +158,13 @@ function FunnlAIPage() {
         i === index ? { role: m.role, content: m.content } : m
       )
       const { data, error: fnError } = await supabase.functions.invoke('ai-chat', {
-        body: { messages: buildProviderMessages(retryMessages) },
+        body: {
+          messages: buildProviderMessages(retryMessages),
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        },
       })
 
-      const invokeError = extractInvokeError(fnError, data)
+      const invokeError = await extractInvokeError(fnError, data)
       if (invokeError) {
         track('ai_assistant_failed', { code: invokeError.code, retryable: invokeError.retryable })
         setMessages(prev => prev.map((m, i) =>
@@ -317,7 +319,7 @@ function FunnlAIPage() {
                         >
                           Dismiss
                         </button>
-                        {msg.error.retryable && (
+                        {isRetryEligible(messages, i) && (
                           <button
                             onClick={() => retryMessage(i)}
                             disabled={loading}

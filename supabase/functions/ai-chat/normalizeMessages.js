@@ -56,14 +56,13 @@ export function normalizeMessages(messages) {
     validated.push({ role: m.role, content })
   }
 
-  // Step 3: strip the frontend's synthetic opening assistant greeting.
-  // INITIAL_MESSAGE is always the first entry when included; it is a locally-rendered
-  // message that Claude never actually said, so we strip it before sending to Anthropic.
-  // Only the very first message is a candidate for stripping; a real assistant reply
-  // at any later position is kept.
-  let normalized = validated[0]?.role === 'assistant' ? validated.slice(1) : validated
-
-  if (normalized.length === 0) {
+  // Step 3: require the conversation to start with a user message.
+  // The frontend's buildProviderMessages() filters out localOnly messages (including
+  // INITIAL_MESSAGE) before invoking the Edge Function, so a leading assistant role
+  // should never arrive here. Silently stripping it would mask a frontend bug —
+  // rejecting it is the correct defensive posture.
+  let normalized = validated
+  if (normalized[0]?.role !== 'user') {
     return { messages: null, errorCode: 'invalid_request' }
   }
 

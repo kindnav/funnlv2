@@ -110,14 +110,17 @@ test('valid multi-turn conversation succeeds', () => {
   assert.strictEqual(r.messages.length, 3)
 })
 
-test('strips the frontend opening assistant greeting (INITIAL_MESSAGE)', () => {
+test('leading assistant role returns invalid_request (localOnly messages filtered before invoke)', () => {
+  // buildProviderMessages() in ai-chat-conversation.js strips localOnly messages
+  // (including INITIAL_MESSAGE) before invoking the Edge Function, so a leading
+  // assistant role should never arrive here. Silently stripping it would mask a
+  // frontend bug — rejecting it is the correct defensive posture.
   const r = normalizeMessages([
     { role: 'assistant', content: 'Your network is loaded. Ask me anything.' },
     { role: 'user', content: 'Hello' },
   ])
-  assert.strictEqual(r.errorCode, null)
-  assert.strictEqual(r.messages.length, 1)
-  assert.strictEqual(r.messages[0].role, 'user')
+  assert.strictEqual(r.errorCode, 'invalid_request')
+  assert.strictEqual(r.messages, null)
 })
 
 test('does NOT strip a real assistant reply at a later position', () => {
@@ -154,8 +157,9 @@ console.log('\nnormalizeMessages — size limiting')
 
 test('trims oldest turns when total conversation exceeds MAX_TOTAL_CONVERSATION_CHARS', () => {
   const bigContent = 'b'.repeat(MAX_MESSAGE_CHARS - 10)  // 3990 chars each
+  // Conversation starts with user (correct). buildProviderMessages() strips localOnly
+  // messages before invoking — the Edge Function never receives a leading assistant role.
   const msgs = [
-    { role: 'assistant', content: 'Greeting' },        // stripped (INITIAL_MESSAGE)
     { role: 'user',      content: bigContent },         // oldest user turn
     { role: 'assistant', content: bigContent },         // oldest assistant response
     { role: 'user',      content: bigContent },         // middle turn
@@ -164,7 +168,7 @@ test('trims oldest turns when total conversation exceeds MAX_TOTAL_CONVERSATION_
     { role: 'assistant', content: bigContent },         // recent response
     { role: 'user',      content: 'Latest question' }, // current
   ]
-  // After stripping: 7 msgs × ~3990 chars = 27,930 > MAX_TOTAL_CONVERSATION_CHARS
+  // 6 × 3990 + 15 = 23,955 > MAX_TOTAL_CONVERSATION_CHARS (20,000) — trimming required
   const r = normalizeMessages(msgs)
   assert.strictEqual(r.errorCode, null)
   assert.ok(r.messages)

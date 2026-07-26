@@ -863,7 +863,7 @@ Text: "<user input>"
 
 ### Layer C reliability spec — ai-chat Edge Function (branch review/ai-chat-reliability, PR #18)
 
-**Root cause confirmed:** HTTP 200 from Anthropic with `content: [{ type: 'thinking', ... }]` and no text block → `.find(b => b.type === 'text')` returned `undefined` → `reply = undefined` → returned `{ reply: '' }` → frontend `if (data?.reply)` treated it as falsy → "No response received" shown. Now produces `{ error: { code: 'empty_provider_response', ... } }` instead.
+**Root cause confirmed:** HTTP 200 from Anthropic where the `content` array contains NO text block (empty array, thinking-only, whitespace-only, or missing) → the original `.find(b => b.type === 'text')` returned `undefined` → `reply = undefined` → returned `{ reply: '' }` → frontend `if (data?.reply)` treated it as falsy → "No response received" shown. Note: `.find()` scans the entire array, so a thinking block BEFORE a text block is NOT a failure condition — `.find()` would still locate the later text block. The failure path is specifically the case where no text block exists at all. Now produces `{ error: { code: 'empty_provider_response', ... } }` instead.
 
 **Module: `supabase/functions/ai-chat/parseProviderResponse.js`**
 - Collects ALL text blocks (not just first); skips `type: 'thinking'` blocks; joins with `\n\n`
@@ -873,7 +873,7 @@ Text: "<user input>"
 
 **Module: `supabase/functions/ai-chat/normalizeMessages.js`**
 - Validates every message: role must be `user|assistant`, content must be non-blank string ≤ MAX_MESSAGE_CHARS
-- Strips the frontend's opening assistant greeting (INITIAL_MESSAGE) if it is the first message
+- **Rejects** (returns `invalid_request`) any conversation starting with an assistant role — INITIAL_MESSAGE is now marked `localOnly: true` on the frontend and filtered out by `buildProviderMessages()` before invoke; a leading assistant role arriving at the Edge Function indicates a frontend bug and is rejected defensively rather than silently stripped
 - Trims oldest user+assistant pairs until total chars ≤ MAX_TOTAL_CONVERSATION_CHARS
 - Caps at MAX_MESSAGES, then validates strict role alternation, then validates ends with user
 - Returns `{ messages: Array|null, errorCode: 'invalid_request'|null }`
@@ -885,28 +885,42 @@ Text: "<user input>"
 | `MAX_TOTAL_CONVERSATION_CHARS` | 20000 | Total char budget before oldest pairs are trimmed |
 
 **Context budget (`supabase/functions/ai-chat/helpers.js`)**
-- Two-pass: pass 1 = MAX_INTERACTIONS_PER_CONTACT=3 per contact; pass 2 = 1 per contact
-- Hard ceiling: MAX_NETWORK_CONTEXT_CHARS=80,000 — exceeding returns `tooLarge: true` → HTTP 413 (`context_too_large`, not retryable)
-- Field truncation: notes ≤ MAX_NOTE_CHARS=150, relationship_note ≤ MAX_RELATIONSHIP_NOTE_CHARS=100, all other fields ≤ MAX_FIELD_CHARS=80
+- **Three-pass** budget strategy (was two-pass):
+  - Pass 1: MAX_INTERACTIONS_PER_CONTACT=3 per contact (full detail)
+  - Pass 2: 1 interaction per contact (reduced)
+  - Pass 3: compact one-line-per-contact index — every contact appears, no interaction bodies; aggregate metadata only (count, last date, overdue flag)
+  - `tooLarge: true` only when even the compact pass exceeds MAX_NETWORK_CONTEXT_CHARS=80,000
+- Field truncation applied to ALL fields: `truncFreeText()` for free-text (name, company, role, how_met, notes, relationship_note, email, tags), `truncEnum()` for controlled-enum strings (type, relationship_type, outreach_status), `safeDate()` for dates (validates YYYY-MM-DD, returns '' for invalid)
 - Tags capped at 10 per contact
-- Output shape changed to `{ context: string, tooLarge: boolean }` (was plain string — callers updated)
+- Output shape: `{ context: string, tooLarge: boolean, passUsed: 1|2|3|null }` (`passUsed` for testability; null when tooLarge)
+- Timezone-aware: `resolveToday(timezone)` replaces `getLocalToday()`. Edge Function receives user's IANA timezone from `rawBody.timezone` (sent by frontend via `Intl.DateTimeFormat().resolvedOptions().timeZone`). Falls back to UTC for missing or invalid timezone. Resolves overdue follow-up comparisons to the user's calendar day, not the server's UTC clock.
 - Prompt-injection isolation: DATA SAFETY preamble + `=== BEGIN/END NETWORK DATA ===` delimiters
 - Does not mutate source arrays
+
+**Request timeout:** 45 seconds (increased from 25s). Rationale: at max context (80,000 chars network + 20,000 chars history) and max output (2,048 tokens), claude-sonnet-5 at ~80 tok/s needs ~25.6s for output alone plus input processing. 25s was too low; 45s provides headroom. Supabase Edge Function wall-clock limit is ≥150s (free tier). **Provisional** — not verified against production traffic. Adjust if smoke testing reveals legitimate requests being aborted.
 
 **Structured error contract (every error path in index.ts):**
 ```
 { error: { code: string, message: string, retryable: boolean, request_id: string } }
 ```
 
+11 canonical error codes enforced as an allowlist in both the Edge Function and `src/lib/ai-chat-error.js` — unknown codes normalize to `internal_error`:
+
 | Error code | HTTP | Retryable | Trigger |
 |---|---|---|---|
+| `unauthorized` | 401 | false | Missing or invalid auth header |
 | `invalid_request` | 400 | false | Bad messages shape |
-| `pro_required` | 403 | false | ai_enabled = false |
-| `internal_error` | 500 | true | Unexpected exception |
-| `network_data_failed` | 503 | true | DB query error |
-| `provider_error` | 502 | true | Non-OK Anthropic response |
-| `empty_provider_response` | 502 | true | No text block in content |
-| `context_too_large` | 413 | false | Network context > 80,000 chars |
+| `pro_required` | 403 | false | ai_enabled = false or profile row absent |
+| `internal_error` | 500 | true | Unexpected exception or profile DB query error |
+| `network_data_failed` | 503 | true | Contacts/interactions DB query error |
+| `context_too_large` | 413 | false | Network context > 80,000 chars even after compact pass |
+| `provider_rate_limited` | 429 | true | Anthropic 429 (rate limit) |
+| `provider_timeout` | 504 | true | AbortController 45s timeout fired |
+| `provider_unavailable` | 503 | true | Anthropic 529 (overloaded) |
+| `provider_error` | 502 | true | Other non-2xx Anthropic response |
+| `empty_provider_response` | 502 | true | No text block in response content |
+
+Note: profile DB query failure → `internal_error` (retryable), NOT `pro_required` — a transient DB issue must not permanently lock the user out.
 
 **Success response:** `{ reply: string, request_id: string, truncated?: true }`
 
@@ -914,18 +928,27 @@ Text: "<user input>"
 `requestId`, `providerStatus` (HTTP status), `providerRequestId` (Anthropic's `x-request-id` header), `stop_reason`, content block types array, `error.name` for unexpected exceptions.
 
 **Frontend changes (`src/pages/FunnlAIPage.jsx`):**
+- INITIAL_MESSAGE marked `localOnly: true` — it is a frontend UI greeting, never meant for the provider
+- `buildProviderMessages()` (from `ai-chat-conversation.js`) replaces the local function — filters `localOnly` and `error` messages before invoke
+- Sends `timezone: Intl.DateTimeFormat().resolvedOptions().timeZone` in the request body
+- `extractInvokeError` is now async (awaited); FunctionsHttpError.context is a raw Response parsed via `await fnError.context.json()`
+- Retry button shown only when `isRetryEligible(messages, i)` — failed message must be the last in the array (prevents stale retries after successful later turns)
 - Errors are inline per-message (not a separate error state) — failed prompt stays visible
 - `aria-live="polite" role="status"` container for screen reader accessibility
-- Retry button (if `retryable: true`) — resends same prompt without duplicating it in provider history
 - Dismiss button — removes failed message and restores text to input
 - Truncated response shows note: "Response may be cut short — feel free to ask a follow-up."
 - `track('ai_assistant_failed', { code, retryable })` on every error path — no user content
 
 **Frontend error normalizer (`src/lib/ai-chat-error.js`):**
-- `extractInvokeError(fnError, data)` handles FunctionsHttpError.context.error, legacy plain-string errors, and generic network errors
-- Returns `{ code, message, retryable, request_id }` or `null` on success
+- `extractInvokeError(fnError, data)` is **async** — parses `FunctionsHttpError.context` (raw Response) via `await fnError.context.json()`; handles `FunctionsRelayError`, `FunctionsFetchError`, legacy plain-string errors, and generic errors
+- Error code allowlist (11 codes) enforced — unknown codes normalize to `internal_error`
+- Returns `Promise<{ code, message, retryable, request_id }|null>`
 
-**Test totals after overhaul: 227 total (37 csv-header + 62 ai-helpers + 33 theme + 15 parse-provider-response + 18 normalize-messages + 11 ai-chat-error + 51 ai-chat)**
+**Frontend conversation helpers (`src/lib/ai-chat-conversation.js`):**
+- `buildProviderMessages(msgs)` — filters `localOnly` and `error` messages, maps to `{ role, content }` only
+- `isRetryEligible(messages, index)` — returns `true` only if `index === messages.length - 1` (failed message is the last message, guaranteeing valid provider sequence on retry)
+
+**Test totals after overhaul: 268 total (37 csv-header + 62 ai-helpers + 33 theme + 15 parse-provider-response + 18 normalize-messages + 16 ai-chat-error + 67 ai-chat + 20 ai-chat-conversation)**
 
 **Deployment status:** Edge Function and frontend NOT yet deployed. Deployment is a separate step requiring `npx supabase functions deploy ai-chat` and a Vercel push to `main`.
 
