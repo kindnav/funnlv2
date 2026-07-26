@@ -146,6 +146,7 @@ supabase/
 | `followup_snoozed` | FollowUpsPage handleSnooze | `{ option: 'tomorrow'\|'three_days'\|'one_week'\|'custom' }` — controlled enum only | Feature usage |
 | `csv_import_used` | ImportContactsModal handleImport | `{ contacts_imported: number, ai_assisted: boolean }` | Feature usage |
 | `ai_assistant_used` | FunnlAIPage sendMessage on success | none | AI feature usage |
+| `ai_assistant_failed` | FunnlAIPage sendMessage or retryMessage on any error path | `{ code: controlledErrorCode, retryable: boolean }` — no prompt text, no contact data | AI reliability diagnostic |
 | `ai_fill_used` | AddContactDrawer handleAIParse on success | `{ fields_filled: number }` | AI feature usage |
 | `landing_cta_clicked` | LandingPage — all three CTA buttons | `{ location: 'nav'\|'hero'\|'bottom' }` | Acquisition / landing page conversion |
 | `signup_started` | SignInPage on mount when mode === 'signup' | none | Signup funnel step 1 — user arrived at the signup form |
@@ -340,7 +341,7 @@ The contacts page filter pills use `useSearchParams`. Active tag is stored as `?
 | **CSV importer** | ✅ Import button on Contacts page opens a 3-step modal (upload → map → confirm). Mapping step: **pool-at-top UI** — unassigned columns shown prominently at the top as clickable chips ("click to place"); clicking a chip opens a field picker (1 click to assign). Field-first assignment also available via + Add on each field row. `normalizeHeader()` normalizes separators before lookup (first_name / first-name / first.name all match one HEADER_MAP entry). HEADER_MAP pruned of false-positive generic entries. Multiple columns combine in chip order (e.g. First Name + Last Name → "John Smith"). "— not assigned" placeholder on empty fields. Picker uses fixed-position viewport coords (not absolute) so scrollable container can't clip it. Tags: comma-separated cell values split into arrays. relationship_type and relationship_note are mappable fields. All-or-nothing bulk insert. `csv_import_used` event gains `ai_assisted: boolean` property. Known limitations: no duplicate detection, CSV-only, no cell-level editing. **Smart import (Pro):** after upload, Pro users get one `ai-map-csv` Edge Function call on unresolved columns only (deterministic alias mappings take precedence and cannot be overridden by AI); the returned assignment pre-populates Step 2 with an "AI auto-mapped N columns" banner; user reviews/adjusts before importing; non-Pro users see unchanged manual mapping flow with a soft "Pro tip" upgrade banner at the top of Step 2 (informational only — does not block mapping); AI failure silently falls back to rule-based mapping. `relationship_note` ("Why they matter") is a mappable field; common notes column names auto-map via HEADER_MAP ('notes', 'note', 'comments', 'comment', 'memo', 'additional notes', 'general notes' — 'description' and 'details' excluded as ambiguous); multiple columns mapped to relationship_note join with ' | ' separator. **LinkedIn Connections export:** two-pass header detection (PR #15) skips the 2-line preamble LinkedIn prepends before the real header; 'URL' column value-sniffed → linkedin_url when sample values contain linkedin.com; teal detection banner shown in Step 2; tested against real LinkedIn exports. Phase B (split jammed combined columns, e.g. "John Smith, Goldman, analyst" in one cell) deferred — see Known future work. |
 | **Skills removed → relationship intent** | ✅ `skills` column dropped. `relationship_type` (preset select: Mentor/Collaborator/Referral path/Potential employer/Connector/Other) and `relationship_note` (freeform "why this person matters") added to contacts table, all forms, detail page, importer, and AI context. AI Fill extracts `relationship_note` from freeform text but never auto-selects `relationship_type` (deliberate user choice). |
 | **Dynamic sidebar YOUR TAGS** | ✅ Replaced hardcoded Pipeline section (Target firms/Recruiters/Alumni) with live user-tag groups. Queries contacts table on each nav change, counts tag occurrences in JS, sorts by count desc, caps at top 8. Deterministic dot colors per tag. Active tag highlighted. Empty state: "Tags you add to contacts will appear here." |
-| **Product analytics (PostHog)** | ✅ 21 events total (8 core + 2 Phase 1 + 3 Phase 2A + 2 Phase 3 + 2 Phase 4 + 4 Pilot). Core: user_signed_up, first_contact_added, contact_added, interaction_logged, followup_set, csv_import_used, ai_assistant_used, ai_fill_used. Phase 1: landing_cta_clicked, signup_started. Phase 2A: activation_checklist_viewed, activation_step_completed, activation_completed. Phase 3: followup_completed, followup_snoozed. Phase 4: email_confirmed, user_signed_in. Pilot: csv_mapping_completed, csv_mapping_failed, post_import_action_clicked, outreach_status_changed. DOM autocapture disabled; $pageview and $pageleave remain enabled. Behavior only — no contact content. Users identified by Supabase ID. |
+| **Product analytics (PostHog)** | ✅ 22 events total (8 core + 2 Phase 1 + 3 Phase 2A + 2 Phase 3 + 2 Phase 4 + 4 Pilot + 1 AI reliability). Core: user_signed_up, first_contact_added, contact_added, interaction_logged, followup_set, csv_import_used, ai_assistant_used, ai_fill_used. Phase 1: landing_cta_clicked, signup_started. Phase 2A: activation_checklist_viewed, activation_step_completed, activation_completed. Phase 3: followup_completed, followup_snoozed. Phase 4: email_confirmed, user_signed_in. Pilot: csv_mapping_completed, csv_mapping_failed, post_import_action_clicked, outreach_status_changed. AI reliability: ai_assistant_failed. DOM autocapture disabled; $pageview and $pageleave remain enabled. Behavior only — no contact content. Users identified by Supabase ID. |
 | **Privacy policy** | ✅ `/privacy` — plain-language page covering data stored, all third parties (Supabase, Anthropic, PostHog, Resend, Vercel), analytics disclosure, user rights, contact email. Linked from sign-in page and settings. Accessible logged-out. |
 | **Phase 1 — Public landing page** | ✅ `LandingPage.jsx` at `/` for logged-out users. 11 sections: nav, hero with annotated product mock, marquee ticker, problem statement, feature rows (01–03), Funnl AI section, who-it's-for grid, comparison table, privacy note, final CTA, footer. `/signin` and `/signup` as separate routes, mode auto-detected from pathname. Post-sign-in `navigate('/', { replace: true })` prevents blank screen. All product claims verified against actual functionality. |
 | **Phase 2A — Guided activation checklist** | ✅ Three-step checklist on DashboardPage: (1) add or import 5 contacts, (2) log the first conversation, (3) schedule the first follow-up. Milestones stored as four nullable `timestamptz` columns on `profiles` (the fourth records overall activation completion). Written with `WHERE col IS NULL` conditional updates for idempotent deduplication across tabs and sessions. Backfill included in migration `20260713075431_add_activation_milestones.sql`. CSV import button accessible from dashboard in addition to contacts page. |
@@ -653,7 +654,7 @@ Recommended positioning:
 |---|---|---|---|
 | **A** | Plumbing + Pro gate | ✅ Done | `ai_enabled` column + RLS fix. `src/lib/ai.js` canUseAI() Stripe-ready gate. Edge Functions `ai-parse-contact` and `ai-map-csv` deployed. Gate tested: 403 for non-Pro, 200 for Pro. |
 | **B** | Contact from text | ✅ Done | AI Fill section added to AddContactDrawer. Pro-gated (hidden for non-Pro). Textarea → Parse → fields fill with purple highlight. Manual edits clear the highlight. Follow-up suggestion shown as reminder. Never auto-saves. |
-| **C** | AI Assistant | ✅ Done | Working chat UI on /ai (FunnlAIPage.jsx). Edge Function `ai-chat` deployed (claude-sonnet-5). Loads all contacts + interactions per call. Multi-turn conversation works. Extended thinking handled: `.find(b => b.type === 'text')` since claude-sonnet-5 sometimes returns a thinking block first. System prompt STYLE section: prose-first, no reflexive bullets/bolding, warm mentor voice. react-markdown renders assistant replies (bold/lists clean, raw HTML disabled). Typebox redesigned: pill shape, focus glow, send button with press feel. Pro-gated; non-Pro sees locked state. All stale "coming soon" copy updated across Sidebar, Dashboard, ContactDetail. |
+| **C** | AI Assistant | ✅ Done | Working chat UI on /ai (FunnlAIPage.jsx). Edge Function `ai-chat` deployed (claude-sonnet-5). Loads all contacts + interactions per call. Multi-turn conversation works. System prompt STYLE section: prose-first, no reflexive bullets/bolding, warm mentor voice. react-markdown renders assistant replies (bold/lists clean, raw HTML disabled). Typebox redesigned: pill shape, focus glow, send button with press feel. Pro-gated; non-Pro sees locked state. All stale "coming soon" copy updated across Sidebar, Dashboard, ContactDetail. **Reliability overhaul (branch review/ai-chat-reliability, PR #18, 2026-07-26):** Confirmed defective path fixed — HTTP 200 from Anthropic with thinking-only content caused `.find(b => b.type === 'text')` to return undefined, producing an empty reply. Now: `parseProviderResponse.js` collects ALL text blocks, skips thinking blocks, joins with `\n\n`, classifies max_tokens truncation. `normalizeMessages.js` validates and bounds conversation history (MAX_MESSAGES=20, MAX_MESSAGE_CHARS=4000, MAX_TOTAL_CONVERSATION_CHARS=20000, role alternation, strips INITIAL_MESSAGE). Structured error contract `{ error: { code, message, retryable, request_id } }` on all error paths; `{ reply, request_id, truncated? }` on success. Context budget: two-pass deterministic (MAX_NETWORK_CONTEXT_CHARS=80000, MAX_INTERACTIONS_PER_CONTACT=3 then 1). Prompt-injection delimiters around network data. DB query failures return `network_data_failed`. Frontend: inline error with Retry/Dismiss per message, aria-live, failed prompt kept visible, `ai_assistant_failed` analytics event. Not yet deployed — deployment pending. |
 | **D** | Stripe billing | 🔵 Later | Replace manual `ai_enabled` flag with real subscription check. canUseAI() is the seam. |
 
 ---
@@ -857,6 +858,121 @@ Text: "<user input>"
 - Retrieval/embeddings for very large networks (hundreds+ contacts) — not needed at student scale
 - Saved conversation history / multiple chat threads
 - Streaming responses (currently waits for full response before displaying)
+
+---
+
+### Layer C reliability spec — ai-chat Edge Function (branch review/ai-chat-reliability, PR #18)
+
+**Confirmed defective path:** HTTP 200 from Anthropic where the `content` array contains NO usable text block (empty array, thinking-only, whitespace-only, or missing) → the original `.find(b => b.type === 'text')` returned `undefined` → `reply = undefined` → returned `{ reply: '' }` → frontend `if (data?.reply)` treated it as falsy → "No response received" shown. Now produces `{ error: { code: 'empty_provider_response', ... } }` instead.
+
+**Important clarification:** `.find()` scans the entire array, so a thinking block BEFORE a text block is NOT a failure condition — `.find()` would still locate the later text block. The defective condition is specifically when no text block exists at all. The exact provider response body from the historical incident was not captured, so it cannot be proven which specific input (thinking-only, empty, missing, etc.) triggered that individual failure. The fix addresses all usable-text-absent cases. A thinking block appearing before a text block is handled correctly by both the old and new code.
+
+**Module: `supabase/functions/ai-chat/parseProviderResponse.js`**
+- Collects ALL text blocks (not just first); skips `type: 'thinking'` blocks; joins with `\n\n`
+- `stop_reason === 'max_tokens'` → `truncated: true` (reported to frontend, shown as note to user)
+- Error output: `{ reply: null, stop_reason, truncated: false, error: 'empty_provider_response' }`
+- Success output: `{ reply: string, stop_reason, truncated: bool, error: null }`
+
+**Module: `supabase/functions/ai-chat/normalizeMessages.js`**
+- Validates every message: role must be `user|assistant`, content must be non-blank string ≤ MAX_MESSAGE_CHARS
+- **Rejects** (returns `invalid_request`) any conversation starting with an assistant role — INITIAL_MESSAGE is now marked `localOnly: true` on the frontend and filtered out by `buildProviderMessages()` before invoke; a leading assistant role arriving at the Edge Function indicates a frontend bug and is rejected defensively rather than silently stripped
+- Trims oldest user+assistant pairs until total chars ≤ MAX_TOTAL_CONVERSATION_CHARS
+- Caps at MAX_MESSAGES, then validates strict role alternation, then validates ends with user
+- Returns `{ messages: Array|null, errorCode: 'invalid_request'|null }`
+
+| Constant | Value | Purpose |
+|---|---|---|
+| `MAX_MESSAGES` | 20 | Hard cap on conversation turns sent to provider |
+| `MAX_MESSAGE_CHARS` | 4000 | Per-message size ceiling |
+| `MAX_TOTAL_CONVERSATION_CHARS` | 20000 | Total char budget before oldest pairs are trimmed |
+
+**Context budget (`supabase/functions/ai-chat/helpers.js`)**
+- **Three-pass** budget strategy (was two-pass):
+  - Pass 1: MAX_INTERACTIONS_PER_CONTACT=3 per contact (full detail)
+  - Pass 2: 1 interaction per contact (reduced)
+  - Pass 3: compact one-line-per-contact index — every contact appears, no interaction bodies; aggregate metadata only (count, last date, overdue flag)
+  - `tooLarge: true` only when even the compact pass exceeds MAX_NETWORK_CONTEXT_CHARS=80,000
+- Field truncation applied to ALL fields: `truncFreeText()` for free-text (name, company, role, how_met, notes, relationship_note, email, tags), `truncEnum()` for controlled-enum strings (type, relationship_type, outreach_status), `safeDate()` for dates (validates YYYY-MM-DD, returns '' for invalid)
+- Tags capped at 10 per contact
+- Output shape: `{ context: string, tooLarge: boolean, passUsed: 1|2|3|null }` (`passUsed` for testability; null when tooLarge)
+- Timezone-aware: `resolveToday(timezone)` replaces `getLocalToday()`. Edge Function receives user's IANA timezone from `rawBody.timezone` (sent by frontend via `Intl.DateTimeFormat().resolvedOptions().timeZone`). Falls back to UTC for missing or invalid timezone. Resolves overdue follow-up comparisons to the user's calendar day, not the server's UTC clock.
+- Prompt-injection isolation: DATA SAFETY preamble + `=== BEGIN/END NETWORK DATA ===` delimiters
+- Does not mutate source arrays
+
+**Request timeout:** 45 seconds (increased from 25s). Rationale: at max context (80,000 chars network + 20,000 chars history) and max output (2,048 tokens), claude-sonnet-5 at ~80 tok/s needs ~25.6s for output alone plus input processing. 25s was too low; 45s provides headroom. Supabase Edge Function wall-clock limit is ≥150s (free tier). **Provisional** — not verified against production traffic. Adjust if smoke testing reveals legitimate requests being aborted.
+
+**Structured error contract (every error path in index.ts):**
+```
+{ error: { code: string, message: string, retryable: boolean, request_id: string } }
+```
+
+11 canonical error codes enforced as an allowlist in both the Edge Function and `src/lib/ai-chat-error.js` — unknown codes normalize to `internal_error`:
+
+| Error code | HTTP | Retryable | Trigger |
+|---|---|---|---|
+| `unauthorized` | 401 | false | Missing or invalid auth header |
+| `invalid_request` | 400 | false | Bad messages shape |
+| `pro_required` | 403 | false | ai_enabled = false or profile row absent |
+| `internal_error` | 500 | true | Unexpected exception or profile DB query error |
+| `network_data_failed` | 503 | true | Contacts/interactions DB query error |
+| `context_too_large` | 413 | false | Network context > 80,000 chars even after compact pass |
+| `provider_rate_limited` | 429 | true | Anthropic 429 (rate limit) |
+| `provider_timeout` | 504 | true | AbortController 45s timeout fired |
+| `provider_unavailable` | 503 | true | Anthropic 529 (overloaded) |
+| `provider_error` | 502 | true | Other non-2xx Anthropic response |
+| `empty_provider_response` | 502 | true | No text block in response content |
+
+Note: profile DB query failure → `internal_error` (retryable), NOT `pro_required` — a transient DB issue must not permanently lock the user out.
+
+**Success response:** `{ reply: string, request_id: string, truncated?: true }`
+
+**Privacy-safe logging (only these fields, never prompt/response/contact text):**
+`requestId`, `providerStatus` (HTTP status), `providerRequestId` (Anthropic's `x-request-id` header), `stop_reason`, content block types array, `error.name` for unexpected exceptions.
+
+**Frontend changes (`src/pages/FunnlAIPage.jsx`):**
+- INITIAL_MESSAGE marked `localOnly: true` — it is a frontend UI greeting, never meant for the provider
+- `buildProviderMessages()` (from `ai-chat-conversation.js`) replaces the local function — filters `localOnly` and `error` messages before invoke
+- Sends `timezone: Intl.DateTimeFormat().resolvedOptions().timeZone` in the request body
+- `extractInvokeError` is now async (awaited); FunctionsHttpError.context is a raw Response parsed via `await fnError.context.json()`
+- Retry button shown only when `isRetryEligible(messages, i)` — failed message must be the last in the array (prevents stale retries after successful later turns)
+- Errors are inline per-message (not a separate error state) — failed prompt stays visible
+- `aria-live="polite" role="status"` container for screen reader accessibility
+- Dismiss button — removes failed message and restores text to input
+- Truncated response shows note: "Response may be cut short — feel free to ask a follow-up."
+- `track('ai_assistant_failed', { code, retryable })` on every error path — no user content
+
+**Frontend error normalizer (`src/lib/ai-chat-error.js`):**
+- `extractInvokeError(fnError, data)` is **async** — parses `FunctionsHttpError.context` (raw Response) via `await fnError.context.json()`; handles `FunctionsRelayError`, `FunctionsFetchError`, legacy plain-string errors, and generic errors
+- Error code allowlist (11 codes) enforced — unknown codes normalize to `internal_error`
+- Returns `Promise<{ code, message, retryable, request_id }|null>`
+
+**Frontend conversation helpers (`src/lib/ai-chat-conversation.js`):**
+- `buildProviderMessages(msgs)` — filters `localOnly` and `error` messages, maps to `{ role, content }` only
+- `isRetryEligible(messages, index)` — returns `true` only if `index === messages.length - 1` (failed message is the last message, guaranteeing valid provider sequence on retry)
+
+**Test totals after overhaul: 272 total (37 csv-header + 62 ai-helpers + 33 theme + 15 parse-provider-response + 18 normalize-messages + 19 ai-chat-error + 67 ai-chat + 21 ai-chat-conversation)**
+
+**Deployment status:** Edge Function and frontend NOT yet deployed. Deployment is a separate step — and the **order matters**.
+
+**Compatibility matrix:**
+
+| Frontend version | Edge Function version | Result |
+|---|---|---|
+| **New** (localOnly filter) | **Old** | ✅ Compatible — provider messages start with `user`; old function accepts them; `timezone` field ignored; old `{ reply }` shape handled by `if (!data?.reply)` |
+| **New** (localOnly filter) | **New** | ✅ Compatible — full structured error contract, timezone validated, `request_id` flows through |
+| **Old** (sends INITIAL_MESSAGE as assistant) | **New** | ❌ **Incompatible** — old frontend sends INITIAL_MESSAGE as the first message with `role: 'assistant'`; new Edge Function rejects any leading assistant role with `invalid_request`; all Pro AI requests break immediately |
+
+**Required deployment order (frontend first):**
+
+1. Merge PR #18 → Vercel auto-deploys new frontend from `main` (wait for build to complete)
+2. Smoke test: new frontend vs old Edge Function — confirm AI still works for Pro users
+3. `npx supabase functions deploy ai-chat --linked` — deploys new Edge Function
+4. Smoke test: new frontend vs new Edge Function — confirm structured errors, retry, timezone
+5. If Edge Function smoke test fails: redeploy previous Edge Function version from Supabase dashboard (Functions → Deployment history)
+
+**Rollback procedure:**
+- Edge Function failure: Supabase dashboard → Edge Functions → `ai-chat` → Deployment history → activate previous version. Frontend stays on new version (compatible with old Edge Function per the matrix above).
+- Frontend failure (unlikely — it is backward-compatible): revert commit on `main` and push; Vercel redeploys within minutes.
 
 ---
 
