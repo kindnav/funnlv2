@@ -285,6 +285,43 @@ test('em dash at start of string is removed without leaving the em dash characte
   assert.ok(result.includes('Starting thought here.'), 'content after em dash should be preserved')
 })
 
+console.log('\nsanitizeAssistantReply — multiline Markdown structure preserved')
+
+test('em dash within first paragraph does not consume the double-newline paragraph break', () => {
+  const reply = 'First paragraph—this part.\n\nSecond paragraph.'
+  const result = sanitizeAssistantReply(reply)
+  assert.ok(!result.includes('—'), 'em dash still present')
+  assert.ok(result.includes('\n\nSecond paragraph.'), 'double-newline paragraph break was consumed')
+})
+
+test('em dash within a Markdown list item does not consume the newline before the next item', () => {
+  const reply = '- item one—note here\n- item two'
+  const result = sanitizeAssistantReply(reply)
+  assert.ok(!result.includes('—'), 'em dash still present')
+  assert.ok(result.includes('\n- item two'), 'newline before list item was consumed')
+})
+
+test('em dash at start of reply produces no leading horizontal whitespace', () => {
+  const reply = '—Starting the reply.'
+  const result = sanitizeAssistantReply(reply)
+  assert.ok(!result.startsWith(' ') && !result.startsWith('\t'), 'leading horizontal whitespace from boundary em dash')
+  assert.ok(!result.includes('—'), 'em dash should be removed')
+})
+
+test('em dash at end of reply produces no trailing horizontal whitespace', () => {
+  const reply = 'End of reply—'
+  const result = sanitizeAssistantReply(reply)
+  assert.ok(!result.endsWith(' ') && !result.endsWith('\t'), 'trailing horizontal whitespace from boundary em dash')
+  assert.ok(!result.includes('—'), 'em dash should be removed')
+})
+
+test('spaced en dash within a list item does not consume the newline before the next item', () => {
+  const reply = 'Overview:\n- role – which matters\n- next item'
+  const result = sanitizeAssistantReply(reply)
+  assert.ok(!result.includes(' – '), 'sentence-punctuation en dash still present')
+  assert.ok(result.includes('\n- next item'), 'newline before list item was consumed by en dash replacement')
+})
+
 // ── results ───────────────────────────────────────────────────────────────────
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed\n`)
 if (failed > 0) process.exit(1)

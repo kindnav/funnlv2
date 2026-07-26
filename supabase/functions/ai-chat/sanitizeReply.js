@@ -113,17 +113,21 @@ export function sanitizeContactLinks(markdown, allowedContacts) {
 /**
  * Removes em dashes and sentence-punctuation en dashes from an AI reply.
  *
- * Em dash (U+2014): always replaced with " - " (space-hyphen-space) regardless
- * of surrounding context — the system prompt instructs the model never to use one.
- * This is a defensive final-output safety net.
+ * Em dash (U+2014): replaced with " - " (space-hyphen-space). Surrounding
+ * horizontal whitespace (spaces and tabs) is absorbed so no double spaces appear.
+ * Newlines and carriage returns are NOT consumed — paragraph breaks and Markdown
+ * list-item newlines are preserved.
  *
- * En dash (U+2013): replaced only when it appears as sentence punctuation, i.e.
- * surrounded by spaces on both sides. En dashes used as range separators
- * (e.g. "2020–2021", "pages 5–10") have no surrounding spaces and are preserved.
+ * En dash (U+2013): replaced only when surrounded by horizontal whitespace on both
+ * sides (sentence-punctuation use). Range en dashes ("2020–2024", "pages 5–10")
+ * have no surrounding whitespace and are preserved.
+ *
+ * Leading or trailing horizontal whitespace introduced by an em dash at the very
+ * start or end of the reply string is trimmed. Only horizontal chars are removed;
+ * newlines are untouched so multi-paragraph replies are not affected.
  *
  * Normal hyphens in compound words ("follow-up", "well-known") and ISO date
- * separators ("2026-07-26") are never touched — this function only targets
- * Unicode em dash (U+2014) and en dash (U+2013) code points.
+ * separators ("2026-07-26") are never touched.
  *
  * @param {string} reply - sanitized markdown reply text
  * @returns {string} reply with em dashes removed and sentence-punctuation en dashes replaced
@@ -132,12 +136,16 @@ export function sanitizeAssistantReply(reply) {
   if (!reply || typeof reply !== 'string') return reply ?? ''
 
   let result = reply
-  // Em dash — absorb any surrounding whitespace so the replacement is a single ' - ',
-  // preventing double spaces when the original text had spaces around the dash.
-  result = result.replace(/\s*—\s*/g, ' - ')
-  // En dash — replace when used as sentence punctuation (one or more spaces on each side).
-  // Range en dashes (no surrounding spaces, e.g. 2020–2024) are not matched by \s+.
-  result = result.replace(/\s+–\s+/g, ' - ')
+  // Em dash — absorb surrounding horizontal whitespace (spaces and tabs only).
+  // \s would also match \n and \r, which could consume paragraph breaks in Markdown.
+  result = result.replace(/[ \t]*—[ \t]*/g, ' - ')
+  // En dash used as sentence punctuation — surrounded by horizontal whitespace.
+  // [ \t]+ requires at least one space/tab on each side; range en dashes (no surrounding
+  // whitespace) are not matched and are preserved.
+  result = result.replace(/[ \t]+–[ \t]+/g, ' - ')
+  // Trim any leading or trailing horizontal whitespace that a boundary em dash introduced.
+  // Only removes spaces and tabs — newlines are left alone.
+  result = result.replace(/^[ \t]+/, '').replace(/[ \t]+$/, '')
 
   return result
 }
