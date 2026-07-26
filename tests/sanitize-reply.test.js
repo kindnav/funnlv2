@@ -72,11 +72,12 @@ test('label that does not match stored name is stripped to label', () => {
   assert.ok(!result.includes(`/contacts/${ALICE_ID}`), 'link with wrong label should be removed')
 })
 
-test('label match is case-insensitive (lowercase label is accepted)', () => {
+test('label match is case-insensitive: output uses stored contact name casing', () => {
   const md = `[alice smith](/contacts/${ALICE_ID}) replied.`
   const result = sanitizeContactLinks(md, ALLOWED)
-  // Case-insensitive match — the link is valid and should be preserved
-  assert.strictEqual(result, md)
+  // Case-insensitive comparison accepts the match; output is canonicalised to stored-name casing
+  assert.ok(result.includes(`[Alice Smith](/contacts/${ALICE_ID})`), 'canonical link not in output')
+  assert.ok(!result.includes('[alice smith]'), 'lowercase label was not corrected to stored casing')
 })
 
 test('malformed UUID (missing hex segments) is stripped to label', () => {
@@ -138,6 +139,83 @@ test('two contacts with same name linked by correct IDs are both validated', () 
   assert.ok(result.includes(`/contacts/${id2}`), 'second valid link removed')
 })
 
+// UUID fixture with hex letters so toUpperCase() produces a visibly different string
+const CHARLIE_ID   = 'aabbccdd-eeff-1122-3344-556677889900'
+const CHARLIE_ID_U = CHARLIE_ID.toUpperCase()  // 'AABBCCDD-EEFF-1122-3344-556677889900'
+const ALLOWED_EXTRA = [
+  ...ALLOWED,
+  { id: CHARLIE_ID, name: 'Charlie Brown' },
+]
+
+console.log('\nsanitizeContactLinks — canonicalisation')
+
+test('uppercase UUID in model output is normalised to lowercase in the canonical link', () => {
+  // CONTACT_PATH_RE accepts mixed-case UUIDs via the i flag; output is always lowercase
+  const md = `[Charlie Brown](/contacts/${CHARLIE_ID_U}) is great.`
+  const result = sanitizeContactLinks(md, ALLOWED_EXTRA)
+  assert.ok(result.includes(`/contacts/${CHARLIE_ID}`), 'lowercase canonical UUID not in output')
+  assert.ok(!result.includes(CHARLIE_ID_U), 'uppercase UUID leaked into output')
+})
+
+test('model label with different casing is replaced with exact stored name in canonical output', () => {
+  const md = `[ALICE SMITH](/contacts/${ALICE_ID}) replied.`
+  const result = sanitizeContactLinks(md, ALLOWED)
+  assert.ok(result.includes('[Alice Smith]'), 'stored-name casing not used in canonical link')
+  assert.ok(!result.includes('[ALICE SMITH]'), 'model casing was not corrected')
+})
+
+test('contact path with query parameter is rejected to plain text', () => {
+  const md = `[Alice Smith](/contacts/${ALICE_ID}?foo=bar) is here.`
+  const result = sanitizeContactLinks(md, ALLOWED)
+  assert.ok(result.includes('Alice Smith'), 'label should be preserved')
+  assert.ok(!result.includes('?foo=bar'), 'query parameter should be stripped')
+  assert.ok(!result.includes(`/contacts/${ALICE_ID}`), 'contact path with query param should be rejected')
+})
+
+test('contact path with URL fragment is rejected to plain text', () => {
+  const md = `[Alice Smith](/contacts/${ALICE_ID}#section) called.`
+  const result = sanitizeContactLinks(md, ALLOWED)
+  assert.ok(result.includes('Alice Smith'), 'label should be preserved')
+  assert.ok(!result.includes('#section'), 'fragment should be stripped')
+  assert.ok(!result.includes(`/contacts/${ALICE_ID}`), 'contact path with fragment should be rejected')
+})
+
+test('contact path with trailing slash is rejected to plain text', () => {
+  const md = `[Alice Smith](/contacts/${ALICE_ID}/) replied.`
+  const result = sanitizeContactLinks(md, ALLOWED)
+  assert.ok(result.includes('Alice Smith'), 'label should be preserved')
+  assert.ok(!result.includes(`/contacts/${ALICE_ID}/`), 'trailing slash path should be rejected')
+})
+
+console.log('\nsanitizeContactLinks — first-mention-only')
+
+test('first valid mention of a contact receives the canonical link', () => {
+  const md = `Reach out to [Alice Smith](/contacts/${ALICE_ID}) soon.`
+  const result = sanitizeContactLinks(md, ALLOWED)
+  assert.ok(result.includes(`[Alice Smith](/contacts/${ALICE_ID})`), 'first mention should be a canonical link')
+})
+
+test('second mention of the same contact ID is downgraded to plain stored name', () => {
+  const md = `[Alice Smith](/contacts/${ALICE_ID}) replied. Message [Alice Smith](/contacts/${ALICE_ID}) again.`
+  const result = sanitizeContactLinks(md, ALLOWED)
+  // Exactly one markdown link for Alice
+  const linkCount = (result.match(/\[Alice Smith\]/g) ?? []).length
+  assert.strictEqual(linkCount, 1, 'only the first mention should be a markdown link')
+  // Second mention appears as plain text
+  assert.ok(result.includes('Message Alice Smith again.'), 'second mention should be plain stored name')
+})
+
+test('invalid first attempt (wrong label) does not prevent later valid mention from being linked', () => {
+  // First occurrence has a wrong label — fails validation, not added to linkedIds
+  // Second occurrence has the correct label — should receive the canonical link
+  const md = `[Alicia Smith](/contacts/${ALICE_ID}) is wrong. Later [Alice Smith](/contacts/${ALICE_ID}) is right.`
+  const result = sanitizeContactLinks(md, ALLOWED)
+  // Invalid first attempt → plain text label
+  assert.ok(result.includes('Alicia Smith is wrong.'), 'invalid label should become plain text')
+  // Later valid mention → canonical link (linkedIds not consumed by the failed attempt)
+  assert.ok(result.includes(`[Alice Smith](/contacts/${ALICE_ID})`), 'later valid mention should be linked')
+})
+
 // ── sanitizeAssistantReply ────────────────────────────────────────────────────
 console.log('\nsanitizeAssistantReply — em dash and en dash handling')
 
@@ -183,6 +261,28 @@ test('valid contact link markdown survives sanitizeAssistantReply unchanged', ()
   const reply = `You should follow up with ${link} soon.`
   const result = sanitizeAssistantReply(reply)
   assert.ok(result.includes(link), 'contact link was altered by sanitizeAssistantReply')
+})
+
+test('em dash surrounded by spaces produces no double spaces', () => {
+  const reply = 'First point — second point.'
+  const result = sanitizeAssistantReply(reply)
+  assert.ok(!result.includes('—'), 'em dash still present')
+  assert.ok(!result.includes('  '), 'double space produced by replacement')
+  assert.strictEqual(result, 'First point - second point.')
+})
+
+test('multiple em dashes in one reply are all replaced', () => {
+  const reply = 'One—two—three.'
+  const result = sanitizeAssistantReply(reply)
+  assert.ok(!result.includes('—'), 'em dash still present after multi-replace')
+  assert.ok(result.includes(' - '), 'at least one replacement should exist')
+})
+
+test('em dash at start of string is removed without leaving the em dash character', () => {
+  const reply = '—Starting thought here.'
+  const result = sanitizeAssistantReply(reply)
+  assert.ok(!result.includes('—'), 'em dash at string start should be removed')
+  assert.ok(result.includes('Starting thought here.'), 'content after em dash should be preserved')
 })
 
 // ── results ───────────────────────────────────────────────────────────────────

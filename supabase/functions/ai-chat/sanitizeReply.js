@@ -26,37 +26,50 @@ function normalizeNameForCompare(s) {
 /**
  * Validates and sanitizes contact links in an AI-generated markdown reply.
  *
- * Retains a markdown link ONLY when all three conditions hold:
- *   1. The URL exactly matches /contacts/<uuid>
+ * Retains a markdown link as a CANONICAL link only when all three conditions hold:
+ *   1. The URL exactly matches /contacts/<uuid> (with or without mixed case — normalised to lowercase)
  *   2. The UUID is present in allowedContacts
- *   3. The link label case-insensitively matches the stored contact name (whitespace normalized)
+ *   3. The link label case-insensitively matches the stored contact name (whitespace normalised)
+ *
+ * When all three conditions pass, the returned link is CANONICAL — the label is set to the
+ * exact stored name and the UUID is lowercased — regardless of how the model wrote either.
+ *
+ * First-mention-only: each contact ID receives at most one clickable link per reply. The
+ * first valid mention is linked; subsequent valid mentions of the same ID become plain text
+ * (the stored name, no link). A failed first attempt (wrong label, unknown UUID, etc.) does
+ * NOT consume the linking opportunity — only a successful first mention does.
  *
  * On any validation failure the link is degraded to plain text (just the label).
  * The rest of the answer is always preserved — a bad link never discards surrounding text.
  *
  * Rejects without explicit checks (covered by CONTACT_PATH_RE failing to match):
- *   external URLs, javascript: URIs, data: URIs, protocol-relative URLs, and
- *   URL-encoded path bypasses (e.g. %2Fcontacts%2F...).
+ *   external URLs, javascript: URIs, data: URIs, protocol-relative URLs, query params,
+ *   URL fragments, trailing slashes, and URL-encoded path bypasses.
  *
  * Handles duplicate contact names: validation is by ID+name pair, so two contacts
- * with the same display name but different IDs are both accepted when correctly linked.
+ * with the same display name but different IDs can each receive one canonical link.
  *
  * @param {string} markdown - AI-generated reply text (may contain markdown links)
  * @param {Array<{id: string, name: string}>} allowedContacts - contacts from the current user's DB query
- * @returns {string} markdown with only validated contact links intact; all others become plain text
+ * @returns {string} markdown with only canonical validated contact links; all others become plain text
  */
 export function sanitizeContactLinks(markdown, allowedContacts) {
   if (!markdown || typeof markdown !== 'string') return markdown ?? ''
 
-  // Build a lookup: lowercased UUID → normalized name
+  // Build a lookup: lowercase UUID → { id (lowercase), name (exact stored casing) }
   const contactMap = new Map()
   if (Array.isArray(allowedContacts)) {
     for (const c of allowedContacts) {
       if (c && typeof c.id === 'string' && typeof c.name === 'string' && c.id && c.name) {
-        contactMap.set(c.id.toLowerCase(), normalizeNameForCompare(c.name))
+        contactMap.set(c.id.toLowerCase(), { id: c.id.toLowerCase(), name: c.name })
       }
     }
   }
+
+  // Track which contact IDs have received their one canonical link (first-mention-only).
+  // Only added to the set after full validation passes — an invalid first attempt
+  // (wrong label, unknown UUID, path mismatch, etc.) does not consume the opportunity.
+  const linkedIds = new Set()
 
   return markdown.replace(LINK_RE, (match, label, href) => {
     // Normalize href: trim surrounding whitespace before testing
@@ -64,25 +77,34 @@ export function sanitizeContactLinks(markdown, allowedContacts) {
     const pathMatch = CONTACT_PATH_RE.exec(trimmedHref)
 
     if (!pathMatch) {
-      // Not a contact path — degrade to plain text
+      // Not a contact path (external URL, javascript:, data:, query param, fragment, etc.)
       return label
     }
 
     const uuid = pathMatch[1].toLowerCase()
-    const expectedName = contactMap.get(uuid)
+    const contact = contactMap.get(uuid)
 
-    if (expectedName === undefined) {
+    if (!contact) {
       // UUID not in this user's allowedContacts — degrade to plain text
       return label
     }
 
-    if (normalizeNameForCompare(label) !== expectedName) {
-      // Label doesn't match the stored contact name — degrade to plain text
+    if (normalizeNameForCompare(label) !== normalizeNameForCompare(contact.name)) {
+      // Label doesn't match the stored contact name — degrade to plain text.
+      // The ID is NOT added to linkedIds so a later valid mention can still be linked.
       return label
     }
 
-    // All checks pass — preserve the original markdown link
-    return match
+    if (linkedIds.has(uuid)) {
+      // This contact has already received its one canonical link — return stored name as plain text
+      return contact.name
+    }
+
+    // First valid mention: mark as linked and return the canonical link.
+    // Canonical form uses exact stored-name casing and a lowercase UUID path.
+    // Never trust the model's casing for either.
+    linkedIds.add(uuid)
+    return `[${contact.name}](/contacts/${uuid})`
   })
 }
 
@@ -110,10 +132,12 @@ export function sanitizeAssistantReply(reply) {
   if (!reply || typeof reply !== 'string') return reply ?? ''
 
   let result = reply
-  // Em dash — always replace regardless of context
-  result = result.replace(/—/g, ' - ')
-  // En dash — only replace when used as sentence punctuation (space on both sides)
-  result = result.replace(/ – /g, ' - ')
+  // Em dash — absorb any surrounding whitespace so the replacement is a single ' - ',
+  // preventing double spaces when the original text had spaces around the dash.
+  result = result.replace(/\s*—\s*/g, ' - ')
+  // En dash — replace when used as sentence punctuation (one or more spaces on each side).
+  // Range en dashes (no surrounding spaces, e.g. 2020–2024) are not matched by \s+.
+  result = result.replace(/\s+–\s+/g, ' - ')
 
   return result
 }

@@ -46,6 +46,22 @@ test('path without valid UUID format returns false', () => {
   assert.strictEqual(isValidContactLink('/contacts/not-a-uuid'), false)
 })
 
+test('path with uppercase UUID returns false (server always canonicalises to lowercase)', () => {
+  assert.strictEqual(isValidContactLink('/contacts/11111111-1111-1111-1111-11111111111A'), false)
+})
+
+test('contact path with query string returns false', () => {
+  assert.strictEqual(isValidContactLink('/contacts/11111111-1111-1111-1111-111111111111?foo=bar'), false)
+})
+
+test('contact path with URL fragment returns false', () => {
+  assert.strictEqual(isValidContactLink('/contacts/11111111-1111-1111-1111-111111111111#section'), false)
+})
+
+test('contact path with trailing slash returns false', () => {
+  assert.strictEqual(isValidContactLink('/contacts/11111111-1111-1111-1111-111111111111/'), false)
+})
+
 // ── results ───────────────────────────────────────────────────────────────────
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed\n`)
 if (failed > 0) process.exit(1)
