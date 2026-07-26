@@ -146,6 +146,7 @@ supabase/
 | `followup_snoozed` | FollowUpsPage handleSnooze | `{ option: 'tomorrow'\|'three_days'\|'one_week'\|'custom' }` — controlled enum only | Feature usage |
 | `csv_import_used` | ImportContactsModal handleImport | `{ contacts_imported: number, ai_assisted: boolean }` | Feature usage |
 | `ai_assistant_used` | FunnlAIPage sendMessage on success | none | AI feature usage |
+| `ai_assistant_failed` | FunnlAIPage sendMessage or retryMessage on any error path | `{ code: controlledErrorCode, retryable: boolean }` — no prompt text, no contact data | AI reliability diagnostic |
 | `ai_fill_used` | AddContactDrawer handleAIParse on success | `{ fields_filled: number }` | AI feature usage |
 | `landing_cta_clicked` | LandingPage — all three CTA buttons | `{ location: 'nav'\|'hero'\|'bottom' }` | Acquisition / landing page conversion |
 | `signup_started` | SignInPage on mount when mode === 'signup' | none | Signup funnel step 1 — user arrived at the signup form |
@@ -340,7 +341,7 @@ The contacts page filter pills use `useSearchParams`. Active tag is stored as `?
 | **CSV importer** | ✅ Import button on Contacts page opens a 3-step modal (upload → map → confirm). Mapping step: **pool-at-top UI** — unassigned columns shown prominently at the top as clickable chips ("click to place"); clicking a chip opens a field picker (1 click to assign). Field-first assignment also available via + Add on each field row. `normalizeHeader()` normalizes separators before lookup (first_name / first-name / first.name all match one HEADER_MAP entry). HEADER_MAP pruned of false-positive generic entries. Multiple columns combine in chip order (e.g. First Name + Last Name → "John Smith"). "— not assigned" placeholder on empty fields. Picker uses fixed-position viewport coords (not absolute) so scrollable container can't clip it. Tags: comma-separated cell values split into arrays. relationship_type and relationship_note are mappable fields. All-or-nothing bulk insert. `csv_import_used` event gains `ai_assisted: boolean` property. Known limitations: no duplicate detection, CSV-only, no cell-level editing. **Smart import (Pro):** after upload, Pro users get one `ai-map-csv` Edge Function call on unresolved columns only (deterministic alias mappings take precedence and cannot be overridden by AI); the returned assignment pre-populates Step 2 with an "AI auto-mapped N columns" banner; user reviews/adjusts before importing; non-Pro users see unchanged manual mapping flow with a soft "Pro tip" upgrade banner at the top of Step 2 (informational only — does not block mapping); AI failure silently falls back to rule-based mapping. `relationship_note` ("Why they matter") is a mappable field; common notes column names auto-map via HEADER_MAP ('notes', 'note', 'comments', 'comment', 'memo', 'additional notes', 'general notes' — 'description' and 'details' excluded as ambiguous); multiple columns mapped to relationship_note join with ' | ' separator. **LinkedIn Connections export:** two-pass header detection (PR #15) skips the 2-line preamble LinkedIn prepends before the real header; 'URL' column value-sniffed → linkedin_url when sample values contain linkedin.com; teal detection banner shown in Step 2; tested against real LinkedIn exports. Phase B (split jammed combined columns, e.g. "John Smith, Goldman, analyst" in one cell) deferred — see Known future work. |
 | **Skills removed → relationship intent** | ✅ `skills` column dropped. `relationship_type` (preset select: Mentor/Collaborator/Referral path/Potential employer/Connector/Other) and `relationship_note` (freeform "why this person matters") added to contacts table, all forms, detail page, importer, and AI context. AI Fill extracts `relationship_note` from freeform text but never auto-selects `relationship_type` (deliberate user choice). |
 | **Dynamic sidebar YOUR TAGS** | ✅ Replaced hardcoded Pipeline section (Target firms/Recruiters/Alumni) with live user-tag groups. Queries contacts table on each nav change, counts tag occurrences in JS, sorts by count desc, caps at top 8. Deterministic dot colors per tag. Active tag highlighted. Empty state: "Tags you add to contacts will appear here." |
-| **Product analytics (PostHog)** | ✅ 21 events total (8 core + 2 Phase 1 + 3 Phase 2A + 2 Phase 3 + 2 Phase 4 + 4 Pilot). Core: user_signed_up, first_contact_added, contact_added, interaction_logged, followup_set, csv_import_used, ai_assistant_used, ai_fill_used. Phase 1: landing_cta_clicked, signup_started. Phase 2A: activation_checklist_viewed, activation_step_completed, activation_completed. Phase 3: followup_completed, followup_snoozed. Phase 4: email_confirmed, user_signed_in. Pilot: csv_mapping_completed, csv_mapping_failed, post_import_action_clicked, outreach_status_changed. DOM autocapture disabled; $pageview and $pageleave remain enabled. Behavior only — no contact content. Users identified by Supabase ID. |
+| **Product analytics (PostHog)** | ✅ 22 events total (8 core + 2 Phase 1 + 3 Phase 2A + 2 Phase 3 + 2 Phase 4 + 4 Pilot + 1 AI reliability). Core: user_signed_up, first_contact_added, contact_added, interaction_logged, followup_set, csv_import_used, ai_assistant_used, ai_fill_used. Phase 1: landing_cta_clicked, signup_started. Phase 2A: activation_checklist_viewed, activation_step_completed, activation_completed. Phase 3: followup_completed, followup_snoozed. Phase 4: email_confirmed, user_signed_in. Pilot: csv_mapping_completed, csv_mapping_failed, post_import_action_clicked, outreach_status_changed. AI reliability: ai_assistant_failed. DOM autocapture disabled; $pageview and $pageleave remain enabled. Behavior only — no contact content. Users identified by Supabase ID. |
 | **Privacy policy** | ✅ `/privacy` — plain-language page covering data stored, all third parties (Supabase, Anthropic, PostHog, Resend, Vercel), analytics disclosure, user rights, contact email. Linked from sign-in page and settings. Accessible logged-out. |
 | **Phase 1 — Public landing page** | ✅ `LandingPage.jsx` at `/` for logged-out users. 11 sections: nav, hero with annotated product mock, marquee ticker, problem statement, feature rows (01–03), Funnl AI section, who-it's-for grid, comparison table, privacy note, final CTA, footer. `/signin` and `/signup` as separate routes, mode auto-detected from pathname. Post-sign-in `navigate('/', { replace: true })` prevents blank screen. All product claims verified against actual functionality. |
 | **Phase 2A — Guided activation checklist** | ✅ Three-step checklist on DashboardPage: (1) add or import 5 contacts, (2) log the first conversation, (3) schedule the first follow-up. Milestones stored as four nullable `timestamptz` columns on `profiles` (the fourth records overall activation completion). Written with `WHERE col IS NULL` conditional updates for idempotent deduplication across tabs and sessions. Backfill included in migration `20260713075431_add_activation_milestones.sql`. CSV import button accessible from dashboard in addition to contacts page. |
@@ -653,7 +654,7 @@ Recommended positioning:
 |---|---|---|---|
 | **A** | Plumbing + Pro gate | ✅ Done | `ai_enabled` column + RLS fix. `src/lib/ai.js` canUseAI() Stripe-ready gate. Edge Functions `ai-parse-contact` and `ai-map-csv` deployed. Gate tested: 403 for non-Pro, 200 for Pro. |
 | **B** | Contact from text | ✅ Done | AI Fill section added to AddContactDrawer. Pro-gated (hidden for non-Pro). Textarea → Parse → fields fill with purple highlight. Manual edits clear the highlight. Follow-up suggestion shown as reminder. Never auto-saves. |
-| **C** | AI Assistant | ✅ Done | Working chat UI on /ai (FunnlAIPage.jsx). Edge Function `ai-chat` deployed (claude-sonnet-5). Loads all contacts + interactions per call. Multi-turn conversation works. Extended thinking handled: `.find(b => b.type === 'text')` since claude-sonnet-5 sometimes returns a thinking block first. System prompt STYLE section: prose-first, no reflexive bullets/bolding, warm mentor voice. react-markdown renders assistant replies (bold/lists clean, raw HTML disabled). Typebox redesigned: pill shape, focus glow, send button with press feel. Pro-gated; non-Pro sees locked state. All stale "coming soon" copy updated across Sidebar, Dashboard, ContactDetail. |
+| **C** | AI Assistant | ✅ Done | Working chat UI on /ai (FunnlAIPage.jsx). Edge Function `ai-chat` deployed (claude-sonnet-5). Loads all contacts + interactions per call. Multi-turn conversation works. System prompt STYLE section: prose-first, no reflexive bullets/bolding, warm mentor voice. react-markdown renders assistant replies (bold/lists clean, raw HTML disabled). Typebox redesigned: pill shape, focus glow, send button with press feel. Pro-gated; non-Pro sees locked state. All stale "coming soon" copy updated across Sidebar, Dashboard, ContactDetail. **Reliability overhaul (branch review/ai-chat-reliability, PR #18, 2026-07-26):** Confirmed defective path fixed — HTTP 200 from Anthropic with thinking-only content caused `.find(b => b.type === 'text')` to return undefined, producing an empty reply. Now: `parseProviderResponse.js` collects ALL text blocks, skips thinking blocks, joins with `\n\n`, classifies max_tokens truncation. `normalizeMessages.js` validates and bounds conversation history (MAX_MESSAGES=20, MAX_MESSAGE_CHARS=4000, MAX_TOTAL_CONVERSATION_CHARS=20000, role alternation, strips INITIAL_MESSAGE). Structured error contract `{ error: { code, message, retryable, request_id } }` on all error paths; `{ reply, request_id, truncated? }` on success. Context budget: two-pass deterministic (MAX_NETWORK_CONTEXT_CHARS=80000, MAX_INTERACTIONS_PER_CONTACT=3 then 1). Prompt-injection delimiters around network data. DB query failures return `network_data_failed`. Frontend: inline error with Retry/Dismiss per message, aria-live, failed prompt kept visible, `ai_assistant_failed` analytics event. Not yet deployed — deployment pending. |
 | **D** | Stripe billing | 🔵 Later | Replace manual `ai_enabled` flag with real subscription check. canUseAI() is the seam. |
 
 ---
@@ -857,6 +858,76 @@ Text: "<user input>"
 - Retrieval/embeddings for very large networks (hundreds+ contacts) — not needed at student scale
 - Saved conversation history / multiple chat threads
 - Streaming responses (currently waits for full response before displaying)
+
+---
+
+### Layer C reliability spec — ai-chat Edge Function (branch review/ai-chat-reliability, PR #18)
+
+**Root cause confirmed:** HTTP 200 from Anthropic with `content: [{ type: 'thinking', ... }]` and no text block → `.find(b => b.type === 'text')` returned `undefined` → `reply = undefined` → returned `{ reply: '' }` → frontend `if (data?.reply)` treated it as falsy → "No response received" shown. Now produces `{ error: { code: 'empty_provider_response', ... } }` instead.
+
+**Module: `supabase/functions/ai-chat/parseProviderResponse.js`**
+- Collects ALL text blocks (not just first); skips `type: 'thinking'` blocks; joins with `\n\n`
+- `stop_reason === 'max_tokens'` → `truncated: true` (reported to frontend, shown as note to user)
+- Error output: `{ reply: null, stop_reason, truncated: false, error: 'empty_provider_response' }`
+- Success output: `{ reply: string, stop_reason, truncated: bool, error: null }`
+
+**Module: `supabase/functions/ai-chat/normalizeMessages.js`**
+- Validates every message: role must be `user|assistant`, content must be non-blank string ≤ MAX_MESSAGE_CHARS
+- Strips the frontend's opening assistant greeting (INITIAL_MESSAGE) if it is the first message
+- Trims oldest user+assistant pairs until total chars ≤ MAX_TOTAL_CONVERSATION_CHARS
+- Caps at MAX_MESSAGES, then validates strict role alternation, then validates ends with user
+- Returns `{ messages: Array|null, errorCode: 'invalid_request'|null }`
+
+| Constant | Value | Purpose |
+|---|---|---|
+| `MAX_MESSAGES` | 20 | Hard cap on conversation turns sent to provider |
+| `MAX_MESSAGE_CHARS` | 4000 | Per-message size ceiling |
+| `MAX_TOTAL_CONVERSATION_CHARS` | 20000 | Total char budget before oldest pairs are trimmed |
+
+**Context budget (`supabase/functions/ai-chat/helpers.js`)**
+- Two-pass: pass 1 = MAX_INTERACTIONS_PER_CONTACT=3 per contact; pass 2 = 1 per contact
+- Hard ceiling: MAX_NETWORK_CONTEXT_CHARS=80,000 — exceeding returns `tooLarge: true` → HTTP 413 (`context_too_large`, not retryable)
+- Field truncation: notes ≤ MAX_NOTE_CHARS=150, relationship_note ≤ MAX_RELATIONSHIP_NOTE_CHARS=100, all other fields ≤ MAX_FIELD_CHARS=80
+- Tags capped at 10 per contact
+- Output shape changed to `{ context: string, tooLarge: boolean }` (was plain string — callers updated)
+- Prompt-injection isolation: DATA SAFETY preamble + `=== BEGIN/END NETWORK DATA ===` delimiters
+- Does not mutate source arrays
+
+**Structured error contract (every error path in index.ts):**
+```
+{ error: { code: string, message: string, retryable: boolean, request_id: string } }
+```
+
+| Error code | HTTP | Retryable | Trigger |
+|---|---|---|---|
+| `invalid_request` | 400 | false | Bad messages shape |
+| `pro_required` | 403 | false | ai_enabled = false |
+| `internal_error` | 500 | true | Unexpected exception |
+| `network_data_failed` | 503 | true | DB query error |
+| `provider_error` | 502 | true | Non-OK Anthropic response |
+| `empty_provider_response` | 502 | true | No text block in content |
+| `context_too_large` | 413 | false | Network context > 80,000 chars |
+
+**Success response:** `{ reply: string, request_id: string, truncated?: true }`
+
+**Privacy-safe logging (only these fields, never prompt/response/contact text):**
+`requestId`, `providerStatus` (HTTP status), `providerRequestId` (Anthropic's `x-request-id` header), `stop_reason`, content block types array, `error.name` for unexpected exceptions.
+
+**Frontend changes (`src/pages/FunnlAIPage.jsx`):**
+- Errors are inline per-message (not a separate error state) — failed prompt stays visible
+- `aria-live="polite" role="status"` container for screen reader accessibility
+- Retry button (if `retryable: true`) — resends same prompt without duplicating it in provider history
+- Dismiss button — removes failed message and restores text to input
+- Truncated response shows note: "Response may be cut short — feel free to ask a follow-up."
+- `track('ai_assistant_failed', { code, retryable })` on every error path — no user content
+
+**Frontend error normalizer (`src/lib/ai-chat-error.js`):**
+- `extractInvokeError(fnError, data)` handles FunctionsHttpError.context.error, legacy plain-string errors, and generic network errors
+- Returns `{ code, message, retryable, request_id }` or `null` on success
+
+**Test totals after overhaul: 227 total (37 csv-header + 62 ai-helpers + 33 theme + 15 parse-provider-response + 18 normalize-messages + 11 ai-chat-error + 51 ai-chat)**
+
+**Deployment status:** Edge Function and frontend NOT yet deployed. Deployment is a separate step requiring `npx supabase functions deploy ai-chat` and a Vercel push to `main`.
 
 ---
 
