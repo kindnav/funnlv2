@@ -123,16 +123,16 @@ test('shows correct count for multiple contacts', () => {
   assert.ok(r.context.includes('CONTACTS (2 total)'))
 })
 
-test('indexes contacts starting at 1', () => {
+test('indexes contacts starting at 1 with Contact ID prefix', () => {
   const r = formatNetworkContext([BASE_CONTACT], [], TODAY)
-  assert.ok(r.context.includes('[1] Priya Sharma'))
+  assert.ok(r.context.includes('[1] Contact ID: c1 | Name: Priya Sharma'))
 })
 
-test('indexes multiple contacts sequentially', () => {
+test('indexes multiple contacts sequentially with Contact ID prefix', () => {
   const c2 = { id: 'c2', name: 'James Chen' }
   const r = formatNetworkContext([BASE_CONTACT, c2], [], TODAY)
-  assert.ok(r.context.includes('[1] Priya Sharma'))
-  assert.ok(r.context.includes('[2] James Chen'))
+  assert.ok(r.context.includes('[1] Contact ID: c1 | Name: Priya Sharma'))
+  assert.ok(r.context.includes('[2] Contact ID: c2 | Name: James Chen'))
 })
 
 // ── formatNetworkContext — optional contact fields ────────────────────────────
@@ -605,6 +605,65 @@ test('tags are capped at 10 per contact', () => {
   // Only tags 0–9 should appear; tag10 and beyond should not
   assert.ok(r.context.includes('tag9'), 'tag9 should be present')
   assert.ok(!r.context.includes('tag10'), 'tag10 should be excluded (cap at 10)')
+})
+
+// ── formatNetworkContext — Contact ID in context ──────────────────────────────
+console.log('\nformatNetworkContext — Contact ID in context')
+
+test('Contact ID appears on the first line of a full-detail contact entry', () => {
+  const c = { id: 'abc-123-uuid', name: 'Ryan Miller' }
+  const r = formatNetworkContext([c], [], TODAY)
+  assert.ok(r.context.includes('Contact ID: abc-123-uuid'), 'Contact ID not found in context')
+})
+
+test('Contact ID and Name are on the same [N] header line', () => {
+  const c = { id: 'abc-123-uuid', name: 'Ryan Miller' }
+  const r = formatNetworkContext([c], [], TODAY)
+  const headerLine = r.context.split('\n').find(l => l.includes('[1]'))
+  assert.ok(headerLine, 'no [1] header line found')
+  assert.ok(headerLine.includes('Contact ID: abc-123-uuid'), 'Contact ID not on header line')
+  assert.ok(headerLine.includes('Name: Ryan Miller'), 'Name not on header line')
+})
+
+test('each contact has its own ID on its header line (ID-name correspondence)', () => {
+  const c1 = { id: 'id-for-alice', name: 'Alice' }
+  const c2 = { id: 'id-for-bob', name: 'Bob' }
+  const r = formatNetworkContext([c1, c2], [], TODAY)
+  const line1 = r.context.split('\n').find(l => l.includes('[1]'))
+  const line2 = r.context.split('\n').find(l => l.includes('[2]'))
+  assert.ok(line1.includes('id-for-alice') && line1.includes('Name: Alice'))
+  assert.ok(line2.includes('id-for-bob') && line2.includes('Name: Bob'))
+})
+
+test('empty network context does not contain Contact ID label', () => {
+  const r = formatNetworkContext([], [], TODAY)
+  assert.ok(!r.context.includes('Contact ID:'))
+})
+
+test('Contact ID appears in compact pass (pass 3) context', () => {
+  // Force pass 3 with a large network — verify IDs still appear in compact lines
+  const contacts = Array.from({ length: 300 }, (_, i) => ({
+    id: `contact-id-${i}`,
+    name: `Contact Person Number ${i}`,
+    company: 'Goldman Sachs International Partners',
+    role: 'Senior Analyst',
+    how_met: 'Career fair networking event at the Harvard Business School campus',
+    relationship_note: 'Key contact for the PE and VC recruiting pipeline this upcoming season',
+    tags: ['recruiter', 'target firm', 'alumni'],
+  }))
+  const interactions = contacts.flatMap(c =>
+    Array.from({ length: 4 }, (_, j) => ({
+      id: `ix-${c.id}-${j}`, contact_id: c.id, type: 'Email',
+      interaction_date: '2026-07-01',
+      notes: 'Detailed conversation about recruiting timeline and interview process',
+      follow_up_date: j === 3 ? '2026-08-01' : null,
+    }))
+  )
+  const r = formatNetworkContext(contacts, interactions, TODAY)
+  if (r.passUsed === 3) {
+    assert.ok(r.context.includes('contact-id-0'), 'Contact ID not found in compact pass')
+  }
+  assert.strictEqual(r.tooLarge, false)
 })
 
 // ── results ───────────────────────────────────────────────────────────────────
