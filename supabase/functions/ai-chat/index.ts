@@ -1,7 +1,7 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { formatNetworkContext, resolveToday } from './helpers.js'
-import { parseProviderResponse } from './parseProviderResponse.js'
 import { normalizeMessages } from './normalizeMessages.js'
+import { runProviderAttempts } from './providerCall.js'
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -198,7 +198,7 @@ Deno.serve(async (req) => {
     // resolveToday() validates the value and falls back to UTC if missing or invalid.
     // The timezone string is never logged or included in any response body.
     const today = resolveToday(rawBody?.timezone)
-    const { context: networkData, tooLarge } = formatNetworkContext(
+    const { context: networkData, tooLarge, passUsed } = formatNetworkContext(
       contactsResult.data ?? [],
       interactionsResult.data ?? [],
       today
@@ -218,116 +218,39 @@ Deno.serve(async (req) => {
       .replace('{today}', today)
       .replace('{network_data}', networkData)
 
-    // ── 6. Call Claude ─────────────────────────────────────────────────────────
-    // Timeout: 45 seconds.
-    //
-    // Rationale: at max context (80,000 chars network + 20,000 chars history) and
-    // max output (2,048 tokens), claude-sonnet-5 at typical throughput (~80 tok/s)
-    // needs ~25 seconds for output alone, plus input processing time. 25 seconds
-    // was too low. 45 seconds provides headroom for large requests while keeping
-    // user-facing latency bounded. Supabase Edge Function wall-clock limit is at
-    // least 150 seconds (free tier), so 45s is well within platform limits.
-    //
-    // PROVISIONAL: this timeout has not been verified against production traffic.
-    // Adjust if smoke testing reveals legitimate requests are being aborted.
-    //
-    // ANTHROPIC_API_KEY is stored in Supabase secrets — never in any file.
-    const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), 45_000)
+    // ── 6. Run the provider call (primary + bounded fallback if needed) ────────
+    // requestStart is recorded here so runProviderAttempts can compute elapsed
+    // time for the remaining-time check before the fallback attempt.
+    const requestStart = Date.now()
+    const result = await runProviderAttempts({
+      systemPrompt,
+      messages: validatedMessages,
+      requestId,
+      passUsed,
+      requestStart,
+      anthropicApiKey: Deno.env.get('ANTHROPIC_API_KEY') ?? '',
+      // fetchImpl, now, makeSignalFn, logAttempt, logSummary — production defaults
+    })
 
-    let anthropicRes: Response
-    try {
-      anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': Deno.env.get('ANTHROPIC_API_KEY') ?? '',
-          'anthropic-version': '2023-06-01',
-        },
-        body: JSON.stringify({
-          model: 'claude-sonnet-5',
-          max_tokens: 2048,
-          system: systemPrompt,
-          messages: validatedMessages,
-        }),
-        signal: controller.signal,
-      })
-    } catch (fetchErr: any) {
-      if (fetchErr?.name === 'AbortError') {
-        // Log only safe metadata — no user content or request details.
-        console.error('ai-chat provider-timeout', { requestId })
-        return errorResponse(
-          'provider_timeout',
-          'AI response timed out — please try again',
-          true,
-          requestId,
-          504
-        )
-      }
-      throw fetchErr
-    } finally {
-      clearTimeout(timer)
+    // ── 7. Return the structured response ─────────────────────────────────────
+    if (result.ok) {
+      const successBody: Record<string, any> = { reply: result.reply, request_id: requestId }
+      if (result.truncated) successBody.truncated = true
+      return jsonResponse(successBody, 200)
     }
 
-    // ── 7. Handle non-2xx provider responses ──────────────────────────────────
-    if (!anthropicRes.ok) {
-      // Log only provider metadata — never the response body (may contain
-      // request-related content) and never user data.
-      console.error('ai-chat provider-error', {
-        requestId,
-        providerStatus: anthropicRes.status,
-        providerRequestId: anthropicRes.headers.get('x-request-id'),
-      })
-
-      if (anthropicRes.status === 429) {
-        return errorResponse(
-          'provider_rate_limited',
-          'AI is busy right now — please wait a moment and try again',
-          true,
-          requestId,
-          429
-        )
-      }
-      if (anthropicRes.status === 529) {
-        return errorResponse(
-          'provider_unavailable',
-          'AI service is temporarily overloaded — please try again in a moment',
-          true,
-          requestId,
-          503
-        )
-      }
-      // All other non-2xx responses: 4xx auth errors, 5xx server errors, etc.
-      return errorResponse('provider_error', 'AI service error — please try again', true, requestId, 502)
+    switch (result.errorCode) {
+      case 'provider_timeout':
+        return errorResponse('provider_timeout', 'AI response timed out — please try again', true, requestId, 504)
+      case 'provider_rate_limited':
+        return errorResponse('provider_rate_limited', 'AI is busy right now — please wait a moment and try again', true, requestId, 429)
+      case 'provider_unavailable':
+        return errorResponse('provider_unavailable', 'AI service is temporarily overloaded — please try again in a moment', true, requestId, 503)
+      case 'provider_error':
+        return errorResponse('provider_error', 'AI service error — please try again', true, requestId, 502)
+      default:
+        return errorResponse('empty_provider_response', 'AI did not return a response — please try again', true, requestId, 502)
     }
-
-    // ── 8. Parse provider response ─────────────────────────────────────────────
-    const anthropicData = await anthropicRes.json()
-    const { reply, stop_reason, truncated, error: parseError } = parseProviderResponse(anthropicData)
-
-    if (parseError) {
-      // Log safe metadata only — no response text, content data, or user content.
-      console.error('ai-chat empty-provider-response', {
-        requestId,
-        stop_reason,
-        contentBlockTypes: (anthropicData?.content ?? []).map((b: any) => b?.type),
-      })
-      return errorResponse(
-        'empty_provider_response',
-        'AI did not return a response — please try again',
-        true,
-        requestId,
-        502
-      )
-    }
-
-    // Truncated partial responses (stop_reason=max_tokens) are returned rather than
-    // rejected: the partial text is still useful. The truncated flag lets the
-    // frontend surface an optional note to the user.
-    const successBody: Record<string, any> = { reply, request_id: requestId }
-    if (truncated) successBody.truncated = true
-
-    return jsonResponse(successBody, 200)
 
   } catch (err: any) {
     // Log only the error name — err.message and err.stack may contain user data

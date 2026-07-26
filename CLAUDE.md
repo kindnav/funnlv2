@@ -952,7 +952,7 @@ Note: profile DB query failure → `internal_error` (retryable), NOT `pro_requir
 
 **Test totals after overhaul: 272 total (37 csv-header + 62 ai-helpers + 33 theme + 15 parse-provider-response + 18 normalize-messages + 19 ai-chat-error + 67 ai-chat + 21 ai-chat-conversation)**
 
-**Deployment status:** Edge Function and frontend NOT yet deployed. Deployment is a separate step — and the **order matters**.
+**Deployment status:** Edge Function and frontend NOT yet deployed. Deployment is a separate step — and the **order matters**. (PR #18 merged and deployed; see below for subsequent hotfix.)
 
 **Compatibility matrix:**
 
@@ -973,6 +973,89 @@ Note: profile DB query failure → `internal_error` (retryable), NOT `pro_requir
 **Rollback procedure:**
 - Edge Function failure: Supabase dashboard → Edge Functions → `ai-chat` → Deployment history → activate previous version. Frontend stays on new version (compatible with old Edge Function per the matrix above).
 - Frontend failure (unlikely — it is backward-compatible): revert commit on `main` and push; Vercel redeploys within minutes.
+
+---
+
+### Layer C hotfix — complex prompt failure (branch review/ai-chat-complex-prompt-hotfix)
+
+**Production symptom (support ref e14696ba-a8ca-4a24-b5a9-0889f4c4d796):** Complex network-analysis prompts (e.g., "compile a list of people who fit these criteria from my network") returned "AI did not return a response — please try again" while short simple prompts succeeded. The failure was consistent with a specific class of provider response, not a random fluke.
+
+**Root cause (strongest evidence-backed diagnosis — production logs not directly accessible via API):** Strongest evidence-backed diagnosis: Claude Sonnet 5 enables adaptive thinking by default, and the previous 2,048-token output allowance covered both thinking and visible text. The repeatable simple-versus-complex failure pattern and `empty_provider_response` code are consistent with complex prompts exhausting the visible-response budget. The original provider stop reason and block types were not recoverable, so the exact historical response shape is unconfirmed.
+
+**Fix: two-attempt provider loop with bounded fallback**
+
+New module `supabase/functions/ai-chat/providerCall.js` (plain JS, importable from Node tests without transpilation) exports:
+
+| Export | Value | Purpose |
+|---|---|---|
+| `MODEL` | `'claude-sonnet-5'` | Model identifier |
+| `PRIMARY_MAX_TOKENS` | `4096` | Full budget for visible text (thinking disabled) |
+| `PRIMARY_THINKING` | `{ type: 'disabled' }` | Disables adaptive thinking — all tokens go to visible output |
+| `PRIMARY_EFFORT` | `'high'` | Full quality on primary attempt |
+| `FALLBACK_MAX_TOKENS` | `4096` | Same budget — all goes to visible text |
+| `FALLBACK_THINKING` | `{ type: 'disabled' }` | Thinking also disabled on fallback |
+| `FALLBACK_EFFORT` | `'medium'` | Different execution path from primary |
+| `OVERALL_TIMEOUT_MS` | `60_000` | Hard cap for the entire request (all attempts) |
+| `PRIMARY_ATTEMPT_TIMEOUT_MS` | `45_000` | Per-attempt AbortSignal deadline |
+| `MIN_FALLBACK_TIME_MS` | `10_000` | Minimum remaining ms before fallback may start |
+| `shouldRetryForBlankReply(...)` | pure fn | Retry decision — see conditions below |
+| `buildAttemptLog(...)` | pure fn | Safe structured log for one provider attempt |
+| `buildRequestSummaryLog(...)` | pure fn | Safe structured log for completed request |
+| `makeSignal(ms)` | fn | Creates `{ signal, clearTimer }` — injectable in tests |
+| `runProviderAttempts({...})` | async fn | Full orchestration — primary + bounded fallback |
+
+**Attempt 1 (primary):** `model: 'claude-sonnet-5', thinking: { type: 'disabled' }, output_config: { effort: 'high' }, max_tokens: 4096`. Thinking disabled reserves the full 4096-token budget for visible text.
+
+**Attempt 2 (fallback — only when retry is warranted):** `thinking: { type: 'disabled' }, output_config: { effort: 'medium' }, max_tokens: 4096`. Medium effort provides a different provider-side execution path from the primary attempt.
+
+**Per-attempt AbortSignals — bounded fallback time.** Each attempt gets its own `AbortController` with `PRIMARY_ATTEMPT_TIMEOUT_MS = 45s`. Before the fallback starts, the elapsed time is checked: `remaining = OVERALL_TIMEOUT_MS - elapsed`. If `remaining < MIN_FALLBACK_TIME_MS (10s)`, the fallback is skipped and `provider_timeout` is returned immediately — prevents starting a call that cannot realistically complete. Fallback timeout = `min(remaining, PRIMARY_ATTEMPT_TIMEOUT_MS)`. Total wall time ≤ `OVERALL_TIMEOUT_MS (60s)`.
+
+**`runProviderAttempts` orchestration** (extracted to `providerCall.js`, fully injectable for testing):
+- Parameters: `{ systemPrompt, messages, requestId, passUsed, requestStart, anthropicApiKey, fetchImpl, now, makeSignalFn, logAttempt, logSummary }`
+- Returns: `{ ok: true, reply, truncated, attempts }` or `{ ok: false, errorCode, attempts }`
+- `fetchImpl`, `now`, `makeSignalFn` default to production globals; injecting them enables real orchestration unit tests without module mocking
+- `index.ts` calls it with only the required args (all four injectable deps use production defaults)
+
+**Retry conditions (`shouldRetryForBlankReply`):** Retry is allowed ONLY when ALL of:
+1. Anthropic returned HTTP 200 (not a rate-limit, server error, or overload)
+2. `parseProviderResponse` returned `parseError === 'empty_provider_response'` (no usable text)
+3. One of: `stop_reason === 'max_tokens'` (budget exhausted) OR content array is empty OR every block is `thinking`/`redacted_thinking` (thinking-only response)
+4. This is the first attempt (caller enforces the two-attempt maximum)
+
+**Never retried:** non-200 HTTP responses; refusals (model produces a visible text block declining the request, so `parseError` is null); auth / DB / context-budget failures (handled before any provider call); timeout (AbortError stops the loop immediately).
+
+**`reply_present` definition:** `typeof parsedReply === 'string' && parsedReply.trim().length > 0` — guards against whitespace-only strings that parseProviderResponse filtered but that are technically non-null.
+
+**Analytics:** `ai_assistant_used` fires exactly once after the final successful reply, regardless of how many attempts were needed. `ai_assistant_failed` fires exactly once if the entire operation (all attempts) fails.
+
+**Privacy-safe diagnostic logging** (two structured JSON events per request, safe to surface in any logging system):
+
+`ai_chat_provider_attempt` — emitted after each provider call (regardless of success/failure):
+- `event`, `request_id`, `attempt` (1 or 2), `model`, `max_tokens`, `thinking_mode`, `effort`
+- `provider_status` (HTTP status or null if aborted), `provider_request_id` (Anthropic's `x-request-id`)
+- `stop_reason`, `content_block_types` (array of block type strings), `input_tokens`, `output_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`, `duration_ms`
+- `context_pass` (1/2/3 — which network context pass was used), `reply_present` (boolean — non-blank visible text present)
+- **Never contains:** prompt text, system prompt, contact names, emails, companies, roles, tags, notes, URLs, network context text, or provider response text
+
+`ai_chat_request_complete` — emitted once in a `finally` block regardless of outcome:
+- `event`, `request_id`, `success` (boolean), `attempts` (1 or 2), `final_error_code` (null on success), `total_duration_ms`
+
+**Timeout:** 60 s overall hard cap. Per-attempt signal fires at 45 s. Remaining-time guard prevents starting fallback with < 10 s left. PROVISIONAL — adjust after production smoke tests.
+
+**`index.ts` changes:** imports only `runProviderAttempts` from `providerCall.js`. Records `requestStart = Date.now()` before the call. Delegates all provider orchestration to `runProviderAttempts`. Maps `result.ok` / `result.errorCode` to the 11 canonical HTTP error responses.
+
+**Test totals after hotfix: 353 total (37 csv-header + 62 ai-helpers + 33 theme + 15 parse-provider-response + 18 normalize-messages + 19 ai-chat-error + 67 ai-chat + 21 ai-chat-conversation + 81 ai-chat-provider)**
+
+`tests/ai-chat-provider.test.js` — 81 tests: constants (10), `makeSignal` (1), `shouldRetryForBlankReply` (16), `buildAttemptLog` (22), `buildRequestSummaryLog` (11), `runProviderAttempts` orchestration (21 — all real control-flow paths covered: primary success, multi-block join, thinking+text, truncation, fallback trigger, fallback success, refusal, 429/529/400, primary timeout, insufficient remaining time, both attempts fail, call count cap, timer cleanup, log fire counts, privacy guarantees).
+
+**Deployment status:** NOT yet deployed. Branch `review/ai-chat-complex-prompt-hotfix`. Draft PR targeting `main`. Do not deploy until explicit approval. Only `ai-chat` Edge Function needs deployment — no frontend changes, no schema changes, no migrations.
+
+**Deployment steps (when approved):**
+1. Merge PR → Vercel auto-deploys (frontend unchanged, but Vercel still builds)
+2. `npx supabase functions deploy ai-chat --project-ref jzybxhvgnksrwxfivdwt --use-api` — deploys new Edge Function
+3. Smoke test: simple prompt (verify works), complex network-analysis prompt (verify non-empty response)
+4. If complex prompt still fails: check Supabase dashboard Edge Function logs for `ai_chat_provider_attempt` events — `attempt`, `stop_reason`, `content_block_types`, and `reply_present` will show which attempt produced text (or didn't)
+5. Rollback (current production version: 9): Supabase dashboard → Edge Functions → `ai-chat` → Deployment history → activate version 9
 
 ---
 
