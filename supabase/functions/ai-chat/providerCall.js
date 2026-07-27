@@ -22,7 +22,7 @@ export const MODEL = 'claude-sonnet-5'
 //
 // Do not add temperature, top_p, top_k, or manual budget_tokens.
 
-export const PRIMARY_MAX_TOKENS = 4096
+export const PRIMARY_MAX_TOKENS = 2048
 export const PRIMARY_THINKING = { type: 'disabled' }
 export const PRIMARY_EFFORT = 'high'
 
@@ -38,26 +38,34 @@ export const PRIMARY_EFFORT = 'high'
 // alternative execution path. The remaining-time guard (MIN_FALLBACK_TIME_MS)
 // ensures it only runs when meaningful time remains.
 
-export const FALLBACK_MAX_TOKENS = 4096
+export const FALLBACK_MAX_TOKENS = 2048
 export const FALLBACK_THINKING = { type: 'disabled' }
 export const FALLBACK_EFFORT = 'medium'
 
 // ── Timing constants ──────────────────────────────────────────────────────────
 //
-// OVERALL_TIMEOUT_MS   — hard cap for the entire request across all attempts.
-// PRIMARY_ATTEMPT_TIMEOUT_MS — per-attempt abort deadline (used for both primary
-//                        and, bounded by remaining time, for the fallback).
-// MIN_FALLBACK_TIME_MS — minimum remaining time required to start a fallback;
-//                        prevents starting an attempt that cannot realistically
-//                        complete and would only extend the user-facing wait.
+// OVERALL_TIMEOUT_MS   — hard cap for the entire provider stage across all attempts.
+//                        Chosen to fit within the Supabase Free-tier wall-clock limit
+//                        of 150 s (the pre-provider stage — auth, DB, context — adds
+//                        another ~2–5 s, keeping the total invocation well under 150 s).
+// PRIMARY_ATTEMPT_TIMEOUT_MS — per-attempt AbortSignal deadline (applies to both primary
+//                        and, bounded by remaining time, to the fallback).
+//                        Sized to accommodate a worst-case follow-up request:
+//                        2,048-token output / 80 tok/s ≈ 25.6 s output generation,
+//                        plus input processing for a large contact network and multi-turn
+//                        history, plus network overhead. 90 s gives ~2× headroom.
+// MIN_FALLBACK_TIME_MS — minimum remaining time required before starting a blank-reply
+//                        fallback. Prevents launching an attempt that cannot realistically
+//                        complete; the fallback only runs on fast blank HTTP-200 responses
+//                        (not on timeouts), so meaningful remaining time is expected.
 //
 // Worst-case total: if the primary returns quickly with a blank reply and there
-// is enough remaining time, the fallback gets up to min(remaining, 45s). The
+// is enough remaining time, the fallback gets up to min(remaining, 90s). The
 // remaining-time check guarantees total ≤ OVERALL_TIMEOUT_MS.
 
-export const OVERALL_TIMEOUT_MS = 60_000
-export const PRIMARY_ATTEMPT_TIMEOUT_MS = 45_000
-export const MIN_FALLBACK_TIME_MS = 10_000
+export const OVERALL_TIMEOUT_MS = 120_000
+export const PRIMARY_ATTEMPT_TIMEOUT_MS = 90_000
+export const MIN_FALLBACK_TIME_MS = 20_000
 
 // ── Retry decision ────────────────────────────────────────────────────────────
 
@@ -133,8 +141,12 @@ export function buildAttemptLog({
  * Builds a safe loggable summary for the completed request.
  * Never contains user data. The `success` field means a non-blank visible
  * reply was returned to the caller.
+ *
+ * `preProviderMs` is the time spent on pre-provider work (auth, DB, context
+ * building) before the first provider call was started. It is computed as
+ * `requestStart - requestEntryMs` by the caller. Null when not provided.
  */
-export function buildRequestSummaryLog({ requestId, success, attempts, finalErrorCode, totalDurationMs }) {
+export function buildRequestSummaryLog({ requestId, success, attempts, finalErrorCode, totalDurationMs, preProviderMs }) {
   return {
     event: 'ai_chat_request_complete',
     request_id: requestId ?? null,
@@ -142,6 +154,7 @@ export function buildRequestSummaryLog({ requestId, success, attempts, finalErro
     attempts: typeof attempts === 'number' ? attempts : null,
     final_error_code: finalErrorCode ?? null,
     total_duration_ms: typeof totalDurationMs === 'number' ? totalDurationMs : null,
+    pre_provider_ms: typeof preProviderMs === 'number' ? preProviderMs : null,
   }
 }
 
@@ -203,6 +216,10 @@ const ANTHROPIC_API_VERSION = '2023-06-01'
  * @param {number|null} params.passUsed        Context budget pass used (for logging)
  * @param {number}      params.requestStart    ms timestamp when request handling began
  * @param {string}      params.anthropicApiKey Anthropic API key (from Supabase secrets)
+ * @param {number}     [params.requestEntryMs] ms timestamp recorded at Edge Function entry
+ *                                             (before auth, DB, and context work). When provided,
+ *                                             pre_provider_ms = requestStart - requestEntryMs is
+ *                                             included in the summary log. Omit to log null.
  * @param {Function}   [params.fetchImpl]      async (url, init) => Response; defaults to global fetch
  * @param {Function}   [params.now]            () => number (ms); defaults to Date.now
  * @param {Function}   [params.makeSignalFn]   (ms) => { signal, clearTimer }; defaults to makeSignal
@@ -220,6 +237,7 @@ export async function runProviderAttempts({
   requestId,
   passUsed,
   requestStart,
+  requestEntryMs,
   anthropicApiKey,
   fetchImpl,
   now,
@@ -395,6 +413,7 @@ export async function runProviderAttempts({
       attempts,
       finalErrorCode,
       totalDurationMs: _now() - requestStart,
+      preProviderMs: typeof requestEntryMs === 'number' ? requestStart - requestEntryMs : null,
     }))
   }
 

@@ -1155,11 +1155,55 @@ New module `supabase/functions/ai-chat/providerCall.js` (plain JS, importable fr
 
 **Test totals: 453 total across 13 suites (37 csv-header + 62 ai-helpers + 33 theme + 15 parse-provider-response + 43 normalize-messages + 19 ai-chat-error + 72 ai-chat + 28 ai-chat-conversation + 81 ai-chat-provider + 37 sanitize-reply + 9 contact-link-validator + 4 extract-children-text + 13 ai-chat-request-gate)**
 
-**Deployment status:** NOT yet deployed. Branch `review/ai-chat-followup-history-hotfix`. Draft PR targeting `main`. Do not merge or deploy without explicit approval.
+**Deployment status:** Deployed as PR #21 (2026-07-27). Production ai-chat v12. Frontend live at main SHA `030e315`. Rollback: Edge Function — Supabase dashboard → ai-chat → Deployment history → activate version 11.
 
-**What must be deployed:** frontend (Vercel auto-deploy on merge) + Edge Function (`ai-chat` only). Order: frontend first, then Edge Function.
+---
 
-**Rollback:** Edge Function — Supabase dashboard → ai-chat → Deployment history → activate version 11 (current production). Frontend — revert commit on main; Vercel redeploys.
+### Layer C timeout hotfix — follow-up request timeout (branch review/ai-chat-followup-timeout-hotfix)
+
+**Production symptom (support ref 4aeabfa7-8afc-4b46-8cd0-ae380bcfbb88):** Complex first prompt succeeded; immediate follow-up ("include Indiana University students too, but put them in a separate section and explain which stored facts make each person a potential user") returned `provider_timeout` in ~45 s. NOT the previous `Invalid messages` failure from PR #21 — normalization passed and the provider path was reached.
+
+**Root cause:** `PRIMARY_ATTEMPT_TIMEOUT_MS = 45,000` was too short. With `PRIMARY_MAX_TOKENS = 4,096`, output generation alone at ~80 tok/s = 51.2 s — already 6 s past the abort deadline, before input processing or network overhead. The Supabase platform wall-clock limit is 150 s (free tier); CPU time is 2 s but excludes async I/O entirely. The self-imposed 45 s timeout was the only binding constraint.
+
+**Fix: five constant changes + one new diagnostic field in `providerCall.js` + `requestEntryMs` in `index.ts`:**
+
+| Constant | Old | New | Rationale |
+|---|---|---|---|
+| `PRIMARY_MAX_TOKENS` | 4096 | 2048 | Aligns with ≤250-word readable-answer standard; halves worst-case output latency (51 s → 26 s) |
+| `FALLBACK_MAX_TOKENS` | 4096 | 2048 | Consistent with primary |
+| `PRIMARY_ATTEMPT_TIMEOUT_MS` | 45,000 | 90,000 | Core fix: 2048 tok / 80 tok/s ≈ 26 s output + input processing + network ≈ 40 s worst-case; 90 s gives 2× headroom |
+| `OVERALL_TIMEOUT_MS` | 60,000 | 120,000 | PRIMARY (90 s) + MIN_FALLBACK (20 s) + buffer; well within 150 s platform limit |
+| `MIN_FALLBACK_TIME_MS` | 10,000 | 20,000 | Blank-reply fallback also gets up to 90 s; 20 s minimum ensures it can realistically complete |
+
+**New `pre_provider_ms` diagnostic field:**
+- `buildRequestSummaryLog` accepts new optional `preProviderMs` param → emits `pre_provider_ms` (numeric or null)
+- `runProviderAttempts` accepts new optional `requestEntryMs` param; computes `preProviderMs = requestStart - requestEntryMs` in its finally block
+- `index.ts` records `requestEntryMs = Date.now()` at invocation entry (before auth/DB/context), passes it to `runProviderAttempts`
+- Surfaces the pre-provider overhead (auth + 2 DB queries + context build) separately from the provider stage in each `ai_chat_request_complete` log event
+
+**Files changed:**
+- `supabase/functions/ai-chat/providerCall.js` — 5 constant changes, `buildRequestSummaryLog` (new `preProviderMs` param + `pre_provider_ms` field), `runProviderAttempts` (new `requestEntryMs` param, `preProviderMs` in finally)
+- `supabase/functions/ai-chat/index.ts` — `requestEntryMs = Date.now()` at handler entry; passed to `runProviderAttempts`
+- `supabase/functions/ai-chat/normalizeMessages.js` — updated comment to reference new `PRIMARY_MAX_TOKENS = 2,048`
+- `tests/ai-chat-provider.test.js` — 5 updated constant tests + 3 new `buildRequestSummaryLog` pre_provider_ms tests + 8 new orchestration tests (N1–N8)
+
+**Test totals: 464 total across 13 suites (37 csv-header + 62 ai-helpers + 33 theme + 15 parse-provider-response + 43 normalize-messages + 19 ai-chat-error + 72 ai-chat + 28 ai-chat-conversation + 92 ai-chat-provider + 37 sanitize-reply + 9 contact-link-validator + 4 extract-children-text + 13 ai-chat-request-gate)**
+
+**No frontend changes. No schema changes. No migrations. No other Edge Functions.**
+
+**Compatibility:** `requestEntryMs` is an optional parameter in `runProviderAttempts`. Omitting it produces `pre_provider_ms: null` in the summary log — backward-compatible with all existing callers and tests.
+
+**Deployment status:** NOT yet deployed. Branch `review/ai-chat-followup-timeout-hotfix`. Draft PR targeting `main`. Do not deploy without explicit approval.
+
+**What must be deployed:** Edge Function (`ai-chat` only). No frontend changes; no Vercel deployment needed. Order: deploy Edge Function → smoke test.
+
+**Smoke test (when approved):**
+1. Simple prompt → confirm non-empty reply
+2. Complex first prompt (e.g., "identify contacts for VC introductions") → confirm non-empty reply
+3. Follow-up turn (e.g., "include Indiana University students too in a separate section") → confirm non-empty reply (this is the previously-failing scenario)
+4. Check Supabase Edge Function logs for `ai_chat_request_complete` — verify `pre_provider_ms` is present and `total_duration_ms` < 90,000
+
+**Rollback:** Supabase dashboard → Edge Functions → `ai-chat` → Deployment history → activate version 12 (current production). Frontend stays unchanged.
 
 ---
 

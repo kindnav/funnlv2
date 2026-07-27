@@ -18,10 +18,13 @@ export const MAX_USER_MESSAGE_CHARS = 8_000
  * forwarded to the provider. The full content is NEVER modified in the browser —
  * only the copy sent as provider history is shortened.
  *
- * Value justification: the app's PRIMARY_MAX_TOKENS = 4,096 tokens.
- * At ~5 chars/token (English + markdown), max output ≈ 20,480 chars.
- * This limit is set just below that maximum so any legitimately generated
- * response fits without shortening under normal conditions.
+ * Value justification: the app's PRIMARY_MAX_TOKENS = 2,048 tokens.
+ * At ~5 chars/token (English + markdown), max output ≈ 10,240 chars.
+ * The 20,000 char limit provides generous headroom above that maximum so
+ * any legitimately generated response fits without shortening under normal
+ * conditions. Shortening is triggered only if a response somehow exceeds
+ * this limit (e.g., a very long-form answer or a model update that generates
+ * longer responses at the same token count).
  */
 export const MAX_ASSISTANT_HISTORY_CHARS = 20_000
 

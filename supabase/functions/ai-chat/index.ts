@@ -103,6 +103,9 @@ Deno.serve(async (req) => {
   // It is safe to show to users as a support reference and to log as a
   // correlation key. It never contains user data.
   const requestId = crypto.randomUUID()
+  // Recorded at invocation entry — before auth, DB, and context work — so that
+  // pre_provider_ms in the summary log captures the full pre-provider overhead.
+  const requestEntryMs = Date.now()
 
   try {
     // ── 1. Verify the caller's auth token ─────────────────────────────────────
@@ -300,6 +303,7 @@ Deno.serve(async (req) => {
       requestId,
       passUsed,
       requestStart,
+      requestEntryMs,
       anthropicApiKey: Deno.env.get('ANTHROPIC_API_KEY') ?? '',
       // fetchImpl, now, makeSignalFn, logAttempt, logSummary — production defaults
     })
