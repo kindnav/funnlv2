@@ -135,7 +135,7 @@ test('stale request must not clear loading for a newer in-flight request', () =>
     'active request finally block must clear loading')
 })
 
-test('simulated async flow: stale request cannot mutate messages or analytics after reset', async () => {
+test('simulated async flow: stale request cannot mutate messages or analytics after reset', () => {
   // Simulates the FunnlAIPage post-await pattern for a send→reset→resolve sequence.
   // Each await point in sendMessage/retryMessage calls gate.isCurrent(token) first.
   const gate = createRequestGate()

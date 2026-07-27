@@ -414,8 +414,13 @@ test('over-budget sequence with consecutive user messages returns invalid_role_s
     { role: 'user',      content: 'x'.repeat(8_000) },  // consecutive users — invalid
     { role: 'user',      content: 'y'.repeat(8_000) },
     { role: 'assistant', content: 'z'.repeat(20_000) },
-    { role: 'user',      content: 'Final question' },
+    { role: 'user',      content: 'a'.repeat(8_000) },  // 8,000 chars — total = 44,000 > MAX_TOTAL_CONVERSATION_CHARS
   ]
+  // Verify the sequence genuinely exceeds the budget so the test proves that
+  // pre-trim validation catches the invalid sequence before trimming can hide it.
+  const rawTotal = msgs.reduce((sum, msg) => sum + msg.content.length, 0)
+  assert.ok(rawTotal > MAX_TOTAL_CONVERSATION_CHARS,
+    `raw total ${rawTotal} must exceed MAX_TOTAL_CONVERSATION_CHARS ${MAX_TOTAL_CONVERSATION_CHARS}`)
   const r = normalizeMessages(msgs)
   assert.strictEqual(r.errorCode, 'invalid_request',
     'consecutive user messages in over-budget sequence must be rejected')
