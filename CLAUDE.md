@@ -1155,11 +1155,91 @@ New module `supabase/functions/ai-chat/providerCall.js` (plain JS, importable fr
 
 **Test totals: 453 total across 13 suites (37 csv-header + 62 ai-helpers + 33 theme + 15 parse-provider-response + 43 normalize-messages + 19 ai-chat-error + 72 ai-chat + 28 ai-chat-conversation + 81 ai-chat-provider + 37 sanitize-reply + 9 contact-link-validator + 4 extract-children-text + 13 ai-chat-request-gate)**
 
-**Deployment status:** NOT yet deployed. Branch `review/ai-chat-followup-history-hotfix`. Draft PR targeting `main`. Do not merge or deploy without explicit approval.
+**Deployment status:** Deployed as PR #21 (2026-07-27). Production ai-chat v12. Frontend live at main SHA `030e315`. Rollback: Edge Function — Supabase dashboard → ai-chat → Deployment history → activate version 11.
 
-**What must be deployed:** frontend (Vercel auto-deploy on merge) + Edge Function (`ai-chat` only). Order: frontend first, then Edge Function.
+---
 
-**Rollback:** Edge Function — Supabase dashboard → ai-chat → Deployment history → activate version 11 (current production). Frontend — revert commit on main; Vercel redeploys.
+### Layer C timeout hotfix — follow-up request timeout (branch review/ai-chat-followup-timeout-hotfix)
+
+**Production symptom (support ref 4aeabfa7-8afc-4b46-8cd0-ae380bcfbb88):** Complex first prompt succeeded; immediate follow-up ("include Indiana University students too, but put them in a separate section and explain which stored facts make each person a potential user") returned `provider_timeout` in ~45 s. NOT the previous `Invalid messages` failure from PR #21 — normalization passed and the provider path was reached.
+
+**What is confirmed:** The frontend received `provider_timeout`. The deployed Edge Function had `PRIMARY_ATTEMPT_TIMEOUT_MS = 45,000` (an AbortController deadline). The code does not retry on timeout — one attempt, then a structured error.
+
+**What is inferred (not confirmed):** The complex multi-turn follow-up likely exceeded the 45 s per-attempt deadline. The exact provider-side duration, token counts, and whether the abort fired at precisely 45 s are not confirmed — Supabase Edge Function logs are not accessible programmatically and were not captured at the time of failure.
+
+**Fix overview:**
+
+**1. `PRIMARY_MAX_TOKENS` reduced from 4096 → 2048** — aligns with the ≤250-word readable-answer standard; makes worst-case output latency more predictable.
+
+**2. `PRIMARY_ATTEMPT_TIMEOUT_MS` increased from 45,000 → 90,000** — the core fix, giving the provider substantially more wall time before abort.
+
+**3. `OVERALL_TIMEOUT_MS` replaced with `REQUEST_DEADLINE_MS = 125,000`** — architectural correction. The prior `OVERALL_TIMEOUT_MS = 120,000` was measured from `requestStart`, which is captured AFTER auth + DB + context work. It therefore only covered the provider stage, not the full invocation. The new `REQUEST_DEADLINE_MS = 125,000` is measured from `requestEntryMs` (captured at the very start of the Edge Function handler, before auth), covering the full invocation. The 25,000 ms safety margin below the 150 s Supabase wall-clock limit is provisional — actual pre-provider overhead should be validated from `pre_provider_ms` in production logs once deployed.
+
+**4. `MIN_FALLBACK_TIME_MS` increased from 10,000 → 20,000** — ensures a blank-reply fallback attempt has realistic time to complete.
+
+**Full constant table:**
+
+| Constant | Old | New | Notes |
+|---|---|---|---|
+| `PRIMARY_MAX_TOKENS` | 4096 | 2048 | Aligns with ≤250-word readable-answer standard |
+| `FALLBACK_MAX_TOKENS` | 4096 | 2048 | Consistent with primary |
+| `PRIMARY_ATTEMPT_TIMEOUT_MS` | 45,000 | 90,000 | Core fix: per-attempt abort deadline |
+| `OVERALL_TIMEOUT_MS` | 60,000 | (removed) | Replaced by REQUEST_DEADLINE_MS — see below |
+| `REQUEST_DEADLINE_MS` | (new) | 125,000 | Full-invocation deadline from `requestEntryMs` (handler entry, before auth). Covers auth + DB + context + all provider attempts. 25s below 150s platform limit — provisional |
+| `MIN_FALLBACK_TIME_MS` | 10,000 | 20,000 | Minimum remaining budget to start a blank-reply fallback |
+
+**Deadline architecture (`providerCall.js`):**
+- `REQUEST_DEADLINE_MS = 125,000` is measured from `requestEntryMs` (passed from `index.ts`), not from `requestStart`
+- Before every attempt: `remainingRequestMs = REQUEST_DEADLINE_MS - (now() - requestEntryMs)`
+- Per-attempt signal: `min(PRIMARY_ATTEMPT_TIMEOUT_MS, remainingRequestMs)` — budget-bounded
+- If `remainingRequestMs < MIN_FALLBACK_TIME_MS` before any attempt: skip immediately, return `provider_timeout` with `timeout_source: 'request_deadline'`
+- AbortError from a provider call → `timeout_source: 'attempt_deadline'`
+- When `requestEntryMs` is not provided: deadline check is skipped; each attempt gets full `PRIMARY_ATTEMPT_TIMEOUT_MS` (backward-compatible)
+
+**Diagnostic metrics (three separate values):**
+- `pre_provider_ms`: `requestStart - requestEntryMs` — time from handler entry until provider orchestration begins (auth + DB + context)
+- `provider_duration_ms`: `finalMs - requestStart` — time spent inside provider orchestration only
+- `total_duration_ms`: `finalMs - requestEntryMs` — elapsed time from handler entry through provider orchestration completion. Includes pre-provider and provider work; excludes final reply sanitization and response serialization (the small amount of work that runs after `runProviderAttempts` returns).
+
+Note: `total_duration_ms` meaning changed from the prior version (where it measured only the provider stage from `requestStart`). All three fields appear in the `ai_chat_request_complete` log event.
+
+**New attempt log fields:**
+- `remaining_request_ms_at_attempt_start` — budget remaining when each attempt started
+- `attempt_timeout_ms` — the AbortController deadline actually used for that attempt
+
+**`timeout_source` field (new):**
+- `'attempt_deadline'` — AbortController fired during the provider call
+- `'request_deadline'` — full-invocation budget exhausted before attempt started
+- `null` — no timeout (success, or error from a non-timeout cause)
+
+**Files changed:**
+- `supabase/functions/ai-chat/providerCall.js` — removed `OVERALL_TIMEOUT_MS`, added `REQUEST_DEADLINE_MS`; full deadline architecture; `buildAttemptLog` gains `remainingRequestMsAtAttemptStart` + `attemptTimeoutMs`; `buildRequestSummaryLog` gains `timeoutSource` + `providerDurationMs`; `total_duration_ms` meaning changed (now from `requestEntryMs`); `runProviderAttempts` accepts `requestEntryMs`
+- `supabase/functions/ai-chat/index.ts` — `requestEntryMs = Date.now()` at handler entry; `requestStart = Date.now()` just before `runProviderAttempts`; both passed to `runProviderAttempts`
+- `supabase/functions/ai-chat/normalizeMessages.js` — updated comment referencing `PRIMARY_MAX_TOKENS = 2,048`
+- `tests/ai-chat-provider.test.js` — import updated (`OVERALL_TIMEOUT_MS` → `REQUEST_DEADLINE_MS`); `makeSteppingNow` helper added; constant tests updated; 4 new `buildAttemptLog` tests; 7 new `buildRequestSummaryLog` tests; N5 and N6 rewritten for new deadline architecture; P1–P15 deadline regression tests added
+
+**Test totals: 479 total across 13 suites (37 csv-header + 62 ai-helpers + 33 theme + 15 parse-provider-response + 43 normalize-messages + 19 ai-chat-error + 72 ai-chat + 28 ai-chat-conversation + 117 ai-chat-provider + 37 sanitize-reply + 9 contact-link-validator + 4 extract-children-text + 13 ai-chat-request-gate)**
+
+**No frontend behavior changes. No schema changes. No migrations. No other Edge Functions.**
+
+**Compatibility:** `requestEntryMs` is an optional parameter in `runProviderAttempts`. When omitted: deadline check is skipped, each attempt gets full `PRIMARY_ATTEMPT_TIMEOUT_MS`, `pre_provider_ms` and `total_duration_ms` are null — backward-compatible with all existing callers and tests.
+
+**Deployment status:** Deployed as PR #22 (2026-07-27). Production ai-chat v13. Rollback: Edge Function — Supabase dashboard → ai-chat → Deployment history → activate version 12.
+
+**Deployment notes:**
+- PR #22 contains no frontend behavior changes.
+- Merging to main triggers the configured Vercel production build even when no frontend source changed.
+- The generated frontend bundle is functionally unchanged.
+- The ai-chat fix becomes active only after the Supabase Edge Function is separately deployed.
+- Edge Function command: `npx supabase functions deploy ai-chat --project-ref jzybxhvgnksrwxfivdwt --use-api`
+
+**Smoke test (when approved):**
+1. Simple prompt → confirm non-empty reply
+2. Complex first prompt (e.g., "identify contacts for VC introductions") → confirm non-empty reply
+3. Follow-up turn (e.g., "include Indiana University students too in a separate section") → confirm non-empty reply (this is the previously-failing scenario)
+4. Check Supabase Edge Function logs for `ai_chat_request_complete` — verify `pre_provider_ms`, `provider_duration_ms`, and `total_duration_ms` are all present; verify `timeout_source` is null on success; verify `total_duration_ms` is below 125,000
+
+**Rollback:** Supabase dashboard → Edge Functions → `ai-chat` → Deployment history → activate version 12 (current production). Frontend bundle is functionally unchanged either way.
 
 ---
 

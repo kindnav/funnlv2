@@ -12,7 +12,7 @@ import {
   MODEL,
   PRIMARY_MAX_TOKENS, PRIMARY_THINKING, PRIMARY_EFFORT,
   FALLBACK_MAX_TOKENS, FALLBACK_THINKING, FALLBACK_EFFORT,
-  OVERALL_TIMEOUT_MS, PRIMARY_ATTEMPT_TIMEOUT_MS, MIN_FALLBACK_TIME_MS,
+  REQUEST_DEADLINE_MS, PRIMARY_ATTEMPT_TIMEOUT_MS, MIN_FALLBACK_TIME_MS,
   shouldRetryForBlankReply,
   buildAttemptLog,
   buildRequestSummaryLog,
@@ -55,6 +55,15 @@ function providerBody(content, stop_reason = 'end_turn', usage = { input_tokens:
 const textBlock  = (text)     => ({ type: 'text', text })
 const thinkBlock = (thinking) => ({ type: 'thinking', thinking })
 
+// Returns a now() function that steps through values on successive calls.
+// The last value is held indefinitely once the list is exhausted.
+// Use this for timing-sensitive tests where _now() must return different
+// values at different points in the control flow (e.g., deadline checks).
+function makeSteppingNow(...values) {
+  let i = 0
+  return () => values[Math.min(i++, values.length - 1)]
+}
+
 // Creates a fetchImpl that returns different responses on successive calls.
 function sequentialFetch(...responses) {
   let callCount = 0
@@ -92,8 +101,8 @@ await test('MODEL is claude-sonnet-5', () => {
   assert.strictEqual(MODEL, 'claude-sonnet-5')
 })
 
-await test('PRIMARY_MAX_TOKENS is 4096 (reliability-first: no thinking budget to share)', () => {
-  assert.strictEqual(PRIMARY_MAX_TOKENS, 4096)
+await test('PRIMARY_MAX_TOKENS is 2048 (readable-answer standard: aligns with ≤250-word replies, halves worst-case output latency)', () => {
+  assert.strictEqual(PRIMARY_MAX_TOKENS, 2048)
 })
 
 await test('PRIMARY_THINKING disables adaptive thinking for predictable output', () => {
@@ -104,8 +113,8 @@ await test('PRIMARY_EFFORT is high (full quality on primary attempt)', () => {
   assert.strictEqual(PRIMARY_EFFORT, 'high')
 })
 
-await test('FALLBACK_MAX_TOKENS is 4096', () => {
-  assert.strictEqual(FALLBACK_MAX_TOKENS, 4096)
+await test('FALLBACK_MAX_TOKENS is 2048 (consistent with primary)', () => {
+  assert.strictEqual(FALLBACK_MAX_TOKENS, 2048)
 })
 
 await test('FALLBACK_THINKING is disabled (no hidden thinking on fallback either)', () => {
@@ -116,16 +125,16 @@ await test('FALLBACK_EFFORT is medium (different execution path from primary)', 
   assert.strictEqual(FALLBACK_EFFORT, 'medium')
 })
 
-await test('OVERALL_TIMEOUT_MS is 60000 (hard cap for the entire request)', () => {
-  assert.strictEqual(OVERALL_TIMEOUT_MS, 60_000)
+await test('REQUEST_DEADLINE_MS is 125000 (full-invocation deadline from handler entry; 25s below 150s Supabase wall-clock limit)', () => {
+  assert.strictEqual(REQUEST_DEADLINE_MS, 125_000)
 })
 
-await test('PRIMARY_ATTEMPT_TIMEOUT_MS is 45000 (per-attempt abort deadline)', () => {
-  assert.strictEqual(PRIMARY_ATTEMPT_TIMEOUT_MS, 45_000)
+await test('PRIMARY_ATTEMPT_TIMEOUT_MS is 90000 (per-attempt abort deadline; accommodates large-context follow-ups)', () => {
+  assert.strictEqual(PRIMARY_ATTEMPT_TIMEOUT_MS, 90_000)
 })
 
-await test('MIN_FALLBACK_TIME_MS is 10000 (minimum remaining time to start a fallback)', () => {
-  assert.strictEqual(MIN_FALLBACK_TIME_MS, 10_000)
+await test('MIN_FALLBACK_TIME_MS is 20000 (minimum remaining time to start a blank-reply fallback)', () => {
+  assert.strictEqual(MIN_FALLBACK_TIME_MS, 20_000)
 })
 
 // ── makeSignal ────────────────────────────────────────────────────────────────
@@ -352,6 +361,24 @@ await test('cache token counts are included when usage provides them', () => {
   assert.strictEqual(log.cache_read_input_tokens, 25)
 })
 
+await test('remaining_request_ms_at_attempt_start is null when not provided', () => {
+  assert.strictEqual(buildAttemptLog(ATTEMPT_PARAMS).remaining_request_ms_at_attempt_start, null)
+})
+
+await test('remaining_request_ms_at_attempt_start is numeric when provided', () => {
+  const log = buildAttemptLog({ ...ATTEMPT_PARAMS, remainingRequestMsAtAttemptStart: 85_000 })
+  assert.strictEqual(log.remaining_request_ms_at_attempt_start, 85_000)
+})
+
+await test('attempt_timeout_ms is null when not provided', () => {
+  assert.strictEqual(buildAttemptLog(ATTEMPT_PARAMS).attempt_timeout_ms, null)
+})
+
+await test('attempt_timeout_ms is numeric when provided', () => {
+  const log = buildAttemptLog({ ...ATTEMPT_PARAMS, attemptTimeoutMs: 90_000 })
+  assert.strictEqual(log.attempt_timeout_ms, 90_000)
+})
+
 // ── buildRequestSummaryLog — structure and field safety ────────────────────────
 console.log('\nbuildRequestSummaryLog — structure and field safety')
 
@@ -390,7 +417,7 @@ await test('final_error_code is the error code string on failure', () => {
   assert.strictEqual(log.final_error_code, 'provider_timeout')
 })
 
-await test('includes total_duration_ms in log output', () => {
+await test('total_duration_ms measures full Edge Function invocation (entry to completion)', () => {
   const log = buildRequestSummaryLog({ requestId: 'r', success: true, attempts: 1, finalErrorCode: null, totalDurationMs: 4567 })
   assert.strictEqual(log.total_duration_ms, 4567)
 })
@@ -411,6 +438,60 @@ await test('log does not contain any field that could carry user data', () => {
   assert.ok(!keys.includes('reply'), 'log must not include reply field')
   assert.ok(!keys.includes('context'), 'log must not include context (network data) field')
   assert.ok(!keys.includes('messages'), 'log must not include messages field')
+})
+
+// ── buildRequestSummaryLog — pre_provider_ms field ────────────────────────────
+console.log('\nbuildRequestSummaryLog — pre_provider_ms diagnostic field')
+
+await test('pre_provider_ms is included when numeric value provided', () => {
+  const log = buildRequestSummaryLog({ requestId: 'r', success: true, attempts: 1, finalErrorCode: null, totalDurationMs: 3000, preProviderMs: 850 })
+  assert.strictEqual(log.pre_provider_ms, 850)
+})
+
+await test('pre_provider_ms is null when not provided (backward compatibility)', () => {
+  const log = buildRequestSummaryLog({ requestId: 'r', success: true, attempts: 1, finalErrorCode: null, totalDurationMs: 3000 })
+  assert.strictEqual(log.pre_provider_ms, null)
+})
+
+await test('pre_provider_ms is null when non-numeric value provided', () => {
+  const log = buildRequestSummaryLog({ requestId: 'r', success: true, attempts: 1, finalErrorCode: null, totalDurationMs: 3000, preProviderMs: 'not-a-number' })
+  assert.strictEqual(log.pre_provider_ms, null)
+})
+
+// ── buildRequestSummaryLog — new fields (timeout_source, provider_duration_ms) ──
+console.log('\nbuildRequestSummaryLog — timeout_source and provider_duration_ms')
+
+await test('timeout_source is null when not provided', () => {
+  const log = buildRequestSummaryLog({ requestId: 'r', success: true, attempts: 1, finalErrorCode: null, totalDurationMs: 2000 })
+  assert.strictEqual(log.timeout_source, null)
+})
+
+await test('timeout_source is attempt_deadline when AbortController fired', () => {
+  const log = buildRequestSummaryLog({ requestId: 'r', success: false, attempts: 1, finalErrorCode: 'provider_timeout', totalDurationMs: 90000, timeoutSource: 'attempt_deadline' })
+  assert.strictEqual(log.timeout_source, 'attempt_deadline')
+})
+
+await test('timeout_source is request_deadline when budget exhausted before attempt', () => {
+  const log = buildRequestSummaryLog({ requestId: 'r', success: false, attempts: 0, finalErrorCode: 'provider_timeout', totalDurationMs: 125000, timeoutSource: 'request_deadline' })
+  assert.strictEqual(log.timeout_source, 'request_deadline')
+})
+
+await test('provider_duration_ms is null when not provided', () => {
+  const log = buildRequestSummaryLog({ requestId: 'r', success: true, attempts: 1, finalErrorCode: null, totalDurationMs: 2000 })
+  assert.strictEqual(log.provider_duration_ms, null)
+})
+
+await test('provider_duration_ms is numeric when provided (measures provider stage only)', () => {
+  const log = buildRequestSummaryLog({ requestId: 'r', success: true, attempts: 1, finalErrorCode: null, totalDurationMs: 7000, preProviderMs: 5000, providerDurationMs: 2000 })
+  assert.strictEqual(log.provider_duration_ms, 2000)
+})
+
+await test('summary log does not contain user-identifiable data in new fields', () => {
+  const log = buildRequestSummaryLog({ requestId: 'r', success: false, attempts: 1, finalErrorCode: 'provider_timeout', totalDurationMs: 60000, timeoutSource: 'attempt_deadline', preProviderMs: 2000, providerDurationMs: 58000 })
+  const keys = Object.keys(log)
+  assert.ok(!keys.includes('prompt'), 'no prompt field')
+  assert.ok(!keys.includes('messages'), 'no messages field')
+  assert.ok(!keys.includes('network_data'), 'no network_data field')
 })
 
 // ── runProviderAttempts — real orchestration tests ─────────────────────────────
@@ -626,26 +707,29 @@ await test('11. primary times out → provider_timeout, no fallback', async () =
   assert.strictEqual(fetchCallCount.n, 1)
 })
 
-// 12. Insufficient time remains for fallback → fallback not started
-await test('12. insufficient time for fallback → provider_timeout without starting fallback', async () => {
-  // requestStart=0, now()=50001 → elapsed=50001, remaining=9999 < MIN_FALLBACK_TIME_MS=10000
-  const fetchCallCount = { n: 0 }
-  const blankFetch = async () => {
-    fetchCallCount.n++
-    return makeResponse(200, providerBody([]))  // blank reply
-  }
+// 12. Primary runs (blank reply), full-request budget exhausted before fallback
+await test('12. primary returns blank, remaining full-request budget < MIN_FALLBACK_TIME_MS → fallback skipped', async () => {
+  // requestEntryMs=0. Stepping now(): low value during primary (budget fine), then
+  // high value at fallback check → remaining = REQUEST_DEADLINE_MS - 105001 = 19999 < 20000.
+  // now() sequence: [primary-budget-check, attemptStart, durationMs, fallback-budget-check, finalMs]
+  const nowFn = makeSteppingNow(1000, 1000, 2000, REQUEST_DEADLINE_MS - MIN_FALLBACK_TIME_MS + 1, REQUEST_DEADLINE_MS - MIN_FALLBACK_TIME_MS + 1)
+  let fetchCalls = 0
+  const summaryLogs = []
   const result = await runProviderAttempts({
     ...BASE_ARGS,
     requestStart: 0,
-    fetchImpl: blankFetch,
-    now: () => OVERALL_TIMEOUT_MS - MIN_FALLBACK_TIME_MS + 1,  // 50001ms "elapsed"
+    requestEntryMs: 0,
+    fetchImpl: async () => { fetchCalls++; return makeResponse(200, providerBody([])) },
+    now: nowFn,
     makeSignalFn: (_ms) => ({ signal: new AbortController().signal, clearTimer: () => {} }),
-    logAttempt: () => {}, logSummary: () => {},
+    logAttempt: () => {},
+    logSummary: (d) => summaryLogs.push(d),
   })
   assert.ok(!result.ok)
   assert.strictEqual(result.errorCode, 'provider_timeout')
   assert.strictEqual(result.attempts, 1, 'fallback should not have been started')
-  assert.strictEqual(fetchCallCount.n, 1, 'fetch called only once (primary only)')
+  assert.strictEqual(fetchCalls, 1, 'fetch called only once (primary only)')
+  assert.strictEqual(summaryLogs[0].timeout_source, 'request_deadline', 'timeout_source must be request_deadline when budget exhausted')
 })
 
 // 13. Fallback succeeds → final result is success
@@ -828,6 +912,474 @@ await test('20. systemPrompt and messages content are never present in logged da
     `systemPrompt should not appear in logs`)
   assert.ok(!combined.includes(UNIQUE_MSG),
     `user message content should not appear in logs`)
+})
+
+// ── runProviderAttempts — timeout and pre_provider_ms additions ────────────────
+console.log('\nrunProviderAttempts — new timeout constants and pre_provider_ms')
+
+// N1. Request body max_tokens — primary
+await test('N1. primary request body sends max_tokens equal to PRIMARY_MAX_TOKENS', async () => {
+  const fetch = sequentialFetch(makeResponse(200, providerBody([textBlock('ok')])))
+  await runProviderAttempts({
+    ...BASE_ARGS,
+    fetchImpl: fetch,
+    now: () => 100,
+    makeSignalFn: (_ms) => ({ signal: new AbortController().signal, clearTimer: () => {} }),
+    logAttempt: () => {}, logSummary: () => {},
+  })
+  const body = JSON.parse(fetch.calls[0].opts.body)
+  assert.strictEqual(body.max_tokens, PRIMARY_MAX_TOKENS,
+    `expected max_tokens=${PRIMARY_MAX_TOKENS}, got ${body.max_tokens}`)
+})
+
+// N2. Request body max_tokens — fallback
+await test('N2. fallback request body sends max_tokens equal to FALLBACK_MAX_TOKENS', async () => {
+  const fetch = sequentialFetch(
+    makeResponse(200, providerBody([])),                              // blank primary
+    makeResponse(200, providerBody([textBlock('fallback ok')]))       // fallback success
+  )
+  await runProviderAttempts({
+    ...BASE_ARGS,
+    fetchImpl: fetch,
+    now: () => 100,
+    makeSignalFn: (_ms) => ({ signal: new AbortController().signal, clearTimer: () => {} }),
+    logAttempt: () => {}, logSummary: () => {},
+  })
+  assert.strictEqual(fetch.calls.length, 2, 'fallback must have been called')
+  const body = JSON.parse(fetch.calls[1].opts.body)
+  assert.strictEqual(body.max_tokens, FALLBACK_MAX_TOKENS,
+    `expected max_tokens=${FALLBACK_MAX_TOKENS}, got ${body.max_tokens}`)
+})
+
+// N3. requestEntryMs flows to pre_provider_ms in the summary log
+await test('N3. requestEntryMs → pre_provider_ms in summary log equals requestStart - requestEntryMs', async () => {
+  const summaryLogs = []
+  await runProviderAttempts({
+    ...BASE_ARGS,
+    requestStart: 1000,
+    requestEntryMs: 250,   // pre-provider work took 750 ms
+    fetchImpl: sequentialFetch(makeResponse(200, providerBody([textBlock('ok')]))),
+    now: () => 1000,       // constant — totalDurationMs = 0, preProviderMs = 1000-250 = 750
+    makeSignalFn: (_ms) => ({ signal: new AbortController().signal, clearTimer: () => {} }),
+    logAttempt: () => {},
+    logSummary: (d) => summaryLogs.push(d),
+  })
+  assert.strictEqual(summaryLogs.length, 1)
+  assert.strictEqual(summaryLogs[0].pre_provider_ms, 750, 'expected requestStart - requestEntryMs = 750')
+})
+
+// N4. pre_provider_ms is null in summary when requestEntryMs not provided
+await test('N4. requestEntryMs omitted → pre_provider_ms is null in summary log', async () => {
+  const summaryLogs = []
+  await runProviderAttempts({
+    ...BASE_ARGS,
+    // no requestEntryMs
+    fetchImpl: sequentialFetch(makeResponse(200, providerBody([textBlock('ok')]))),
+    now: () => 100,
+    makeSignalFn: (_ms) => ({ signal: new AbortController().signal, clearTimer: () => {} }),
+    logAttempt: () => {},
+    logSummary: (d) => summaryLogs.push(d),
+  })
+  assert.strictEqual(summaryLogs[0].pre_provider_ms, null)
+})
+
+// N5. Boundary: remaining = MIN_FALLBACK_TIME_MS-1 → fallback not started
+await test('N5. full-request budget remaining = MIN_FALLBACK_TIME_MS-1 → fallback skipped', async () => {
+  // requestEntryMs=0. At fallback budget check, now() = REQUEST_DEADLINE_MS - (MIN_FALLBACK_TIME_MS-1)
+  // remaining = REQUEST_DEADLINE_MS - that_value = MIN_FALLBACK_TIME_MS-1 < MIN_FALLBACK_TIME_MS
+  // now() sequence: [primary-budget-check, attemptStart, durationMs, fallback-budget-check, finalMs]
+  const highNow = REQUEST_DEADLINE_MS - MIN_FALLBACK_TIME_MS + 1  // 105001
+  const nowFn = makeSteppingNow(1000, 1000, 2000, highNow, highNow)
+  let fetchCalls = 0
+  const result = await runProviderAttempts({
+    ...BASE_ARGS,
+    requestStart: 0,
+    requestEntryMs: 0,
+    fetchImpl: async () => { fetchCalls++; return makeResponse(200, providerBody([])) },
+    now: nowFn,
+    makeSignalFn: (_ms) => ({ signal: new AbortController().signal, clearTimer: () => {} }),
+    logAttempt: () => {}, logSummary: () => {},
+  })
+  assert.ok(!result.ok)
+  assert.strictEqual(result.errorCode, 'provider_timeout')
+  assert.strictEqual(fetchCalls, 1, 'fallback must not start when remaining < MIN_FALLBACK_TIME_MS')
+})
+
+// N6. Boundary: remaining = MIN_FALLBACK_TIME_MS exactly → fallback starts
+await test('N6. full-request budget remaining = MIN_FALLBACK_TIME_MS exactly → fallback starts and succeeds', async () => {
+  // requestEntryMs=0. At fallback budget check, now()=105000 → remaining = 125000-105000 = 20000
+  // 20000 < 20000 is false → fallback proceeds.
+  // now() sequence: [primary-check, attemptStart, durationMs, fallback-check, fallbackStart, fallbackDuration, finalMs]
+  const nowFn = makeSteppingNow(1000, 1000, 2000, 105_000, 105_000, 106_000, 106_000)
+  const fetch = sequentialFetch(
+    makeResponse(200, providerBody([])),                               // blank primary
+    makeResponse(200, providerBody([textBlock('fallback started')]))   // fallback success
+  )
+  const result = await runProviderAttempts({
+    ...BASE_ARGS,
+    requestStart: 0,
+    requestEntryMs: 0,
+    fetchImpl: fetch,
+    now: nowFn,
+    makeSignalFn: (_ms) => ({ signal: new AbortController().signal, clearTimer: () => {} }),
+    logAttempt: () => {}, logSummary: () => {},
+  })
+  assert.ok(result.ok, 'fallback should start and succeed when remaining === MIN_FALLBACK_TIME_MS')
+  assert.strictEqual(result.attempts, 2, 'fallback must have run')
+})
+
+// N7. pre_provider_ms is a safe numeric field — not user data
+await test('N7. summary log pre_provider_ms is numeric and no user-data fields are added', async () => {
+  const summaryLogs = []
+  await runProviderAttempts({
+    ...BASE_ARGS,
+    requestStart: 3000,
+    requestEntryMs: 500,   // preProviderMs = 2500
+    fetchImpl: sequentialFetch(makeResponse(200, providerBody([textBlock('ok')]))),
+    now: () => 3000,
+    makeSignalFn: (_ms) => ({ signal: new AbortController().signal, clearTimer: () => {} }),
+    logAttempt: () => {},
+    logSummary: (d) => summaryLogs.push(d),
+  })
+  const log = summaryLogs[0]
+  assert.strictEqual(typeof log.pre_provider_ms, 'number', 'pre_provider_ms must be a number')
+  assert.strictEqual(log.pre_provider_ms, 2500)
+  // No new user-data fields
+  const keys = Object.keys(log)
+  assert.ok(!keys.includes('prompt'), 'no prompt field')
+  assert.ok(!keys.includes('messages'), 'no messages field')
+  assert.ok(!keys.includes('system'), 'no system field')
+})
+
+// N8. Large-context follow-up simulation: primary succeeds (no abort) within 90 s window
+await test('N8. large-context follow-up simulation: primary succeeds within 90s window', async () => {
+  // Simulates a multi-turn request: 2 messages (initial + follow-up), large system prompt.
+  // The fetch resolves normally (no abort), verifying the control flow produces a success result.
+  const largeSystemPrompt = 'S'.repeat(80_000)  // simulate network context at pass-2 size
+  const messages = [
+    { role: 'user', content: 'Who should I contact for VC intros?' },
+    { role: 'assistant', content: 'Based on your network, '.repeat(500) },  // ~11k chars
+    { role: 'user', content: 'Include Indiana University students too.' },
+  ]
+  const fetch = sequentialFetch(makeResponse(200, providerBody([textBlock('Here are the results.')])))
+  const result = await runProviderAttempts({
+    systemPrompt: largeSystemPrompt,
+    messages,
+    requestId: 'req-large-context',
+    passUsed: 2,
+    requestStart: 0,
+    anthropicApiKey: 'test-key',
+    fetchImpl: fetch,
+    now: () => 50_000,  // 50 s elapsed — well within 90 s primary deadline
+    makeSignalFn: (_ms) => ({ signal: new AbortController().signal, clearTimer: () => {} }),
+    logAttempt: () => {}, logSummary: () => {},
+  })
+  assert.ok(result.ok, 'large-context follow-up must succeed when provider responds within 90s')
+  assert.strictEqual(result.reply, 'Here are the results.')
+  assert.strictEqual(result.attempts, 1)
+  assert.strictEqual(fetch.callCount(), 1, 'no fallback should be needed')
+})
+
+// ── Deadline regression tests (P1–P15) ────────────────────────────────────────
+// These tests verify the full-invocation deadline (REQUEST_DEADLINE_MS measured
+// from requestEntryMs) introduced to cover pre-provider work (auth + DB + context)
+// that was not counted in the prior OVERALL_TIMEOUT_MS architecture.
+console.log('\ndeadline regression — P1–P15')
+
+// P1. Pre-provider overhead exhausts budget before primary → primary skipped
+await test('P1. pre-provider overhead exhausts budget → primary skipped, timeout_source=request_deadline, attempts=0', async () => {
+  // now() is constant and already past REQUEST_DEADLINE_MS - MIN_FALLBACK_TIME_MS
+  // so the FIRST budget check (before primary) skips immediately.
+  // remaining = REQUEST_DEADLINE_MS - (now - requestEntryMs) = 125000 - 105001 = 19999 < 20000
+  let fetchCalls = 0
+  const summaryLogs = []
+  const result = await runProviderAttempts({
+    ...BASE_ARGS,
+    requestStart: 0,
+    requestEntryMs: 0,
+    fetchImpl: async () => { fetchCalls++; return makeResponse(200, providerBody([textBlock('should not reach')])) },
+    now: () => REQUEST_DEADLINE_MS - MIN_FALLBACK_TIME_MS + 1,   // 105001
+    makeSignalFn: (_ms) => ({ signal: new AbortController().signal, clearTimer: () => {} }),
+    logAttempt: () => {},
+    logSummary: (d) => summaryLogs.push(d),
+  })
+  assert.ok(!result.ok)
+  assert.strictEqual(result.errorCode, 'provider_timeout')
+  assert.strictEqual(result.attempts, 0, 'no provider calls should have started')
+  assert.strictEqual(fetchCalls, 0, 'fetch must not be called when budget exhausted before first attempt')
+  assert.strictEqual(summaryLogs[0].timeout_source, 'request_deadline')
+})
+
+// P2. 40s pre-provider → attempt_timeout_ms capped to remaining budget
+await test('P2. 40s pre-provider → attempt_timeout_ms = min(90000, 85000) = 85000', async () => {
+  // requestEntryMs=0, now() always = 40000 (requestStart also 40000)
+  // remaining = 125000 - (40000 - 0) = 85000
+  // attempt_timeout_ms = min(90000, 85000) = 85000
+  const capturedTimeouts = []
+  const fetch = sequentialFetch(makeResponse(200, providerBody([textBlock('ok')])))
+  await runProviderAttempts({
+    ...BASE_ARGS,
+    requestStart: 40_000,
+    requestEntryMs: 0,
+    fetchImpl: fetch,
+    now: () => 40_000,
+    makeSignalFn: (ms) => { capturedTimeouts.push(ms); return { signal: new AbortController().signal, clearTimer: () => {} } },
+    logAttempt: () => {}, logSummary: () => {},
+  })
+  assert.ok(capturedTimeouts.length >= 1, 'at least one signal should have been created')
+  assert.strictEqual(capturedTimeouts[0], 85_000, `expected attempt_timeout_ms=85000, got ${capturedTimeouts[0]}`)
+})
+
+// P3. 2s pre-provider → attempt_timeout_ms gets full PRIMARY_ATTEMPT_TIMEOUT_MS
+await test('P3. 2s pre-provider → attempt_timeout_ms = PRIMARY_ATTEMPT_TIMEOUT_MS (90000)', async () => {
+  // remaining = 125000 - (2000 - 0) = 123000 > 90000 → min(90000, 123000) = 90000
+  const capturedTimeouts = []
+  const fetch = sequentialFetch(makeResponse(200, providerBody([textBlock('ok')])))
+  await runProviderAttempts({
+    ...BASE_ARGS,
+    requestStart: 2_000,
+    requestEntryMs: 0,
+    fetchImpl: fetch,
+    now: () => 2_000,
+    makeSignalFn: (ms) => { capturedTimeouts.push(ms); return { signal: new AbortController().signal, clearTimer: () => {} } },
+    logAttempt: () => {}, logSummary: () => {},
+  })
+  assert.ok(capturedTimeouts.length >= 1, 'at least one signal should have been created')
+  assert.strictEqual(capturedTimeouts[0], PRIMARY_ATTEMPT_TIMEOUT_MS, `expected attempt_timeout_ms=90000, got ${capturedTimeouts[0]}`)
+})
+
+// P4. AbortError from primary → timeout_source = 'attempt_deadline'
+await test('P4. AbortError from primary → timeout_source=attempt_deadline in summary log', async () => {
+  const summaryLogs = []
+  await runProviderAttempts({
+    ...BASE_ARGS,
+    requestStart: 0,
+    requestEntryMs: 0,
+    fetchImpl: async (_url, opts) => {
+      if (opts?.signal?.aborted) { const e = new Error('Aborted'); e.name = 'AbortError'; throw e }
+      return makeResponse(200, providerBody([textBlock('unreachable')]))
+    },
+    now: () => 100,
+    makeSignalFn: (_ms) => { const c = new AbortController(); c.abort(); return { signal: c.signal, clearTimer: () => {} } },
+    logAttempt: () => {},
+    logSummary: (d) => summaryLogs.push(d),
+  })
+  assert.strictEqual(summaryLogs[0].timeout_source, 'attempt_deadline')
+})
+
+// P5. Successful primary → timeout_source = null
+await test('P5. successful primary → timeout_source=null in summary log', async () => {
+  const summaryLogs = []
+  await runProviderAttempts({
+    ...BASE_ARGS,
+    requestStart: 0,
+    requestEntryMs: 0,
+    fetchImpl: sequentialFetch(makeResponse(200, providerBody([textBlock('success')]))),
+    now: () => 100,
+    makeSignalFn: (_ms) => ({ signal: new AbortController().signal, clearTimer: () => {} }),
+    logAttempt: () => {},
+    logSummary: (d) => summaryLogs.push(d),
+  })
+  assert.strictEqual(summaryLogs[0].timeout_source, null)
+})
+
+// P6. Provider HTTP 429 → timeout_source = null (not a timeout error)
+await test('P6. provider HTTP 429 → timeout_source=null in summary log', async () => {
+  const summaryLogs = []
+  await runProviderAttempts({
+    ...BASE_ARGS,
+    requestStart: 0,
+    requestEntryMs: 0,
+    fetchImpl: sequentialFetch(makeResponse(429, {})),
+    now: () => 100,
+    makeSignalFn: (_ms) => ({ signal: new AbortController().signal, clearTimer: () => {} }),
+    logAttempt: () => {},
+    logSummary: (d) => summaryLogs.push(d),
+  })
+  assert.strictEqual(summaryLogs[0].timeout_source, null)
+})
+
+// P7. total_duration_ms = finalMs - requestEntryMs (full invocation)
+await test('P7. total_duration_ms = finalMs - requestEntryMs (not requestStart)', async () => {
+  // requestEntryMs=1000, requestStart=6000, now()=8000
+  // total_duration_ms should be 8000-1000=7000, not 8000-6000=2000
+  const summaryLogs = []
+  await runProviderAttempts({
+    ...BASE_ARGS,
+    requestStart: 6_000,
+    requestEntryMs: 1_000,
+    fetchImpl: sequentialFetch(makeResponse(200, providerBody([textBlock('ok')]))),
+    now: () => 8_000,
+    makeSignalFn: (_ms) => ({ signal: new AbortController().signal, clearTimer: () => {} }),
+    logAttempt: () => {},
+    logSummary: (d) => summaryLogs.push(d),
+  })
+  assert.strictEqual(summaryLogs[0].total_duration_ms, 7_000, 'total_duration_ms must measure from requestEntryMs (full invocation)')
+})
+
+// P8. provider_duration_ms = finalMs - requestStart (provider stage only)
+await test('P8. provider_duration_ms = finalMs - requestStart (provider stage only)', async () => {
+  // Same params as P7: requestStart=6000, requestEntryMs=1000, now()=8000
+  // provider_duration_ms = 8000-6000 = 2000
+  const summaryLogs = []
+  await runProviderAttempts({
+    ...BASE_ARGS,
+    requestStart: 6_000,
+    requestEntryMs: 1_000,
+    fetchImpl: sequentialFetch(makeResponse(200, providerBody([textBlock('ok')]))),
+    now: () => 8_000,
+    makeSignalFn: (_ms) => ({ signal: new AbortController().signal, clearTimer: () => {} }),
+    logAttempt: () => {},
+    logSummary: (d) => summaryLogs.push(d),
+  })
+  assert.strictEqual(summaryLogs[0].provider_duration_ms, 2_000, 'provider_duration_ms must measure from requestStart (provider stage)')
+})
+
+// P9. pre_provider_ms = requestStart - requestEntryMs
+await test('P9. pre_provider_ms = requestStart - requestEntryMs', async () => {
+  // requestStart=5000, requestEntryMs=0 → pre_provider_ms=5000
+  const summaryLogs = []
+  await runProviderAttempts({
+    ...BASE_ARGS,
+    requestStart: 5_000,
+    requestEntryMs: 0,
+    fetchImpl: sequentialFetch(makeResponse(200, providerBody([textBlock('ok')]))),
+    now: () => 5_000,
+    makeSignalFn: (_ms) => ({ signal: new AbortController().signal, clearTimer: () => {} }),
+    logAttempt: () => {},
+    logSummary: (d) => summaryLogs.push(d),
+  })
+  assert.strictEqual(summaryLogs[0].pre_provider_ms, 5_000, 'pre_provider_ms must equal requestStart - requestEntryMs')
+})
+
+// P10. total_duration_ms and pre_provider_ms are null when requestEntryMs not provided
+await test('P10. total_duration_ms and pre_provider_ms are null when requestEntryMs omitted', async () => {
+  const summaryLogs = []
+  await runProviderAttempts({
+    ...BASE_ARGS,
+    // no requestEntryMs
+    fetchImpl: sequentialFetch(makeResponse(200, providerBody([textBlock('ok')]))),
+    now: () => 5_000,
+    makeSignalFn: (_ms) => ({ signal: new AbortController().signal, clearTimer: () => {} }),
+    logAttempt: () => {},
+    logSummary: (d) => summaryLogs.push(d),
+  })
+  assert.strictEqual(summaryLogs[0].total_duration_ms, null, 'total_duration_ms must be null when requestEntryMs absent')
+  assert.strictEqual(summaryLogs[0].pre_provider_ms, null, 'pre_provider_ms must be null when requestEntryMs absent')
+})
+
+// P11. remaining_request_ms_at_attempt_start in attempt log
+await test('P11. attempt log contains remaining_request_ms_at_attempt_start', async () => {
+  // requestEntryMs=0, now()=5000 → remaining = 125000-5000 = 120000 at attempt start
+  const attemptLogs = []
+  await runProviderAttempts({
+    ...BASE_ARGS,
+    requestStart: 5_000,
+    requestEntryMs: 0,
+    fetchImpl: sequentialFetch(makeResponse(200, providerBody([textBlock('ok')]))),
+    now: () => 5_000,
+    makeSignalFn: (_ms) => ({ signal: new AbortController().signal, clearTimer: () => {} }),
+    logAttempt: (d) => attemptLogs.push(d),
+    logSummary: () => {},
+  })
+  assert.ok(attemptLogs.length >= 1, 'at least one attempt log expected')
+  assert.strictEqual(attemptLogs[0].remaining_request_ms_at_attempt_start, 120_000,
+    'remaining_request_ms_at_attempt_start must be REQUEST_DEADLINE_MS - elapsed')
+})
+
+// P12. attempt_timeout_ms in attempt log bounded by remaining budget
+await test('P12. attempt_timeout_ms in attempt log = min(PRIMARY_ATTEMPT_TIMEOUT_MS, remaining)', async () => {
+  // requestEntryMs=0, requestStart=40000, now()=40000
+  // remaining = 125000-40000 = 85000
+  // attempt_timeout_ms = min(90000, 85000) = 85000
+  const attemptLogs = []
+  await runProviderAttempts({
+    ...BASE_ARGS,
+    requestStart: 40_000,
+    requestEntryMs: 0,
+    fetchImpl: sequentialFetch(makeResponse(200, providerBody([textBlock('ok')]))),
+    now: () => 40_000,
+    makeSignalFn: (_ms) => ({ signal: new AbortController().signal, clearTimer: () => {} }),
+    logAttempt: (d) => attemptLogs.push(d),
+    logSummary: () => {},
+  })
+  assert.ok(attemptLogs.length >= 1)
+  assert.strictEqual(attemptLogs[0].attempt_timeout_ms, 85_000,
+    'attempt_timeout_ms must be capped by remaining budget (85000 < 90000)')
+})
+
+// P13. Fallback attempt timeout bounded by remaining budget
+await test('P13. fallback attempt_timeout_ms bounded by remaining budget', async () => {
+  // Primary at now()=5000 (remaining=120000), fallback check at now()=100000 (remaining=25000)
+  // fallback attempt_timeout_ms = min(90000, 25000) = 25000
+  // now() sequence: [primary-check, pStart, pDur, fallback-check, fStart, fDur, finalMs]
+  const nowFn = makeSteppingNow(5_000, 5_000, 10_000, 100_000, 100_000, 101_000, 101_000)
+  const capturedTimeouts = []
+  const fetch = sequentialFetch(
+    makeResponse(200, providerBody([])),                              // primary: blank
+    makeResponse(200, providerBody([textBlock('fallback ok')]))       // fallback: success
+  )
+  const result = await runProviderAttempts({
+    ...BASE_ARGS,
+    requestStart: 5_000,
+    requestEntryMs: 0,
+    fetchImpl: fetch,
+    now: nowFn,
+    makeSignalFn: (ms) => { capturedTimeouts.push(ms); return { signal: new AbortController().signal, clearTimer: () => {} } },
+    logAttempt: () => {}, logSummary: () => {},
+  })
+  assert.ok(result.ok, 'fallback must succeed')
+  assert.strictEqual(result.attempts, 2, 'two attempts must have run')
+  assert.strictEqual(capturedTimeouts.length, 2, 'two signals created (primary + fallback)')
+  assert.strictEqual(capturedTimeouts[1], 25_000,
+    `fallback attempt_timeout_ms must be min(90000, 25000)=25000, got ${capturedTimeouts[1]}`)
+})
+
+// P14. New timing fields contain no user-identifiable data
+await test('P14. new deadline/timing fields in attempt and summary logs contain no user-identifiable data', async () => {
+  const UNIQUE_TEXT = 'UNIQUE_DEADLINE_PRIVACY_CANARY_XYZ_543'
+  const loggedData = []
+  await runProviderAttempts({
+    ...BASE_ARGS,
+    systemPrompt: UNIQUE_TEXT,
+    messages: [{ role: 'user', content: UNIQUE_TEXT }],
+    requestStart: 5_000,
+    requestEntryMs: 0,
+    fetchImpl: sequentialFetch(makeResponse(200, providerBody([textBlock(UNIQUE_TEXT)]))),
+    now: () => 5_000,
+    makeSignalFn: (_ms) => ({ signal: new AbortController().signal, clearTimer: () => {} }),
+    logAttempt: (d) => loggedData.push(JSON.stringify(d)),
+    logSummary: (d) => loggedData.push(JSON.stringify(d)),
+  })
+  const combined = loggedData.join('\n')
+  assert.ok(!combined.includes(UNIQUE_TEXT),
+    'new timing fields (remaining_request_ms, attempt_timeout_ms, timeout_source, provider_duration_ms) must not leak user text')
+})
+
+// P15. Large-context follow-up with requestEntryMs still produces a success result
+await test('P15. large-context follow-up with requestEntryMs provided still succeeds', async () => {
+  // requestEntryMs=0, requestStart=5000, now()=5000 → remaining=120000 → full budget
+  const largeMessages = [
+    { role: 'user', content: 'Who should I follow up with for VC introductions?' },
+    { role: 'assistant', content: 'Based on your network, here are the top contacts. '.repeat(200) },
+    { role: 'user', content: 'Include Indiana University students too in a separate section.' },
+  ]
+  const result = await runProviderAttempts({
+    systemPrompt: 'S'.repeat(60_000),
+    messages: largeMessages,
+    requestId: 'req-p15',
+    passUsed: 2,
+    requestStart: 5_000,
+    requestEntryMs: 0,
+    anthropicApiKey: 'test-key',
+    fetchImpl: sequentialFetch(makeResponse(200, providerBody([textBlock('Here are the results.')]))),
+    now: () => 5_000,
+    makeSignalFn: (_ms) => ({ signal: new AbortController().signal, clearTimer: () => {} }),
+    logAttempt: () => {}, logSummary: () => {},
+  })
+  assert.ok(result.ok, 'large-context follow-up must succeed with full remaining budget')
+  assert.strictEqual(result.reply, 'Here are the results.')
+  assert.strictEqual(result.attempts, 1)
 })
 
 // ── results ───────────────────────────────────────────────────────────────────

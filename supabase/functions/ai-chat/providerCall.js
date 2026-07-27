@@ -22,7 +22,7 @@ export const MODEL = 'claude-sonnet-5'
 //
 // Do not add temperature, top_p, top_k, or manual budget_tokens.
 
-export const PRIMARY_MAX_TOKENS = 4096
+export const PRIMARY_MAX_TOKENS = 2048
 export const PRIMARY_THINKING = { type: 'disabled' }
 export const PRIMARY_EFFORT = 'high'
 
@@ -38,26 +38,37 @@ export const PRIMARY_EFFORT = 'high'
 // alternative execution path. The remaining-time guard (MIN_FALLBACK_TIME_MS)
 // ensures it only runs when meaningful time remains.
 
-export const FALLBACK_MAX_TOKENS = 4096
+export const FALLBACK_MAX_TOKENS = 2048
 export const FALLBACK_THINKING = { type: 'disabled' }
 export const FALLBACK_EFFORT = 'medium'
 
 // ── Timing constants ──────────────────────────────────────────────────────────
 //
-// OVERALL_TIMEOUT_MS   — hard cap for the entire request across all attempts.
-// PRIMARY_ATTEMPT_TIMEOUT_MS — per-attempt abort deadline (used for both primary
-//                        and, bounded by remaining time, for the fallback).
-// MIN_FALLBACK_TIME_MS — minimum remaining time required to start a fallback;
-//                        prevents starting an attempt that cannot realistically
-//                        complete and would only extend the user-facing wait.
+// REQUEST_DEADLINE_MS — hard cap for the complete Edge Function invocation, measured
+//                        from requestEntryMs (recorded at handler entry, before auth,
+//                        DB, and context work). The 125-second application deadline
+//                        leaves 25 seconds of safety below the Supabase documented
+//                        150-second request-idle timeout. When requestEntryMs is not
+//                        provided by the caller, this constant is not used — only the
+//                        per-attempt timeout applies (backward-compatible for tests).
+// PRIMARY_ATTEMPT_TIMEOUT_MS — maximum per-attempt AbortSignal deadline. The actual
+//                        timeout for any given attempt is bounded:
+//                          min(PRIMARY_ATTEMPT_TIMEOUT_MS, remainingRequestMs)
+//                        where remainingRequestMs = REQUEST_DEADLINE_MS − elapsed_from_entry.
+//                        90 s was chosen to accommodate large-context follow-up requests —
+//                        a design judgment based on max_tokens and typical provider
+//                        throughput, not a confirmed production measurement.
+// MIN_FALLBACK_TIME_MS — minimum remaining full-request budget required before starting
+//                        any attempt (primary or fallback). An attempt that cannot
+//                        realistically complete within REQUEST_DEADLINE_MS is not started;
+//                        the user receives an immediate provider_timeout instead.
 //
-// Worst-case total: if the primary returns quickly with a blank reply and there
-// is enough remaining time, the fallback gets up to min(remaining, 45s). The
-// remaining-time check guarantees total ≤ OVERALL_TIMEOUT_MS.
+// Worst-case total from handler entry: pre-provider work + primary attempt + optional
+// fallback ≤ REQUEST_DEADLINE_MS (125 s). The per-attempt bound guarantees this.
 
-export const OVERALL_TIMEOUT_MS = 60_000
-export const PRIMARY_ATTEMPT_TIMEOUT_MS = 45_000
-export const MIN_FALLBACK_TIME_MS = 10_000
+export const REQUEST_DEADLINE_MS = 125_000
+export const PRIMARY_ATTEMPT_TIMEOUT_MS = 90_000
+export const MIN_FALLBACK_TIME_MS = 20_000
 
 // ── Retry decision ────────────────────────────────────────────────────────────
 
@@ -106,6 +117,7 @@ export function buildAttemptLog({
   requestId, attempt, model, max_tokens, thinking_mode, effort,
   providerStatus, providerRequestId, stop_reason, contentBlockTypes,
   usage, durationMs, contextPass, replyPresent,
+  remainingRequestMsAtAttemptStart, attemptTimeoutMs,
 }) {
   return {
     event: 'ai_chat_provider_attempt',
@@ -126,6 +138,8 @@ export function buildAttemptLog({
     duration_ms: typeof durationMs === 'number' ? durationMs : null,
     context_pass: contextPass ?? null,
     reply_present: replyPresent === true,
+    remaining_request_ms_at_attempt_start: typeof remainingRequestMsAtAttemptStart === 'number' ? remainingRequestMsAtAttemptStart : null,
+    attempt_timeout_ms: typeof attemptTimeoutMs === 'number' ? attemptTimeoutMs : null,
   }
 }
 
@@ -133,14 +147,33 @@ export function buildAttemptLog({
  * Builds a safe loggable summary for the completed request.
  * Never contains user data. The `success` field means a non-blank visible
  * reply was returned to the caller.
+ *
+ * Timing fields (all null when not available):
+ *   pre_provider_ms      — requestStart − requestEntryMs: time spent on pre-provider
+ *                          work (auth, DB query, context build) before the first
+ *                          provider call. Null when requestEntryMs not provided.
+ *   provider_duration_ms — finalMs − requestStart: time spent inside runProviderAttempts
+ *                          across all attempts (the provider stage only).
+ *   total_duration_ms    — finalMs − requestEntryMs: full Edge Function invocation
+ *                          duration from handler entry to completion. Null when
+ *                          requestEntryMs not provided.
+ *
+ * `timeout_source` distinguishes why a provider_timeout occurred:
+ *   'attempt_deadline'   — an AbortController fired during a provider call
+ *   'request_deadline'   — remaining full-request budget (REQUEST_DEADLINE_MS) was
+ *                          exhausted before the attempt could start
+ *   null                 — no timeout (success or a different error code)
  */
-export function buildRequestSummaryLog({ requestId, success, attempts, finalErrorCode, totalDurationMs }) {
+export function buildRequestSummaryLog({ requestId, success, attempts, finalErrorCode, timeoutSource, preProviderMs, providerDurationMs, totalDurationMs }) {
   return {
     event: 'ai_chat_request_complete',
     request_id: requestId ?? null,
     success: success === true,
     attempts: typeof attempts === 'number' ? attempts : null,
     final_error_code: finalErrorCode ?? null,
+    timeout_source: timeoutSource ?? null,
+    pre_provider_ms: typeof preProviderMs === 'number' ? preProviderMs : null,
+    provider_duration_ms: typeof providerDurationMs === 'number' ? providerDurationMs : null,
     total_duration_ms: typeof totalDurationMs === 'number' ? totalDurationMs : null,
   }
 }
@@ -182,12 +215,15 @@ const ANTHROPIC_API_VERSION = '2023-06-01'
  * All I/O dependencies are injectable so this function's full control flow can
  * be tested with synchronous mocks — no real HTTP or timers in unit tests.
  *
- * Timing model:
- *   - Primary attempt: PRIMARY_ATTEMPT_TIMEOUT_MS (its own AbortSignal).
- *   - Before fallback: if (OVERALL_TIMEOUT_MS - elapsed) < MIN_FALLBACK_TIME_MS,
- *     return provider_timeout without starting a call that cannot complete.
- *   - Fallback timeout: min(remaining, PRIMARY_ATTEMPT_TIMEOUT_MS).
- *   - Total wall time ≤ OVERALL_TIMEOUT_MS.
+ * Timing model (full-invocation deadline):
+ *   - Before EVERY attempt: remainingRequestMs = REQUEST_DEADLINE_MS − (now − requestEntryMs).
+ *     If remainingRequestMs < MIN_FALLBACK_TIME_MS, return provider_timeout immediately
+ *     without starting a call that cannot realistically complete.
+ *   - Attempt timeout: min(PRIMARY_ATTEMPT_TIMEOUT_MS, remainingRequestMs) — bounds every
+ *     provider call within the full-invocation application deadline.
+ *   - When requestEntryMs is not provided: deadline check is skipped; each attempt receives
+ *     PRIMARY_ATTEMPT_TIMEOUT_MS (backward-compatible behavior for legacy callers/tests).
+ *   - Total wall time from requestEntryMs ≤ REQUEST_DEADLINE_MS (125 s).
  *
  * Non-retried conditions (break immediately, no fallback):
  *   - AbortError (timeout): return provider_timeout.
@@ -201,8 +237,17 @@ const ANTHROPIC_API_VERSION = '2023-06-01'
  * @param {Array}       params.messages        Validated conversation message array
  * @param {string}      params.requestId       Unique request identifier for logging
  * @param {number|null} params.passUsed        Context budget pass used (for logging)
- * @param {number}      params.requestStart    ms timestamp when request handling began
+ * @param {number}      params.requestStart    ms timestamp recorded in index.ts immediately
+ *                                             before this function is called. Used as providerStartMs
+ *                                             for timing metrics: pre_provider_ms (requestStart −
+ *                                             requestEntryMs) and provider_duration_ms (finalMs −
+ *                                             requestStart).
  * @param {string}      params.anthropicApiKey Anthropic API key (from Supabase secrets)
+ * @param {number}     [params.requestEntryMs] ms timestamp recorded at Edge Function entry
+ *                                             (before auth, DB, and context work). When provided:
+ *                                             all attempt timeouts are bounded by REQUEST_DEADLINE_MS;
+ *                                             pre_provider_ms and total_duration_ms are computed.
+ *                                             Omit for legacy/test callers — deadline check skipped.
  * @param {Function}   [params.fetchImpl]      async (url, init) => Response; defaults to global fetch
  * @param {Function}   [params.now]            () => number (ms); defaults to Date.now
  * @param {Function}   [params.makeSignalFn]   (ms) => { signal, clearTimer }; defaults to makeSignal
@@ -220,6 +265,7 @@ export async function runProviderAttempts({
   requestId,
   passUsed,
   requestStart,
+  requestEntryMs,
   anthropicApiKey,
   fetchImpl,
   now,
@@ -236,27 +282,39 @@ export async function runProviderAttempts({
   let finalReply = null
   let finalTruncated = false
   let finalErrorCode = null
+  let finalTimeoutSource = null
   let attempts = 0
 
   try {
     for (let i = 0; i < ATTEMPT_CONFIGS.length; i++) {
       const config = ATTEMPT_CONFIGS[i]
 
-      // Before any attempt after the first, verify meaningful time remains.
-      // Do not start a call that cannot realistically complete within the overall
-      // deadline — the user is better served by an immediate provider_timeout than
-      // a fallback that aborts after a few seconds anyway.
-      let attemptTimeoutMs = PRIMARY_ATTEMPT_TIMEOUT_MS
-      if (i > 0) {
-        const elapsed = _now() - requestStart
-        const remaining = OVERALL_TIMEOUT_MS - elapsed
-        if (remaining < MIN_FALLBACK_TIME_MS) {
-          finalErrorCode = 'provider_timeout'
-          break
-        }
-        // Bound the fallback to remaining time so total stays within OVERALL_TIMEOUT_MS.
-        attemptTimeoutMs = Math.min(remaining, PRIMARY_ATTEMPT_TIMEOUT_MS)
+      // Compute remaining full-request budget from Edge Function entry.
+      // When requestEntryMs is provided, this ensures the total invocation —
+      // including pre-provider work (auth, DB, context) — stays within
+      // REQUEST_DEADLINE_MS. When omitted (legacy/test callers without deadline
+      // tracking), remainingRequestMs is null and the budget check is skipped.
+      const remainingRequestMs = typeof requestEntryMs === 'number'
+        ? REQUEST_DEADLINE_MS - (_now() - requestEntryMs)
+        : null
+
+      // Do not begin an attempt if the remaining full-request budget is already
+      // too small to make a meaningful attempt. This guards against pathologically
+      // slow pre-provider work (auth or DB latency) that has consumed most of the
+      // application deadline before any provider call is made.
+      if (remainingRequestMs !== null && remainingRequestMs < MIN_FALLBACK_TIME_MS) {
+        finalErrorCode = 'provider_timeout'
+        finalTimeoutSource = 'request_deadline'
+        break
       }
+
+      // Per-attempt abort deadline: bounded by the remaining full-request budget
+      // when tracking a deadline, otherwise the configured maximum.
+      // min() guarantees that even a slow provider call cannot push the total
+      // invocation past REQUEST_DEADLINE_MS.
+      const attemptTimeoutMs = remainingRequestMs !== null
+        ? Math.min(PRIMARY_ATTEMPT_TIMEOUT_MS, remainingRequestMs)
+        : PRIMARY_ATTEMPT_TIMEOUT_MS
 
       attempts++
       const attemptStart = _now()
@@ -306,11 +364,14 @@ export async function runProviderAttempts({
           durationMs,
           contextPass: passUsed,
           replyPresent: false,
+          remainingRequestMsAtAttemptStart: remainingRequestMs,
+          attemptTimeoutMs,
         }))
         // A timeout aborts this attempt immediately. Do not start the fallback —
-        // the AbortSignal is already fired and the overall budget is exhausted.
+        // AbortError indicates the per-attempt deadline fired, not a blank reply.
         if (fetchErr.name === 'AbortError') {
           finalErrorCode = 'provider_timeout'
+          finalTimeoutSource = 'attempt_deadline'
           break
         }
         // Unexpected network-level error — propagate to index.ts outer handler.
@@ -336,6 +397,8 @@ export async function runProviderAttempts({
           durationMs,
           contextPass: passUsed,
           replyPresent: false,
+          remainingRequestMsAtAttemptStart: remainingRequestMs,
+          attemptTimeoutMs,
         }))
         if (anthropicRes.status === 429) finalErrorCode = 'provider_rate_limited'
         else if (anthropicRes.status === 529) finalErrorCode = 'provider_unavailable'
@@ -367,6 +430,8 @@ export async function runProviderAttempts({
         durationMs,
         contextPass: passUsed,
         replyPresent,
+        remainingRequestMsAtAttemptStart: remainingRequestMs,
+        attemptTimeoutMs,
       }))
 
       if (replyPresent) {
@@ -389,12 +454,21 @@ export async function runProviderAttempts({
   } finally {
     // Summary log fires once regardless of how the loop exits — normal completion,
     // break, or unexpected throw. Even a throw leaves useful diagnostic data.
+    //
+    // Timing metrics (all null when requestEntryMs not provided):
+    //   pre_provider_ms      — time from Edge Function entry to first provider call
+    //   provider_duration_ms — time inside runProviderAttempts (provider stage only)
+    //   total_duration_ms    — full invocation duration from Edge Function entry
+    const finalMs = _now()
     _logSummary(buildRequestSummaryLog({
       requestId,
       success: finalReply !== null,
       attempts,
       finalErrorCode,
-      totalDurationMs: _now() - requestStart,
+      timeoutSource: finalTimeoutSource,
+      preProviderMs: typeof requestEntryMs === 'number' ? requestStart - requestEntryMs : null,
+      providerDurationMs: finalMs - requestStart,
+      totalDurationMs: typeof requestEntryMs === 'number' ? finalMs - requestEntryMs : null,
     }))
   }
 
