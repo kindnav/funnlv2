@@ -186,7 +186,9 @@ Deno.serve(async (req) => {
     // Counts and lengths only — message content is never logged.
     const rawMsgCount      = Array.isArray(rawMessages) ? rawMessages.length : 0
     const rawUserCount     = Array.isArray(rawMessages) ? rawMessages.filter((m: any) => m?.role === 'user').length : 0
-    const rawAssistantCount = rawMsgCount - rawUserCount
+    // Explicit count — excludes messages with invalid or missing roles.
+    // rawMsgCount - rawUserCount would incorrectly count malformed messages as assistant.
+    const rawAssistantCount = Array.isArray(rawMessages) ? rawMessages.filter((m: any) => m?.role === 'assistant').length : 0
     const rawMaxUserLen    = Array.isArray(rawMessages)
       ? Math.max(0, ...rawMessages.filter((m: any) => m?.role === 'user' && typeof m?.content === 'string').map((m: any) => (m.content as string).length), 0)
       : 0

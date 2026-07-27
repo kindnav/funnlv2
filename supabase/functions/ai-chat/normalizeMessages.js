@@ -90,15 +90,20 @@ export function shortenAssistantForHistory(content) {
  *    The frontend's buildProviderMessages() filters out localOnly messages
  *    (including INITIAL_MESSAGE) before invoking the Edge Function. A leading
  *    assistant role indicates a frontend bug and is rejected defensively.
- * 4. Trims the oldest full turns (user+assistant pairs) when total character count
+ * 4. Validates strict role alternation on the complete original sequence BEFORE
+ *    any history trimming. An invalid sequence cannot become valid merely because
+ *    trimming would have removed its malformed portion from the front.
+ * 5. Validates that the original conversation ends with a user message BEFORE
+ *    any trimming, for the same reason.
+ * 6. Trims the oldest full turns (user+assistant pairs) when total character count
  *    exceeds MAX_TOTAL_CONVERSATION_CHARS. Trimming always removes complete pairs
  *    to preserve alternation; orphaned assistant replies are also removed.
  *    The current user message (last) is always preserved.
- * 5. Caps total message count at MAX_MESSAGES, keeping the most recent messages.
+ * 7. Caps total message count at MAX_MESSAGES, keeping the most recent messages.
  *    After slicing, any leading assistant message is stripped to ensure the result
  *    starts with a user message.
- * 6. Validates strict role alternation throughout the sequence.
- * 7. Validates that the final message is from the user.
+ * 8. Defensive post-trim invariant: re-validates that the result is non-empty,
+ *    alternating, and ends with a user message.
  *
  * On validation failure returns:
  *   { messages: null, errorCode: string, validationReason: string }
@@ -157,7 +162,23 @@ export function normalizeMessages(messages) {
     return { messages: null, errorCode: 'invalid_request', validationReason: 'leading_assistant' }
   }
 
-  // Step 4: trim oldest turns when total character count exceeds budget.
+  // Step 4: validate strict role alternation on the COMPLETE original sequence
+  // before any trimming. An over-budget sequence with consecutive roles must not
+  // become valid merely because trimming would have removed its malformed portion.
+  for (let i = 1; i < validated.length; i++) {
+    if (validated[i].role === validated[i - 1].role) {
+      return { messages: null, errorCode: 'invalid_request', validationReason: 'invalid_role_sequence' }
+    }
+  }
+
+  // Step 5: require the original conversation to end with a user message before
+  // any trimming. Same principle: an invalid trailing state must not be hidden by
+  // front-trimming that preserves the tail.
+  if (validated[validated.length - 1].role !== 'user') {
+    return { messages: null, errorCode: 'invalid_request', validationReason: 'conversation_not_user_terminated' }
+  }
+
+  // Step 6: trim oldest turns when total character count exceeds budget.
   // Always remove a user message together with the assistant reply that follows it
   // so that alternation is preserved after trimming.
   let normalized = validated
@@ -172,7 +193,7 @@ export function normalizeMessages(messages) {
     }
   }
 
-  // Step 5: cap total message count, keeping the most recent.
+  // Step 7: cap total message count, keeping the most recent.
   if (normalized.length > MAX_MESSAGES) {
     normalized = normalized.slice(normalized.length - MAX_MESSAGES)
     while (normalized.length > 0 && normalized[0].role === 'assistant') {
@@ -180,18 +201,19 @@ export function normalizeMessages(messages) {
     }
   }
 
+  // Step 8: defensive post-trim invariants. The pre-trim checks (steps 4–5) already
+  // validated the original sequence. These re-checks guard against any unexpected
+  // edge case in the trimming/capping logic above.
   if (normalized.length === 0) {
     return { messages: null, errorCode: 'invalid_request', validationReason: 'conversation_empty_after_normalization' }
   }
 
-  // Step 6: validate strict alternation.
   for (let i = 1; i < normalized.length; i++) {
     if (normalized[i].role === normalized[i - 1].role) {
       return { messages: null, errorCode: 'invalid_request', validationReason: 'invalid_role_sequence' }
     }
   }
 
-  // Step 7: final message must be from the user.
   if (normalized[normalized.length - 1].role !== 'user') {
     return { messages: null, errorCode: 'invalid_request', validationReason: 'conversation_not_user_terminated' }
   }

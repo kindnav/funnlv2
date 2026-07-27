@@ -8,6 +8,7 @@ import { extractInvokeError } from '../lib/ai-chat-error'
 import { buildProviderMessages, isRetryEligible } from '../lib/ai-chat-conversation'
 import { isValidContactLink } from '../lib/contactLinkValidator'
 import { extractChildrenText } from '../lib/extractChildrenText'
+import { createRequestGate } from '../lib/ai-chat-request-gate'
 
 // Markdown component overrides — applied only to assistant messages.
 // Raw HTML is not rendered (react-markdown default, kept intentionally).
@@ -76,6 +77,10 @@ function FunnlAIPage() {
   const [loading, setLoading]             = useState(false)
   const bottomRef = useRef(null)
   const inputRef  = useRef(null)
+  // Per-instance request gate — prevents stale AI responses from mutating state
+  // after startNewChat() or a newer sendMessage() supersedes an in-flight request.
+  const gateRef   = useRef(null)
+  if (!gateRef.current) gateRef.current = createRequestGate()
 
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => {
@@ -96,9 +101,17 @@ function FunnlAIPage() {
 
   // Sends a new user message. Keeps the message visible on failure with an
   // inline error and Retry button — does not revert or restore to the input.
+  //
+  // A unique request token is acquired at the start via gate.begin(). Every
+  // post-await branch (success, error, catch, finally) checks gate.isCurrent(token)
+  // before mutating state or firing analytics. startNewChat() calls gate.invalidate()
+  // first, so any in-flight request finds its token stale and aborts cleanly.
   async function sendMessage(text) {
     const trimmed = text.trim()
     if (!trimmed || loading) return
+
+    const gate  = gateRef.current
+    const token = gate.begin()  // invalidates any prior in-flight token
 
     const userMsg      = { role: 'user', content: trimmed }
     const nextMessages = [...messages, userMsg]
@@ -116,7 +129,14 @@ function FunnlAIPage() {
         },
       })
 
+      // Check after invoke — startNewChat may have fired while the request was in-flight.
+      if (!gate.isCurrent(token)) return
+
       const invokeError = await extractInvokeError(fnError, data)
+
+      // Check after the async error normalizer — another await point.
+      if (!gate.isCurrent(token)) return
+
       if (invokeError) {
         track('ai_assistant_failed', { code: invokeError.code, retryable: invokeError.retryable })
         setMessages(prev => {
@@ -148,6 +168,7 @@ function FunnlAIPage() {
         return [...updated, assistantMsg]
       })
     } catch {
+      if (!gate.isCurrent(token)) return
       const fallback = { code: 'internal_error', message: 'Something went wrong — please try again.', retryable: true, request_id: null }
       track('ai_assistant_failed', { code: fallback.code, retryable: fallback.retryable })
       setMessages(prev => {
@@ -156,14 +177,20 @@ function FunnlAIPage() {
         return updated
       })
     } finally {
-      setLoading(false)
+      // Only clear loading if this request is still the current one.
+      // A newer request's finally block will clear loading for itself.
+      if (gate.isCurrent(token)) setLoading(false)
     }
   }
 
   // Retries the failed message at the given index. Clears the error inline so
   // the message remains visible, then resends without adding a new visible prompt.
+  // Uses the same request-token pattern as sendMessage.
   async function retryMessage(index) {
     if (loading) return
+
+    const gate  = gateRef.current
+    const token = gate.begin()  // invalidates any prior in-flight token
 
     setMessages(prev => prev.map((m, i) =>
       i === index ? { role: m.role, content: m.content } : m
@@ -183,7 +210,12 @@ function FunnlAIPage() {
         },
       })
 
+      if (!gate.isCurrent(token)) return
+
       const invokeError = await extractInvokeError(fnError, data)
+
+      if (!gate.isCurrent(token)) return
+
       if (invokeError) {
         track('ai_assistant_failed', { code: invokeError.code, retryable: invokeError.retryable })
         setMessages(prev => prev.map((m, i) =>
@@ -211,13 +243,14 @@ function FunnlAIPage() {
         return [...updated, assistantMsg]
       })
     } catch {
+      if (!gate.isCurrent(token)) return
       const fallback = { code: 'internal_error', message: 'Something went wrong — please try again.', retryable: true, request_id: null }
       track('ai_assistant_failed', { code: fallback.code, retryable: fallback.retryable })
       setMessages(prev => prev.map((m, i) =>
         i === index ? { ...m, error: fallback } : m
       ))
     } finally {
-      setLoading(false)
+      if (gate.isCurrent(token)) setLoading(false)
     }
   }
 
@@ -233,7 +266,12 @@ function FunnlAIPage() {
   // Resets the conversation to just the INITIAL_MESSAGE greeting.
   // Clears all messages, loading state, and the input box.
   // Does not affect contacts or stored data in the database.
+  //
+  // gate.invalidate() runs synchronously before state resets, poisoning any
+  // in-flight token. The in-flight request will find isCurrent() false at its
+  // next post-await check and return without mutating the reset conversation.
   function startNewChat(source = 'user_action') {
+    gateRef.current.invalidate()
     setMessages([INITIAL_MESSAGE])
     setInput('')
     setLoading(false)

@@ -402,6 +402,61 @@ test('successful normalization has no validationReason', () => {
   assert.ok(!r.validationReason, 'successful result should not have validationReason')
 })
 
+// ── Pre-trim role sequence validation (Correction 2 regression tests) ─────────
+console.log('\nnormalizeMessages — pre-trim role sequence validation')
+
+test('over-budget sequence with consecutive user messages returns invalid_role_sequence before trimming can mask it', () => {
+  // [user(8k), user(8k), assistant(20k), user(8k)] total = 44,000 > MAX_TOTAL_CONVERSATION_CHARS.
+  // Without pre-trim validation, the first user(8k) would be trimmed, leaving
+  // [user, assistant, user] — a valid sequence. The bug would be hidden.
+  // Pre-trim alternation check must catch this and return invalid_role_sequence.
+  const msgs = [
+    { role: 'user',      content: 'x'.repeat(8_000) },  // consecutive users — invalid
+    { role: 'user',      content: 'y'.repeat(8_000) },
+    { role: 'assistant', content: 'z'.repeat(20_000) },
+    { role: 'user',      content: 'Final question' },
+  ]
+  const r = normalizeMessages(msgs)
+  assert.strictEqual(r.errorCode, 'invalid_request',
+    'consecutive user messages in over-budget sequence must be rejected')
+  assert.strictEqual(r.validationReason, 'invalid_role_sequence',
+    'must report invalid_role_sequence, not silently succeed after trimming')
+})
+
+test('over-budget sequence ending with assistant returns conversation_not_user_terminated before trimming', () => {
+  // [user(5k), assistant(20k), user(5k), assistant(20k)] total = 50,000 > MAX_TOTAL_CONVERSATION_CHARS.
+  // Trimming removes from the front — it cannot fix a trailing assistant message.
+  // Pre-trim termination check explicitly validates this before any trimming occurs.
+  const msgs = [
+    { role: 'user',      content: 'a'.repeat(5_000) },
+    { role: 'assistant', content: 'b'.repeat(20_000) },
+    { role: 'user',      content: 'c'.repeat(5_000) },
+    { role: 'assistant', content: 'd'.repeat(20_000) },  // ends with assistant — invalid
+  ]
+  const r = normalizeMessages(msgs)
+  assert.strictEqual(r.errorCode, 'invalid_request')
+  assert.strictEqual(r.validationReason, 'conversation_not_user_terminated',
+    'pre-trim termination check must fire before any trimming occurs')
+})
+
+// ── prompt_too_long applies to all user messages (Correction 4 confirmation) ──
+console.log('\nnormalizeMessages — prompt_too_long on historical user message')
+
+test('a historical user message over MAX_USER_MESSAGE_CHARS also returns prompt_too_long', () => {
+  // The limit applies to all user messages (historical and current) — not just
+  // the last one. In normal flow this should not occur, but is validated defensively.
+  const msgs = [
+    { role: 'user',      content: 'x'.repeat(MAX_USER_MESSAGE_CHARS + 1) },  // historical, oversized
+    { role: 'assistant', content: 'Answer to previous question' },
+    { role: 'user',      content: 'Follow-up question' },
+  ]
+  const r = normalizeMessages(msgs)
+  assert.strictEqual(r.errorCode, 'prompt_too_long',
+    'oversized historical user message must return prompt_too_long (not silent truncation)')
+  assert.strictEqual(r.validationReason, 'user_message_too_long')
+  assert.strictEqual(r.messages, null)
+})
+
 // ── results ───────────────────────────────────────────────────────────────────
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed\n`)
 if (failed > 0) process.exit(1)

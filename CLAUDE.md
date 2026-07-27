@@ -1120,17 +1120,31 @@ New module `supabase/functions/ai-chat/providerCall.js` (plain JS, importable fr
 
 **Assistant history shortening:** When an assistant response exceeds 20,000 chars in provider history, `shortenAssistantForHistory()` trims it deterministically: keeps the first half + `\n[Previous assistant response shortened for conversation history]\n` + the last half. The full response remains visible in the browser — only the copy sent as provider history is shortened. Surrogate pair boundaries are respected. Exported for independent testing.
 
-**Prompt-too-long error:** New canonical error code `prompt_too_long` (HTTP 400, retryable: false). Message: "Your message is too long — please shorten it and try again". Added to `KNOWN_CODES` in `ai-chat-error.js`.
+**Prompt-too-long error:** New canonical error code `prompt_too_long` (HTTP 400, retryable: false). Message: "Your message is too long — please shorten it and try again". Added to `KNOWN_CODES` in `ai-chat-error.js`. Dismiss restores the original text to the input so the user can shorten it. No "Start new chat" is shown — editing the prompt alone can fix it. User prompts are never silently truncated.
 
 **Retry button fix:** `isRetryEligible()` in `ai-chat-conversation.js` now requires `msg.error.retryable === true`. Non-retryable errors (`invalid_request`, `prompt_too_long`, `pro_required`, `context_too_large`) no longer show Retry — resending the identical request cannot succeed.
 
-**Start new chat:** `FunnlAIPage.jsx` now has a "Start new chat" action that resets the conversation to `[INITIAL_MESSAGE]`, clears loading/input, and fires `ai_chat_reset` with `{ source: 'user_action' | 'ai_error_recovery' }`. The button appears in the header once the user has sent a message. For `invalid_request` errors (conversation-history failures where editing alone cannot help), "Start new chat" also appears inline in the error area. No database changes; conversation history is session-only.
+**Start new chat:** `FunnlAIPage.jsx` has a "Start new chat" action that resets the conversation to `[INITIAL_MESSAGE]`, clears loading/input, and fires `ai_chat_reset` with `{ source: 'user_action' | 'ai_error_recovery' }`. The button appears in the header once the user has sent a message. For `invalid_request` errors (conversation-history failures where editing alone cannot help), "Start new chat" also appears inline in the error area. No database changes; conversation history is session-only.
 
-**Privacy-safe validation diagnostics:** `normalizeMessages()` returns a `validationReason` string alongside `errorCode` on failure. Controlled enum values: `messages_not_array`, `messages_empty`, `invalid_message_shape`, `invalid_role`, `blank_content`, `user_message_too_long`, `invalid_role_sequence`, `leading_assistant`, `conversation_not_user_terminated`, `conversation_empty_after_normalization`. These are never included in HTTP response bodies — only used for internal logging. `index.ts` logs the `ai_chat_message_validation_failed` event with: `event`, `request_id`, `validation_reason`, `message_count`, `user_message_count`, `assistant_message_count`, `max_user_message_chars`, `max_assistant_message_chars`, `total_chars`. No message content, no contact data.
+**Stale-request protection (Codex correction, not a production-observed race):** `FunnlAIPage.jsx` uses a per-component-instance request gate (`src/lib/ai-chat-request-gate.js`). Each `sendMessage()` and `retryMessage()` call acquires a unique token via `gate.begin()`, which implicitly invalidates any prior in-flight token. `startNewChat()` calls `gate.invalidate()` synchronously before resetting state. Every post-await branch in both functions (success, error, catch, finally) checks `gate.isCurrent(token)` before mutating state or firing analytics. A stale request — one whose token was invalidated by a reset or newer send — returns early at its first stale check without touching messages, loading, or analytics. The gate is a plain value object with no React dependencies, making it independently unit-testable. The underlying Supabase invoke call is not physically cancelled (no safe AbortSignal path); its stale completion is silently discarded.
 
-**Updated invalid_request message:** The `index.ts` now returns "Conversation history could not be processed — please start a new chat" (was "Invalid or missing messages") for `invalid_request` validation failures.
+**Pre-trim role sequence validation (Codex correction):** `normalizeMessages()` previously validated strict alternation and ends-with-user only after trimming. This allowed a malformed sequence (e.g. two consecutive user messages) to become valid if trimming removed the malformed portion from the front. Now: strict alternation and ends-with-user are validated on the complete original `validated` array immediately after per-message validation and the leading-role check, before any history trimming. An invalid original sequence always returns an error regardless of whether trimming could have hidden it.
 
-**Files changed:**
+**Diagnostic role counts (Codex correction):** `rawAssistantCount` in `index.ts` was computed as `rawMsgCount - rawUserCount`, which incorrectly counted messages with invalid or missing roles as assistant messages. Changed to an explicit `rawMessages.filter(m => m?.role === 'assistant').length` count.
+
+**Privacy-safe validation diagnostics:** `normalizeMessages()` returns a `validationReason` string alongside `errorCode` on failure. Controlled enum values: `messages_not_array`, `messages_empty`, `invalid_message_shape`, `invalid_role`, `blank_content`, `user_message_too_long`, `invalid_role_sequence`, `leading_assistant`, `conversation_not_user_terminated`, `conversation_empty_after_normalization`. These are never included in HTTP response bodies — only used for internal logging. `index.ts` logs the `ai_chat_message_validation_failed` event with: `event`, `request_id`, `validation_reason`, `message_count`, `user_message_count`, `assistant_message_count`, `max_user_message_chars`, `max_assistant_message_chars`, `total_chars`. No message content, no contact data. Both `user_message_count` and `assistant_message_count` use explicit role matching (not subtraction).
+
+**Updated invalid_request message:** `index.ts` returns "Conversation history could not be processed — please start a new chat" (was "Invalid or missing messages") for `invalid_request` validation failures.
+
+**Files changed (corrective commit):**
+- `src/lib/ai-chat-request-gate.js` — NEW: pure `createRequestGate()` helper
+- `src/pages/FunnlAIPage.jsx` — request gate integrated in `sendMessage`, `retryMessage`, `startNewChat`
+- `supabase/functions/ai-chat/normalizeMessages.js` — pre-trim alternation + ends-with-user validation (steps 4–5 in new order); post-trim checks remain as defensive invariants (step 8)
+- `supabase/functions/ai-chat/index.ts` — explicit `rawAssistantCount` calculation
+- `tests/ai-chat-request-gate.test.js` — NEW: 13 tests for token lifecycle and FunnlAIPage control flow invariants
+- `tests/normalize-messages.test.js` — 3 new tests: over-budget malformed sequence regression, over-budget trailing-assistant regression, historical oversized user message
+
+**Files changed (initial commit — 5b89f01):**
 - `supabase/functions/ai-chat/normalizeMessages.js` — role-specific limits, `shortenAssistantForHistory`, `validationReason`, exported constants renamed
 - `supabase/functions/ai-chat/index.ts` — `prompt_too_long` error path, privacy-safe diagnostic log, updated `invalid_request` message
 - `src/lib/ai-chat-conversation.js` — `isRetryEligible` requires `retryable === true`
@@ -1139,7 +1153,7 @@ New module `supabase/functions/ai-chat/providerCall.js` (plain JS, importable fr
 - `tests/normalize-messages.test.js` — updated imports/constants, 22 new tests (regression, shortening, diagnostics)
 - `tests/ai-chat-conversation.test.js` — 7 new retry-eligibility tests
 
-**Test totals: 437 total (37 csv-header + 62 ai-helpers + 33 theme + 15 parse-provider-response + 40 normalize-messages + 19 ai-chat-error + 72 ai-chat + 28 ai-chat-conversation + 81 ai-chat-provider + 37 sanitize-reply + 9 contact-link-validator + 4 extract-children-text)**
+**Test totals: 453 total across 13 suites (37 csv-header + 62 ai-helpers + 33 theme + 15 parse-provider-response + 43 normalize-messages + 19 ai-chat-error + 72 ai-chat + 28 ai-chat-conversation + 81 ai-chat-provider + 37 sanitize-reply + 9 contact-link-validator + 4 extract-children-text + 13 ai-chat-request-gate)**
 
 **Deployment status:** NOT yet deployed. Branch `review/ai-chat-followup-history-hotfix`. Draft PR targeting `main`. Do not merge or deploy without explicit approval.
 
