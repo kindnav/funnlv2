@@ -1197,9 +1197,9 @@ New module `supabase/functions/ai-chat/providerCall.js` (plain JS, importable fr
 - When `requestEntryMs` is not provided: deadline check is skipped; each attempt gets full `PRIMARY_ATTEMPT_TIMEOUT_MS` (backward-compatible)
 
 **Diagnostic metrics (three separate values):**
-- `pre_provider_ms`: `providerStartMs - requestEntryMs` — time spent on auth + DB + context before first provider call
-- `provider_duration_ms`: `finalMs - requestStart` — time spent in the provider stage only
-- `total_duration_ms`: `finalMs - requestEntryMs` — true full-invocation duration (from handler entry)
+- `pre_provider_ms`: `requestStart - requestEntryMs` — time from handler entry until provider orchestration begins (auth + DB + context)
+- `provider_duration_ms`: `finalMs - requestStart` — time spent inside provider orchestration only
+- `total_duration_ms`: `finalMs - requestEntryMs` — elapsed time from handler entry through provider orchestration completion. Includes pre-provider and provider work; excludes final reply sanitization and response serialization (the small amount of work that runs after `runProviderAttempts` returns).
 
 Note: `total_duration_ms` meaning changed from the prior version (where it measured only the provider stage from `requestStart`). All three fields appear in the `ai_chat_request_complete` log event.
 
@@ -1220,21 +1220,26 @@ Note: `total_duration_ms` meaning changed from the prior version (where it measu
 
 **Test totals: 479 total across 13 suites (37 csv-header + 62 ai-helpers + 33 theme + 15 parse-provider-response + 43 normalize-messages + 19 ai-chat-error + 72 ai-chat + 28 ai-chat-conversation + 117 ai-chat-provider + 37 sanitize-reply + 9 contact-link-validator + 4 extract-children-text + 13 ai-chat-request-gate)**
 
-**No frontend changes. No schema changes. No migrations. No other Edge Functions.**
+**No frontend behavior changes. No schema changes. No migrations. No other Edge Functions.**
 
 **Compatibility:** `requestEntryMs` is an optional parameter in `runProviderAttempts`. When omitted: deadline check is skipped, each attempt gets full `PRIMARY_ATTEMPT_TIMEOUT_MS`, `pre_provider_ms` and `total_duration_ms` are null — backward-compatible with all existing callers and tests.
 
-**Deployment status:** NOT yet deployed. Branch `review/ai-chat-followup-timeout-hotfix`. Draft PR targeting `main`. Do not deploy without explicit approval.
+**Deployment status:** Deployed as PR #22 (2026-07-27). Production ai-chat v13. Rollback: Edge Function — Supabase dashboard → ai-chat → Deployment history → activate version 12.
 
-**What must be deployed:** Edge Function (`ai-chat` only). No frontend changes; no Vercel deployment needed. Order: deploy Edge Function → smoke test.
+**Deployment notes:**
+- PR #22 contains no frontend behavior changes.
+- Merging to main triggers the configured Vercel production build even when no frontend source changed.
+- The generated frontend bundle is functionally unchanged.
+- The ai-chat fix becomes active only after the Supabase Edge Function is separately deployed.
+- Edge Function command: `npx supabase functions deploy ai-chat --project-ref jzybxhvgnksrwxfivdwt --use-api`
 
 **Smoke test (when approved):**
 1. Simple prompt → confirm non-empty reply
 2. Complex first prompt (e.g., "identify contacts for VC introductions") → confirm non-empty reply
 3. Follow-up turn (e.g., "include Indiana University students too in a separate section") → confirm non-empty reply (this is the previously-failing scenario)
-4. Check Supabase Edge Function logs for `ai_chat_request_complete` — verify `pre_provider_ms`, `provider_duration_ms`, and `total_duration_ms` are all present; verify `timeout_source` is null on success
+4. Check Supabase Edge Function logs for `ai_chat_request_complete` — verify `pre_provider_ms`, `provider_duration_ms`, and `total_duration_ms` are all present; verify `timeout_source` is null on success; verify `total_duration_ms` is below 125,000
 
-**Rollback:** Supabase dashboard → Edge Functions → `ai-chat` → Deployment history → activate version 12 (current production). Frontend stays unchanged.
+**Rollback:** Supabase dashboard → Edge Functions → `ai-chat` → Deployment history → activate version 12 (current production). Frontend bundle is functionally unchanged either way.
 
 ---
 
