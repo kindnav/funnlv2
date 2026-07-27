@@ -1,10 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
+import { Link } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { canUseAI } from '../lib/ai'
 import { track } from '../lib/analytics'
 import { extractInvokeError } from '../lib/ai-chat-error'
 import { buildProviderMessages, isRetryEligible } from '../lib/ai-chat-conversation'
+import { isValidContactLink } from '../lib/contactLinkValidator'
+import { extractChildrenText } from '../lib/extractChildrenText'
 
 // Markdown component overrides — applied only to assistant messages.
 // Raw HTML is not rendered (react-markdown default, kept intentionally).
@@ -15,7 +18,23 @@ const mdComponents = {
   li:     ({ children }) => <li>{children}</li>,
   strong: ({ children }) => <strong className="font-semibold text-hi">{children}</strong>,
   em:     ({ children }) => <em className="italic">{children}</em>,
-  a:      ({ children }) => <span>{children}</span>,
+  a:      ({ href, children }) => {
+    if (isValidContactLink(href)) {
+      const name = extractChildrenText(children)
+      const ariaLabel = name ? `Open ${name}'s contact` : 'Open contact details'
+      return (
+        <Link
+          to={href}
+          aria-label={ariaLabel}
+          onClick={() => track('ai_contact_link_clicked', { source: 'ai_response' })}
+          className="text-accent underline hover:opacity-80 transition-opacity"
+        >
+          {children}
+        </Link>
+      )
+    }
+    return <span>{children}</span>
+  },
 }
 
 const STARTER_PROMPTS = [

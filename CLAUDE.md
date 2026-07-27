@@ -147,6 +147,7 @@ supabase/
 | `csv_import_used` | ImportContactsModal handleImport | `{ contacts_imported: number, ai_assisted: boolean }` | Feature usage |
 | `ai_assistant_used` | FunnlAIPage sendMessage on success | none | AI feature usage |
 | `ai_assistant_failed` | FunnlAIPage sendMessage or retryMessage on any error path | `{ code: controlledErrorCode, retryable: boolean }` — no prompt text, no contact data | AI reliability diagnostic |
+| `ai_contact_link_clicked` | FunnlAIPage anchor renderer — when user clicks a validated contact link in an AI reply | `{ source: 'ai_response' }` — no contact ID, no name | AI contact link engagement |
 | `ai_fill_used` | AddContactDrawer handleAIParse on success | `{ fields_filled: number }` | AI feature usage |
 | `landing_cta_clicked` | LandingPage — all three CTA buttons | `{ location: 'nav'\|'hero'\|'bottom' }` | Acquisition / landing page conversion |
 | `signup_started` | SignInPage on mount when mode === 'signup' | none | Signup funnel step 1 — user arrived at the signup form |
@@ -1046,6 +1047,8 @@ New module `supabase/functions/ai-chat/providerCall.js` (plain JS, importable fr
 
 **Test totals after hotfix: 353 total (37 csv-header + 62 ai-helpers + 33 theme + 15 parse-provider-response + 18 normalize-messages + 19 ai-chat-error + 67 ai-chat + 21 ai-chat-conversation + 81 ai-chat-provider)**
 
+**Test totals after grounding/readable/contact-links branch (after Codex corrections + multiline Markdown tests): 408 total (37 csv-header + 62 ai-helpers + 33 theme + 15 parse-provider-response + 18 normalize-messages + 19 ai-chat-error + 72 ai-chat + 21 ai-chat-conversation + 81 ai-chat-provider + 37 sanitize-reply + 9 contact-link-validator + 4 extract-children-text)**
+
 `tests/ai-chat-provider.test.js` — 81 tests: constants (10), `makeSignal` (1), `shouldRetryForBlankReply` (16), `buildAttemptLog` (22), `buildRequestSummaryLog` (11), `runProviderAttempts` orchestration (21 — all real control-flow paths covered: primary success, multi-block join, thinking+text, truncation, fallback trigger, fallback success, refusal, 429/529/400, primary timeout, insufficient remaining time, both attempts fail, call count cap, timer cleanup, log fire counts, privacy guarantees).
 
 **Deployment status:** NOT yet deployed. Branch `review/ai-chat-complex-prompt-hotfix`. Draft PR targeting `main`. Do not deploy until explicit approval. Only `ai-chat` Edge Function needs deployment — no frontend changes, no schema changes, no migrations.
@@ -1056,6 +1059,49 @@ New module `supabase/functions/ai-chat/providerCall.js` (plain JS, importable fr
 3. Smoke test: simple prompt (verify works), complex network-analysis prompt (verify non-empty response)
 4. If complex prompt still fails: check Supabase dashboard Edge Function logs for `ai_chat_provider_attempt` events — `attempt`, `stop_reason`, `content_block_types`, and `reply_present` will show which attempt produced text (or didn't)
 5. Rollback (current production version: 9): Supabase dashboard → Edge Functions → `ai-chat` → Deployment history → activate version 9
+
+---
+
+### Layer C quality pass — grounding, readable answers, contact links (branch review/ai-grounding-readable-contact-links)
+
+**What this adds (no schema changes, no migrations, no new Edge Functions):**
+
+**Part C — Stronger grounding in SYSTEM_PROMPT:** Explicit rules that the model must never invent contacts, companies, roles, interactions, or any detail not in the data. Distinguishes observation from inference. Removes the need for users to preface questions with "don't make things up." No repetitive disclaimers after the first relevant mention.
+
+**Part D — Readable answer standard in SYSTEM_PROMPT:** Direct answer first. ≤250 words for normal replies. Short paragraphs (≤3 sentences). Bullet points only for 3+ contacts/items. No large intro/outro paragraphs. No tables by default. No excessive headings. No italics.
+
+**Part E — Absolute no em dash rule:** `SYSTEM_PROMPT` instructs the model to never use U+2014. `sanitizeAssistantReply()` in `supabase/functions/ai-chat/sanitizeReply.js` replaces any em dash with ` - ` as a final-output safety net using `/[ \t]*—[ \t]*/g` (absorbs surrounding horizontal whitespace — spaces and tabs only, not newlines — to prevent double spaces while preserving Markdown paragraph breaks and list-item newlines). Also replaces horizontal-whitespace-surrounded en dashes (U+2013) used as sentence punctuation via `/[ \t]+–[ \t]+/g`; range en dashes (no surrounding whitespace) and all normal hyphens are preserved. Leading/trailing horizontal whitespace from a boundary em dash is trimmed after replacement.
+
+**Part F — Safe clickable contact names:**
+- `supabase/functions/ai-chat/helpers.js`: All three context passes now include `Contact ID: <uuid>` on the `[N]` header line so the model can reference IDs.
+- `SYSTEM_PROMPT`: Contact link format instruction — first mention of a stored contact → `[Exact Name](/contacts/<exact-id>)`, link only first mention, IDs only from network data.
+- `supabase/functions/ai-chat/sanitizeReply.js` `sanitizeContactLinks(markdown, allowedContacts)`: Server-side validation and canonicalization — UUID must be in current user's contacts, label must case-insensitively match stored name, and the contact must not have already been linked in this reply (first-mention-only, enforced by a `Set`). On success the returned link is **canonical**: stored-name casing + lowercase UUID path, regardless of how the model wrote either. An invalid first attempt (wrong label, unknown UUID, query param, fragment, etc.) does NOT consume the first-mention opportunity. All other links become plain text. Applied before `sanitizeAssistantReply`. Handles one level of balanced parens in URLs.
+- `index.ts`: Imports both sanitizers; applies `sanitizeContactLinks` then `sanitizeAssistantReply` to `result.reply` before returning the success response. Passes `allowedContacts` array (id + name only) from the DB query.
+- `src/lib/contactLinkValidator.js`: Frontend-only validator `isValidContactLink(href)` — accepts only `/contacts/<lowercase-uuid>` format (lowercase hex UUIDs only). The server independently validates model-produced links via `CONTACT_PATH_RE` in `sanitizeReply.js` (accepts mixed-case UUIDs from the model, outputs canonical lowercase). The two validators use coordinated route rules but are separate functions — `contactLinkValidator.js` is not imported by the Edge Function.
+- `src/lib/extractChildrenText.js`: Pure helper — recursively extracts visible text from React children (strings, numbers, arrays, nested React element objects) without importing React. Used by the anchor renderer to generate accurate `aria-label` values. Safe to unit-test in plain Node.js.
+- `src/pages/FunnlAIPage.jsx`: `Link` from react-router-dom and `extractChildrenText` imported. Anchor renderer: `/contacts/<uuid>` hrefs → `<Link>` with `aria-label` built from `extractChildrenText(children)` (falls back to "Open contact details" when text cannot be extracted), `onClick` analytics, `text-accent underline` styling; all other hrefs → `<span>` (raw HTML remains disabled).
+
+**Part G — Analytics:** `ai_contact_link_clicked` event fires on each validated contact link click with `{ source: 'ai_response' }` only — no contact ID, no name.
+
+**Part H — Response contract unchanged:** `{ reply, request_id, truncated? }` on success; 11-code error contract unchanged.
+
+**New files:**
+- `supabase/functions/ai-chat/sanitizeReply.js` — `sanitizeContactLinks`, `sanitizeAssistantReply`
+- `src/lib/contactLinkValidator.js` — frontend-only `isValidContactLink` (lowercase-UUID only; coordinates with but does not share code with the Edge Function's `CONTACT_PATH_RE`)
+- `src/lib/extractChildrenText.js` — `extractChildrenText`
+- `tests/sanitize-reply.test.js` — 37 tests (updated + expanded after Codex corrections + multiline Markdown tests)
+- `tests/contact-link-validator.test.js` — 9 tests (updated + expanded after Codex corrections)
+- `tests/extract-children-text.test.js` — 4 tests
+
+**Modified files:** `helpers.js`, `index.ts` (SYSTEM_PROMPT + sanitizer imports), `FunnlAIPage.jsx`, `tests/ai-chat.test.js` (2 header-format fixes + 5 new context tests)
+
+**Test totals: 408 total** (see breakdown in test-totals line above)
+
+**Deployment status:** NOT yet deployed. Branch `review/ai-grounding-readable-contact-links`. Draft PR targeting `main`. Do NOT merge, do NOT deploy the Edge Function or frontend without explicit approval.
+
+**What must be deployed together:** frontend (`src/pages/FunnlAIPage.jsx`, `src/lib/contactLinkValidator.js`) + Edge Function (`supabase/functions/ai-chat/` — `index.ts`, `helpers.js`, `sanitizeReply.js`). Order: frontend first (Vercel auto-deploy on merge), then Edge Function.
+
+**Rollback:** Edge Function — Supabase dashboard → ai-chat → Deployment history → activate version 10 (current production). Frontend — revert commit on main; Vercel redeploys.
 
 ---
 

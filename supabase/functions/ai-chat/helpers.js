@@ -118,7 +118,7 @@ function buildContextBody(contacts, byContact, today, maxIx) {
     if (c.how_met)           meta.push(`How met: ${truncFreeText(c.how_met, MAX_FIELD_CHARS)}`)
     if (c.relationship_type) meta.push(`Relationship type: ${truncEnum(c.relationship_type, MAX_FIELD_CHARS)}`)
 
-    lines.push(`[${i + 1}] ${truncFreeText(c.name, MAX_FIELD_CHARS)}`)
+    lines.push(`[${i + 1}] Contact ID: ${c.id} | Name: ${truncFreeText(c.name, MAX_FIELD_CHARS)}`)
     if (meta.length) lines.push(`  ${meta.join(' | ')}`)
 
     if (c.tags?.length) {
@@ -198,7 +198,7 @@ function buildCompactBody(contacts, byContact, today) {
       if (hasOverdue) ixParts.push('follow-up OVERDUE')
     }
 
-    lines.push(`[${i + 1}] ${namePart}${metaStr}${relStr} [${ixParts.join(', ')}]`)
+    lines.push(`[${i + 1}] Contact ID: ${c.id} | Name: ${namePart}${metaStr}${relStr} [${ixParts.join(', ')}]`)
   }
 
   return lines.join('\n')
