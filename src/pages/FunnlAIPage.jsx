@@ -230,6 +230,17 @@ function FunnlAIPage() {
     inputRef.current?.focus()
   }
 
+  // Resets the conversation to just the INITIAL_MESSAGE greeting.
+  // Clears all messages, loading state, and the input box.
+  // Does not affect contacts or stored data in the database.
+  function startNewChat(source = 'user_action') {
+    setMessages([INITIAL_MESSAGE])
+    setInput('')
+    setLoading(false)
+    track('ai_chat_reset', { source })
+    inputRef.current?.focus()
+  }
+
   function handleKeyDown(e) {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
@@ -264,7 +275,7 @@ function FunnlAIPage() {
         <div className="w-9 h-9 rounded-[10px] bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] flex items-center justify-center shadow-[0_4px_16px_rgba(91,69,240,0.4)] flex-none text-white">
           <SparkleIcon size={19}/>
         </div>
-        <div>
+        <div className="flex-1">
           <div className="flex items-center gap-2">
             <span className="text-[16px] font-bold text-hi">Funnl AI</span>
             {isProUser && (
@@ -279,6 +290,14 @@ function FunnlAIPage() {
               : 'Available with Pro access'}
           </p>
         </div>
+        {isProUser && hasUserMessaged && (
+          <button
+            onClick={() => startNewChat('user_action')}
+            className="text-[12px] text-low hover:text-mid transition-colors px-2 py-1 rounded-lg hover:bg-elevated flex-none"
+          >
+            Start new chat
+          </button>
+        )}
       </div>
 
       {/* ── Messages / locked state ─────────────────────────────────────────────── */}
@@ -331,13 +350,18 @@ function FunnlAIPage() {
                           Support ref: {msg.error.request_id}
                         </p>
                       )}
-                      <div className="flex gap-3 items-center">
+                      <div className="flex gap-3 items-center flex-wrap justify-end">
+                        {/* Dismiss: always shown — removes the failed message and
+                            restores text to the input so the user can edit. */}
                         <button
                           onClick={() => dismissError(i)}
                           className="text-[11.5px] text-low hover:text-mid transition-colors"
                         >
                           Dismiss
                         </button>
+                        {/* Retry: only for retryable errors on the last message.
+                            Non-retryable errors (invalid_request, prompt_too_long,
+                            pro_required) do not show Retry — resending is futile. */}
                         {isRetryEligible(messages, i) && (
                           <button
                             onClick={() => retryMessage(i)}
@@ -345,6 +369,16 @@ function FunnlAIPage() {
                             className="text-[11.5px] text-accent hover:opacity-80 transition-opacity disabled:opacity-40 font-medium"
                           >
                             Retry
+                          </button>
+                        )}
+                        {/* Start new chat: shown for conversation-history errors where
+                            editing the prompt alone cannot fix the underlying issue. */}
+                        {msg.error.code === 'invalid_request' && (
+                          <button
+                            onClick={() => startNewChat('ai_error_recovery')}
+                            className="text-[11.5px] text-accent hover:opacity-80 transition-opacity font-medium"
+                          >
+                            Start new chat
                           </button>
                         )}
                       </div>

@@ -171,13 +171,63 @@ Deno.serve(async (req) => {
       return errorResponse('invalid_request', 'Request body is not valid JSON', false, requestId, 400)
     }
 
-    // normalizeMessages validates roles and content, enforces per-message and
-    // total character limits, and ensures the sequence starts with user and ends
-    // with user. It rejects any leading assistant message — the frontend's
-    // buildProviderMessages() already excludes localOnly messages.
-    const { messages: validatedMessages, errorCode: msgError } = normalizeMessages(rawBody?.messages)
+    // normalizeMessages validates roles and content, enforces role-specific character
+    // limits, shortens oversized assistant history deterministically, and ensures the
+    // sequence starts and ends with user. It rejects any leading assistant message —
+    // the frontend's buildProviderMessages() already excludes localOnly messages.
+    //
+    // Role-specific limits:
+    //   MAX_USER_MESSAGE_CHARS      = 8,000  — user messages; prompt_too_long on exceed
+    //   MAX_ASSISTANT_HISTORY_CHARS = 20,000 — assistant history; shortened if over (never rejected)
+    //   MAX_TOTAL_CONVERSATION_CHARS = 40,000 — total; oldest complete turns trimmed
+    const rawMessages = rawBody?.messages
+
+    // Pre-compute privacy-safe metadata from the raw input for diagnostic logging.
+    // Counts and lengths only — message content is never logged.
+    const rawMsgCount      = Array.isArray(rawMessages) ? rawMessages.length : 0
+    const rawUserCount     = Array.isArray(rawMessages) ? rawMessages.filter((m: any) => m?.role === 'user').length : 0
+    const rawAssistantCount = rawMsgCount - rawUserCount
+    const rawMaxUserLen    = Array.isArray(rawMessages)
+      ? Math.max(0, ...rawMessages.filter((m: any) => m?.role === 'user' && typeof m?.content === 'string').map((m: any) => (m.content as string).length), 0)
+      : 0
+    const rawMaxAssistantLen = Array.isArray(rawMessages)
+      ? Math.max(0, ...rawMessages.filter((m: any) => m?.role === 'assistant' && typeof m?.content === 'string').map((m: any) => (m.content as string).length), 0)
+      : 0
+    const rawTotalChars = Array.isArray(rawMessages)
+      ? rawMessages.reduce((s: number, m: any) => s + (typeof m?.content === 'string' ? (m.content as string).length : 0), 0)
+      : 0
+
+    const { messages: validatedMessages, errorCode: msgError, validationReason } = normalizeMessages(rawMessages)
     if (msgError || !validatedMessages) {
-      return errorResponse('invalid_request', 'Invalid or missing messages', false, requestId, 400)
+      // Privacy-safe diagnostic log — counts and lengths only, never content.
+      console.log(JSON.stringify({
+        event: 'ai_chat_message_validation_failed',
+        request_id: requestId,
+        validation_reason: validationReason ?? 'unknown',
+        message_count: rawMsgCount,
+        user_message_count: rawUserCount,
+        assistant_message_count: rawAssistantCount,
+        max_user_message_chars: rawMaxUserLen,
+        max_assistant_message_chars: rawMaxAssistantLen,
+        total_chars: rawTotalChars,
+      }))
+
+      if (msgError === 'prompt_too_long') {
+        return errorResponse(
+          'prompt_too_long',
+          'Your message is too long — please shorten it and try again',
+          false,
+          requestId,
+          400
+        )
+      }
+      return errorResponse(
+        'invalid_request',
+        'Conversation history could not be processed — please start a new chat',
+        false,
+        requestId,
+        400
+      )
     }
 
     // ── 4. Load this user's contacts + interactions ────────────────────────────

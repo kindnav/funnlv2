@@ -1097,11 +1097,55 @@ New module `supabase/functions/ai-chat/providerCall.js` (plain JS, importable fr
 
 **Test totals: 408 total** (see breakdown in test-totals line above)
 
-**Deployment status:** NOT yet deployed. Branch `review/ai-grounding-readable-contact-links`. Draft PR targeting `main`. Do NOT merge, do NOT deploy the Edge Function or frontend without explicit approval.
+**Deployment status:** Merged as PR #20 (2026-07-27). Production ai-chat v11. Frontend live at main SHA 4b60a93.
 
-**What must be deployed together:** frontend (`src/pages/FunnlAIPage.jsx`, `src/lib/contactLinkValidator.js`) + Edge Function (`supabase/functions/ai-chat/` — `index.ts`, `helpers.js`, `sanitizeReply.js`). Order: frontend first (Vercel auto-deploy on merge), then Edge Function.
+---
 
-**Rollback:** Edge Function — Supabase dashboard → ai-chat → Deployment history → activate version 10 (current production). Frontend — revert commit on main; Vercel redeploys.
+### Layer C followup-history hotfix — multi-turn conversation failure (branch review/ai-chat-followup-history-hotfix)
+
+**Production symptom (support ref 04b0e67f-deb8-49f3-98d0-b32264e8fd90):** Complex first prompts (e.g. "identify contacts for VC introductions") succeeded. The user's short follow-up ("do not include indiana students") returned HTTP 400 in ~545 ms with `Invalid or missing messages`. Retry also returned HTTP 400. Both failures were on ai-chat version 11.
+
+**Root cause:** `normalizeMessages.js` used a single `MAX_MESSAGE_CHARS = 4,000` for both user and assistant messages. Provider output is capped at 4,096 tokens (~5-20 chars/token = up to ~20,000 chars for a long response). A long assistant reply displayed fine in the browser, but when the user sent a follow-up, `buildProviderMessages()` included the full assistant response as conversation history. The Edge Function rejected it as `> 4,000 chars` → HTTP 400 → the follow-up was permanently blocked. Retry sent the same invalid history → same failure.
+
+**Why the complex first prompt succeeded:** The first prompt had no conversation history (only a single user message, well under 4,000 chars). The failure was in the follow-up, not the original request.
+
+**Fix:** Role-specific message limits — `normalizeMessages.js` now applies distinct limits per role:
+
+| Constant | Value | Applied to |
+|---|---|---|
+| `MAX_USER_MESSAGE_CHARS` | 8,000 | All user messages — returns `prompt_too_long` if exceeded |
+| `MAX_ASSISTANT_HISTORY_CHARS` | 20,000 | Assistant history — shortened deterministically if exceeded (never rejected) |
+| `MAX_TOTAL_CONVERSATION_CHARS` | 40,000 | Entire conversation — oldest complete user+assistant pairs trimmed |
+| `MAX_MESSAGES` | 20 | Unchanged |
+
+**Assistant history shortening:** When an assistant response exceeds 20,000 chars in provider history, `shortenAssistantForHistory()` trims it deterministically: keeps the first half + `\n[Previous assistant response shortened for conversation history]\n` + the last half. The full response remains visible in the browser — only the copy sent as provider history is shortened. Surrogate pair boundaries are respected. Exported for independent testing.
+
+**Prompt-too-long error:** New canonical error code `prompt_too_long` (HTTP 400, retryable: false). Message: "Your message is too long — please shorten it and try again". Added to `KNOWN_CODES` in `ai-chat-error.js`.
+
+**Retry button fix:** `isRetryEligible()` in `ai-chat-conversation.js` now requires `msg.error.retryable === true`. Non-retryable errors (`invalid_request`, `prompt_too_long`, `pro_required`, `context_too_large`) no longer show Retry — resending the identical request cannot succeed.
+
+**Start new chat:** `FunnlAIPage.jsx` now has a "Start new chat" action that resets the conversation to `[INITIAL_MESSAGE]`, clears loading/input, and fires `ai_chat_reset` with `{ source: 'user_action' | 'ai_error_recovery' }`. The button appears in the header once the user has sent a message. For `invalid_request` errors (conversation-history failures where editing alone cannot help), "Start new chat" also appears inline in the error area. No database changes; conversation history is session-only.
+
+**Privacy-safe validation diagnostics:** `normalizeMessages()` returns a `validationReason` string alongside `errorCode` on failure. Controlled enum values: `messages_not_array`, `messages_empty`, `invalid_message_shape`, `invalid_role`, `blank_content`, `user_message_too_long`, `invalid_role_sequence`, `leading_assistant`, `conversation_not_user_terminated`, `conversation_empty_after_normalization`. These are never included in HTTP response bodies — only used for internal logging. `index.ts` logs the `ai_chat_message_validation_failed` event with: `event`, `request_id`, `validation_reason`, `message_count`, `user_message_count`, `assistant_message_count`, `max_user_message_chars`, `max_assistant_message_chars`, `total_chars`. No message content, no contact data.
+
+**Updated invalid_request message:** The `index.ts` now returns "Conversation history could not be processed — please start a new chat" (was "Invalid or missing messages") for `invalid_request` validation failures.
+
+**Files changed:**
+- `supabase/functions/ai-chat/normalizeMessages.js` — role-specific limits, `shortenAssistantForHistory`, `validationReason`, exported constants renamed
+- `supabase/functions/ai-chat/index.ts` — `prompt_too_long` error path, privacy-safe diagnostic log, updated `invalid_request` message
+- `src/lib/ai-chat-conversation.js` — `isRetryEligible` requires `retryable === true`
+- `src/lib/ai-chat-error.js` — `prompt_too_long` added to `KNOWN_CODES`
+- `src/pages/FunnlAIPage.jsx` — `startNewChat` function, header button, inline "Start new chat" for `invalid_request`
+- `tests/normalize-messages.test.js` — updated imports/constants, 22 new tests (regression, shortening, diagnostics)
+- `tests/ai-chat-conversation.test.js` — 7 new retry-eligibility tests
+
+**Test totals: 437 total (37 csv-header + 62 ai-helpers + 33 theme + 15 parse-provider-response + 40 normalize-messages + 19 ai-chat-error + 72 ai-chat + 28 ai-chat-conversation + 81 ai-chat-provider + 37 sanitize-reply + 9 contact-link-validator + 4 extract-children-text)**
+
+**Deployment status:** NOT yet deployed. Branch `review/ai-chat-followup-history-hotfix`. Draft PR targeting `main`. Do not merge or deploy without explicit approval.
+
+**What must be deployed:** frontend (Vercel auto-deploy on merge) + Edge Function (`ai-chat` only). Order: frontend first, then Edge Function.
+
+**Rollback:** Edge Function — Supabase dashboard → ai-chat → Deployment history → activate version 11 (current production). Frontend — revert commit on main; Vercel redeploys.
 
 ---
 
