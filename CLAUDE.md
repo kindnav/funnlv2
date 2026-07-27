@@ -1224,7 +1224,7 @@ Note: `total_duration_ms` meaning changed from the prior version (where it measu
 
 **Compatibility:** `requestEntryMs` is an optional parameter in `runProviderAttempts`. When omitted: deadline check is skipped, each attempt gets full `PRIMARY_ATTEMPT_TIMEOUT_MS`, `pre_provider_ms` and `total_duration_ms` are null — backward-compatible with all existing callers and tests.
 
-**Deployment status:** Deployed as PR #22 (2026-07-27). Production ai-chat v13. Rollback: Edge Function — Supabase dashboard → ai-chat → Deployment history → activate version 12.
+**Deployment status:** Deployed as PR #22 (2026-07-27). Production ai-chat v13. Frontend at merge SHA 5281c58. Authenticated smoke test passed: both complex first prompt and immediate follow-up returned non-empty answers with no timeout. Rollback: Edge Function — Supabase dashboard → ai-chat → Deployment history → activate version 12.
 
 **Deployment notes:**
 - PR #22 contains no frontend behavior changes.
