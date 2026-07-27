@@ -6,8 +6,10 @@
 import assert from 'assert'
 import {
   normalizeMessages,
+  shortenAssistantForHistory,
   MAX_MESSAGES,
-  MAX_MESSAGE_CHARS,
+  MAX_USER_MESSAGE_CHARS,
+  MAX_ASSISTANT_HISTORY_CHARS,
   MAX_TOTAL_CONVERSATION_CHARS,
 } from '../supabase/functions/ai-chat/normalizeMessages.js'
 
@@ -60,9 +62,10 @@ test('message with blank content returns invalid_request', () => {
   assert.strictEqual(r.errorCode, 'invalid_request')
 })
 
-test(`message exceeding MAX_MESSAGE_CHARS (${MAX_MESSAGE_CHARS}) returns invalid_request`, () => {
-  const r = normalizeMessages([{ role: 'user', content: 'x'.repeat(MAX_MESSAGE_CHARS + 1) }])
-  assert.strictEqual(r.errorCode, 'invalid_request')
+test(`user message exceeding MAX_USER_MESSAGE_CHARS (${MAX_USER_MESSAGE_CHARS}) returns prompt_too_long`, () => {
+  const r = normalizeMessages([{ role: 'user', content: 'x'.repeat(MAX_USER_MESSAGE_CHARS + 1) }])
+  assert.strictEqual(r.errorCode, 'prompt_too_long')
+  assert.strictEqual(r.messages, null)
 })
 
 test('consecutive user messages return invalid_request', () => {
@@ -111,10 +114,6 @@ test('valid multi-turn conversation succeeds', () => {
 })
 
 test('leading assistant role returns invalid_request (localOnly messages filtered before invoke)', () => {
-  // buildProviderMessages() in ai-chat-conversation.js strips localOnly messages
-  // (including INITIAL_MESSAGE) before invoking the Edge Function, so a leading
-  // assistant role should never arrive here. Silently stripping it would mask a
-  // frontend bug — rejecting it is the correct defensive posture.
   const r = normalizeMessages([
     { role: 'assistant', content: 'Your network is loaded. Ask me anything.' },
     { role: 'user', content: 'Hello' },
@@ -152,24 +151,138 @@ test('content is trimmed', () => {
   assert.strictEqual(r.messages[0].content, 'hello')
 })
 
+// ── Production regression: long assistant response followed by short follow-up ──
+console.log('\nnormalizeMessages — production regression: long assistant history')
+
+test('10,000-char assistant response followed by short follow-up succeeds', () => {
+  // Reproduces the production failure: a long assistant response is sent back as
+  // history. Previously rejected because 10,000 > MAX_MESSAGE_CHARS (4,000).
+  // After fix: shortened for history, follow-up accepted.
+  const longAssistant = 'a'.repeat(10_000)
+  const msgs = [
+    { role: 'user',      content: 'Who fits these criteria from my network?' },
+    { role: 'assistant', content: longAssistant },
+    { role: 'user',      content: 'do not include indiana students' },
+  ]
+  const r = normalizeMessages(msgs)
+  assert.strictEqual(r.errorCode, null, `expected success but got errorCode=${r.errorCode}`)
+  assert.ok(r.messages, 'messages should not be null')
+  assert.strictEqual(r.messages[r.messages.length - 1].content, 'do not include indiana students')
+})
+
+test('exact production sequence: complex request, long list, short refinement', () => {
+  // Mirrors support ref 04b0e67f: user sends complex request, gets a long list
+  // of contacts matching criteria (e.g. 8,000-char list), then refines with
+  // "do not include indiana students". Previously returned HTTP 400.
+  const longList = 'Here are the contacts:\n' + 'Contact Name, Company, Role. Relevant because...\n'.repeat(120)
+  const msgs = [
+    { role: 'user',      content: 'Review my network and identify strong contacts for venture capital introductions. For each, cite specific stored facts.' },
+    { role: 'assistant', content: longList },
+    { role: 'user',      content: 'do not include indiana students' },
+  ]
+  const r = normalizeMessages(msgs)
+  assert.strictEqual(r.errorCode, null, `production regression: expected success but got errorCode=${r.errorCode}`)
+  assert.ok(r.messages)
+  assert.strictEqual(r.messages[r.messages.length - 1].content, 'do not include indiana students')
+})
+
+test('assistant response at exact MAX_ASSISTANT_HISTORY_CHARS succeeds unchanged', () => {
+  const exactContent = 'x'.repeat(MAX_ASSISTANT_HISTORY_CHARS)
+  const msgs = [
+    { role: 'user',      content: 'Question' },
+    { role: 'assistant', content: exactContent },
+    { role: 'user',      content: 'Follow-up' },
+  ]
+  const r = normalizeMessages(msgs)
+  assert.strictEqual(r.errorCode, null)
+  assert.strictEqual(r.messages[1].content, exactContent, 'exact-limit content should be unchanged')
+})
+
+test('assistant response over MAX_ASSISTANT_HISTORY_CHARS is shortened, not rejected', () => {
+  const oversized = 'x'.repeat(MAX_ASSISTANT_HISTORY_CHARS + 1_000)
+  const msgs = [
+    { role: 'user',      content: 'Question' },
+    { role: 'assistant', content: oversized },
+    { role: 'user',      content: 'Follow-up' },
+  ]
+  const r = normalizeMessages(msgs)
+  assert.strictEqual(r.errorCode, null, 'oversized assistant history must not return error')
+  assert.ok(r.messages, 'messages must not be null')
+  // History copy is shortened
+  const historyContent = r.messages[1].content
+  assert.ok(historyContent.length <= MAX_ASSISTANT_HISTORY_CHARS,
+    `shortened content ${historyContent.length} > limit ${MAX_ASSISTANT_HISTORY_CHARS}`)
+  // Shortening marker is present
+  assert.ok(historyContent.includes('[Previous assistant response shortened for conversation history]'),
+    'shortening marker not found in history')
+})
+
+test('original input string is never mutated by normalizeMessages', () => {
+  const oversized = 'x'.repeat(MAX_ASSISTANT_HISTORY_CHARS + 500)
+  const original = oversized.length
+  const msgs = [
+    { role: 'user',      content: 'Q' },
+    { role: 'assistant', content: oversized },
+    { role: 'user',      content: 'Follow-up' },
+  ]
+  normalizeMessages(msgs)
+  assert.strictEqual(oversized.length, original, 'input string was mutated')
+  assert.strictEqual(msgs[1].content, oversized, 'input message was mutated')
+})
+
+test('oversized prompt_too_long: current user message too long returns prompt_too_long', () => {
+  const msgs = [
+    { role: 'user', content: 'x'.repeat(MAX_USER_MESSAGE_CHARS + 1) },
+  ]
+  const r = normalizeMessages(msgs)
+  assert.strictEqual(r.errorCode, 'prompt_too_long')
+  assert.strictEqual(r.messages, null)
+})
+
+// ── shortenAssistantForHistory ────────────────────────────────────────────────
+console.log('\nshortenAssistantForHistory — shortening behavior')
+
+test('content within limit is returned unchanged', () => {
+  const s = 'a'.repeat(MAX_ASSISTANT_HISTORY_CHARS)
+  assert.strictEqual(shortenAssistantForHistory(s), s)
+})
+
+test('content over limit is shortened to at most MAX_ASSISTANT_HISTORY_CHARS chars', () => {
+  const s = 'a'.repeat(MAX_ASSISTANT_HISTORY_CHARS + 5_000)
+  const result = shortenAssistantForHistory(s)
+  assert.ok(result.length <= MAX_ASSISTANT_HISTORY_CHARS,
+    `shortened length ${result.length} > ${MAX_ASSISTANT_HISTORY_CHARS}`)
+})
+
+test('shortened result includes the shortening marker', () => {
+  const s = 'a'.repeat(MAX_ASSISTANT_HISTORY_CHARS + 1_000)
+  const result = shortenAssistantForHistory(s)
+  assert.ok(result.includes('[Previous assistant response shortened for conversation history]'))
+})
+
+test('shortened result preserves both the beginning and the end of the original', () => {
+  // Build a distinguishable string: AAAA...BBBB
+  const half = Math.floor(MAX_ASSISTANT_HISTORY_CHARS / 2) + 2_000
+  const s = 'A'.repeat(half) + 'B'.repeat(half)
+  const result = shortenAssistantForHistory(s)
+  assert.ok(result.startsWith('A'), 'beginning of original not preserved')
+  assert.ok(result.endsWith('B'), 'end of original not preserved')
+})
+
 // ── Size limiting ──────────────────────────────────────────────────────────────
 console.log('\nnormalizeMessages — size limiting')
 
 test('trims oldest turns when total conversation exceeds MAX_TOTAL_CONVERSATION_CHARS', () => {
-  const bigContent = 'b'.repeat(MAX_MESSAGE_CHARS - 10)  // 3990 chars each
-  // Conversation starts with user (correct). buildProviderMessages() strips localOnly
-  // messages before invoking — the Edge Function never receives a leading assistant role.
-  const msgs = [
-    { role: 'user',      content: bigContent },         // oldest user turn
-    { role: 'assistant', content: bigContent },         // oldest assistant response
-    { role: 'user',      content: bigContent },         // middle turn
-    { role: 'assistant', content: bigContent },         // middle response
-    { role: 'user',      content: bigContent },         // recent turn
-    { role: 'assistant', content: bigContent },         // recent response
-    { role: 'user',      content: 'Latest question' }, // current
-  ]
-  // 6 × 3990 + 15 = 23,955 > MAX_TOTAL_CONVERSATION_CHARS (20,000) — trimming required
-  const r = normalizeMessages(msgs)
+  const bigContent = 'b'.repeat(2_000)  // well within per-message limits
+  // 22 × 2,000 + 15 = 44,015 > MAX_TOTAL_CONVERSATION_CHARS (40,000) — trimming required
+  const manyMsgs = []
+  for (let i = 0; i < 11; i++) {
+    manyMsgs.push({ role: 'user', content: bigContent })
+    manyMsgs.push({ role: 'assistant', content: bigContent })
+  }
+  manyMsgs.push({ role: 'user', content: 'Latest question' })
+
+  const r = normalizeMessages(manyMsgs)
   assert.strictEqual(r.errorCode, null)
   assert.ok(r.messages)
   // Latest question must be preserved
@@ -180,7 +293,9 @@ test('trims oldest turns when total conversation exceeds MAX_TOTAL_CONVERSATION_
     totalChars <= MAX_TOTAL_CONVERSATION_CHARS,
     `total ${totalChars} > ${MAX_TOTAL_CONVERSATION_CHARS}`
   )
-  // Sequence must still alternate and end with user
+  // Must start with user
+  assert.strictEqual(r.messages[0].role, 'user')
+  // Sequence must still alternate
   for (let i = 1; i < r.messages.length; i++) {
     assert.notStrictEqual(r.messages[i].role, r.messages[i - 1].role)
   }
@@ -188,22 +303,163 @@ test('trims oldest turns when total conversation exceeds MAX_TOTAL_CONVERSATION_
 })
 
 test(`caps message count at MAX_MESSAGES (${MAX_MESSAGES})`, () => {
-  // Build a valid alternating conversation with MAX_MESSAGES + 4 entries
   const msgs = []
   for (let i = 0; i < Math.floor((MAX_MESSAGES + 4) / 2); i++) {
     msgs.push({ role: 'user',      content: `Question ${i + 1}` })
     msgs.push({ role: 'assistant', content: `Answer ${i + 1}` })
   }
-  // Add a final user message so it ends with user
   msgs.push({ role: 'user', content: 'Final question' })
 
   const r = normalizeMessages(msgs)
   assert.strictEqual(r.errorCode, null)
   assert.ok(r.messages.length <= MAX_MESSAGES)
-  // Most recent must be preserved
   assert.strictEqual(r.messages[r.messages.length - 1].content, 'Final question')
-  // Must start with user
   assert.strictEqual(r.messages[0].role, 'user')
+})
+
+test('normalized history always starts with user and ends with user', () => {
+  const r = normalizeMessages([
+    { role: 'user',      content: 'Q1' },
+    { role: 'assistant', content: 'A1' },
+    { role: 'user',      content: 'Q2' },
+    { role: 'assistant', content: 'A2' },
+    { role: 'user',      content: 'Q3' },
+  ])
+  assert.strictEqual(r.errorCode, null)
+  assert.strictEqual(r.messages[0].role, 'user', 'must start with user')
+  assert.strictEqual(r.messages[r.messages.length - 1].role, 'user', 'must end with user')
+})
+
+// ── Validation diagnostic reasons ────────────────────────────────────────────
+console.log('\nnormalizeMessages — validation diagnostic reasons')
+
+test('validationReason is present on error returns', () => {
+  const r = normalizeMessages(null)
+  assert.ok(typeof r.validationReason === 'string' && r.validationReason.length > 0,
+    'validationReason should be a non-empty string on error')
+})
+
+test('validationReason does not contain message content', () => {
+  // Over-limit user message — validationReason must be a controlled enum value,
+  // not the actual content. Content is 'x'.repeat(N); reason must not include it.
+  const r2 = normalizeMessages([{ role: 'user', content: 'x'.repeat(MAX_USER_MESSAGE_CHARS + 1) }])
+  assert.ok(!r2.validationReason.includes('x'.repeat(10)),
+    'validationReason must not contain message content')
+})
+
+test('null input has controlled reason messages_not_array', () => {
+  const r = normalizeMessages(null)
+  assert.strictEqual(r.validationReason, 'messages_not_array')
+})
+
+test('empty array has controlled reason messages_empty', () => {
+  const r = normalizeMessages([])
+  assert.strictEqual(r.validationReason, 'messages_empty')
+})
+
+test('invalid role has controlled reason invalid_role', () => {
+  const r = normalizeMessages([{ role: 'system', content: 'hi' }])
+  assert.strictEqual(r.validationReason, 'invalid_role')
+})
+
+test('blank content has controlled reason blank_content', () => {
+  const r = normalizeMessages([{ role: 'user', content: '   ' }])
+  assert.strictEqual(r.validationReason, 'blank_content')
+})
+
+test('user message too long has controlled reason user_message_too_long', () => {
+  const r = normalizeMessages([{ role: 'user', content: 'x'.repeat(MAX_USER_MESSAGE_CHARS + 1) }])
+  assert.strictEqual(r.validationReason, 'user_message_too_long')
+})
+
+test('leading assistant has controlled reason leading_assistant', () => {
+  const r = normalizeMessages([
+    { role: 'assistant', content: 'Hi' },
+    { role: 'user', content: 'Hello' },
+  ])
+  assert.strictEqual(r.validationReason, 'leading_assistant')
+})
+
+test('consecutive same roles has controlled reason invalid_role_sequence', () => {
+  const r = normalizeMessages([
+    { role: 'user', content: 'Q1' },
+    { role: 'user', content: 'Q2' },
+  ])
+  assert.strictEqual(r.validationReason, 'invalid_role_sequence')
+})
+
+test('ends with assistant has controlled reason conversation_not_user_terminated', () => {
+  const r = normalizeMessages([
+    { role: 'user', content: 'Q' },
+    { role: 'assistant', content: 'A' },
+  ])
+  assert.strictEqual(r.validationReason, 'conversation_not_user_terminated')
+})
+
+test('successful normalization has no validationReason', () => {
+  const r = normalizeMessages([{ role: 'user', content: 'Hello' }])
+  assert.strictEqual(r.errorCode, null)
+  assert.ok(!r.validationReason, 'successful result should not have validationReason')
+})
+
+// ── Pre-trim role sequence validation (Correction 2 regression tests) ─────────
+console.log('\nnormalizeMessages — pre-trim role sequence validation')
+
+test('over-budget sequence with consecutive user messages returns invalid_role_sequence before trimming can mask it', () => {
+  // [user(8k), user(8k), assistant(20k), user(8k)] total = 44,000 > MAX_TOTAL_CONVERSATION_CHARS.
+  // Without pre-trim validation, the first user(8k) would be trimmed, leaving
+  // [user, assistant, user] — a valid sequence. The bug would be hidden.
+  // Pre-trim alternation check must catch this and return invalid_role_sequence.
+  const msgs = [
+    { role: 'user',      content: 'x'.repeat(8_000) },  // consecutive users — invalid
+    { role: 'user',      content: 'y'.repeat(8_000) },
+    { role: 'assistant', content: 'z'.repeat(20_000) },
+    { role: 'user',      content: 'a'.repeat(8_000) },  // 8,000 chars — total = 44,000 > MAX_TOTAL_CONVERSATION_CHARS
+  ]
+  // Verify the sequence genuinely exceeds the budget so the test proves that
+  // pre-trim validation catches the invalid sequence before trimming can hide it.
+  const rawTotal = msgs.reduce((sum, msg) => sum + msg.content.length, 0)
+  assert.ok(rawTotal > MAX_TOTAL_CONVERSATION_CHARS,
+    `raw total ${rawTotal} must exceed MAX_TOTAL_CONVERSATION_CHARS ${MAX_TOTAL_CONVERSATION_CHARS}`)
+  const r = normalizeMessages(msgs)
+  assert.strictEqual(r.errorCode, 'invalid_request',
+    'consecutive user messages in over-budget sequence must be rejected')
+  assert.strictEqual(r.validationReason, 'invalid_role_sequence',
+    'must report invalid_role_sequence, not silently succeed after trimming')
+})
+
+test('over-budget sequence ending with assistant returns conversation_not_user_terminated before trimming', () => {
+  // [user(5k), assistant(20k), user(5k), assistant(20k)] total = 50,000 > MAX_TOTAL_CONVERSATION_CHARS.
+  // Trimming removes from the front — it cannot fix a trailing assistant message.
+  // Pre-trim termination check explicitly validates this before any trimming occurs.
+  const msgs = [
+    { role: 'user',      content: 'a'.repeat(5_000) },
+    { role: 'assistant', content: 'b'.repeat(20_000) },
+    { role: 'user',      content: 'c'.repeat(5_000) },
+    { role: 'assistant', content: 'd'.repeat(20_000) },  // ends with assistant — invalid
+  ]
+  const r = normalizeMessages(msgs)
+  assert.strictEqual(r.errorCode, 'invalid_request')
+  assert.strictEqual(r.validationReason, 'conversation_not_user_terminated',
+    'pre-trim termination check must fire before any trimming occurs')
+})
+
+// ── prompt_too_long applies to all user messages (Correction 4 confirmation) ──
+console.log('\nnormalizeMessages — prompt_too_long on historical user message')
+
+test('a historical user message over MAX_USER_MESSAGE_CHARS also returns prompt_too_long', () => {
+  // The limit applies to all user messages (historical and current) — not just
+  // the last one. In normal flow this should not occur, but is validated defensively.
+  const msgs = [
+    { role: 'user',      content: 'x'.repeat(MAX_USER_MESSAGE_CHARS + 1) },  // historical, oversized
+    { role: 'assistant', content: 'Answer to previous question' },
+    { role: 'user',      content: 'Follow-up question' },
+  ]
+  const r = normalizeMessages(msgs)
+  assert.strictEqual(r.errorCode, 'prompt_too_long',
+    'oversized historical user message must return prompt_too_long (not silent truncation)')
+  assert.strictEqual(r.validationReason, 'user_message_too_long')
+  assert.strictEqual(r.messages, null)
 })
 
 // ── results ───────────────────────────────────────────────────────────────────

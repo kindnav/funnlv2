@@ -19,6 +19,7 @@ import { FunctionsHttpError, FunctionsRelayError, FunctionsFetchError } from '@s
 const KNOWN_CODES = new Set([
   'unauthorized',
   'invalid_request',
+  'prompt_too_long',
   'pro_required',
   'internal_error',
   'network_data_failed',

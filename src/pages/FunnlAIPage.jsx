@@ -8,6 +8,7 @@ import { extractInvokeError } from '../lib/ai-chat-error'
 import { buildProviderMessages, isRetryEligible } from '../lib/ai-chat-conversation'
 import { isValidContactLink } from '../lib/contactLinkValidator'
 import { extractChildrenText } from '../lib/extractChildrenText'
+import { createRequestGate } from '../lib/ai-chat-request-gate'
 
 // Markdown component overrides — applied only to assistant messages.
 // Raw HTML is not rendered (react-markdown default, kept intentionally).
@@ -76,6 +77,10 @@ function FunnlAIPage() {
   const [loading, setLoading]             = useState(false)
   const bottomRef = useRef(null)
   const inputRef  = useRef(null)
+  // Per-instance request gate — prevents stale AI responses from mutating state
+  // after startNewChat() or a newer sendMessage() supersedes an in-flight request.
+  const gateRef   = useRef(null)
+  if (!gateRef.current) gateRef.current = createRequestGate()
 
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => {
@@ -96,9 +101,17 @@ function FunnlAIPage() {
 
   // Sends a new user message. Keeps the message visible on failure with an
   // inline error and Retry button — does not revert or restore to the input.
+  //
+  // A unique request token is acquired at the start via gate.begin(). Every
+  // post-await branch (success, error, catch, finally) checks gate.isCurrent(token)
+  // before mutating state or firing analytics. startNewChat() calls gate.invalidate()
+  // first, so any in-flight request finds its token stale and aborts cleanly.
   async function sendMessage(text) {
     const trimmed = text.trim()
     if (!trimmed || loading) return
+
+    const gate  = gateRef.current
+    const token = gate.begin()  // invalidates any prior in-flight token
 
     const userMsg      = { role: 'user', content: trimmed }
     const nextMessages = [...messages, userMsg]
@@ -116,7 +129,14 @@ function FunnlAIPage() {
         },
       })
 
+      // Check after invoke — startNewChat may have fired while the request was in-flight.
+      if (!gate.isCurrent(token)) return
+
       const invokeError = await extractInvokeError(fnError, data)
+
+      // Check after the async error normalizer — another await point.
+      if (!gate.isCurrent(token)) return
+
       if (invokeError) {
         track('ai_assistant_failed', { code: invokeError.code, retryable: invokeError.retryable })
         setMessages(prev => {
@@ -148,6 +168,7 @@ function FunnlAIPage() {
         return [...updated, assistantMsg]
       })
     } catch {
+      if (!gate.isCurrent(token)) return
       const fallback = { code: 'internal_error', message: 'Something went wrong — please try again.', retryable: true, request_id: null }
       track('ai_assistant_failed', { code: fallback.code, retryable: fallback.retryable })
       setMessages(prev => {
@@ -156,14 +177,20 @@ function FunnlAIPage() {
         return updated
       })
     } finally {
-      setLoading(false)
+      // Only clear loading if this request is still the current one.
+      // A newer request's finally block will clear loading for itself.
+      if (gate.isCurrent(token)) setLoading(false)
     }
   }
 
   // Retries the failed message at the given index. Clears the error inline so
   // the message remains visible, then resends without adding a new visible prompt.
+  // Uses the same request-token pattern as sendMessage.
   async function retryMessage(index) {
     if (loading) return
+
+    const gate  = gateRef.current
+    const token = gate.begin()  // invalidates any prior in-flight token
 
     setMessages(prev => prev.map((m, i) =>
       i === index ? { role: m.role, content: m.content } : m
@@ -183,7 +210,12 @@ function FunnlAIPage() {
         },
       })
 
+      if (!gate.isCurrent(token)) return
+
       const invokeError = await extractInvokeError(fnError, data)
+
+      if (!gate.isCurrent(token)) return
+
       if (invokeError) {
         track('ai_assistant_failed', { code: invokeError.code, retryable: invokeError.retryable })
         setMessages(prev => prev.map((m, i) =>
@@ -211,13 +243,14 @@ function FunnlAIPage() {
         return [...updated, assistantMsg]
       })
     } catch {
+      if (!gate.isCurrent(token)) return
       const fallback = { code: 'internal_error', message: 'Something went wrong — please try again.', retryable: true, request_id: null }
       track('ai_assistant_failed', { code: fallback.code, retryable: fallback.retryable })
       setMessages(prev => prev.map((m, i) =>
         i === index ? { ...m, error: fallback } : m
       ))
     } finally {
-      setLoading(false)
+      if (gate.isCurrent(token)) setLoading(false)
     }
   }
 
@@ -227,6 +260,22 @@ function FunnlAIPage() {
     const text = messages[index]?.content ?? ''
     setMessages(prev => prev.filter((_, i) => i !== index))
     setInput(text)
+    inputRef.current?.focus()
+  }
+
+  // Resets the conversation to just the INITIAL_MESSAGE greeting.
+  // Clears all messages, loading state, and the input box.
+  // Does not affect contacts or stored data in the database.
+  //
+  // gate.invalidate() runs synchronously before state resets, poisoning any
+  // in-flight token. The in-flight request will find isCurrent() false at its
+  // next post-await check and return without mutating the reset conversation.
+  function startNewChat(source = 'user_action') {
+    gateRef.current.invalidate()
+    setMessages([INITIAL_MESSAGE])
+    setInput('')
+    setLoading(false)
+    track('ai_chat_reset', { source })
     inputRef.current?.focus()
   }
 
@@ -264,7 +313,7 @@ function FunnlAIPage() {
         <div className="w-9 h-9 rounded-[10px] bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] flex items-center justify-center shadow-[0_4px_16px_rgba(91,69,240,0.4)] flex-none text-white">
           <SparkleIcon size={19}/>
         </div>
-        <div>
+        <div className="flex-1">
           <div className="flex items-center gap-2">
             <span className="text-[16px] font-bold text-hi">Funnl AI</span>
             {isProUser && (
@@ -279,6 +328,14 @@ function FunnlAIPage() {
               : 'Available with Pro access'}
           </p>
         </div>
+        {isProUser && hasUserMessaged && (
+          <button
+            onClick={() => startNewChat('user_action')}
+            className="text-[12px] text-low hover:text-mid transition-colors px-2 py-1 rounded-lg hover:bg-elevated flex-none"
+          >
+            Start new chat
+          </button>
+        )}
       </div>
 
       {/* ── Messages / locked state ─────────────────────────────────────────────── */}
@@ -331,13 +388,18 @@ function FunnlAIPage() {
                           Support ref: {msg.error.request_id}
                         </p>
                       )}
-                      <div className="flex gap-3 items-center">
+                      <div className="flex gap-3 items-center flex-wrap justify-end">
+                        {/* Dismiss: always shown — removes the failed message and
+                            restores text to the input so the user can edit. */}
                         <button
                           onClick={() => dismissError(i)}
                           className="text-[11.5px] text-low hover:text-mid transition-colors"
                         >
                           Dismiss
                         </button>
+                        {/* Retry: only for retryable errors on the last message.
+                            Non-retryable errors (invalid_request, prompt_too_long,
+                            pro_required) do not show Retry — resending is futile. */}
                         {isRetryEligible(messages, i) && (
                           <button
                             onClick={() => retryMessage(i)}
@@ -345,6 +407,16 @@ function FunnlAIPage() {
                             className="text-[11.5px] text-accent hover:opacity-80 transition-opacity disabled:opacity-40 font-medium"
                           >
                             Retry
+                          </button>
+                        )}
+                        {/* Start new chat: shown for conversation-history errors where
+                            editing the prompt alone cannot fix the underlying issue. */}
+                        {msg.error.code === 'invalid_request' && (
+                          <button
+                            onClick={() => startNewChat('ai_error_recovery')}
+                            className="text-[11.5px] text-accent hover:opacity-80 transition-opacity font-medium"
+                          >
+                            Start new chat
                           </button>
                         )}
                       </div>

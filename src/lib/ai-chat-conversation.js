@@ -40,6 +40,9 @@ export function isRetryEligible(messages, index) {
   if (index < 0 || index >= messages.length) return false
   const msg = messages[index]
   if (!msg?.error || msg.role !== 'user') return false
+  // Non-retryable errors (invalid_request, prompt_too_long, pro_required, etc.)
+  // must not show Retry — resending the identical request cannot succeed.
+  if (!msg.error.retryable) return false
   // Only eligible when this is the very last message in the array — any subsequent
   // turn (successful or otherwise) makes the earlier failure ineligible for retry.
   return index === messages.length - 1

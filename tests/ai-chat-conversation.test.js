@@ -222,6 +222,60 @@ test('INITIAL_MESSAGE-style localOnly message at index 0 is not retry-eligible',
   assert.strictEqual(isRetryEligible(msgs, 0), false)
 })
 
+// ── isRetryEligible — retryable flag enforcement ──────────────────────────────
+console.log('\nisRetryEligible — retryable flag enforcement')
+
+test('returns false for invalid_request (retryable: false) — resending is futile', () => {
+  const error = { code: 'invalid_request', message: 'History error', retryable: false, request_id: null }
+  const msgs = [{ role: 'user', content: 'Q', error }]
+  assert.strictEqual(isRetryEligible(msgs, 0), false)
+})
+
+test('returns false for prompt_too_long (retryable: false)', () => {
+  const error = { code: 'prompt_too_long', message: 'Too long', retryable: false, request_id: null }
+  const msgs = [{ role: 'user', content: 'Q', error }]
+  assert.strictEqual(isRetryEligible(msgs, 0), false)
+})
+
+test('returns false for pro_required (retryable: false)', () => {
+  const error = { code: 'pro_required', message: 'Pro only', retryable: false, request_id: null }
+  const msgs = [{ role: 'user', content: 'Q', error }]
+  assert.strictEqual(isRetryEligible(msgs, 0), false)
+})
+
+test('returns false for context_too_large (retryable: false)', () => {
+  const error = { code: 'context_too_large', message: 'Too large', retryable: false, request_id: null }
+  const msgs = [{ role: 'user', content: 'Q', error }]
+  assert.strictEqual(isRetryEligible(msgs, 0), false)
+})
+
+test('returns true for provider_timeout (retryable: true) on the last message', () => {
+  const error = { code: 'provider_timeout', message: 'Timed out', retryable: true, request_id: 'abc' }
+  const msgs = [
+    { role: 'user',      content: 'Q1' },
+    { role: 'assistant', content: 'A1' },
+    { role: 'user',      content: 'Q2', error },
+  ]
+  assert.strictEqual(isRetryEligible(msgs, 2), true)
+})
+
+test('returns true for internal_error (retryable: true) on the last message', () => {
+  const error = { code: 'internal_error', message: 'Error', retryable: true, request_id: null }
+  const msgs = [{ role: 'user', content: 'Q', error }]
+  assert.strictEqual(isRetryEligible(msgs, 0), true)
+})
+
+test('returns false for retryable error that is NOT the last message', () => {
+  const error = { code: 'provider_timeout', message: 'Timed out', retryable: true, request_id: null }
+  const msgs = [
+    { role: 'user',      content: 'Q1', error },
+    { role: 'user',      content: 'Q2' },
+    { role: 'assistant', content: 'A2' },
+    { role: 'user',      content: 'Q3' },
+  ]
+  assert.strictEqual(isRetryEligible(msgs, 0), false)
+})
+
 // ── Backward compatibility: new frontend + old Edge Function ───────────────────
 // When the old Edge Function is deployed, the new frontend must not break.
 // The key invariant: buildProviderMessages always produces user-first provider messages
