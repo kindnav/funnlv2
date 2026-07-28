@@ -1,6 +1,7 @@
 ﻿import { useCallback, useEffect, useState } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
+import { getProAccessStatus } from '../lib/pro-access-status'
 
 // Defined outside Sidebar to avoid React remount-on-render issues
 function NavItem({ to, label, icon, badge, active }) {
@@ -48,13 +49,14 @@ function Sidebar() {
       setUser(data.user)
       if (data.user) {
         const uid = data.user.id
+        // Fetch profile for display (display_name). Entitlement via server-authoritative RPC
+        // so can_use_pro uses the DB clock, not the browser's new Date().
         Promise.all([
-          supabase.from('profiles').select('display_name, ai_enabled').eq('id', uid).maybeSingle(),
-          supabase.from('pro_trials').select('started_at, ends_at').eq('user_id', uid).maybeSingle(),
-        ]).then(([{ data: p }, { data: t }]) => {
+          supabase.from('profiles').select('display_name').eq('id', uid).maybeSingle(),
+          getProAccessStatus(),
+        ]).then(([{ data: p }, status]) => {
           setProfile(p)
-          const trialActive = t?.started_at && t?.ends_at && new Date(t.ends_at) > new Date()
-          setIsProUser(p?.ai_enabled === true || Boolean(trialActive))
+          setIsProUser(status?.can_use_pro === true)
         })
       }
     })

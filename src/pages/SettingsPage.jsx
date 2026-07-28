@@ -2,7 +2,7 @@
 import { Link, useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { getTheme, setTheme } from '../lib/theme'
-import { computeTrialStatus } from '../lib/ai'
+import { getProAccessStatus } from '../lib/pro-access-status'
 
 const iCls = 'flex-1 bg-input border border-line-3 rounded-xl px-[13px] py-[11px] text-[13.5px] text-hi placeholder-[#54545E] outline-none focus:border-[rgba(139,124,255,0.5)] transition-colors'
 const lCls = 'mb-[7px] block text-[12.5px] font-semibold text-mid'
@@ -27,15 +27,24 @@ function SettingsPage() {
       const { data: { user } } = await supabase.auth.getUser()
       setUser(user)
       if (user) {
-        const [profileResult, trialResult] = await Promise.all([
-          supabase.from('profiles').select('display_name, ai_enabled').eq('id', user.id).maybeSingle(),
-          supabase.from('pro_trials').select('started_at, ends_at').eq('user_id', user.id).maybeSingle(),
+        // Fetch display_name for the editable field, and pro status via server-authoritative RPC.
+        const [profileResult, status] = await Promise.all([
+          supabase.from('profiles').select('display_name').eq('id', user.id).maybeSingle(),
+          getProAccessStatus(),
         ])
         if (profileResult.data) {
           setDisplayName(profileResult.data.display_name || '')
-          setIsPermanentPro(profileResult.data.ai_enabled === true)
         }
-        setTrialStatus(computeTrialStatus(trialResult.data, new Date()))
+        if (status) {
+          setIsPermanentPro(status.permanent_pro === true)
+          setTrialStatus({
+            eligible:      status.trial_eligible  ?? false,
+            active:        status.trial_active    ?? false,
+            expired:       status.trial_expired   ?? false,
+            daysRemaining: status.days_remaining  ?? 0,
+            endsAt:        status.ends_at         ?? null,
+          })
+        }
       }
       setLoading(false)
     }

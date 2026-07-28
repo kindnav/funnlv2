@@ -2,24 +2,38 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { identifyUser, track } from '../lib/analytics'
+import { getProAccessStatus } from '../lib/pro-access-status'
 
 function WelcomePage() {
   const navigate = useNavigate()
   const [signingOut, setSigningOut] = useState(false)
-  const [trialStarted, setTrialStarted] = useState(false)
+  // null = loading, true = trial active, false = not active, 'error' = status unavailable
+  const [trialDisplay, setTrialDisplay] = useState(null)
 
   // Fire email_confirmed once per browser per user — fires only when Supabase has
   // verified the session and the email_confirmed_at timestamp is set.
   // localStorage prevents re-fires on refresh or repeat visits.
   // No PII in event properties; identifyUser() links the event to the PostHog person.
   //
-  // After confirming, also starts the 7-day Pro trial via start_my_pro_trial() RPC.
-  // Failure is silently swallowed — the welcome page must not block on analytics or trial errors.
+  // Trial activation sequence:
+  //   1. Call start_my_pro_trial() as a recovery mechanism. The primary activation path
+  //      is the on_email_confirmed DB trigger — this RPC is a safety net in case that
+  //      trigger failed silently (transient DB issue, edge-case routing).
+  //      We await it so its write completes before we read status, but we never use
+  //      its started_now field to drive UI or analytics.
+  //   2. Call getProAccessStatus() for the server-authoritative state (DB clock, not browser).
+  //   3. Show the trial banner when the server confirms trial_active = true.
+  //   4. Fire pro_trial_started with localStorage deduplication (best-effort, not exact-once).
+  //      A second-device visit to /welcome may fire the event again on that device, but
+  //      PostHog deduplicates by distinct_id in funnel views.
   useEffect(() => {
     async function maybeTrackEmailConfirmed() {
       try {
         const { data: { session } } = await supabase.auth.getSession()
-        if (!session?.user?.email_confirmed_at) return
+        if (!session?.user?.email_confirmed_at) {
+          setTrialDisplay('error')
+          return
+        }
         const userId = session.user.id
 
         // Email confirmed analytics (once per browser)
@@ -29,20 +43,35 @@ function WelcomePage() {
           localStorage.setItem('funnl_confirmed_' + userId, '1')
         }
 
-        // Activate the 7-day Pro trial — start_my_pro_trial() is idempotent
-        // (returns started_now: false if already started). Only fires the analytics
-        // event on the call that actually starts the trial.
+        // Recovery mechanism: call start_my_pro_trial() so that if the DB trigger
+        // failed silently the trial is activated before we read status. This call is
+        // idempotent (WHERE started_at IS NULL guard) — no risk of double-starting.
+        // Failure is swallowed; getProAccessStatus() below is the source of truth.
         try {
-          const { data: trialData, error: trialError } = await supabase.rpc('start_my_pro_trial')
-          if (!trialError && trialData?.started_now === true) {
-            track('pro_trial_started')
-            setTrialStarted(true)
-          }
+          await supabase.rpc('start_my_pro_trial')
         } catch {
-          // Trial RPC failure must never block the welcome page
+          // Recovery failure is acceptable — primary trigger may have already fired
+        }
+
+        // Server-authoritative status (DB clock, not browser Date)
+        const status = await getProAccessStatus()
+        if (!status) {
+          setTrialDisplay('error')
+          return
+        }
+
+        const trialIsActive = status.trial_active === true
+        setTrialDisplay(trialIsActive)
+
+        // pro_trial_started: fire once per browser per user (best-effort dedup).
+        // Keyed separately from email_confirmed so they can be independently tracked.
+        if (trialIsActive && !localStorage.getItem('funnl_trial_started_' + userId)) {
+          track('pro_trial_started')
+          localStorage.setItem('funnl_trial_started_' + userId, '1')
         }
       } catch {
-        // analytics failure must never block the welcome page
+        // Any unhandled failure must not block the welcome page
+        setTrialDisplay('error')
       }
     }
     maybeTrackEmailConfirmed()
@@ -85,14 +114,23 @@ function WelcomePage() {
           Your email is confirmed.<br/>You can sign in now.
         </p>
 
-        {/* Trial started notice */}
-        {trialStarted && (
+        {/* Trial notice — server-authoritative */}
+        {trialDisplay === true && (
           <div className="flex items-center gap-2 bg-[rgba(139,124,255,0.1)] border border-[rgba(139,124,255,0.25)] rounded-xl px-4 py-3 mb-6 text-left">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="#8B7CFF" className="flex-none">
               <path d="M12 3l1.7 5.3L19 10l-5.3 1.7L12 17l-1.7-5.3L5 10l5.3-1.7L12 3z"/>
             </svg>
             <p className="text-[13px] text-accent font-medium leading-snug">
               Your 7-day Funnl Pro trial has started — explore AI features after signing in.
+            </p>
+          </div>
+        )}
+
+        {/* Status unavailable — neutral fallback (never shows false success) */}
+        {trialDisplay === 'error' && (
+          <div className="bg-[rgba(255,255,255,0.04)] border border-line-1 rounded-xl px-4 py-3 mb-6 text-left">
+            <p className="text-[13px] text-muted leading-snug">
+              Account confirmed. Pro trial status will refresh after you sign in.
             </p>
           </div>
         )}

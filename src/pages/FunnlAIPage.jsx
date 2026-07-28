@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import { Link } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
-import { canUseAI, getTrialStatus } from '../lib/ai'
+import { getProAccessStatus } from '../lib/pro-access-status'
 import { track } from '../lib/analytics'
 import { extractInvokeError } from '../lib/ai-chat-error'
 import { buildProviderMessages, isRetryEligible } from '../lib/ai-chat-conversation'
@@ -68,8 +68,8 @@ const SendIcon = () => (
 
 function FunnlAIPage() {
   const [isCheckingPro, setIsCheckingPro] = useState(true)
-  const [isProUser, setIsProUser]         = useState(false)
-  const [trialStatus, setTrialStatus]     = useState(null)   // null = not yet loaded
+  // null = loading, object = loaded (check .can_use_pro), 'error' = status unavailable
+  const [proStatus, setProStatus]         = useState(null)
   // Message shape: { role, content, error?, truncated? }
   // error: { code, message, retryable, request_id } — present on failed user messages only
   // truncated: true — present on assistant messages where stop_reason was max_tokens
@@ -84,19 +84,16 @@ function FunnlAIPage() {
   if (!gateRef.current) gateRef.current = createRequestGate()
 
   useEffect(() => {
-    supabase.auth.getUser().then(({ data }) => {
-      if (data.user) {
-        const uid = data.user.id
-        Promise.all([canUseAI(uid), getTrialStatus(uid)]).then(([canUse, trial]) => {
-          setIsProUser(canUse)
-          setTrialStatus(trial)
-          setIsCheckingPro(false)
-        })
-      } else {
-        setIsCheckingPro(false)
-      }
+    // Single server-authoritative call — never uses browser Date for access decisions.
+    // Returns null on failure; we treat that as "status unavailable" (not "not Pro")
+    // so a transient RPC error doesn't silently lock out Pro users from the UI.
+    getProAccessStatus().then(status => {
+      setProStatus(status ?? 'error')
+      setIsCheckingPro(false)
     })
   }, [])
+
+  const isProUser = proStatus !== 'error' && proStatus?.can_use_pro === true
 
   useEffect(() => {
     if (isProUser) bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -319,14 +316,16 @@ function FunnlAIPage() {
         <div className="flex-1">
           <div className="flex items-center gap-2">
             <span className="text-[16px] font-bold text-hi">Funnl AI</span>
-            {isProUser && !trialStatus?.active && (
+            {/* Permanent Pro always shows PRO badge, regardless of trial state */}
+            {isProUser && proStatus?.permanent_pro && (
               <span className="font-mono text-[9.5px] font-bold tracking-[0.5px] text-accent bg-[rgba(139,124,255,0.22)] px-1.5 py-0.5 rounded-[5px]">
                 PRO
               </span>
             )}
-            {isProUser && trialStatus?.active && (
+            {/* Trial users (not permanent Pro) show a days-remaining countdown */}
+            {isProUser && !proStatus?.permanent_pro && proStatus?.trial_active && (
               <span className="font-mono text-[9.5px] font-bold tracking-[0.5px] text-warning bg-[rgba(255,184,77,0.15)] px-1.5 py-0.5 rounded-[5px]">
-                {trialStatus.daysRemaining === 1 ? '1 DAY LEFT' : `${trialStatus.daysRemaining} DAYS LEFT`}
+                {proStatus.days_remaining === 1 ? '1 DAY LEFT' : `${proStatus.days_remaining} DAYS LEFT`}
               </span>
             )}
           </div>
@@ -474,12 +473,12 @@ function FunnlAIPage() {
               <SparkleIcon size={28}/>
             </div>
             <div className="max-w-[280px]">
-              {trialStatus?.expired ? (
+              {proStatus !== 'error' && proStatus?.trial_expired ? (
                 <>
                   <h3 className="font-display text-[19px] font-bold text-hi mb-2">Your trial has ended</h3>
                   <p className="text-[13.5px] leading-relaxed text-muted">
                     Your 7-day free trial ended on{' '}
-                    {new Date(trialStatus.endsAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric' })}.
+                    {new Date(proStatus.ends_at).toLocaleDateString('en-US', { month: 'long', day: 'numeric' })}.
                     Contact us to continue with Funnl Pro.
                   </p>
                 </>
