@@ -76,6 +76,8 @@ function FunnlAIPage() {
   const [messages, setMessages]           = useState([INITIAL_MESSAGE])
   const [input, setInput]                 = useState('')
   const [loading, setLoading]             = useState(false)
+  // true while a status Retry is in flight — prevents duplicate concurrent retries
+  const [isRetrying, setIsRetrying]       = useState(false)
   const bottomRef = useRef(null)
   const inputRef  = useRef(null)
   // Per-instance request gate — prevents stale AI responses from mutating state
@@ -279,6 +281,17 @@ function FunnlAIPage() {
     inputRef.current?.focus()
   }
 
+  // Retries the Pro status check when the initial getProAccessStatus() call failed.
+  // Guard prevents duplicate concurrent retries. A successful retry transitions
+  // the page directly to the correct state (Pro chat or non-Pro locked screen).
+  async function retryProStatus() {
+    if (isRetrying) return
+    setIsRetrying(true)
+    const status = await getProAccessStatus()
+    setProStatus(status ?? 'error')
+    setIsRetrying(false)
+  }
+
   function handleKeyDown(e) {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
@@ -347,7 +360,28 @@ function FunnlAIPage() {
 
       {/* ── Messages / locked state ─────────────────────────────────────────────── */}
       <div className="flex-1 overflow-y-auto min-h-0 px-4 md:px-8 py-5">
-        {isProUser ? (
+        {proStatus === 'error' ? (
+          /* Status unavailable — distinct from confirmed non-Pro or expired trial.
+             Never shows false access info; shows neutral message + Retry only. */
+          <div className="flex flex-col items-center justify-center min-h-[300px] h-full text-center gap-5 py-12">
+            <div className="w-[64px] h-[64px] rounded-[18px] bg-elevated border border-line-2 flex items-center justify-center text-low">
+              <SparkleIcon size={28}/>
+            </div>
+            <div className="max-w-[280px]" aria-live="polite" role="status">
+              <h3 className="font-display text-[19px] font-bold text-hi mb-2">Pro status unavailable</h3>
+              <p className="text-[13.5px] leading-relaxed text-muted mb-4">
+                We couldn't verify your Pro access right now. Please try again.
+              </p>
+              <button
+                onClick={retryProStatus}
+                disabled={isRetrying}
+                className="text-[13.5px] font-semibold text-accent hover:opacity-80 transition-opacity disabled:opacity-40"
+              >
+                {isRetrying ? 'Checking…' : 'Retry'}
+              </button>
+            </div>
+          </div>
+        ) : isProUser ? (
           <div className="space-y-4">
 
             {/* Chat messages */}
@@ -473,7 +507,8 @@ function FunnlAIPage() {
               <SparkleIcon size={28}/>
             </div>
             <div className="max-w-[280px]">
-              {proStatus !== 'error' && proStatus?.trial_expired ? (
+              {/* proStatus is always a loaded object here (error branch handled above) */}
+              {proStatus?.trial_expired ? (
                 <>
                   <h3 className="font-display text-[19px] font-bold text-hi mb-2">Your trial has ended</h3>
                   <p className="text-[13.5px] leading-relaxed text-muted">
@@ -497,7 +532,17 @@ function FunnlAIPage() {
 
       {/* ── Input bar ───────────────────────────────────────────────────────────── */}
       <div className="flex-none px-4 md:px-8 pb-6 pt-3 border-t border-line-1">
-        {isProUser ? (
+        {proStatus === 'error' ? (
+          /* Status unavailable — neutral disabled bar, no "AI only for Pro" claim */
+          <div className="flex items-center bg-input border border-line-2 rounded-[20px] cursor-not-allowed opacity-40 select-none">
+            <span className="flex-1 text-[14.5px] text-lower pl-5 py-[15px]">Unable to verify access…</span>
+            <div className="flex-none p-[10px]">
+              <div className="w-9 h-9 rounded-[12px] bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] flex items-center justify-center">
+                <SendIcon/>
+              </div>
+            </div>
+          </div>
+        ) : isProUser ? (
           <>
             <div className="flex items-end bg-input border border-line-3 rounded-[20px] focus-within:border-[rgba(139,124,255,0.45)] focus-within:shadow-[0_0_0_3px_rgba(139,124,255,0.07)] transition-all duration-150">
               <textarea

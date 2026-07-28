@@ -16,9 +16,10 @@ function WelcomePage() {
   // No PII in event properties; identifyUser() links the event to the PostHog person.
   //
   // Trial activation sequence:
-  //   1. Call start_my_pro_trial() as a recovery mechanism. The primary activation path
-  //      is the on_email_confirmed DB trigger — this RPC is a safety net in case that
-  //      trigger failed silently (transient DB issue, edge-case routing).
+  //   1. Call start_my_pro_trial() as an idempotent reconciliation step. The primary
+  //      activation path is the on_email_confirmed DB trigger. This RPC covers the
+  //      case where a confirmed user's eligible row still has started_at IS NULL
+  //      (e.g., trigger did not fire due to transient infrastructure issues).
   //      We await it so its write completes before we read status, but we never use
   //      its started_now field to drive UI or analytics.
   //   2. Call getProAccessStatus() for the server-authoritative state (DB clock, not browser).
@@ -43,10 +44,12 @@ function WelcomePage() {
           localStorage.setItem('funnl_confirmed_' + userId, '1')
         }
 
-        // Recovery mechanism: call start_my_pro_trial() so that if the DB trigger
-        // failed silently the trial is activated before we read status. This call is
-        // idempotent (WHERE started_at IS NULL guard) — no risk of double-starting.
-        // Failure is swallowed; getProAccessStatus() below is the source of truth.
+        // Recovery mechanism: call start_my_pro_trial() for confirmed users whose
+        // eligible pro_trials row still has started_at IS NULL (e.g., if the
+        // on_email_confirmed trigger did not fire due to transient infrastructure
+        // issues). This call is idempotent (WHERE started_at IS NULL guard) and
+        // only updates existing rows — it does not create missing rows or extend
+        // existing trials. Failure is swallowed; getProAccessStatus() is authoritative.
         try {
           await supabase.rpc('start_my_pro_trial')
         } catch {

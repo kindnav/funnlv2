@@ -21,6 +21,9 @@ function SettingsPage() {
   const [currentTheme, setCurrentTheme] = useState(() => getTheme())
   const [isPermanentPro, setIsPermanentPro] = useState(false)
   const [trialStatus, setTrialStatus] = useState(null)
+  // true when getProAccessStatus() returned null — shows neutral row rather than
+  // silently hiding the card, which would look like "not Pro" for Pro users.
+  const [proStatusError, setProStatusError] = useState(false)
 
   useEffect(() => {
     async function load() {
@@ -44,6 +47,10 @@ function SettingsPage() {
             daysRemaining: status.days_remaining  ?? 0,
             endsAt:        status.ends_at         ?? null,
           })
+        } else {
+          // RPC failed — show neutral row rather than silently hiding Pro status,
+          // which would look like "not Pro" for a user who is actually Pro.
+          setProStatusError(true)
         }
       }
       setLoading(false)
@@ -161,12 +168,14 @@ function SettingsPage() {
 
         </div>
 
-        {/* Pro access — shown only when there is something to display */}
-        {(isPermanentPro || (trialStatus && (trialStatus.active || trialStatus.expired))) && (
+        {/* Pro access — shown when there is something to display or status failed */}
+        {(proStatusError || isPermanentPro || (trialStatus && (trialStatus.active || trialStatus.expired))) && (
           <div className="bg-card border border-line-2 rounded-2xl overflow-hidden mb-5">
             <div className="p-6">
               <p className="text-[11.5px] font-bold tracking-[1px] text-lower uppercase font-mono mb-4">Pro access</p>
-              {isPermanentPro ? (
+              {proStatusError ? (
+                <p className="text-[13.5px] text-muted">Pro status temporarily unavailable.</p>
+              ) : isPermanentPro ? (
                 <div className="flex items-center gap-2">
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="#8B7CFF" className="flex-none">
                     <path d="M12 3l1.7 5.3L19 10l-5.3 1.7L12 17l-1.7-5.3L5 10l5.3-1.7L12 3z"/>
