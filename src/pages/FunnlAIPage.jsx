@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import { Link } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
-import { canUseAI } from '../lib/ai'
+import { getProAccessStatus } from '../lib/pro-access-status'
+import { classifyProStatus } from '../lib/pro-ui-status'
 import { track } from '../lib/analytics'
 import { extractInvokeError } from '../lib/ai-chat-error'
 import { buildProviderMessages, isRetryEligible } from '../lib/ai-chat-conversation'
@@ -68,32 +69,46 @@ const SendIcon = () => (
 
 function FunnlAIPage() {
   const [isCheckingPro, setIsCheckingPro] = useState(true)
-  const [isProUser, setIsProUser]         = useState(false)
+  // null = loading, object = loaded (check .can_use_pro), 'error' = status unavailable
+  const [proStatus, setProStatus]         = useState(null)
   // Message shape: { role, content, error?, truncated? }
   // error: { code, message, retryable, request_id } — present on failed user messages only
   // truncated: true — present on assistant messages where stop_reason was max_tokens
   const [messages, setMessages]           = useState([INITIAL_MESSAGE])
   const [input, setInput]                 = useState('')
   const [loading, setLoading]             = useState(false)
-  const bottomRef = useRef(null)
-  const inputRef  = useRef(null)
+  // UI display state for Retry button
+  const [isRetrying, setIsRetrying]       = useState(false)
+  const bottomRef      = useRef(null)
+  const inputRef       = useRef(null)
+  // Synchronous ref guard for duplicate retry requests: state alone cannot prevent
+  // two rapid clicks from both passing the `if (isRetrying)` check before the
+  // first setState re-render fires. The ref is checked and set synchronously.
+  const isRetryingRef  = useRef(false)
   // Per-instance request gate — prevents stale AI responses from mutating state
   // after startNewChat() or a newer sendMessage() supersedes an in-flight request.
   const gateRef   = useRef(null)
   if (!gateRef.current) gateRef.current = createRequestGate()
 
   useEffect(() => {
-    supabase.auth.getUser().then(({ data }) => {
-      if (data.user) {
-        canUseAI(data.user.id).then(result => {
-          setIsProUser(result)
-          setIsCheckingPro(false)
-        })
-      } else {
-        setIsCheckingPro(false)
-      }
-    })
+    // Single server-authoritative call — never uses browser Date for access decisions.
+    // Returns null on failure; we treat that as "status unavailable" (not "not Pro")
+    // so a transient RPC error doesn't silently lock out Pro users from the UI.
+    // The `active` flag prevents stale state updates if the component unmounts
+    // while the request is in flight (user navigates away before it resolves).
+    let active = true
+    async function checkPro() {
+      const status = await getProAccessStatus()
+      if (!active) return
+      setProStatus(status ?? 'error')
+      setIsCheckingPro(false)
+    }
+    checkPro()
+    return () => { active = false }
   }, [])
+
+  const displayStatus = classifyProStatus(proStatus)
+  const isProUser = displayStatus === 'permanent' || displayStatus === 'trial'
 
   useEffect(() => {
     if (isProUser) bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -279,6 +294,23 @@ function FunnlAIPage() {
     inputRef.current?.focus()
   }
 
+  // Retries the Pro status check when the initial getProAccessStatus() call failed.
+  // isRetryingRef is a synchronous guard that prevents two rapid clicks from both
+  // entering before the first setIsRetrying(true) re-render fires.
+  // try/finally guarantees isRetrying always resets even on unexpected errors.
+  async function retryProStatus() {
+    if (isRetryingRef.current) return
+    isRetryingRef.current = true
+    setIsRetrying(true)
+    try {
+      const status = await getProAccessStatus()
+      setProStatus(status ?? 'error')
+    } finally {
+      isRetryingRef.current = false
+      setIsRetrying(false)
+    }
+  }
+
   function handleKeyDown(e) {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
@@ -316,9 +348,16 @@ function FunnlAIPage() {
         <div className="flex-1">
           <div className="flex items-center gap-2">
             <span className="text-[16px] font-bold text-hi">Funnl AI</span>
-            {isProUser && (
+            {/* Permanent Pro always shows PRO badge, regardless of trial state */}
+            {isProUser && proStatus?.permanent_pro && (
               <span className="font-mono text-[9.5px] font-bold tracking-[0.5px] text-accent bg-[rgba(139,124,255,0.22)] px-1.5 py-0.5 rounded-[5px]">
                 PRO
+              </span>
+            )}
+            {/* Trial users (not permanent Pro) show a days-remaining countdown */}
+            {isProUser && !proStatus?.permanent_pro && proStatus?.trial_active && (
+              <span className="font-mono text-[9.5px] font-bold tracking-[0.5px] text-warning bg-[rgba(255,184,77,0.15)] px-1.5 py-0.5 rounded-[5px]">
+                {proStatus.days_remaining === 1 ? '1 DAY LEFT' : `${proStatus.days_remaining} DAYS LEFT`}
               </span>
             )}
           </div>
@@ -340,7 +379,28 @@ function FunnlAIPage() {
 
       {/* ── Messages / locked state ─────────────────────────────────────────────── */}
       <div className="flex-1 overflow-y-auto min-h-0 px-4 md:px-8 py-5">
-        {isProUser ? (
+        {displayStatus === 'unavailable' ? (
+          /* Status unavailable — distinct from confirmed non-Pro or expired trial.
+             Never shows false access info; shows neutral message + Retry only. */
+          <div className="flex flex-col items-center justify-center min-h-[300px] h-full text-center gap-5 py-12">
+            <div className="w-[64px] h-[64px] rounded-[18px] bg-elevated border border-line-2 flex items-center justify-center text-low">
+              <SparkleIcon size={28}/>
+            </div>
+            <div className="max-w-[280px]" aria-live="polite" role="status">
+              <h3 className="font-display text-[19px] font-bold text-hi mb-2">Pro status unavailable</h3>
+              <p className="text-[13.5px] leading-relaxed text-muted mb-4">
+                We couldn't verify your Pro access right now. Please try again.
+              </p>
+              <button
+                onClick={retryProStatus}
+                disabled={isRetrying}
+                className="text-[13.5px] font-semibold text-accent hover:opacity-80 transition-opacity disabled:opacity-40"
+              >
+                {isRetrying ? 'Checking…' : 'Retry'}
+              </button>
+            </div>
+          </div>
+        ) : isProUser ? (
           <div className="space-y-4">
 
             {/* Chat messages */}
@@ -465,11 +525,25 @@ function FunnlAIPage() {
             <div className="w-[64px] h-[64px] rounded-[18px] bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] flex items-center justify-center text-white opacity-50 shadow-[0_12px_40px_rgba(91,69,240,0.35)]">
               <SparkleIcon size={28}/>
             </div>
-            <div className="max-w-[260px]">
-              <h3 className="font-display text-[19px] font-bold text-hi mb-2">AI only available for Pro</h3>
-              <p className="text-[13.5px] leading-relaxed text-muted">
-                Ask anything about your network — who's gone cold, who you know at a specific company, what to follow up on next.
-              </p>
+            <div className="max-w-[280px]">
+              {/* proStatus is always a loaded object here (error branch handled above) */}
+              {proStatus?.trial_expired ? (
+                <>
+                  <h3 className="font-display text-[19px] font-bold text-hi mb-2">Your trial has ended</h3>
+                  <p className="text-[13.5px] leading-relaxed text-muted">
+                    Your 7-day free trial ended on{' '}
+                    {new Date(proStatus.ends_at).toLocaleDateString('en-US', { month: 'long', day: 'numeric' })}.
+                    Contact us to continue with Funnl Pro.
+                  </p>
+                </>
+              ) : (
+                <>
+                  <h3 className="font-display text-[19px] font-bold text-hi mb-2">AI only available for Pro</h3>
+                  <p className="text-[13.5px] leading-relaxed text-muted">
+                    Ask anything about your network — who's gone cold, who you know at a specific company, what to follow up on next.
+                  </p>
+                </>
+              )}
             </div>
           </div>
         )}
@@ -477,7 +551,17 @@ function FunnlAIPage() {
 
       {/* ── Input bar ───────────────────────────────────────────────────────────── */}
       <div className="flex-none px-4 md:px-8 pb-6 pt-3 border-t border-line-1">
-        {isProUser ? (
+        {displayStatus === 'unavailable' ? (
+          /* Status unavailable — neutral disabled bar, no "AI only for Pro" claim */
+          <div className="flex items-center bg-input border border-line-2 rounded-[20px] cursor-not-allowed opacity-40 select-none">
+            <span className="flex-1 text-[14.5px] text-lower pl-5 py-[15px]">Unable to verify access…</span>
+            <div className="flex-none p-[10px]">
+              <div className="w-9 h-9 rounded-[12px] bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] flex items-center justify-center">
+                <SendIcon/>
+              </div>
+            </div>
+          </div>
+        ) : isProUser ? (
           <>
             <div className="flex items-end bg-input border border-line-3 rounded-[20px] focus-within:border-[rgba(139,124,255,0.45)] focus-within:shadow-[0_0_0_3px_rgba(139,124,255,0.07)] transition-all duration-150">
               <textarea

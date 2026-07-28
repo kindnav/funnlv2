@@ -1,5 +1,6 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { UUID_V4_RE, MAX_CONTACTS, ALLOWED_REL_TYPES, normalizeTags, sanitizeOutput } from '../shared/categorization-helpers.js'
+import { loadProEntitlement, evaluateProEntitlement } from '../shared/pro-entitlement.js'
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -35,19 +36,32 @@ Deno.serve(async (req) => {
       )
     }
 
-    // ── 2. Check ai_enabled via service-role key (authoritative) ──────────────
+    // ── 2. Check effective Pro access via service-role key (authoritative) ───────
+    // Uses shared loadProEntitlement + evaluateProEntitlement from ../shared/pro-entitlement.js.
+    // DB failure on either query → 500 (retriable), not 403. A transient DB issue
+    // must not permanently lock out a Pro user.
     const supabaseAdmin = createClient(
       Deno.env.get('SUPABASE_URL') ?? '',
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
     )
 
-    const { data: profile } = await supabaseAdmin
-      .from('profiles')
-      .select('ai_enabled')
-      .eq('id', user.id)
-      .maybeSingle()
+    const { profile, trial, profileError, trialError, _profileErrorCode, _trialErrorCode } =
+      await loadProEntitlement(supabaseAdmin, user.id)
 
-    if (!profile?.ai_enabled) {
+    if (profileError || trialError) {
+      console.error('[ai-categorize-contacts] entitlement-query-failed', {
+        profileErrorCode: _profileErrorCode,
+        trialErrorCode:   _trialErrorCode,
+      })
+      return new Response(
+        JSON.stringify({ error: 'Could not verify access — please try again' }),
+        { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      )
+    }
+
+    const entitlement = evaluateProEntitlement(profile, trial, new Date())
+
+    if (!entitlement.canUse) {
       return new Response(
         JSON.stringify({ error: 'Funnl AI is a Pro feature — access not enabled for this account' }),
         { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }

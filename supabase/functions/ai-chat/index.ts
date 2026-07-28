@@ -3,6 +3,7 @@ import { formatNetworkContext, resolveToday } from './helpers.js'
 import { normalizeMessages } from './normalizeMessages.js'
 import { runProviderAttempts } from './providerCall.js'
 import { sanitizeContactLinks, sanitizeAssistantReply } from './sanitizeReply.js'
+import { loadProEntitlement, evaluateProEntitlement } from '../shared/pro-entitlement.js'
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -125,27 +126,23 @@ Deno.serve(async (req) => {
       return errorResponse('unauthorized', 'Not authenticated', false, requestId, 401)
     }
 
-    // ── 2. Check ai_enabled via service-role key (authoritative) ──────────────
-    // The service-role key bypasses RLS — the user cannot manipulate what we read.
-    // It is automatically injected by Supabase and never appears in any file.
+    // ── 2. Check effective Pro access via service-role key (authoritative) ───────
+    // Uses shared loadProEntitlement + evaluateProEntitlement from ../shared/pro-entitlement.js.
+    // DB failure on either query → internal_error (retryable 500), not pro_required (403).
+    // A transient DB issue must not permanently block the user's request.
     const supabaseAdmin = createClient(
       Deno.env.get('SUPABASE_URL') ?? '',
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
     )
 
-    const { data: profile, error: profileError } = await supabaseAdmin
-      .from('profiles')
-      .select('ai_enabled')
-      .eq('id', user.id)
-      .maybeSingle()
+    const { profile, trial, profileError, trialError, _profileErrorCode, _trialErrorCode } =
+      await loadProEntitlement(supabaseAdmin, user.id)
 
-    // A database/network failure on the profile query is a retriable service error,
-    // NOT an access-denied signal. If we treated it as pro_required (non-retryable),
-    // a transient DB issue would permanently block the user's request.
-    if (profileError) {
-      console.error('ai-chat profile-query-failed', {
+    if (profileError || trialError) {
+      console.error('ai-chat entitlement-query-failed', {
         requestId,
-        code: profileError.code,
+        profileErrorCode: _profileErrorCode,
+        trialErrorCode:   _trialErrorCode,
       })
       return errorResponse(
         'internal_error',
@@ -156,7 +153,9 @@ Deno.serve(async (req) => {
       )
     }
 
-    if (!profile?.ai_enabled) {
+    const entitlement = evaluateProEntitlement(profile, trial, new Date())
+
+    if (!entitlement.canUse) {
       return errorResponse(
         'pro_required',
         'Funnl AI is a Pro feature — access not enabled for this account',

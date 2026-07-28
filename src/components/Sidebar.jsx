@@ -1,6 +1,7 @@
 ﻿import { useCallback, useEffect, useState } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
+import { getProAccessStatus } from '../lib/pro-access-status'
 
 // Defined outside Sidebar to avoid React remount-on-render issues
 function NavItem({ to, label, icon, badge, active }) {
@@ -47,8 +48,20 @@ function Sidebar() {
     supabase.auth.getUser().then(({ data }) => {
       setUser(data.user)
       if (data.user) {
-        supabase.from('profiles').select('display_name, ai_enabled').eq('id', data.user.id).maybeSingle()
-          .then(({ data: p }) => { setProfile(p); setIsProUser(p?.ai_enabled === true) })
+        const uid = data.user.id
+        // Fetch profile for display (display_name). Entitlement via server-authoritative RPC
+        // so can_use_pro uses the DB clock, not the browser's new Date().
+        // Profile query gets a defensive .catch() so a thrown SDK exception (network
+        // error, etc.) cannot suppress the Pro badge by rejecting the entire Promise.all.
+        // getProAccessStatus() never throws — it always resolves to an object or null.
+        Promise.all([
+          supabase.from('profiles').select('display_name').eq('id', uid).maybeSingle()
+            .catch(() => ({ data: null })),
+          getProAccessStatus(),
+        ]).then(([{ data: p }, status]) => {
+          setProfile(p)
+          setIsProUser(status?.can_use_pro === true)
+        })
       }
     })
     fetchFollowUpCount()

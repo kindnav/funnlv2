@@ -2,6 +2,7 @@
 import { Link, useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { getTheme, setTheme } from '../lib/theme'
+import { getProAccessStatus } from '../lib/pro-access-status'
 
 const iCls = 'flex-1 bg-input border border-line-3 rounded-xl px-[13px] py-[11px] text-[13.5px] text-hi placeholder-[#54545E] outline-none focus:border-[rgba(139,124,255,0.5)] transition-colors'
 const lCls = 'mb-[7px] block text-[12.5px] font-semibold text-mid'
@@ -18,20 +19,55 @@ function SettingsPage() {
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState('')
   const [currentTheme, setCurrentTheme] = useState(() => getTheme())
+  const [isPermanentPro, setIsPermanentPro] = useState(false)
+  const [trialStatus, setTrialStatus] = useState(null)
+  // true when getProAccessStatus() returned null — shows neutral row rather than
+  // silently hiding the card, which would look like "not Pro" for Pro users.
+  const [proStatusError, setProStatusError] = useState(false)
 
   useEffect(() => {
     async function load() {
-      const { data: { user } } = await supabase.auth.getUser()
-      setUser(user)
-      if (user) {
-        const { data: profile } = await supabase
-          .from('profiles')
-          .select('display_name')
-          .eq('id', user.id)
-          .maybeSingle()
-        if (profile) setDisplayName(profile.display_name || '')
+      try {
+        const { data: { user } } = await supabase.auth.getUser()
+        setUser(user)
+        if (user) {
+          // Run profile and Pro status fetches independently — one failure must not
+          // block the other. getProAccessStatus() never throws (after its fix).
+          // The profile query gets a defensive .catch() in case the Supabase SDK
+          // throws a network error or SDK exception rather than returning { error }.
+          const [profileResult, status] = await Promise.all([
+            supabase
+              .from('profiles')
+              .select('display_name')
+              .eq('id', user.id)
+              .maybeSingle()
+              .catch(() => ({ data: null, error: true })),
+            getProAccessStatus(),
+          ])
+          if (profileResult.data) {
+            setDisplayName(profileResult.data.display_name || '')
+          }
+          if (status) {
+            setIsPermanentPro(status.permanent_pro === true)
+            setTrialStatus({
+              eligible:      status.trial_eligible  ?? false,
+              active:        status.trial_active    ?? false,
+              expired:       status.trial_expired   ?? false,
+              daysRemaining: status.days_remaining  ?? 0,
+              endsAt:        status.ends_at         ?? null,
+            })
+          } else {
+            // RPC failed — show neutral row rather than silently hiding Pro status,
+            // which would look like "not Pro" for a user who is actually Pro.
+            setProStatusError(true)
+          }
+        }
+      } catch {
+        // Unexpected failure (e.g. supabase.auth.getUser() threw) — render the
+        // page with defaults. setLoading(false) always fires in finally.
+      } finally {
+        setLoading(false)
       }
-      setLoading(false)
     }
     load()
   }, [])
@@ -145,6 +181,51 @@ function SettingsPage() {
           </div>
 
         </div>
+
+        {/* Pro access — shown when there is something to display or status failed */}
+        {(proStatusError || isPermanentPro || (trialStatus && (trialStatus.active || trialStatus.expired))) && (
+          <div className="bg-card border border-line-2 rounded-2xl overflow-hidden mb-5">
+            <div className="p-6">
+              <p className="text-[11.5px] font-bold tracking-[1px] text-lower uppercase font-mono mb-4">Pro access</p>
+              {proStatusError ? (
+                <p className="text-[13.5px] text-muted">Pro status temporarily unavailable.</p>
+              ) : isPermanentPro ? (
+                <div className="flex items-center gap-2">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="#8B7CFF" className="flex-none">
+                    <path d="M12 3l1.7 5.3L19 10l-5.3 1.7L12 17l-1.7-5.3L5 10l5.3-1.7L12 3z"/>
+                  </svg>
+                  <span className="text-[13.5px] font-semibold text-accent">Funnl Pro — permanent access</span>
+                </div>
+              ) : trialStatus?.active ? (
+                <div>
+                  <div className="flex items-center gap-2 mb-1">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="#8B7CFF" className="flex-none">
+                      <path d="M12 3l1.7 5.3L19 10l-5.3 1.7L12 17l-1.7-5.3L5 10l5.3-1.7L12 3z"/>
+                    </svg>
+                    <span className="text-[13.5px] font-semibold text-accent">
+                      {trialStatus.daysRemaining === 1
+                        ? '1 day left in your trial'
+                        : `${trialStatus.daysRemaining} days left in your trial`}
+                    </span>
+                  </div>
+                  <p className="text-[12px] text-low ml-5">
+                    Trial ends {new Date(trialStatus.endsAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric' })}
+                  </p>
+                </div>
+              ) : trialStatus?.expired ? (
+                <div className="flex items-start gap-2">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#6C6C78" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-none mt-0.5">
+                    <circle cx="12" cy="12" r="9"/><path d="M12 8v4l2.5 2.5"/>
+                  </svg>
+                  <div>
+                    <span className="text-[13.5px] font-medium text-low">Trial ended</span>
+                    <p className="text-[12px] text-lower mt-0.5">Your 7-day free trial has ended.</p>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          </div>
+        )}
 
         {/* Appearance */}
         <div className="bg-card border border-line-2 rounded-2xl overflow-hidden mb-5">
