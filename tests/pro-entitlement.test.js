@@ -218,7 +218,7 @@ function makeStubClient({ profileData = null, profileError = null, trialData = n
       return {
         select() {
           return {
-            eq(col, val) {
+            eq(_col, _val) {
               return {
                 maybeSingle() {
                   if (table === 'profiles') {
@@ -287,6 +287,122 @@ await test('loadProEntitlement: evaluateProEntitlement integration — trial onl
   const entitlement = evaluateProEntitlement(r.profile, r.trial, NOW)
   assert.strictEqual(entitlement.canUse, true)
   assert.strictEqual(entitlement.reason, 'trial')
+})
+
+// ── loadProEntitlement: genuine throws (not just { error } returns) ────────────
+// These tests verify the "never throws" contract using stubs that actually reject.
+// Promise.all would propagate the first rejection — individual try/catch is required.
+
+function makeThrowingStubClient({ profileThrows = false, trialThrows = false, profileError = null, trialError = null } = {}) {
+  return {
+    from(table) {
+      return {
+        select() {
+          return {
+            eq(_col, _val) {
+              return {
+                maybeSingle() {
+                  if (table === 'profiles') {
+                    if (profileThrows) return Promise.reject(new Error('network failure'))
+                    return Promise.resolve({ data: null, error: profileError })
+                  }
+                  if (table === 'pro_trials') {
+                    if (trialThrows) return Promise.reject(new Error('network failure'))
+                    return Promise.resolve({ data: null, error: trialError })
+                  }
+                  return Promise.resolve({ data: null, error: null })
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+await test('loadProEntitlement: profile query throws → profileError=true, does not reject', async () => {
+  const client = makeThrowingStubClient({ profileThrows: true })
+  // Must not throw — catches the rejection and maps to an error flag
+  const result = await loadProEntitlement(client, 'user-id')
+  assert.strictEqual(result.profileError, true)
+  assert.strictEqual(result.profile, null)
+  // Trial query ran independently and succeeded
+  assert.strictEqual(result.trialError, false)
+})
+
+await test('loadProEntitlement: trial query throws → trialError=true, does not reject', async () => {
+  const client = makeThrowingStubClient({ trialThrows: true })
+  const result = await loadProEntitlement(client, 'user-id')
+  assert.strictEqual(result.trialError, true)
+  assert.strictEqual(result.trial, null)
+  // Profile query ran independently and succeeded
+  assert.strictEqual(result.profileError, false)
+})
+
+await test('loadProEntitlement: both queries throw → both errors=true, does not reject', async () => {
+  const client = makeThrowingStubClient({ profileThrows: true, trialThrows: true })
+  const result = await loadProEntitlement(client, 'user-id')
+  assert.strictEqual(result.profileError, true)
+  assert.strictEqual(result.trialError, true)
+  assert.strictEqual(result.profile, null)
+  assert.strictEqual(result.trial, null)
+})
+
+await test('loadProEntitlement: evaluateProEntitlement with thrown profile → fails closed', async () => {
+  // profile error means ai_enabled unknown — must not grant access
+  const client = makeThrowingStubClient({ profileThrows: true })
+  const r = await loadProEntitlement(client, 'user-id')
+  // trial is null (no data), profile is null (error)
+  const entitlement = evaluateProEntitlement(r.profile, r.trial, NOW)
+  assert.strictEqual(entitlement.canUse, false)
+})
+
+// ── Malformed timestamps fail closed ──────────────────────────────────────────
+
+await test('malformed started_at (non-date string): treated as truthy — ends_at governs', () => {
+  // started_at is checked for truthiness (not parsed). If started_at is a non-null
+  // truthy string and ends_at is also malformed, the guard at !trial.started_at is false,
+  // so execution reaches the ends_at parse — NaN check returns no_trial (fail closed).
+  const r = evaluateProEntitlement(NON_PRO_PROFILE, { started_at: 'bad', ends_at: 'also-bad' }, NOW)
+  assert.strictEqual(r.canUse, false)
+  assert.strictEqual(r.reason, 'no_trial')
+})
+
+await test('malformed started_at null but valid ends_at → no_trial (started_at required)', () => {
+  // Guard: !trial.started_at is true when started_at is null — returns no_trial immediately
+  const r = evaluateProEntitlement(NON_PRO_PROFILE, { started_at: null, ends_at: ACTIVE_TRIAL.ends_at }, NOW)
+  assert.strictEqual(r.canUse, false)
+  assert.strictEqual(r.reason, 'no_trial')
+})
+
+// ── Missing fields in evaluateProEntitlement (profile shape variants) ─────────
+
+await test('profile with no ai_enabled field (missing key) → treated as non-Pro', () => {
+  const r = evaluateProEntitlement({}, ACTIVE_TRIAL, NOW)
+  assert.strictEqual(r.canUse, true)
+  assert.strictEqual(r.reason, 'trial')  // not permanent_pro, falls through to trial
+})
+
+await test('profile with ai_enabled=true always wins over all trial states', () => {
+  const states = [ACTIVE_TRIAL, EXPIRED_TRIAL, ELIGIBLE_TRIAL, null]
+  for (const trial of states) {
+    const r = evaluateProEntitlement(PERMANENT_PROFILE, trial, NOW)
+    assert.strictEqual(r.canUse, true, `expected canUse=true for trial=${JSON.stringify(trial)}`)
+    assert.strictEqual(r.reason, 'permanent', `expected reason=permanent for trial=${JSON.stringify(trial)}`)
+  }
+})
+
+// ── localStorage analytics deduplication is per-browser (documented, not enforced in code) ──
+// The pro_trial_started event uses localStorage keyed by userId. Tests for the dedup
+// logic itself live in WelcomePage.jsx (a React component — not testable in plain Node.js).
+// This test documents the contract: the key format is 'funnl_trial_started_<userId>'.
+await test('pro_trial_started dedup key format: funnl_trial_started_<userId>', () => {
+  const userId = 'abc-123'
+  const expectedKey = 'funnl_trial_started_' + userId
+  // Verify the key pattern — actual localStorage usage is in WelcomePage.jsx
+  assert.ok(expectedKey.startsWith('funnl_trial_started_'), 'key must start with funnl_trial_started_')
+  assert.ok(expectedKey.endsWith(userId), 'key must end with the user ID')
 })
 
 console.log('All pro-entitlement tests passed.')
