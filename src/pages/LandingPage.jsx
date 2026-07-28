@@ -3,7 +3,7 @@ import { useNavigate, Link } from 'react-router-dom'
 import { track } from '../lib/analytics'
 
 // ─── constants ───────────────────────────────────────────────────────────────
-const FW = 120, FH = 140
+const FW = 120, FH = 107
 const SENTENCES = [
   'Stop losing track of people.',
   'Remember every conversation.',
@@ -139,7 +139,7 @@ function HeroSection({ t, nat, reduced }) {
         }}>
           <div style={{
             position: 'absolute', inset: 0, background: '#FF4423',
-            clipPath: 'polygon(0% 0%,100% 0%,62% 58%,62% 100%,38% 100%,38% 58%)',
+            clipPath: 'polygon(0% 0%,100% 0%,66.7% 53.1%,66.7% 100%,33.3% 100%,33.3% 53.1%)',
           }} />
         </div>
 
@@ -589,7 +589,9 @@ function CTASection({ onStart, reduced }) {
   return (
     <section id="cta" ref={ref} style={{ position: 'relative', minHeight: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '120px 24px', background: '#14110F' }}>
       <div style={{ ...r('0s'), position: 'relative', width: 100, height: 118, marginBottom: 30, filter: 'drop-shadow(0 0 28px rgba(255,68,35,0.4))' }}>
-        <div style={{ position: 'absolute', inset: 0, background: 'conic-gradient(from 180deg,#FF4423,#D6330F,#FF4423)', clipPath: 'polygon(0% 0%,100% 0%,62% 58%,62% 100%,38% 100%,38% 58%)' }} />
+        <svg style={{ position: 'absolute', inset: 0, width: '100%', height: '100%' }} viewBox="0 0 24 24" fill="none">
+          <path d="M3 4H21L15 12.5V20H9V12.5Z" fill="#FF4423"/>
+        </svg>
       </div>
       <h2 style={{ ...r('.12s'), fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 'clamp(34px,6vw,72px)', letterSpacing: '-2.5px', textAlign: 'center', margin: '0 0 26px', maxWidth: 800, lineHeight: 1.02, color: '#F7F2E7' }}>Build the network<br/>that builds your career.</h2>
       <div style={{ ...r('.24s'), display: 'flex', gap: 16, flexWrap: 'wrap', justifyContent: 'center' }}>
