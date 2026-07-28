@@ -47,8 +47,15 @@ function Sidebar() {
     supabase.auth.getUser().then(({ data }) => {
       setUser(data.user)
       if (data.user) {
-        supabase.from('profiles').select('display_name, ai_enabled').eq('id', data.user.id).maybeSingle()
-          .then(({ data: p }) => { setProfile(p); setIsProUser(p?.ai_enabled === true) })
+        const uid = data.user.id
+        Promise.all([
+          supabase.from('profiles').select('display_name, ai_enabled').eq('id', uid).maybeSingle(),
+          supabase.from('pro_trials').select('started_at, ends_at').eq('user_id', uid).maybeSingle(),
+        ]).then(([{ data: p }, { data: t }]) => {
+          setProfile(p)
+          const trialActive = t?.started_at && t?.ends_at && new Date(t.ends_at) > new Date()
+          setIsProUser(p?.ai_enabled === true || Boolean(trialActive))
+        })
       }
     })
     fetchFollowUpCount()

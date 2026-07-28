@@ -125,27 +125,27 @@ Deno.serve(async (req) => {
       return errorResponse('unauthorized', 'Not authenticated', false, requestId, 401)
     }
 
-    // ── 2. Check ai_enabled via service-role key (authoritative) ──────────────
+    // ── 2. Check effective Pro access via service-role key (authoritative) ───────
+    // Effective Pro = ai_enabled (permanent) OR an active trial (started_at set, ends_at > now).
     // The service-role key bypasses RLS — the user cannot manipulate what we read.
-    // It is automatically injected by Supabase and never appears in any file.
+    // A DB failure on either query is a retriable service error (not access-denied):
+    // treating a transient DB issue as pro_required (non-retryable) would permanently
+    // block the user's request.
     const supabaseAdmin = createClient(
       Deno.env.get('SUPABASE_URL') ?? '',
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
     )
 
-    const { data: profile, error: profileError } = await supabaseAdmin
-      .from('profiles')
-      .select('ai_enabled')
-      .eq('id', user.id)
-      .maybeSingle()
+    const [profileResult, trialResult] = await Promise.all([
+      supabaseAdmin.from('profiles').select('ai_enabled').eq('id', user.id).maybeSingle(),
+      supabaseAdmin.from('pro_trials').select('started_at, ends_at').eq('user_id', user.id).maybeSingle(),
+    ])
 
-    // A database/network failure on the profile query is a retriable service error,
-    // NOT an access-denied signal. If we treated it as pro_required (non-retryable),
-    // a transient DB issue would permanently block the user's request.
-    if (profileError) {
-      console.error('ai-chat profile-query-failed', {
+    if (profileResult.error || trialResult.error) {
+      console.error('ai-chat entitlement-query-failed', {
         requestId,
-        code: profileError.code,
+        profileErrorCode: profileResult.error?.code,
+        trialErrorCode: trialResult.error?.code,
       })
       return errorResponse(
         'internal_error',
@@ -156,7 +156,10 @@ Deno.serve(async (req) => {
       )
     }
 
-    if (!profile?.ai_enabled) {
+    const trialRow = trialResult.data
+    const trialActive = trialRow?.started_at && trialRow?.ends_at && new Date(trialRow.ends_at) > new Date()
+
+    if (!profileResult.data?.ai_enabled && !trialActive) {
       return errorResponse(
         'pro_required',
         'Funnl AI is a Pro feature — access not enabled for this account',

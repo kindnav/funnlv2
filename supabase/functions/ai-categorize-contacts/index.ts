@@ -35,19 +35,30 @@ Deno.serve(async (req) => {
       )
     }
 
-    // ── 2. Check ai_enabled via service-role key (authoritative) ──────────────
+    // ── 2. Check effective Pro access via service-role key (authoritative) ───────
+    // Effective Pro = ai_enabled (permanent) OR an active trial (started_at set, ends_at > now).
+    // A DB failure on either query is a retriable service error (500), not access-denied (403).
     const supabaseAdmin = createClient(
       Deno.env.get('SUPABASE_URL') ?? '',
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
     )
 
-    const { data: profile } = await supabaseAdmin
-      .from('profiles')
-      .select('ai_enabled')
-      .eq('id', user.id)
-      .maybeSingle()
+    const [profileResult, trialResult] = await Promise.all([
+      supabaseAdmin.from('profiles').select('ai_enabled').eq('id', user.id).maybeSingle(),
+      supabaseAdmin.from('pro_trials').select('started_at, ends_at').eq('user_id', user.id).maybeSingle(),
+    ])
 
-    if (!profile?.ai_enabled) {
+    if (profileResult.error || trialResult.error) {
+      return new Response(
+        JSON.stringify({ error: 'Could not verify access — please try again' }),
+        { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      )
+    }
+
+    const trialRow = trialResult.data
+    const trialActive = trialRow?.started_at && trialRow?.ends_at && new Date(trialRow.ends_at) > new Date()
+
+    if (!profileResult.data?.ai_enabled && !trialActive) {
       return new Response(
         JSON.stringify({ error: 'Funnl AI is a Pro feature — access not enabled for this account' }),
         { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }

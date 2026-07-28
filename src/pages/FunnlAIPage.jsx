@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import { Link } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
-import { canUseAI } from '../lib/ai'
+import { canUseAI, getTrialStatus } from '../lib/ai'
 import { track } from '../lib/analytics'
 import { extractInvokeError } from '../lib/ai-chat-error'
 import { buildProviderMessages, isRetryEligible } from '../lib/ai-chat-conversation'
@@ -69,6 +69,7 @@ const SendIcon = () => (
 function FunnlAIPage() {
   const [isCheckingPro, setIsCheckingPro] = useState(true)
   const [isProUser, setIsProUser]         = useState(false)
+  const [trialStatus, setTrialStatus]     = useState(null)   // null = not yet loaded
   // Message shape: { role, content, error?, truncated? }
   // error: { code, message, retryable, request_id } — present on failed user messages only
   // truncated: true — present on assistant messages where stop_reason was max_tokens
@@ -85,8 +86,10 @@ function FunnlAIPage() {
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => {
       if (data.user) {
-        canUseAI(data.user.id).then(result => {
-          setIsProUser(result)
+        const uid = data.user.id
+        Promise.all([canUseAI(uid), getTrialStatus(uid)]).then(([canUse, trial]) => {
+          setIsProUser(canUse)
+          setTrialStatus(trial)
           setIsCheckingPro(false)
         })
       } else {
@@ -316,9 +319,14 @@ function FunnlAIPage() {
         <div className="flex-1">
           <div className="flex items-center gap-2">
             <span className="text-[16px] font-bold text-hi">Funnl AI</span>
-            {isProUser && (
+            {isProUser && !trialStatus?.active && (
               <span className="font-mono text-[9.5px] font-bold tracking-[0.5px] text-accent bg-[rgba(139,124,255,0.22)] px-1.5 py-0.5 rounded-[5px]">
                 PRO
+              </span>
+            )}
+            {isProUser && trialStatus?.active && (
+              <span className="font-mono text-[9.5px] font-bold tracking-[0.5px] text-warning bg-[rgba(255,184,77,0.15)] px-1.5 py-0.5 rounded-[5px]">
+                {trialStatus.daysRemaining === 1 ? '1 DAY LEFT' : `${trialStatus.daysRemaining} DAYS LEFT`}
               </span>
             )}
           </div>
@@ -465,11 +473,24 @@ function FunnlAIPage() {
             <div className="w-[64px] h-[64px] rounded-[18px] bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] flex items-center justify-center text-white opacity-50 shadow-[0_12px_40px_rgba(91,69,240,0.35)]">
               <SparkleIcon size={28}/>
             </div>
-            <div className="max-w-[260px]">
-              <h3 className="font-display text-[19px] font-bold text-hi mb-2">AI only available for Pro</h3>
-              <p className="text-[13.5px] leading-relaxed text-muted">
-                Ask anything about your network — who's gone cold, who you know at a specific company, what to follow up on next.
-              </p>
+            <div className="max-w-[280px]">
+              {trialStatus?.expired ? (
+                <>
+                  <h3 className="font-display text-[19px] font-bold text-hi mb-2">Your trial has ended</h3>
+                  <p className="text-[13.5px] leading-relaxed text-muted">
+                    Your 7-day free trial ended on{' '}
+                    {new Date(trialStatus.endsAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric' })}.
+                    Contact us to continue with Funnl Pro.
+                  </p>
+                </>
+              ) : (
+                <>
+                  <h3 className="font-display text-[19px] font-bold text-hi mb-2">AI only available for Pro</h3>
+                  <p className="text-[13.5px] leading-relaxed text-muted">
+                    Ask anything about your network — who's gone cold, who you know at a specific company, what to follow up on next.
+                  </p>
+                </>
+              )}
             </div>
           </div>
         )}

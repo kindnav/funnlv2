@@ -2,6 +2,7 @@
 import { Link, useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { getTheme, setTheme } from '../lib/theme'
+import { computeTrialStatus } from '../lib/ai'
 
 const iCls = 'flex-1 bg-input border border-line-3 rounded-xl px-[13px] py-[11px] text-[13.5px] text-hi placeholder-[#54545E] outline-none focus:border-[rgba(139,124,255,0.5)] transition-colors'
 const lCls = 'mb-[7px] block text-[12.5px] font-semibold text-mid'
@@ -18,18 +19,23 @@ function SettingsPage() {
   const [deleting, setDeleting] = useState(false)
   const [deleteError, setDeleteError] = useState('')
   const [currentTheme, setCurrentTheme] = useState(() => getTheme())
+  const [isPermanentPro, setIsPermanentPro] = useState(false)
+  const [trialStatus, setTrialStatus] = useState(null)
 
   useEffect(() => {
     async function load() {
       const { data: { user } } = await supabase.auth.getUser()
       setUser(user)
       if (user) {
-        const { data: profile } = await supabase
-          .from('profiles')
-          .select('display_name')
-          .eq('id', user.id)
-          .maybeSingle()
-        if (profile) setDisplayName(profile.display_name || '')
+        const [profileResult, trialResult] = await Promise.all([
+          supabase.from('profiles').select('display_name, ai_enabled').eq('id', user.id).maybeSingle(),
+          supabase.from('pro_trials').select('started_at, ends_at').eq('user_id', user.id).maybeSingle(),
+        ])
+        if (profileResult.data) {
+          setDisplayName(profileResult.data.display_name || '')
+          setIsPermanentPro(profileResult.data.ai_enabled === true)
+        }
+        setTrialStatus(computeTrialStatus(trialResult.data, new Date()))
       }
       setLoading(false)
     }
@@ -145,6 +151,49 @@ function SettingsPage() {
           </div>
 
         </div>
+
+        {/* Pro access — shown only when there is something to display */}
+        {(isPermanentPro || (trialStatus && (trialStatus.active || trialStatus.expired))) && (
+          <div className="bg-card border border-line-2 rounded-2xl overflow-hidden mb-5">
+            <div className="p-6">
+              <p className="text-[11.5px] font-bold tracking-[1px] text-lower uppercase font-mono mb-4">Pro access</p>
+              {isPermanentPro ? (
+                <div className="flex items-center gap-2">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="#8B7CFF" className="flex-none">
+                    <path d="M12 3l1.7 5.3L19 10l-5.3 1.7L12 17l-1.7-5.3L5 10l5.3-1.7L12 3z"/>
+                  </svg>
+                  <span className="text-[13.5px] font-semibold text-accent">Funnl Pro — permanent access</span>
+                </div>
+              ) : trialStatus?.active ? (
+                <div>
+                  <div className="flex items-center gap-2 mb-1">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="#8B7CFF" className="flex-none">
+                      <path d="M12 3l1.7 5.3L19 10l-5.3 1.7L12 17l-1.7-5.3L5 10l5.3-1.7L12 3z"/>
+                    </svg>
+                    <span className="text-[13.5px] font-semibold text-accent">
+                      {trialStatus.daysRemaining === 1
+                        ? '1 day left in your trial'
+                        : `${trialStatus.daysRemaining} days left in your trial`}
+                    </span>
+                  </div>
+                  <p className="text-[12px] text-low ml-5">
+                    Trial ends {new Date(trialStatus.endsAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric' })}
+                  </p>
+                </div>
+              ) : trialStatus?.expired ? (
+                <div className="flex items-start gap-2">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#6C6C78" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-none mt-0.5">
+                    <circle cx="12" cy="12" r="9"/><path d="M12 8v4l2.5 2.5"/>
+                  </svg>
+                  <div>
+                    <span className="text-[13.5px] font-medium text-low">Trial ended</span>
+                    <p className="text-[12px] text-lower mt-0.5">Your 7-day free trial has ended.</p>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          </div>
+        )}
 
         {/* Appearance */}
         <div className="bg-card border border-line-2 rounded-2xl overflow-hidden mb-5">
