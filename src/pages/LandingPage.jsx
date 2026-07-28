@@ -1,422 +1,730 @@
-﻿import { Link, useNavigate } from 'react-router-dom'
+import { useRef, useState, useEffect, useCallback } from 'react' // useCallback used in LandingPage.measure
+import { useNavigate, Link } from 'react-router-dom'
 import { track } from '../lib/analytics'
 
-function LandingPage() {
-  const navigate = useNavigate()
+// ─── constants ───────────────────────────────────────────────────────────────
+const FW = 120, FH = 140
+const SENTENCES = [
+  'Stop losing track of people.',
+  'Remember every conversation.',
+  'Know exactly who to follow up with.',
+]
+const AIQ = "Show me everyone in my network who works in investment banking at Goldman Sachs, prioritized by how overdue my follow-up is and grouped by how we met."
 
-  function handleStartFree(location) {
-    track('landing_cta_clicked', { location })
-    navigate('/signup')
+// ─── easing helpers (ported exactly from prototype) ──────────────────────────
+function clamp01(x) { return Math.max(0, Math.min(1, x)) }
+function lerp(a, b, t) { return a + (b - a) * t }
+function easeInOut(t) { return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2 }
+function easeOut(t) { return 1 - Math.pow(1 - t, 3) }
+
+// ─── funnel geometry (ported exactly) ────────────────────────────────────────
+function funnelGeom(t, nat) {
+  const vw = window.innerWidth, vh = window.innerHeight
+  const g = easeInOut(clamp01((t - 0.06) / 0.42))
+  let smax = Math.max(2.2, Math.min(0.62 * vh / FH, 0.55 * vw / FW))
+  if (nat && nat.homeBottom) {
+    const cap = (0.6 * vh - nat.homeBottom - 6) / (FH * 0.5)
+    smax = Math.max(1.4, Math.min(smax, cap))
   }
+  let S = lerp(1, smax, g)
+  const sh = easeInOut(clamp01((t - 0.76) / 0.14))
+  S = lerp(S, 0.85, sh)
+  const topFrac = lerp(0.6, 0.28, sh)
+  return { S, topFrac }
+}
+function mouthY(geo) { return geo.topFrac * window.innerHeight - FH * geo.S * 0.5 }
+function spoutY(geo) { return geo.topFrac * window.innerHeight + FH * geo.S * 0.48 }
 
+// ─── NavBar ──────────────────────────────────────────────────────────────────
+function NavBar({ scrolled, onStart }) {
   return (
-    <div className="relative bg-[#0A0910] text-[#F5F3FA] font-sans min-h-screen overflow-x-hidden">
-
-      {/* Grain texture overlay */}
-      <div
-        className="fixed inset-0 z-[1] pointer-events-none"
-        style={{
-          opacity: 0.045,
-          mixBlendMode: 'overlay',
-          backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E")`,
-        }}
-      />
-
-      {/* ── Nav ────────────────────────────────────────────────────────── */}
-      <nav className="sticky top-0 z-50 bg-[rgba(10,9,16,0.75)] backdrop-blur-[14px] border-b border-line-2">
-        <div className="max-w-[1160px] mx-auto px-6 h-16 flex items-center justify-between">
-          <div className="flex items-center gap-[9px]">
-            <div className="w-[26px] h-[26px] rounded-[7px] bg-[#7C6BFF] flex items-center justify-center flex-none">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none">
-                <path d="M3 4H21L15 12.5V20H9V12.5Z" fill="#0A0910"/>
-              </svg>
-            </div>
-            <span className="font-display font-bold text-[17px] text-[#F5F3FA] tracking-[-0.2px]">Funnl</span>
+    <nav style={{
+      position: 'fixed', top: 0, left: 0, right: 0, zIndex: 50,
+      background: scrolled ? 'rgba(20,17,15,0.85)' : 'rgba(20,17,15,0)',
+      backdropFilter: scrolled ? 'blur(14px)' : 'none',
+      borderBottom: scrolled ? '1px solid rgba(247,242,231,0.08)' : '1px solid transparent',
+      transition: 'background .3s ease, border-color .3s ease',
+    }}>
+      <div style={{ maxWidth: 1240, margin: '0 auto', padding: '0 28px', height: 64, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 9 }}>
+          <div style={{ width: 26, height: 26, borderRadius: 7, background: '#FF4423', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M3 4H21L15 12.5V20H9V12.5Z" fill="#14110F"/></svg>
           </div>
-          <div className="flex items-center gap-[22px]">
-            <Link to="/signin" className="text-[13px] font-medium text-[#9C97AC] hover:text-[#F5F3FA] transition-colors no-underline">
-              Sign in
-            </Link>
-            <button
-              onClick={() => handleStartFree('nav')}
-              className="bg-[#F5F3FA] text-[#0A0910] text-[13px] font-bold rounded-full px-[18px] py-[9px] hover:bg-[#D6CFFF] transition-colors cursor-pointer border-0"
-            >
-              Start for free
-            </button>
-          </div>
+          <span style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 16, letterSpacing: '-0.2px', color: '#F7F2E7' }}>Funnl</span>
         </div>
-      </nav>
-
-      {/* ── Hero ────────────────────────────────────────────────────────── */}
-      <section className="relative max-w-[1160px] mx-auto px-6 pt-[104px] pb-0 text-center">
-        {/* Radial glow */}
-        <div
-          className="absolute top-5 left-1/2 -translate-x-1/2 w-[640px] h-[340px] rounded-full z-0 pointer-events-none"
-          style={{ background: 'radial-gradient(ellipse, rgba(124,107,255,0.22), transparent 70%)', filter: 'blur(40px)' }}
-        />
-
-        <div className="relative z-[2]">
-          {/* Eyebrow */}
-          <div className="inline-flex items-center gap-2 mb-7">
-            <span className="w-[6px] h-[6px] rounded-full bg-[#7C6BFF] flex-none"/>
-            <span className="font-mono text-[11.5px] font-semibold text-[#9C97AC] tracking-[1.2px] uppercase">
-              Turn your network into outcomes
-            </span>
-          </div>
-
-          {/* Headline */}
-          <h1 className="font-display font-bold text-[38px] md:text-[68px] leading-[1.04] tracking-[-2px] text-[#F5F3FA] mb-[26px] mx-auto">
-            Never let a warm<br/>
-            <span className="relative inline-block">
-              contact
-              <span
-                className="absolute left-[2%] right-[2%] bottom-[6px] h-[14px]"
-                style={{ background: '#7C6BFF', opacity: 0.35, zIndex: -1, transform: 'skewX(-6deg)' }}
-              />
-            </span>{' '}go cold.
-          </h1>
-
-          {/* Subhead */}
-          <p className="text-[17px] leading-[1.6] text-[#9C97AC] mx-auto mb-9 max-w-[480px]">
-            Funnl helps students recruiting for competitive roles remember every coffee chat, follow up at the right moment, and keep a network that actually stays warm.
-          </p>
-
-          {/* CTAs */}
-          <div className="flex flex-wrap items-center justify-center gap-[22px] mb-[60px]">
-            <button
-              onClick={() => handleStartFree('hero')}
-              className="bg-[#7C6BFF] text-[#0A0910] text-[14.5px] font-bold rounded-full px-7 py-[15px] hover:bg-[#8F80FF] transition-colors inline-flex items-center gap-2 cursor-pointer border-0"
-            >
-              Start for free
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#0A0910" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M5 12h14M13 6l6 6-6 6"/>
-              </svg>
-            </button>
-            <a
-              href="#how-it-works"
-              className="text-[14.5px] font-semibold text-[#F5F3FA] hover:text-[#D6CFFF] transition-colors inline-flex items-center gap-[6px] no-underline"
-            >
-              See how it works
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M9 18l6-6-6-6"/>
-              </svg>
-            </a>
-          </div>
-        </div>
-
-        {/* Annotated product mock */}
-        <div className="relative z-[2] max-w-[720px] mx-auto text-left">
-          {/* Labels — hidden on mobile */}
-          <div className="hidden md:block absolute top-[26px] left-[-30px] bg-[#141220] border border-[rgba(255,255,255,0.1)] rounded-[12px] px-[14px] py-[9px] shadow-[0_12px_28px_rgba(0,0,0,0.4)] z-[4] whitespace-nowrap">
-            <span className="font-mono text-[11px] font-semibold text-[#D6CFFF]">tags by relationship →</span>
-          </div>
-          <div className="hidden md:block absolute top-[120px] right-[-30px] bg-[#141220] border border-[rgba(255,255,255,0.1)] rounded-[12px] px-[14px] py-[9px] shadow-[0_12px_28px_rgba(0,0,0,0.4)] z-[4] whitespace-nowrap">
-            <span className="font-mono text-[11px] font-semibold text-[#FFC97A]">← follow-up reminders</span>
-          </div>
-          <div className="hidden md:block absolute bottom-[-18px] left-[32px] bg-[#141220] border border-[rgba(255,255,255,0.1)] rounded-[12px] px-[14px] py-[9px] shadow-[0_12px_28px_rgba(0,0,0,0.4)] z-[4] whitespace-nowrap">
-            <span className="font-mono text-[11px] font-semibold text-[#7FE8D2]">↑ conversation history</span>
-          </div>
-
-          {/* Product card */}
-          <div className="relative bg-[#141220] border border-line-3 rounded-[20px] p-[22px] shadow-[0_40px_90px_rgba(0,0,0,0.55)]">
-            <div className="flex items-center justify-between mb-[18px]">
-              <span className="font-display font-bold text-[15px] text-[#F5F3FA]">This week</span>
-              <span className="font-mono text-[10.5px] font-bold text-[#FFC97A] bg-[rgba(255,184,77,0.14)] rounded-[6px] px-2 py-1 whitespace-nowrap">3 follow-ups this week</span>
-            </div>
-            <div className="flex flex-col gap-0.5 mb-4">
-              <div className="flex items-center gap-3 py-[11px] border-b border-line-2">
-                <div className="w-[34px] h-[34px] rounded-[10px] flex items-center justify-center text-[12px] font-bold text-white flex-none" style={{ background: 'linear-gradient(135deg,#FF6B8A,#F0A020)' }}>PS</div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-[13px] font-semibold text-[#F5F3FA] m-0">Priya Sharma</p>
-                  <p className="text-[11.5px] text-[#635D74] m-0">Analyst · Goldman Sachs</p>
-                </div>
-                <span className="text-[9.5px] text-[#D6CFFF] bg-[rgba(124,107,255,0.14)] rounded-full px-2 py-[3px] flex-none">recruiter</span>
-              </div>
-              <div className="flex items-center gap-3 py-[11px]">
-                <div className="w-[34px] h-[34px] rounded-[10px] flex items-center justify-center text-[12px] font-bold text-white flex-none" style={{ background: 'linear-gradient(135deg,#7C6BFF,#4B33E0)' }}>JK</div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-[13px] font-semibold text-[#F5F3FA] m-0">James Kim</p>
-                  <p className="text-[11.5px] text-[#635D74] m-0">Coffee chat · 2 weeks ago</p>
-                </div>
-                <span className="text-[10.5px] font-bold text-[#2FD4B6] bg-[rgba(47,212,182,0.15)] rounded-full px-[9px] py-[3px] flex-none whitespace-nowrap">On track</span>
-              </div>
-            </div>
-            <div className="pt-[10px] border-t border-line-2">
-              <p className="text-[11.5px] font-semibold text-[#9C97AC] m-0 mb-[8px]">Upcoming follow-ups</p>
-              <div className="flex items-center gap-[7px]">
-                <span className="w-[6px] h-[6px] rounded-full bg-[#FFB84D] flex-none"/>
-                <span className="text-[11.5px] font-semibold text-[#FFB84D]">Priya Sharma — Jul 22</span>
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      {/* ── Marquee ticker ──────────────────────────────────────────────── */}
-      <div className="relative z-[2] mt-[88px] border-t border-b border-line-2 bg-[#0F0D16] py-4 overflow-hidden">
-        <div className="flex w-max animate-[funnl-marquee_26s_linear_infinite]">
-          {[0, 1].map(i => (
-            <div key={i} className="flex items-center gap-[14px] flex-none pr-[14px]">
-              <span className="font-mono text-[12.5px] font-semibold text-[#9C97AC] tracking-[0.6px] whitespace-nowrap">REMEMBER EVERY CONVERSATION</span>
-              <span className="text-[#7C6BFF]">✦</span>
-              <span className="font-mono text-[12.5px] font-semibold text-[#9C97AC] tracking-[0.6px] whitespace-nowrap">NEVER MISS A FOLLOW-UP</span>
-              <span className="text-[#7C6BFF]">✦</span>
-              <span className="font-mono text-[12.5px] font-semibold text-[#9C97AC] tracking-[0.6px] whitespace-nowrap">KEEP YOUR NETWORK WARM</span>
-              <span className="text-[#7C6BFF]">✦</span>
-              <span className="font-mono text-[12.5px] font-semibold text-[#9C97AC] tracking-[0.6px] whitespace-nowrap">TURN CONNECTIONS INTO OUTCOMES</span>
-              <span className="text-[#7C6BFF]">✦</span>
-            </div>
-          ))}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 26 }}>
+          <a href="#timeline" style={{ fontSize: 13, fontWeight: 500, color: '#C7BFAE', textDecoration: 'none' }}>How it works</a>
+          <a href="#ai" style={{ fontSize: 13, fontWeight: 500, color: '#C7BFAE', textDecoration: 'none' }}>Funnl AI</a>
+          <Link to="/signin" style={{ fontSize: 13, fontWeight: 500, color: '#C7BFAE', textDecoration: 'none' }}>Sign in</Link>
+          <NavCTA onStart={onStart} />
         </div>
       </div>
+    </nav>
+  )
+}
 
-      {/* ── Problem statement ───────────────────────────────────────────── */}
-      <section className="relative z-[2] max-w-[720px] mx-auto px-6 py-24 text-center">
-        <p className="font-display font-medium text-[22px] leading-[1.6] text-[#D3CFE0] m-0 tracking-[-0.3px]">
-          Most students track recruiting contacts in a spreadsheet — or nowhere at all. Conversations get forgotten, follow-ups get missed, and warm relationships go cold.
-        </p>
-      </section>
+function NavCTA({ onStart }) {
+  const [hovered, setHovered] = useState(false)
+  return (
+    <button
+      onClick={onStart}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        background: hovered ? '#FFA37A' : '#F7F2E7',
+        color: '#14110F', fontSize: 13, fontWeight: 700,
+        border: 0, borderRadius: 999, padding: '9px 18px', cursor: 'pointer',
+        transform: hovered ? 'scale(1.05)' : 'scale(1)',
+        transition: 'transform .2s ease, background .2s ease',
+      }}
+    >Get started</button>
+  )
+}
 
-      {/* ── Feature spotlight ───────────────────────────────────────────── */}
-      <section id="how-it-works" className="relative z-[2] max-w-[1000px] mx-auto px-6 pb-10">
+// ─── HeroSection (owns its own scroll wrapper + sticky stage) ────────────────
+const CARD_DEFS = [
+  { name: 'Priya Sharma', role: 'Goldman Sachs', initials: 'PS', tag: 'recruiter', grad: 'linear-gradient(135deg,#FF6A3D,#D6330F)' },
+  { name: 'James Kim',    role: 'McKinsey & Co', initials: 'JK', tag: 'alumni',    grad: 'linear-gradient(135deg,#E8A93B,#A56A00)' },
+  { name: 'Dana Ruiz',    role: 'Sequoia Capital',initials: 'DR', tag: 'club',      grad: 'linear-gradient(135deg,#4F9A73,#2E7D5B)' },
+]
 
-        {/* Row 01 */}
-        <div className="flex flex-col md:flex-row items-center gap-14 py-14 border-t border-line-2">
-          <div className="flex-1 w-full">
-            <span className="font-mono text-[12px] font-bold text-[#635D74]">01</span>
-            <h3 className="font-display font-bold text-[26px] tracking-[-0.5px] text-[#F5F3FA] mt-[10px] mb-3">Add a contact in seconds</h3>
-            <p className="text-[14.5px] text-[#9C97AC] leading-[1.7] m-0 max-w-[360px]">Paste any text about a person or fill the form. Tag by relationship type so your network stays structured, not scattered.</p>
-          </div>
-          <div className="flex-1 w-full">
-            <div className="bg-[#141220] border border-line-3 rounded-[16px] p-5 shadow-[0_20px_50px_rgba(0,0,0,0.4)]">
-              <div className="flex items-start gap-3">
-                <div className="w-[38px] h-[38px] rounded-[10px] bg-[rgba(124,107,255,0.18)] flex items-center justify-center flex-none">
-                  <span className="font-display font-bold text-[12.5px] text-[#B4A8FF]">PS</span>
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-[13.5px] font-semibold text-[#F5F3FA] m-0">Priya Sharma</p>
-                  <p className="text-[11.5px] text-[#635D74] m-0 mb-2">Analyst · Goldman Sachs</p>
-                  <div className="flex gap-[6px] flex-wrap">
-                    <span className="text-[10px] text-[#D6CFFF] bg-[rgba(124,107,255,0.12)] border border-[rgba(124,107,255,0.25)] rounded-full px-[9px] py-[3px] whitespace-nowrap flex-none">recruiter</span>
-                    <span className="text-[10px] text-[#D6CFFF] bg-[rgba(124,107,255,0.12)] border border-[rgba(124,107,255,0.25)] rounded-full px-[9px] py-[3px] whitespace-nowrap flex-none">target firm</span>
-                  </div>
-                </div>
-              </div>
-            </div>
+// HeroInner renders just the content inside the sticky viewport
+function HeroSection({ t, nat, reduced }) {
+  const geo = funnelGeom(t, nat)
+  const vh = typeof window !== 'undefined' ? window.innerHeight : 800
+
+  // funnel transform
+  let pulse = 0
+  for (let i = 0; i < 5; i++) {
+    const wStart = 0.14 + i * 0.09, wDur = 0.26
+    const d = Math.abs(t - (wStart + wDur * 0.55))
+    pulse = Math.max(pulse, Math.max(0, 1 - d / 0.04))
+  }
+  const funnelTransform = `translate(-50%,-50%) scale(${geo.S * (1 + 0.05 * pulse)},${geo.S * (1 - 0.04 * pulse)})`
+  const glow = clamp01(t / 0.7)
+  const glowPx = lerp(8, 40, glow)
+  const glowA  = lerp(0.2, 0.45, glow)
+
+  // clip path bottom value: clips letters at funnel top edge
+  const clipBottom = reduced ? 0 : Math.max(0, vh - mouthY(geo))
+
+  // tagline
+  const tagT = clamp01((t - 0.86) / 0.12)
+  const tagOpacity = reduced ? 1 : tagT
+  const tagTY = lerp(20, 0, tagT)
+
+  // intro block fade
+  const introOpacity = reduced ? 1 : lerp(1, 0, clamp01(t / 0.08))
+
+  return (
+    <>
+        {/* tagline */}
+        <h2 style={{
+          position: 'absolute', top: '46%', left: 0, width: '100%',
+          textAlign: 'center', margin: 0,
+          fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700,
+          fontSize: 'clamp(22px,3.5vw,42px)', letterSpacing: '-1.5px',
+          color: '#F7F2E7', zIndex: 5, padding: '0 20px', boxSizing: 'border-box',
+          opacity: tagOpacity,
+          transform: `translateY(${tagTY}px)`,
+        }}>Ditch the clunky spreadsheets and barbaric documents.</h2>
+
+        {/* funnel mark */}
+        <div style={{
+          position: 'absolute', left: '50%', top: `${geo.topFrac * 100}%`,
+          width: FW, height: FH,
+          transform: funnelTransform,
+          filter: `drop-shadow(0 0 ${glowPx}px rgba(255,68,35,${glowA}))`,
+          zIndex: 2, willChange: 'transform', pointerEvents: 'none',
+        }}>
+          <div style={{
+            position: 'absolute', inset: 0, background: '#FF4423',
+            clipPath: 'polygon(0% 0%,100% 0%,62% 58%,62% 100%,38% 100%,38% 58%)',
+          }} />
+        </div>
+
+        {/* letters layer — clipped at funnel top edge */}
+        <div style={{
+          position: 'absolute', inset: 0, zIndex: 3, pointerEvents: 'none',
+          clipPath: reduced ? 'none' : `inset(0px 0px ${clipBottom}px 0px)`,
+        }}>
+          <div data-letters style={{ position: 'absolute', top: '12%', left: 0, width: '100%', display: 'flex', justifyContent: 'center', gap: '0.02em' }}>
+            {'FUNNL'.split('').map((ch, i) => (
+              <HeroLetter key={i} ch={ch} idx={i} t={t} nat={nat} geo={geo} reduced={reduced} />
+            ))}
           </div>
         </div>
 
-        {/* Row 02 — reversed on desktop */}
-        <div className="flex flex-col md:flex-row-reverse items-center gap-14 py-14 border-t border-line-2">
-          <div className="flex-1 w-full">
-            <span className="font-mono text-[12px] font-bold text-[#635D74]">02</span>
-            <h3 className="font-display font-bold text-[26px] tracking-[-0.5px] text-[#F5F3FA] mt-[10px] mb-3">Log the conversation</h3>
-            <p className="text-[14.5px] text-[#9C97AC] leading-[1.7] m-0 max-w-[360px]">Write notes, set a follow-up date. The conversation lives with the contact, not buried in your notes app.</p>
-          </div>
-          <div className="flex-1 w-full">
-            <div className="bg-[#141220] border border-line-3 rounded-[16px] p-5 shadow-[0_20px_50px_rgba(0,0,0,0.4)]">
-              <div className="flex items-center justify-between mb-[10px]">
-                <span className="text-[11px] font-semibold text-[#9C97AC] bg-[rgba(255,255,255,0.06)] rounded-full px-[10px] py-1">Coffee chat</span>
-                <span className="text-[11px] text-[#635D74]">Jul 8, 2026</span>
-              </div>
-              <p className="text-[12.5px] text-[#9C97AC] leading-[1.6] m-0 mb-[10px]">Great conversation about the analyst program — she mentioned there are still open slots.</p>
-              <div className="flex items-center gap-[7px]">
-                <span className="w-[6px] h-[6px] rounded-full bg-[#FFB84D] flex-none"/>
-                <span className="text-[11.5px] font-bold text-[#FFB84D]">Follow up Jul 22</span>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Row 03 */}
-        <div className="flex flex-col md:flex-row items-center gap-14 py-14 border-t border-b border-line-2">
-          <div className="flex-1 w-full">
-            <span className="font-mono text-[12px] font-bold text-[#635D74]">03</span>
-            <h3 className="font-display font-bold text-[26px] tracking-[-0.5px] text-[#F5F3FA] mt-[10px] mb-3">Follow up on time</h3>
-            <p className="text-[14.5px] text-[#9C97AC] leading-[1.7] m-0 max-w-[360px]">Your dashboard surfaces who's overdue and who's up next — no spreadsheet, no guessing.</p>
-          </div>
-          <div className="flex-1 w-full">
-            <div className="bg-[#141220] border border-line-3 rounded-[16px] p-5 shadow-[0_20px_50px_rgba(0,0,0,0.4)]">
-              <div className="flex items-center gap-[10px] py-[9px] border-b border-line-2">
-                <div className="w-[28px] h-[28px] rounded-full bg-[rgba(255,107,138,0.18)] flex items-center justify-center flex-none">
-                  <span className="font-display font-bold text-[10px] text-[#FF8FA3]">JK</span>
-                </div>
-                <div>
-                  <p className="text-[12px] font-semibold text-[#F5F3FA] m-0">James Kim</p>
-                  <p className="text-[10.5px] text-[#FF8FA3] font-bold m-0">2 days overdue</p>
-                </div>
-              </div>
-              <div className="flex items-center gap-[10px] py-[9px]">
-                <div className="w-[28px] h-[28px] rounded-full bg-[rgba(240,160,32,0.2)] flex items-center justify-center flex-none">
-                  <span className="font-display font-bold text-[10px] text-[#FFC15C]">PS</span>
-                </div>
-                <div>
-                  <p className="text-[12px] font-semibold text-[#F5F3FA] m-0">Priya Sharma</p>
-                  <p className="text-[10.5px] text-[#FFC15C] font-bold m-0">Today</p>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      {/* ── Funnl AI ────────────────────────────────────────────────────── */}
-      <section className="relative z-[2] max-w-[1000px] mx-auto px-6 pb-24">
-        <div
-          className="border border-[rgba(124,107,255,0.3)] rounded-[22px] p-8 md:p-12 flex flex-col md:flex-row items-center gap-12"
-          style={{ background: 'linear-gradient(160deg, rgba(124,107,255,0.09), rgba(20,18,32,0.5))', boxShadow: '0 0 60px rgba(124,107,255,0.08)' }}
-        >
-          {/* Left: copy */}
-          <div className="flex-1 w-full">
-            <div className="inline-flex items-center gap-[7px] mb-[18px]">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="#B4A8FF">
-                <path d="M12 3l1.7 5.3L19 10l-5.3 1.7L12 17l-1.7-5.3L5 10l5.3-1.7L12 3z"/>
-              </svg>
-              <span className="font-mono text-[11px] font-bold text-[#B4A8FF] tracking-[1.2px] uppercase">Funnl AI</span>
-              <span className="font-mono text-[9.5px] font-bold text-[#0A0910] bg-[#FFC97A] rounded-[5px] px-[6px] py-[2px] whitespace-nowrap flex-none">PRO</span>
-            </div>
-            <h2 className="font-display font-bold text-[28px] tracking-[-0.5px] text-[#F5F3FA] m-0 mb-[14px] leading-[1.25]">Ask your network anything.</h2>
-            <p className="text-[14.5px] text-[#9C97AC] leading-[1.7] m-0 mb-[22px] max-w-[380px]">Funnl AI reads your contacts and conversation history to answer questions in plain English — who's gone cold, who you know at a target firm, what to bring up in your next follow-up.</p>
-            <div className="flex flex-col gap-3">
-              <div className="flex items-center gap-[10px]">
-                <span className="text-[#7C6BFF] text-[13px] flex-none">✦</span>
-                <span className="text-[13.5px] text-[#D3CFE0]">Surfaces contacts who are going cold</span>
-              </div>
-              <div className="flex items-center gap-[10px]">
-                <span className="text-[#7C6BFF] text-[13px] flex-none">✦</span>
-                <span className="text-[13.5px] text-[#D3CFE0]">Finds warm intros already in your network</span>
-              </div>
-              <div className="flex items-center gap-[10px]">
-                <span className="text-[#7C6BFF] text-[13px] flex-none">✦</span>
-                <span className="text-[13.5px] text-[#D3CFE0]">Suggests what to say in your next follow-up</span>
-              </div>
-            </div>
-          </div>
-
-          {/* Right: chat mock */}
-          <div className="flex-1 w-full">
-            <div className="bg-[#141220] border border-line-3 rounded-[16px] p-5 shadow-[0_20px_50px_rgba(0,0,0,0.4)]">
-              <div className="flex justify-end mb-3">
-                <div className="bg-[#7C6BFF] text-[#0A0910] text-[13px] font-semibold px-[14px] py-[10px] max-w-[80%]" style={{ borderRadius: '12px 12px 2px 12px' }}>
-                  Who do I know at Goldman Sachs?
-                </div>
-              </div>
-              <div className="flex justify-start mb-4">
-                <div className="bg-[rgba(255,255,255,0.05)] border border-[rgba(255,255,255,0.08)] text-[#D3CFE0] text-[13px] leading-[1.6] px-[14px] py-3 max-w-[88%]" style={{ borderRadius: '12px 12px 12px 2px' }}>
-                  <strong className="text-[#F5F3FA]">Priya Sharma</strong>, Analyst on the recruiting team — you had a coffee chat in June about the analyst program.
-                </div>
-              </div>
-              <div className="flex justify-end mb-3">
-                <div className="bg-[#7C6BFF] text-[#0A0910] text-[13px] font-semibold px-[14px] py-[10px] max-w-[80%]" style={{ borderRadius: '12px 12px 2px 12px' }}>
-                  Who should I reach out to about biotech?
-                </div>
-              </div>
-              <div className="flex justify-start">
-                <div className="bg-[rgba(255,255,255,0.05)] border border-[rgba(255,255,255,0.08)] text-[#D3CFE0] text-[13px] leading-[1.6] px-[14px] py-3 max-w-[88%]" style={{ borderRadius: '12px 12px 12px 2px' }}>
-                  <strong className="text-[#F5F3FA]">Alex Chen</strong> at Flagship Pioneering — you connected at the biotech career panel in May and haven't followed up yet.
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      {/* ── Who it's for ────────────────────────────────────────────────── */}
-      <section className="relative z-[2] max-w-[1000px] mx-auto px-6 pt-4 pb-24">
-        <span className="font-mono text-[11px] font-bold text-[#7C6BFF] tracking-[1.5px] uppercase block mb-4">Who it's for</span>
-        <h2 className="font-display font-bold text-[30px] tracking-[-0.5px] text-[#F5F3FA] m-0 mb-8 max-w-[520px] leading-[1.25]">Built for relationship-driven recruiting.</h2>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {[
-            'Finance, consulting, VC, PE, and tech recruiting, where relationships close offers',
-            'Students managing 20–100+ contacts across multiple firms and schools',
-            "Anyone who's ever lost a warm contact because they forgot to follow up",
-            'Recruiters tell you to stay in touch — Funnl makes that concrete',
-          ].map((text, i) => (
-            <div key={i} className="border border-[rgba(255,255,255,0.08)] rounded-[14px] px-[22px] py-5 flex items-start gap-3">
-              <span className="font-mono text-[12px] text-[#635D74] flex-none mt-0.5">→</span>
-              <span className="text-[14px] text-[#D3CFE0] leading-[1.6]">{text}</span>
-            </div>
+        {/* contact cards */}
+        <div data-cards style={{
+          position: 'absolute', top: '70%', left: 0, width: '100%',
+          display: 'flex', justifyContent: 'center', gap: 16, zIndex: 2,
+          flexWrap: 'wrap', padding: '0 16px', boxSizing: 'border-box',
+        }}>
+          {CARD_DEFS.map((c, j) => (
+            <HeroCard key={j} card={c} j={j} t={t} nat={nat} geo={geo} reduced={reduced} />
           ))}
         </div>
-      </section>
 
-      {/* ── Comparison ──────────────────────────────────────────────────── */}
-      <section className="relative z-[2] max-w-[1000px] mx-auto px-6 pb-24">
-        <span className="font-mono text-[11px] font-bold text-[#7C6BFF] tracking-[1.5px] uppercase block mb-4">Why Funnl</span>
-        <h2 className="font-display font-bold text-[30px] tracking-[-0.5px] text-[#F5F3FA] m-0 mb-8">Designed for this problem, not retrofitted.</h2>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-          {/* Spreadsheet */}
-          <div className="border border-[rgba(255,255,255,0.08)] rounded-[18px] p-7 bg-[#0F0D16]">
-            <p className="font-mono text-[11px] font-bold text-[#635D74] tracking-[1px] uppercase m-0 mb-5">Spreadsheet</p>
-            <div className="flex flex-col gap-[14px]">
-              {['Manual follow-up tracking', 'Notes scattered across cells', 'Tags need manual upkeep', 'No networking insights'].map(item => (
-                <div key={item} className="flex items-center gap-[10px]">
-                  <span className="text-[#635D74] text-[13px] flex-none">✕</span>
-                  <span className="text-[13.5px] text-[#9C97AC]">{item}</span>
-                </div>
-              ))}
-            </div>
-          </div>
-          {/* Funnl */}
-          <div
-            className="border border-[rgba(124,107,255,0.35)] rounded-[18px] p-7"
-            style={{ background: 'linear-gradient(160deg, rgba(124,107,255,0.1), rgba(20,18,32,0.4))', boxShadow: '0 0 50px rgba(124,107,255,0.1)' }}
-          >
-            <p className="font-mono text-[11px] font-bold text-[#B4A8FF] tracking-[1px] uppercase m-0 mb-5">Funnl</p>
-            <div className="flex flex-col gap-[14px]">
-              {['Follow-up dashboard (overdue + upcoming)', 'Conversation history per contact', 'Tag and filter effortlessly', 'AI networking insights — Pro'].map(item => (
-                <div key={item} className="flex items-center gap-[10px]">
-                  <span className="text-[#2FD4B6] text-[13px] flex-none">✓</span>
-                  <span className="text-[13.5px] text-[#F5F3FA]">{item}</span>
-                </div>
-              ))}
-            </div>
+        {/* intro block */}
+        <div style={{
+          position: 'absolute', bottom: '6%', left: 0, width: '100%',
+          display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14,
+          opacity: introOpacity, zIndex: 5,
+        }}>
+          <span style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 11, color: '#FF6A3D', letterSpacing: 1.5, textTransform: 'uppercase' }}>Networking, organized</span>
+          <p style={{ fontSize: 16, color: '#C7BFAE', margin: 0, maxWidth: 420, lineHeight: 1.55, textAlign: 'center' }}>Meet people. Remember everything. Follow through.</p>
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, marginTop: 10 }}>
+            <span style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 10, color: '#6B655C', letterSpacing: 1 }}>SCROLL</span>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#6B655C" strokeWidth="2" style={{ animation: 'chevronBob 1.6s ease-in-out infinite' }}><path d="M12 5v14M5 12l7 7 7-7"/></svg>
           </div>
         </div>
-      </section>
+    </>
+  )
+}
 
-      {/* ── Privacy & trust ─────────────────────────────────────────────── */}
-      <section className="relative z-[2] max-w-[1000px] mx-auto px-6 pb-24">
-        <div className="border border-[rgba(255,255,255,0.08)] rounded-[18px] px-9 py-8">
-          <div className="flex items-center gap-[10px] mb-4">
-            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#7C6BFF" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
-            </svg>
-            <span className="font-display font-bold text-[15px] text-[#F5F3FA]">Privacy & trust</span>
-          </div>
-          <p className="text-[13.5px] text-[#9C97AC] leading-[1.75] m-0">
-            Your network data is private to your account and is not sold. Funnl uses Supabase to store your information with per-user access controls. When you choose to use Funnl AI, the relevant network data is securely sent to Anthropic to generate your response. PostHog receives account identifiers and product-usage events, but never your contacts' names, companies, emails, notes, or conversation content.{' '}
-            <Link to="/privacy" className="text-[#B4A8FF] hover:text-[#D6CFFF] transition-colors no-underline">Full privacy policy →</Link>
-          </p>
-        </div>
-      </section>
+function HeroLetter({ ch, idx, t, nat, geo, reduced }) {
+  const vh = window.innerHeight
+  const wStart = 0.14 + idx * 0.09, wDur = 0.26
+  const lt = clamp01((t - wStart) / wDur)
+  const fall = clamp01(lt / 0.6)
+  const dive = clamp01((lt - 0.6) / 0.4)
+  const e = Math.pow(fall, 1.6)
 
-      {/* ── Final CTA ───────────────────────────────────────────────────── */}
-      <section className="relative z-[2] max-w-[1000px] mx-auto mb-24 px-6 text-center">
-        <h2 className="font-display font-bold text-[32px] md:text-[46px] tracking-[-1px] text-[#F5F3FA] m-0 mb-7 leading-[1.15]">
-          Stop losing track<br/>of your network.
-        </h2>
-        <button
-          onClick={() => handleStartFree('bottom')}
-          className="bg-[#7C6BFF] text-[#0A0910] text-[15px] font-bold rounded-full px-[34px] py-4 hover:bg-[#8F80FF] transition-colors cursor-pointer border-0"
-        >
-          Start for free
-        </button>
-        <p className="text-[12.5px] text-[#635D74] mt-5 m-0">Free to start · No credit card · 2 minutes to your first contact</p>
-      </section>
+  let tx = 0, ty = lerp(0, vh * 0.3, e)
+  if (nat && nat.letters[idx]) {
+    const n = nat.letters[idx]
+    tx = (window.innerWidth / 2 - n.x) * e
+    ty = (mouthY(geo) - n.y) * e
+  }
+  ty += easeOut(dive) * Math.max(180, FH * geo.S * 0.35)
+  const rot = (idx % 2 === 0 ? 1 : -1) * 16 * e * (1 - dive)
+  const scale = lerp(1, 0.5, e)
+  const opacity = reduced ? 0 : (lt >= 1 ? 0 : 1)
 
-      {/* ── Footer ──────────────────────────────────────────────────────── */}
-      <footer className="relative z-[2] border-t border-line-2">
-        <div className="max-w-[1160px] mx-auto px-6 py-6 flex items-center justify-between gap-4 flex-wrap">
-          <span className="text-[12.5px] text-[#635D74]">© 2026 Funnl</span>
-          <Link to="/privacy" className="text-[12.5px] text-[#635D74] hover:text-[#9C97AC] transition-colors no-underline">
-            Privacy Policy
-          </Link>
-        </div>
-      </footer>
+  return (
+    <span data-fl={idx} style={{
+      display: 'inline-block',
+      fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700,
+      fontSize: 'min(18vw,190px)', lineHeight: 0.85, letterSpacing: '-6px',
+      color: '#F7F2E7',
+      transform: `translate(${tx}px,${ty}px) rotate(${rot}deg) scale(${scale})`,
+      opacity, willChange: 'transform',
+    }}>{ch}</span>
+  )
+}
 
+function HeroCard({ card, j, t, nat, geo, reduced }) {
+  const wStart = 0.76 + j * 0.055, wDur = 0.13
+  const lt = clamp01((t - wStart) / wDur)
+  const e = easeOut(lt)
+  let tx = 0, ty = (1 - e) * -120
+  if (nat && nat.cards[j]) {
+    const n = nat.cards[j]
+    tx = (window.innerWidth / 2 - n.x) * (1 - e)
+    ty = (spoutY(geo) + 10 - n.y) * (1 - e)
+  }
+  const opacity = reduced ? 1 : clamp01(lt * 2.5)
+
+  return (
+    <div data-fc={j} style={{
+      display: 'flex', alignItems: 'center', gap: 10,
+      background: '#F7F2E7', borderRadius: 14, padding: '12px 16px',
+      boxShadow: '0 16px 40px rgba(0,0,0,0.45)',
+      opacity,
+      transform: `translate(${tx}px,${ty}px) scale(${lerp(0.55, 1, e)})`,
+      willChange: 'transform,opacity',
+    }}>
+      <div style={{
+        width: 34, height: 34, borderRadius: 9, background: card.grad,
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700,
+        fontSize: 11.5, color: '#F7F2E7', flexShrink: 0,
+      }}>{card.initials}</div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+        <span style={{ fontSize: 13, fontWeight: 600, color: '#14110F', whiteSpace: 'nowrap' }}>{card.name}</span>
+        <span style={{ fontSize: 11, color: '#6B655C', whiteSpace: 'nowrap' }}>{card.role}</span>
+      </div>
+      <span style={{
+        fontFamily: "'JetBrains Mono',monospace", fontSize: 9, color: '#D6330F',
+        border: '1px solid rgba(214,51,15,0.35)', borderRadius: 999,
+        padding: '3px 8px', flexShrink: 0, marginLeft: 4,
+      }}>{card.tag}</span>
     </div>
   )
 }
 
-export default LandingPage
+// ─── TypedSection ─────────────────────────────────────────────────────────────
+function TypedSection({ reduced }) {
+  const ref = useRef(null)
+  const [text, setText] = useState('')
+  const started = useRef(false)
+  const timers = useRef([])
+  const setTextRef = useRef(setText)
+  setTextRef.current = setText
+
+  useEffect(() => {
+    if (reduced) { setText(SENTENCES[2]); return }
+
+    function later(fn, ms) { const id = setTimeout(fn, ms); timers.current.push(id) }
+    function runTyped(si) {
+      const str = SENTENCES[si]; let n = 0
+      function typeNext() {
+        n++; setTextRef.current(str.slice(0, n))
+        if (n < str.length) later(typeNext, 52)
+        else later(() => deleteTyped(si), 1600)
+      }
+      typeNext()
+    }
+    function deleteTyped(si) {
+      const str = SENTENCES[si]; let n = str.length
+      function delNext() {
+        n--; setTextRef.current(str.slice(0, n))
+        if (n > 0) later(delNext, 24)
+        else later(() => runTyped((si + 1) % SENTENCES.length), 350)
+      }
+      delNext()
+    }
+
+    const io = new IntersectionObserver(entries => {
+      if (entries[0].isIntersecting && !started.current) {
+        started.current = true
+        runTyped(0)
+        io.disconnect()
+      }
+    }, { threshold: 0.45 })
+    if (ref.current) io.observe(ref.current)
+    const t = timers.current
+    return () => { io.disconnect(); t.forEach(clearTimeout) }
+  }, [reduced])
+
+  return (
+    <section ref={ref} style={{
+      position: 'relative', minHeight: '100vh',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+      overflow: 'hidden', background: '#14110F',
+    }}>
+      <span style={{
+        position: 'absolute', top: '50%', left: '50%',
+        transform: 'translate(-50%,-50%)',
+        fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700,
+        fontSize: '34vw', letterSpacing: '-1.5vw',
+        color: 'rgba(247,242,231,0.05)', filter: 'blur(5px)',
+        whiteSpace: 'nowrap', pointerEvents: 'none', userSelect: 'none',
+      }}>FUNNL</span>
+      <p style={{
+        position: 'relative',
+        fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700,
+        fontSize: 'clamp(30px,5.5vw,72px)', letterSpacing: '-2px',
+        color: '#F7F2E7', margin: 0, textAlign: 'center',
+        maxWidth: 1000, padding: '0 24px', lineHeight: 1.08,
+        minHeight: '2.2em',
+      }}>
+        {text}
+        <span style={{
+          display: 'inline-block', width: '0.08em', height: '0.9em',
+          background: '#FF4423', verticalAlign: '-0.1em', marginLeft: 6,
+          animation: 'caretBlink 0.9s step-end infinite',
+        }} />
+      </p>
+    </section>
+  )
+}
+
+// ─── reveal hook ─────────────────────────────────────────────────────────────
+function useReveal(reduced) {
+  const ref = useRef(null)
+  const [revealed, setRevealed] = useState(false)
+  useEffect(() => {
+    if (reduced) { setRevealed(true); return }
+    const io = new IntersectionObserver(entries => {
+      if (entries[0].isIntersecting) { setRevealed(true); io.disconnect() }
+    }, { threshold: 0.45 })
+    if (ref.current) io.observe(ref.current)
+    return () => io.disconnect()
+  }, [reduced])
+  return [ref, revealed]
+}
+
+// ─── TimelineSection ──────────────────────────────────────────────────────────
+function TimelineSection({ reduced }) {
+  const [ref, revealed] = useReveal(reduced)
+  const rv = revealed ? '1' : '0'
+  const base = {
+    opacity: rv === '0' ? 0 : 1,
+    transform: rv === '0' ? 'translateY(34px)' : 'none',
+    transition: 'opacity .8s cubic-bezier(.22,1,.36,1), transform .8s cubic-bezier(.22,1,.36,1)',
+  }
+  const r = (delay) => ({ ...base, transitionDelay: delay })
+
+  return (
+    <section id="timeline" ref={ref} style={{
+      position: 'relative', minHeight: '100vh',
+      display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+      padding: '140px 24px', background: '#0F0D0B',
+    }}>
+      <span style={{ ...r('0s'), fontFamily: "'JetBrains Mono',monospace", fontSize: 11, color: '#FF6A3D', letterSpacing: 2, textTransform: 'uppercase', marginBottom: 20 }}>Every interaction, remembered</span>
+      <h2 style={{ ...r('.12s'), fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 'clamp(38px,6.5vw,80px)', letterSpacing: '-2.5px', textAlign: 'center', margin: '0 0 56px', lineHeight: 1.0, color: '#F7F2E7' }}>The conversation,<br/>not just the name.</h2>
+      <div style={{ ...r('.24s'), maxWidth: 560, width: '100%', background: '#1C1815', border: '1px solid rgba(247,242,231,0.08)', borderRadius: 22, padding: 32, boxShadow: '0 40px 100px rgba(0,0,0,0.5)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 26 }}>
+          <div style={{ width: 44, height: 44, borderRadius: 12, background: 'linear-gradient(135deg,#FF6A3D,#D6330F)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 14, color: '#14110F', flexShrink: 0 }}>PS</div>
+          <div style={{ flex: 1 }}>
+            <p style={{ margin: 0, fontWeight: 600, fontSize: 15, color: '#F7F2E7' }}>Priya Sharma</p>
+            <p style={{ margin: 0, fontSize: 12, color: '#6B655C' }}>Analyst · Goldman Sachs</p>
+          </div>
+          <span style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 9.5, color: '#FF6A3D', letterSpacing: 1 }}>RECRUITER</span>
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column' }}>
+          <TlRow delay=".12s" rv={rv} label="MAY 3 · MET" labelColor="#6B655C" text="IU finance club panel — intro after her talk." textColor="#C7BFAE" border />
+          <TlRow delay=".24s" rv={rv} label="JUN 8 · COFFEE CHAT" labelColor="#6B655C" text="Analyst program still has open slots." textColor="#C7BFAE" border />
+          <TlRow delay=".36s" rv={rv} label="JUL 22 · FOLLOW UP" labelColor="#E8A93B" labelBold text="Ask about second-round timing." textColor="#F7F2E7" />
+        </div>
+      </div>
+    </section>
+  )
+}
+
+function TlRow({ delay, rv, label, labelColor, labelBold, text, textColor, border }) {
+  const base = {
+    opacity: rv === '0' ? 0 : 1,
+    transform: rv === '0' ? 'translateY(34px)' : 'none',
+    transition: `opacity .8s cubic-bezier(.22,1,.36,1) ${delay}, transform .8s cubic-bezier(.22,1,.36,1) ${delay}`,
+  }
+  return (
+    <div style={{ ...base, display: 'flex', gap: 14, paddingBottom: border ? 22 : 0, borderLeft: '2px solid rgba(255,106,61,0.35)', paddingLeft: 18, marginLeft: 6 }}>
+      <div>
+        <span style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 10, color: labelColor, fontWeight: labelBold ? 600 : 400 }}>{label}</span>
+        <p style={{ margin: '4px 0 0', fontSize: 13.5, color: textColor }}>{text}</p>
+      </div>
+    </div>
+  )
+}
+
+// ─── PrioritySection ──────────────────────────────────────────────────────────
+const PRIORITY_ROWS = [
+  { name: 'James Kim',   status: '2 DAYS OVERDUE',     color: '#E85D75', bg: 'rgba(232,93,117,0.1)',  border: 'rgba(232,93,117,0.35)' },
+  { name: 'Priya Sharma',status: 'FOLLOW UP TODAY',    color: '#E8A93B', bg: 'rgba(232,169,59,0.08)', border: 'rgba(232,169,59,0.3)' },
+  { name: 'Marcus Lee',  status: 'AWAITING RESPONSE',  color: '#C7A96B', bg: 'rgba(232,169,59,0.05)', border: 'rgba(232,169,59,0.18)' },
+  { name: 'Alex Chen',   status: 'RESPONDED JUL 4',    color: '#4F9A73', bg: 'rgba(79,154,115,0.07)', border: 'rgba(79,154,115,0.22)', opacity: 0.9 },
+]
+const DOT_COLORS = ['#E85D75','#E8A93B','#E8A93B','#4F9A73']
+const DOT_OPACITIES = [1,1,0.6,1]
+
+function PrioritySection({ reduced }) {
+  const [ref, revealed] = useReveal(reduced)
+  const rv = revealed ? '1' : '0'
+  const base = (delay) => ({
+    opacity: rv === '0' ? 0 : 1,
+    transform: rv === '0' ? 'translateY(34px)' : 'none',
+    transition: `opacity .8s cubic-bezier(.22,1,.36,1) ${delay}, transform .8s cubic-bezier(.22,1,.36,1) ${delay}`,
+  })
+  return (
+    <section id="priority" ref={ref} style={{ position: 'relative', minHeight: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '140px 24px', background: '#14110F' }}>
+      <span style={{ ...base('0s'), fontFamily: "'JetBrains Mono',monospace", fontSize: 11, color: '#FF6A3D', letterSpacing: 2, textTransform: 'uppercase', marginBottom: 20 }}>Follow-ups, sorted</span>
+      <h2 style={{ ...base('.12s'), fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 'clamp(38px,6.5vw,80px)', letterSpacing: '-2.5px', textAlign: 'center', margin: '0 0 56px', lineHeight: 1.0, color: '#F7F2E7' }}>Always know<br/>who's next.</h2>
+      <div style={{ ...base('.24s'), maxWidth: 520, width: '100%', display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {PRIORITY_ROWS.map((row, i) => (
+          <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 12, background: row.bg, border: `1px solid ${row.border}`, borderRadius: 12, padding: '16px 20px', opacity: row.opacity ?? 1 }}>
+            <span style={{ width: 8, height: 8, borderRadius: '50%', background: DOT_COLORS[i], flexShrink: 0, opacity: DOT_OPACITIES[i] }} />
+            <div style={{ flex: 1 }}><p style={{ margin: 0, fontSize: 14, fontWeight: 600, color: '#F7F2E7' }}>{row.name}</p></div>
+            <span style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 10.5, color: row.color, fontWeight: 600 }}>{row.status}</span>
+          </div>
+        ))}
+      </div>
+    </section>
+  )
+}
+
+// ─── AISection ────────────────────────────────────────────────────────────────
+const AIQ_WORDS = AIQ.split(' ')
+
+function AISection({ reduced }) {
+  const ref = useRef(null)
+  const [revealed, setRevealed] = useState(false)
+  const [aiWords, setAiWords] = useState(0)
+  const [aiDone, setAiDone] = useState(false)
+  const started = useRef(false)
+  const timers = useRef([])
+  const later = (fn, ms) => { const id = setTimeout(fn, ms); timers.current.push(id) }
+
+  useEffect(() => {
+    if (reduced) { setRevealed(true); setAiWords(AIQ_WORDS.length); setAiDone(true); return }
+    const io = new IntersectionObserver(entries => {
+      if (entries[0].isIntersecting) {
+        setRevealed(true)
+        if (!started.current) {
+          started.current = true
+          let n = 0
+          const next = () => {
+            n++
+            setAiWords(n)
+            if (n < AIQ_WORDS.length) later(next, 60)
+            else later(() => setAiDone(true), 500)
+          }
+          later(next, 500)
+        }
+        io.disconnect()
+      }
+    }, { threshold: 0.45 })
+    if (ref.current) io.observe(ref.current)
+    const t = timers.current
+    return () => { io.disconnect(); t.forEach(clearTimeout) }
+  }, [reduced]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const rv = revealed ? '1' : '0'
+  const baseR = (delay) => ({
+    opacity: rv === '0' ? 0 : 1,
+    transform: rv === '0' ? 'translateY(34px)' : 'none',
+    transition: `opacity .8s cubic-bezier(.22,1,.36,1) ${delay}, transform .8s cubic-bezier(.22,1,.36,1) ${delay}`,
+  })
+  const baseA = (delay) => ({
+    opacity: aiDone || reduced ? 1 : 0,
+    transform: aiDone || reduced ? 'none' : 'translateY(18px)',
+    transition: `opacity .7s ease ${delay}, transform .7s cubic-bezier(.22,1,.36,1) ${delay}`,
+  })
+
+  const chipStyle = { fontFamily: "'JetBrains Mono',monospace", fontSize: 8.5, color: '#52504B', background: 'rgba(20,17,15,0.06)', borderRadius: 4, padding: '2px 7px' }
+  const chipGreen = { fontFamily: "'JetBrains Mono',monospace", fontSize: 8.5, color: '#2E7D5B', background: 'rgba(46,125,91,0.12)', borderRadius: 4, padding: '2px 7px' }
+  const chipWarn  = { fontFamily: "'JetBrains Mono',monospace", fontSize: 8.5, color: '#A56A00', background: 'rgba(232,169,59,0.15)', borderRadius: 4, padding: '2px 7px' }
+
+  const isMobile = typeof window !== 'undefined' && window.innerWidth < 768
+
+  return (
+    <section id="ai" ref={ref} style={{ position: 'relative', minHeight: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '120px 24px', background: '#F7F2E7', color: '#14110F' }}>
+      <span style={{ ...baseR('0s'), fontFamily: "'JetBrains Mono',monospace", fontSize: 11, color: '#D6330F', letterSpacing: 2, textTransform: 'uppercase', marginBottom: 20 }}>Funnl AI</span>
+      <h2 style={{ ...baseR('.12s'), fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 'clamp(38px,6.5vw,80px)', letterSpacing: '-2.5px', textAlign: 'center', margin: '0 0 52px', lineHeight: 1.0, color: '#14110F' }}>Ask your network<br/>anything.</h2>
+      <div style={{ ...baseR('.24s'), width: '100%', maxWidth: 1100, aspectRatio: '16/10', background: '#14110F', borderRadius: 18, padding: 'clamp(8px,1.2vw,14px)', boxShadow: '0 50px 120px rgba(20,17,15,0.4)', boxSizing: 'border-box' }}>
+        <div style={{ width: '100%', height: '100%', background: '#F7F2E7', borderRadius: 10, display: 'flex', overflow: 'hidden' }}>
+          {/* sidebar */}
+          {!isMobile && (
+            <div style={{ width: 168, background: '#EFE9DC', borderRight: '1px solid rgba(20,17,15,0.07)', display: 'flex', flexDirection: 'column', flexShrink: 0 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '16px 16px 20px' }}>
+                <div style={{ width: 20, height: 20, borderRadius: 6, background: '#FF4423', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none"><path d="M3 4H21L15 12.5V20H9V12.5Z" fill="#F7F2E7"/></svg>
+                </div>
+                <span style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 13, color: '#14110F' }}>Funnl</span>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 2, padding: '0 10px' }}>
+                {['Dashboard','Contacts','Follow-ups'].map(item => (
+                  <span key={item} style={{ fontSize: 12.5, color: '#6B655C', padding: '8px 10px', borderRadius: 8 }}>{item}</span>
+                ))}
+                <span style={{ fontSize: 12.5, color: '#F7F2E7', background: '#FF4423', fontWeight: 600, padding: '8px 10px', borderRadius: 8 }}>Funnl AI</span>
+              </div>
+            </div>
+          )}
+          {/* main */}
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '12px 20px', borderBottom: '1px solid rgba(20,17,15,0.08)' }}>
+              <span style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 13, color: '#14110F' }}>Funnl AI</span>
+              <span style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 8.5, color: '#F7F2E7', background: '#14110F', borderRadius: 4, padding: '2px 6px' }}>PRO</span>
+            </div>
+            <div style={{ flex: 1, padding: 'clamp(14px,2vw,24px)', display: 'flex', flexDirection: 'column', gap: 14, overflow: 'hidden' }}>
+              {/* question bubble */}
+              <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+                <div style={{ background: '#FF4423', color: '#F7F2E7', fontSize: 12.5, fontWeight: 500, lineHeight: 1.5, padding: '12px 16px', borderRadius: '14px 14px 3px 14px', maxWidth: '78%', minHeight: '1.3em' }}>
+                  {AIQ_WORDS.slice(0, aiWords).join(' ')}
+                  {!aiDone && aiWords > 0 && (
+                    <span style={{ display: 'inline-block', width: 2, height: '1em', background: '#F7F2E7', verticalAlign: '-0.15em', marginLeft: 3 }} />
+                  )}
+                </div>
+              </div>
+              {/* status line */}
+              <div style={{ ...baseA('0s'), fontFamily: "'JetBrains Mono',monospace", fontSize: 10.5, color: '#6B655C' }}>SEARCHING 34 CONTACTS · 5 AT GOLDMAN SACHS · GROUPING BY HOW YOU MET…</div>
+              {/* group card 1 */}
+              <div style={{ ...baseA('.3s'), background: '#FFFFFF', border: '1px solid rgba(20,17,15,0.08)', borderRadius: 12, padding: '13px 16px', boxShadow: '0 4px 14px rgba(20,17,15,0.04)' }}>
+                <p style={{ margin: '0 0 8px', fontFamily: "'JetBrains Mono',monospace", fontSize: 9, color: '#6B655C', letterSpacing: 1 }}>MET AT CAMPUS EVENTS</p>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                  <span style={{ fontSize: 13, fontWeight: 600, color: '#14110F' }}>Alex Rivera</span>
+                  <span style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 8.5, color: '#F7F2E7', background: '#D6330F', borderRadius: 4, padding: '2px 7px' }}>6 DAYS OVERDUE</span>
+                  <span style={chipStyle}>IB analyst</span>
+                  <span style={chipStyle}>IU finance panel</span>
+                  <span style={chipGreen}>responded ✓</span>
+                </div>
+                <p style={{ margin: '8px 0 0', fontSize: 12, color: '#52504B' }}>Reply to his June note and ask for a 15-minute call before applications open.</p>
+              </div>
+              {/* group card 2 */}
+              <div style={{ ...baseA('.9s'), background: '#FFFFFF', border: '1px solid rgba(20,17,15,0.08)', borderRadius: 12, padding: '13px 16px', boxShadow: '0 4px 14px rgba(20,17,15,0.04)' }}>
+                <p style={{ margin: '0 0 8px', fontFamily: "'JetBrains Mono',monospace", fontSize: 9, color: '#6B655C', letterSpacing: 1 }}>ALUMNI INTROS</p>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                  <span style={{ fontSize: 13, fontWeight: 600, color: '#14110F' }}>Priya Sharma</span>
+                  <span style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 8.5, color: '#14110F', background: '#E8A93B', borderRadius: 4, padding: '2px 7px' }}>DUE TODAY</span>
+                  <span style={chipStyle}>IB associate</span>
+                  <span style={chipStyle}>coffee chat Jun 8</span>
+                  <span style={chipWarn}>awaiting response</span>
+                </div>
+                <p style={{ margin: '8px 0 0', fontSize: 12, color: '#52504B' }}>Follow up on second-round timing from your June coffee chat.</p>
+              </div>
+              {/* group card 3 */}
+              <div style={{ ...baseA('1.5s'), background: '#FFFFFF', border: '1px solid rgba(20,17,15,0.08)', borderRadius: 12, padding: '13px 16px', boxShadow: '0 4px 14px rgba(20,17,15,0.04)' }}>
+                <p style={{ margin: '0 0 8px', fontFamily: "'JetBrains Mono',monospace", fontSize: 9, color: '#6B655C', letterSpacing: 1 }}>CLUB CONNECTIONS</p>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                  <span style={{ fontSize: 13, fontWeight: 600, color: '#14110F' }}>Marcus Lee</span>
+                  <span style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 8.5, color: '#F7F2E7', background: '#6B655C', borderRadius: 4, padding: '2px 7px' }}>NO DATE SET</span>
+                  <span style={chipStyle}>IB VP</span>
+                  <span style={chipStyle}>last spoke 41d</span>
+                  <span style={chipWarn}>no follow-up set</span>
+                </div>
+                <p style={{ margin: '8px 0 0', fontSize: 12, color: '#52504B' }}>Set a follow-up date and reconnect before recruiting season starts.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  )
+}
+
+// ─── CTASection ───────────────────────────────────────────────────────────────
+function CTASection({ onStart, reduced }) {
+  const [ref, revealed] = useReveal(reduced)
+  const rv = revealed ? '1' : '0'
+  const r = (delay) => ({
+    opacity: rv === '0' ? 0 : 1,
+    transform: rv === '0' ? 'translateY(34px)' : 'none',
+    transition: `opacity .8s cubic-bezier(.22,1,.36,1) ${delay}, transform .8s cubic-bezier(.22,1,.36,1) ${delay}`,
+  })
+  const [hovP, setHovP] = useState(false)
+  const [hovS, setHovS] = useState(false)
+
+  return (
+    <section id="cta" ref={ref} style={{ position: 'relative', minHeight: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '120px 24px', background: '#14110F' }}>
+      <div style={{ ...r('0s'), position: 'relative', width: 100, height: 118, marginBottom: 30, filter: 'drop-shadow(0 0 28px rgba(255,68,35,0.4))' }}>
+        <div style={{ position: 'absolute', inset: 0, background: 'conic-gradient(from 180deg,#FF4423,#D6330F,#FF4423)', clipPath: 'polygon(0% 0%,100% 0%,62% 58%,62% 100%,38% 100%,38% 58%)' }} />
+      </div>
+      <h2 style={{ ...r('.12s'), fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 'clamp(34px,6vw,72px)', letterSpacing: '-2.5px', textAlign: 'center', margin: '0 0 26px', maxWidth: 800, lineHeight: 1.02, color: '#F7F2E7' }}>Build the network<br/>that builds your career.</h2>
+      <div style={{ ...r('.24s'), display: 'flex', gap: 16, flexWrap: 'wrap', justifyContent: 'center' }}>
+        <button
+          onClick={onStart}
+          onMouseEnter={() => setHovP(true)} onMouseLeave={() => setHovP(false)}
+          style={{ background: '#FF4423', color: '#14110F', fontSize: 14.5, fontWeight: 700, border: 0, borderRadius: 10, padding: '16px 30px', cursor: 'pointer', transform: hovP ? 'scale(1.04)' : 'scale(1)', transition: 'transform .2s ease' }}
+        >Start building your Funnl</button>
+        <button
+          onClick={() => document.getElementById('timeline')?.scrollIntoView({ behavior: 'smooth' })}
+          onMouseEnter={() => setHovS(true)} onMouseLeave={() => setHovS(false)}
+          style={{ background: 'transparent', color: '#F7F2E7', fontSize: 14.5, fontWeight: 600, border: `1px solid ${hovS ? 'rgba(247,242,231,0.5)' : 'rgba(247,242,231,0.25)'}`, borderRadius: 10, padding: '16px 30px', cursor: 'pointer', transform: hovS ? 'scale(1.04)' : 'scale(1)', transition: 'transform .2s ease, border-color .2s ease' }}
+        >See how it works</button>
+      </div>
+      <p style={{ ...r('.36s'), fontSize: 12.5, color: '#6B655C', marginTop: 24 }}>Free to start · No credit card · 2 minutes to your first contact</p>
+    </section>
+  )
+}
+
+// ─── Footer ───────────────────────────────────────────────────────────────────
+function Footer() {
+  return (
+    <footer style={{ borderTop: '1px solid rgba(247,242,231,0.08)' }}>
+      <div style={{ maxWidth: 1240, margin: '0 auto', padding: '24px 28px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap' }}>
+        <span style={{ fontSize: 12.5, color: '#6B655C' }}>© 2026 Funnl</span>
+        <Link to="/privacy" style={{ fontSize: 12.5, color: '#6B655C', textDecoration: 'none' }}>Privacy Policy</Link>
+      </div>
+    </footer>
+  )
+}
+
+// ─── LandingPage (root) ───────────────────────────────────────────────────────
+export default function LandingPage() {
+  const navigate = useNavigate()
+  const [progress, setProgress] = useState(0)
+  const [navScrolled, setNavScrolled] = useState(false)
+  const [reduced, setReduced] = useState(false)
+  const [isMobile, setIsMobile] = useState(false)
+  const heroRef = useRef(null)
+  const natRef = useRef(null)
+  const rafRef = useRef(null)
+
+  function handleStart() {
+    track('landing_cta_clicked', { location: 'bottom' })
+    navigate('/signup')
+  }
+  function handleNavStart() {
+    track('landing_cta_clicked', { location: 'nav' })
+    navigate('/signup')
+  }
+
+  const measure = useCallback(() => {
+    if (progress > 0.05) return
+    const letterEls = Array.from(document.querySelectorAll('[data-fl]'))
+    const cardEls   = Array.from(document.querySelectorAll('[data-fc]'))
+    if (letterEls.length < 5) return
+    natRef.current = {
+      letters: letterEls.map(el => { const r = el.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 } }),
+      cards:   cardEls.map(el =>   { const r = el.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 } }),
+      homeBottom: Math.max(...letterEls.map(el => el.getBoundingClientRect().bottom)),
+    }
+  }, [progress])
+
+  useEffect(() => {
+    const mq = window.matchMedia('(prefers-reduced-motion: reduce)')
+    setReduced(mq.matches)
+    setIsMobile(window.innerWidth < 768)
+    if (mq.matches) return
+
+    const onScroll = () => {
+      if (rafRef.current) return
+      rafRef.current = requestAnimationFrame(() => {
+        rafRef.current = null
+        const el = heroRef.current
+        if (el) {
+          const rect = el.getBoundingClientRect()
+          const total = rect.height - window.innerHeight
+          const t = total > 0 ? Math.max(0, Math.min(1, -rect.top / total)) : 0
+          setProgress(t)
+          setNavScrolled(window.scrollY > 40)
+        }
+      })
+    }
+    const onResize = () => {
+      setIsMobile(window.innerWidth < 768)
+      measure()
+    }
+
+    window.addEventListener('scroll', onScroll, { passive: true })
+    window.addEventListener('resize', onResize)
+    requestAnimationFrame(() => { measure(); onScroll() })
+
+    return () => {
+      window.removeEventListener('scroll', onScroll)
+      window.removeEventListener('resize', onResize)
+      if (rafRef.current) cancelAnimationFrame(rafRef.current)
+    }
+  }, [measure])
+
+  // re-measure after first render so nat is populated
+  useEffect(() => { measure() }, [measure])
+
+  return (
+    <div style={{ background: '#14110F', fontFamily: "'Plus Jakarta Sans',sans-serif", color: '#F7F2E7', overflow: 'clip' }}>
+      <style>{`
+        @keyframes chevronBob { 0%,100%{transform:translateY(0)} 50%{transform:translateY(6px)} }
+        @keyframes caretBlink { 0%,49%{opacity:1} 50%,100%{opacity:0} }
+        a { color: #FF6A3D; text-decoration: none; }
+        a:hover { color: #FFA37A; }
+        ::selection { background: #FF4423; color: #14110F; }
+        html { scroll-behavior: smooth; }
+        @media (prefers-reduced-motion: reduce) {
+          [data-hero-anim] { transition: none !important; }
+        }
+      `}</style>
+
+      <NavBar scrolled={navScrolled} onStart={handleNavStart} />
+
+      {/* Hero scroll wrapper — heroRef measures scroll progress */}
+      <div ref={heroRef} style={{ position: 'relative', height: reduced ? 'auto' : (isMobile ? '300vh' : '520vh') }}>
+        <div style={{
+          position: reduced ? 'relative' : 'sticky', top: 0,
+          height: reduced ? 'auto' : '100vh', minHeight: '100vh',
+          width: '100%', overflow: 'hidden', boxSizing: 'border-box',
+        }}>
+          <HeroSection t={progress} nat={natRef.current} reduced={reduced} />
+        </div>
+      </div>
+
+      <TypedSection reduced={reduced} />
+      <TimelineSection reduced={reduced} />
+      <PrioritySection reduced={reduced} />
+      <AISection reduced={reduced} />
+      <CTASection onStart={handleStart} reduced={reduced} />
+      <Footer />
+    </div>
+  )
+}
