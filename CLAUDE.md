@@ -77,6 +77,7 @@ src/
     analytics.js           PostHog wrapper: initAnalytics(), identifyUser(), track(), resetAnalytics(), trackError(error)
     csvHeaderDetect.js     Pure CSV header-detection utilities (no React/Supabase deps — safe to import in Node test files). Exports: normalizeHeader, HEADER_MAP, scoreHeaderRow, detectHeaderRow (two-pass; scans first 30 rows, returns -1 if no valid header found), isLinkedInExport (checks for First Name + Last Name + Connected On), buildInitialAssignment. Used by ImportContactsModal.jsx and tests/csv-header-detect.test.js.
     pro-trial-helpers.js   Pure Pro trial helpers (no React/Supabase deps — safe to import in Node test files). Exports: isTrialActive(trial, now), computeTrialStatus(trial, now). Used by ai.js (which re-exports them) and tests/pro-trial.test.js.
+    pro-access-status.js   Frontend wrapper for get_my_pro_access_status() RPC. Export: getProAccessStatus() → server-authoritative status object or null on error. Used by ai.js, Sidebar, FunnlAIPage, SettingsPage, WelcomePage. Never call new Date() for access decisions — use this instead.
 tests/
   csv-header-detect.test.js  27 zero-dependency Node.js tests for csvHeaderDetect.js. Run with: node tests/csv-header-detect.test.js. Covers fixtures A–F (LinkedIn preamble, clean CSV, BOM, misleading preamble, value whitespace, unrecognizable file) plus edge cases.
   App.jsx                  Auth gating, shared layout (Sidebar + main + BottomNav), all routes
@@ -234,7 +235,16 @@ supabase/
 - `supabase/migrations/20260713075431_add_activation_milestones.sql` — adds the four activation timestamp columns above to `profiles`, with backfill SQL for existing users. Applied to production 2026-07-13.
 - `supabase/migrations/20260713185900_harden_handle_new_user.sql` — revokes EXECUTE on `public.handle_new_user()` from `PUBLIC`, `anon`, and `authenticated`. Applied to production 2026-07-13 via `supabase db push`. Post-migration verification: PUBLIC absent from explicit ACL; `anon` and `authenticated` effective execute = false; trigger `on_auth_user_created` still enabled; function owner, SECURITY DEFINER, and search_path unchanged. Requires a real signup/profile creation test to confirm trigger path is unaffected.
 - `supabase/migrations/20260721000000_add_outreach_status.sql` — adds nullable `outreach_status text` column to `public.interactions` with named CHECK constraint `interactions_outreach_status_check` (five allowed values). Applied to production 2026-07-24 via `supabase db push --linked`. Column verified: text, nullable YES, no default. Constraint verified: correct five-value check, NULL permitted. Existing 5 interaction rows unaffected (all `outreach_status = NULL`). RLS and all four ownership policies verified unchanged.
-- `supabase/migrations/20260727000000_add_pro_trials.sql` — creates `public.pro_trials` table with RLS, updates `handle_new_user()` to also create a trial eligibility row on signup, and creates the `start_my_pro_trial()` SECURITY DEFINER RPC. **NOT YET APPLIED to production** — branch `review/pro-trial-7-days`, Draft PR pending. Do not apply without explicit approval.
+- `supabase/migrations/20260727000000_add_pro_trials.sql` — creates `public.pro_trials` table with explicit REVOKE/GRANT hardening (no INSERT/UPDATE/DELETE for authenticated), updates `handle_new_user()` to also create a trial eligibility row on signup (auto-confirmed accounts start trial immediately; normal flow starts with NULL/NULL), adds `on_email_confirmed` DB trigger (`AFTER UPDATE OF email_confirmed_at ON auth.users`) that activates the trial on the NULL→non-NULL transition, and creates two RPCs: `start_my_pro_trial()` (SECURITY DEFINER, recovery mechanism only) and `get_my_pro_access_status()` (SECURITY INVOKER, server-authoritative entitlement using DB clock). All functions use `SET search_path = ''` with fully qualified object names. **NOT YET APPLIED to production** — branch `review/pro-trial-7-days`, Draft PR #23 pending. Do not apply without explicit approval.
+
+**Pro trial production rollout order (do not deviate):**
+  1. Apply only this migration: `supabase db push --linked` (verify one pending migration first with `supabase migration list --linked`)
+  2. Run verification checklist in migration file comments (table, RLS, ACL, triggers, functions, sign-up test)
+  3. Deploy all four AI Edge Functions (ai-chat, ai-parse-contact, ai-map-csv, ai-categorize-contacts) — they now query `pro_trials` via shared helper
+  4. Merge the frontend PR into main; wait for Vercel READY
+  5. Test: new signup → email confirmation → trial active, AI access works
+  6. Test: existing permanent-Pro users (`ai_enabled=true`) still have access; badge shows PRO not DAYS LEFT
+  **Never deploy frontend before migration is applied — `get_my_pro_access_status()` RPC does not exist until migration runs.**
 
 The original schema (contacts, interactions, profiles, RLS policies, triggers) was created manually in Supabase before the migration system was set up — no baseline migration file exists for it (known limitation).
 
@@ -251,22 +261,34 @@ RLS: UPDATE policy prevents users from changing `ai_enabled` on their own row. T
 | Column | Type | Notes |
 |---|---|---|
 | `user_id` | uuid | PK, FK → auth.users ON DELETE CASCADE |
-| `started_at` | timestamptz | Nullable — NULL until email confirmed and WelcomePage calls `start_my_pro_trial()` |
+| `started_at` | timestamptz | Nullable — NULL until email confirmed (set by `on_email_confirmed` trigger or recovery RPC) |
 | `ends_at` | timestamptz | Nullable — NULL until started; always = started_at + 7 days when set |
 | `created_at` | timestamptz | Auto-set on INSERT |
 
 **Trial active when:** `started_at IS NOT NULL AND ends_at IS NOT NULL AND now() < ends_at`  
-**Effective Pro =** `profiles.ai_enabled = true` (permanent) **OR** active trial — checked in parallel in all Pro gates.  
-**Constraint:** `pro_trials_dates_consistent` — both NULL or both set, ends_at > started_at.  
-**RLS:** SELECT only for authenticated (`auth.uid() = user_id`). No INSERT/UPDATE/DELETE for authenticated — all writes go through SECURITY DEFINER functions.
+**Effective Pro =** `profiles.ai_enabled = true` (permanent) **OR** active trial — checked by the shared helper.  
+**Constraint:** `pro_trials_dates_consistent` — both NULL (eligible) or both set (started/expired), ends_at > started_at.  
+**RLS:** SELECT only for authenticated using `(SELECT auth.uid()) = user_id` subquery form. `REVOKE ALL FROM PUBLIC, anon`; `REVOKE INSERT/UPDATE/DELETE FROM authenticated`. All writes go through SECURITY DEFINER functions only.
 
-**`start_my_pro_trial()` RPC** — SECURITY DEFINER, callable by authenticated only. Guards: caller must be authenticated + email_confirmed_at IS NOT NULL in auth.users. Atomic UPDATE with `WHERE started_at IS NULL` prevents double-starting. Returns `{ started_now: bool, started_at, ends_at, server_now }`. Called from `WelcomePage.jsx` after email confirmation; fires `pro_trial_started` analytics event only when `started_now = true`.
+**Trial activation paths (in priority order):**
+1. `handle_new_user()` trigger — for auto-confirmed accounts (OAuth, admin-created), starts the trial immediately.
+2. `on_email_confirmed` DB trigger (`AFTER UPDATE OF email_confirmed_at ON auth.users`, function `activate_trial_on_confirmation()`) — primary path for normal signup; fires when `email_confirmed_at` transitions NULL → non-NULL. `WHERE started_at IS NULL` guard prevents resetting an existing trial.
+3. `start_my_pro_trial()` RPC — recovery mechanism only. Called from `WelcomePage.jsx` as fire-and-forget before reading status. Needed only if the trigger fails silently. Idempotent (`WHERE started_at IS NULL` guard).
+
+**`get_my_pro_access_status()` RPC** — SECURITY INVOKER (uses DB clock `now()`, not browser `Date()`). Returns: `permanent_pro, trial_eligible, trial_active, trial_expired, days_remaining, ends_at, server_now, can_use_pro`. Called by: `src/lib/pro-access-status.js` → `src/lib/ai.js` (canUseAI, getTrialStatus), Sidebar, FunnlAIPage, SettingsPage, WelcomePage. Never use browser `new Date()` for access decisions.
+
+**`start_my_pro_trial()` RPC** — SECURITY DEFINER, callable by authenticated only. Guards: caller authenticated + email_confirmed_at IS NOT NULL. Atomic `WHERE started_at IS NULL` guard. Returns `{ started_now, started_at, ends_at, server_now }`. Recovery mechanism — `started_now` value is not used for UI or analytics (use `get_my_pro_access_status()` instead).
+
+**`activate_trial_on_confirmation()` trigger function** — SECURITY DEFINER, executed by `on_email_confirmed` trigger only. `REVOKE EXECUTE FROM PUBLIC, anon, authenticated` — not callable directly.
+
+**Server-side seam** — `supabase/functions/shared/pro-entitlement.js` exports `evaluateProEntitlement(profile, trial, now)` (pure) and `loadProEntitlement(supabaseAdmin, userId)` (DI-injectable). All four Edge Functions import this; no duplicated entitlement code. Stripe-ready: update this file for Layer D.
 
 **Design constraints (permanent — do not change without Naveen's approval):**
 - `ai_enabled` is NEVER set to true for trial users. Trial access is entirely in `pro_trials`.
 - Permanent Pro (`ai_enabled = true`) is preserved regardless of trial state.
 - No backfill of existing users — only accounts created after the migration get a trial row.
-- `src/lib/pro-trial-helpers.js` contains pure `isTrialActive()` and `computeTrialStatus()` functions — no Supabase imports — safe to unit-test in Node.js.
+- Frontend access decisions always use `get_my_pro_access_status()` RPC — never `new Date()` comparisons.
+- `src/lib/pro-trial-helpers.js` contains pure `isTrialActive()` and `computeTrialStatus()` functions — no Supabase imports — safe to unit-test in Node.js. Re-exported from `src/lib/ai.js` for backward compatibility.
 
 ---
 
@@ -1179,6 +1201,8 @@ New module `supabase/functions/ai-chat/providerCall.js` (plain JS, importable fr
 - `tests/ai-chat-conversation.test.js` — 7 new retry-eligibility tests
 
 **Test totals: 453 total across 13 suites (37 csv-header + 62 ai-helpers + 33 theme + 15 parse-provider-response + 43 normalize-messages + 19 ai-chat-error + 72 ai-chat + 28 ai-chat-conversation + 81 ai-chat-provider + 37 sanitize-reply + 9 contact-link-validator + 4 extract-children-text + 13 ai-chat-request-gate)**
+
+After pro-trial Codex corrections (branch `review/pro-trial-7-days`): **481 total across 15 suites** (adds 36 pro-trial + 28 pro-entitlement).
 
 **Deployment status:** Deployed as PR #21 (2026-07-27). Production ai-chat v12. Frontend live at main SHA `030e315`. Rollback: Edge Function — Supabase dashboard → ai-chat → Deployment history → activate version 11.
 
