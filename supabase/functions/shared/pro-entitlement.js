@@ -74,18 +74,32 @@ export function evaluateProEntitlement(profile, trial, now) {
  * }>}
  */
 export async function loadProEntitlement(supabaseAdmin, userId) {
-  const [profileResult, trialResult] = await Promise.all([
-    supabaseAdmin
+  // Each query is individually wrapped so a thrown exception (network error,
+  // SDK bug) is caught and mapped to an error flag rather than rejecting the
+  // returned Promise. Promise.all would propagate the first rejection, breaking
+  // the "never throws" contract that all Edge Function callers depend on.
+
+  let profileResult
+  try {
+    profileResult = await supabaseAdmin
       .from('profiles')
       .select('ai_enabled')
       .eq('id', userId)
-      .maybeSingle(),
-    supabaseAdmin
+      .maybeSingle()
+  } catch (e) {
+    profileResult = { data: null, error: e }
+  }
+
+  let trialResult
+  try {
+    trialResult = await supabaseAdmin
       .from('pro_trials')
       .select('started_at, ends_at')
       .eq('user_id', userId)
-      .maybeSingle(),
-  ])
+      .maybeSingle()
+  } catch (e) {
+    trialResult = { data: null, error: e }
+  }
 
   return {
     profile:           profileResult.data ?? null,
