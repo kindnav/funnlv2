@@ -1,4 +1,5 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+import { loadProEntitlement, evaluateProEntitlement } from '../shared/pro-entitlement.js'
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -43,29 +44,31 @@ Deno.serve(async (req) => {
     }
 
     // ── 2. Check effective Pro access via service-role key (authoritative) ───────
-    // Effective Pro = ai_enabled (permanent) OR an active trial (started_at set, ends_at > now).
-    // A DB failure on either query is a retriable service error (500), not access-denied (403).
+    // Uses shared loadProEntitlement + evaluateProEntitlement from ../shared/pro-entitlement.js.
+    // DB failure on either query → 500 (retriable), not 403. A transient DB issue
+    // must not permanently lock out a Pro user.
     const supabaseAdmin = createClient(
       Deno.env.get('SUPABASE_URL') ?? '',
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
     )
 
-    const [profileResult, trialResult] = await Promise.all([
-      supabaseAdmin.from('profiles').select('ai_enabled').eq('id', user.id).maybeSingle(),
-      supabaseAdmin.from('pro_trials').select('started_at, ends_at').eq('user_id', user.id).maybeSingle(),
-    ])
+    const { profile, trial, profileError, trialError, _profileErrorCode, _trialErrorCode } =
+      await loadProEntitlement(supabaseAdmin, user.id)
 
-    if (profileResult.error || trialResult.error) {
+    if (profileError || trialError) {
+      console.error('ai-map-csv entitlement-query-failed', {
+        profileErrorCode: _profileErrorCode,
+        trialErrorCode:   _trialErrorCode,
+      })
       return new Response(
         JSON.stringify({ error: 'Could not verify access — please try again' }),
         { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       )
     }
 
-    const trialRow = trialResult.data
-    const trialActive = trialRow?.started_at && trialRow?.ends_at && new Date(trialRow.ends_at) > new Date()
+    const entitlement = evaluateProEntitlement(profile, trial, new Date())
 
-    if (!profileResult.data?.ai_enabled && !trialActive) {
+    if (!entitlement.canUse) {
       return new Response(
         JSON.stringify({ error: 'Funnl AI is a Pro feature — access not enabled for this account' }),
         { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }

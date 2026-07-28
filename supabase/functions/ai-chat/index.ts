@@ -3,6 +3,7 @@ import { formatNetworkContext, resolveToday } from './helpers.js'
 import { normalizeMessages } from './normalizeMessages.js'
 import { runProviderAttempts } from './providerCall.js'
 import { sanitizeContactLinks, sanitizeAssistantReply } from './sanitizeReply.js'
+import { loadProEntitlement, evaluateProEntitlement } from '../shared/pro-entitlement.js'
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -126,26 +127,22 @@ Deno.serve(async (req) => {
     }
 
     // ── 2. Check effective Pro access via service-role key (authoritative) ───────
-    // Effective Pro = ai_enabled (permanent) OR an active trial (started_at set, ends_at > now).
-    // The service-role key bypasses RLS — the user cannot manipulate what we read.
-    // A DB failure on either query is a retriable service error (not access-denied):
-    // treating a transient DB issue as pro_required (non-retryable) would permanently
-    // block the user's request.
+    // Uses shared loadProEntitlement + evaluateProEntitlement from ../shared/pro-entitlement.js.
+    // DB failure on either query → internal_error (retryable 500), not pro_required (403).
+    // A transient DB issue must not permanently block the user's request.
     const supabaseAdmin = createClient(
       Deno.env.get('SUPABASE_URL') ?? '',
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
     )
 
-    const [profileResult, trialResult] = await Promise.all([
-      supabaseAdmin.from('profiles').select('ai_enabled').eq('id', user.id).maybeSingle(),
-      supabaseAdmin.from('pro_trials').select('started_at, ends_at').eq('user_id', user.id).maybeSingle(),
-    ])
+    const { profile, trial, profileError, trialError, _profileErrorCode, _trialErrorCode } =
+      await loadProEntitlement(supabaseAdmin, user.id)
 
-    if (profileResult.error || trialResult.error) {
+    if (profileError || trialError) {
       console.error('ai-chat entitlement-query-failed', {
         requestId,
-        profileErrorCode: profileResult.error?.code,
-        trialErrorCode: trialResult.error?.code,
+        profileErrorCode: _profileErrorCode,
+        trialErrorCode:   _trialErrorCode,
       })
       return errorResponse(
         'internal_error',
@@ -156,10 +153,9 @@ Deno.serve(async (req) => {
       )
     }
 
-    const trialRow = trialResult.data
-    const trialActive = trialRow?.started_at && trialRow?.ends_at && new Date(trialRow.ends_at) > new Date()
+    const entitlement = evaluateProEntitlement(profile, trial, new Date())
 
-    if (!profileResult.data?.ai_enabled && !trialActive) {
+    if (!entitlement.canUse) {
       return errorResponse(
         'pro_required',
         'Funnl AI is a Pro feature — access not enabled for this account',
