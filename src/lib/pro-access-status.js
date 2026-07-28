@@ -1,11 +1,17 @@
-import { supabase } from './supabase'
+import { supabase as _defaultClient } from './supabase'
+import { _getProAccessStatusWith as _impl } from './pro-access-status-impl.js'
+
+// Re-export the DI function so callers can import it from this module.
+// Tests import it from pro-access-status-impl.js directly (no Supabase dep).
+export { _getProAccessStatusWith } from './pro-access-status-impl.js'
 
 /**
  * Fetches the server-authoritative Pro access status for the current user.
  *
  * Calls the get_my_pro_access_status() RPC which uses the database clock (now()),
  * so no access decision ever depends on the browser's Date(). Returns null when
- * the RPC fails (network error, not authenticated, transient DB issue).
+ * the RPC fails for any reason (network error, not authenticated, transient DB
+ * issue, thrown exception, or malformed response).
  *
  * Return shape on success:
  *   permanent_pro  boolean       — ai_enabled = true on profiles row
@@ -26,10 +32,5 @@ import { supabase } from './supabase'
  * @returns {Promise<object|null>}
  */
 export async function getProAccessStatus() {
-  const { data, error } = await supabase.rpc('get_my_pro_access_status')
-  if (error) {
-    console.error('getProAccessStatus failed', error.code ?? error.message)
-    return null
-  }
-  return data ?? null
+  return _impl(_defaultClient)
 }

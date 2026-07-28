@@ -27,33 +27,47 @@ function SettingsPage() {
 
   useEffect(() => {
     async function load() {
-      const { data: { user } } = await supabase.auth.getUser()
-      setUser(user)
-      if (user) {
-        // Fetch display_name for the editable field, and pro status via server-authoritative RPC.
-        const [profileResult, status] = await Promise.all([
-          supabase.from('profiles').select('display_name').eq('id', user.id).maybeSingle(),
-          getProAccessStatus(),
-        ])
-        if (profileResult.data) {
-          setDisplayName(profileResult.data.display_name || '')
+      try {
+        const { data: { user } } = await supabase.auth.getUser()
+        setUser(user)
+        if (user) {
+          // Run profile and Pro status fetches independently — one failure must not
+          // block the other. getProAccessStatus() never throws (after its fix).
+          // The profile query gets a defensive .catch() in case the Supabase SDK
+          // throws a network error or SDK exception rather than returning { error }.
+          const [profileResult, status] = await Promise.all([
+            supabase
+              .from('profiles')
+              .select('display_name')
+              .eq('id', user.id)
+              .maybeSingle()
+              .catch(() => ({ data: null, error: true })),
+            getProAccessStatus(),
+          ])
+          if (profileResult.data) {
+            setDisplayName(profileResult.data.display_name || '')
+          }
+          if (status) {
+            setIsPermanentPro(status.permanent_pro === true)
+            setTrialStatus({
+              eligible:      status.trial_eligible  ?? false,
+              active:        status.trial_active    ?? false,
+              expired:       status.trial_expired   ?? false,
+              daysRemaining: status.days_remaining  ?? 0,
+              endsAt:        status.ends_at         ?? null,
+            })
+          } else {
+            // RPC failed — show neutral row rather than silently hiding Pro status,
+            // which would look like "not Pro" for a user who is actually Pro.
+            setProStatusError(true)
+          }
         }
-        if (status) {
-          setIsPermanentPro(status.permanent_pro === true)
-          setTrialStatus({
-            eligible:      status.trial_eligible  ?? false,
-            active:        status.trial_active    ?? false,
-            expired:       status.trial_expired   ?? false,
-            daysRemaining: status.days_remaining  ?? 0,
-            endsAt:        status.ends_at         ?? null,
-          })
-        } else {
-          // RPC failed — show neutral row rather than silently hiding Pro status,
-          // which would look like "not Pro" for a user who is actually Pro.
-          setProStatusError(true)
-        }
+      } catch {
+        // Unexpected failure (e.g. supabase.auth.getUser() threw) — render the
+        // page with defaults. setLoading(false) always fires in finally.
+      } finally {
+        setLoading(false)
       }
-      setLoading(false)
     }
     load()
   }, [])

@@ -49,17 +49,29 @@
 --   4a. SELECT grantee, privilege_type FROM information_schema.role_table_grants
 --       WHERE table_name = 'pro_trials' ORDER BY grantee, privilege_type;
 --       -- authenticated: SELECT only; anon: none; service_role: all privileges
---   4b. Verify authenticated lacks all dangerous privileges (all must return false):
---       SELECT has_table_privilege('authenticated', 'public.pro_trials', 'INSERT');
---       SELECT has_table_privilege('authenticated', 'public.pro_trials', 'UPDATE');
---       SELECT has_table_privilege('authenticated', 'public.pro_trials', 'DELETE');
---       SELECT has_table_privilege('authenticated', 'public.pro_trials', 'TRUNCATE');
---       SELECT has_table_privilege('authenticated', 'public.pro_trials', 'REFERENCES');
---       SELECT has_table_privilege('authenticated', 'public.pro_trials', 'TRIGGER');
---   4c. Verify service_role has write access (all must return true):
+--   4b. Verify authenticated SELECT is granted and all write privileges are denied:
+--       SELECT has_table_privilege('authenticated', 'public.pro_trials', 'SELECT');    -- true
+--       SELECT has_table_privilege('authenticated', 'public.pro_trials', 'INSERT');    -- false
+--       SELECT has_table_privilege('authenticated', 'public.pro_trials', 'UPDATE');    -- false
+--       SELECT has_table_privilege('authenticated', 'public.pro_trials', 'DELETE');    -- false
+--       SELECT has_table_privilege('authenticated', 'public.pro_trials', 'TRUNCATE');  -- false
+--       SELECT has_table_privilege('authenticated', 'public.pro_trials', 'REFERENCES');-- false
+--       SELECT has_table_privilege('authenticated', 'public.pro_trials', 'TRIGGER');   -- false
+--       -- MAINTAIN (PostgreSQL 15+ only — skip or ignore error on earlier versions):
+--       SELECT has_table_privilege('authenticated', 'public.pro_trials', 'MAINTAIN'); -- false
+--   4c. Verify service_role has full table access (all must return true):
+--       SELECT has_table_privilege('service_role', 'public.pro_trials', 'SELECT');
 --       SELECT has_table_privilege('service_role', 'public.pro_trials', 'INSERT');
 --       SELECT has_table_privilege('service_role', 'public.pro_trials', 'UPDATE');
 --       SELECT has_table_privilege('service_role', 'public.pro_trials', 'DELETE');
+--       SELECT has_table_privilege('service_role', 'public.pro_trials', 'TRUNCATE');
+--       -- MAINTAIN (PostgreSQL 15+ only — skip or ignore error on earlier versions):
+--       SELECT has_table_privilege('service_role', 'public.pro_trials', 'MAINTAIN');
+--   4d. Verify anon has no table privileges (all must return false):
+--       SELECT has_table_privilege('anon', 'public.pro_trials', 'SELECT');
+--       SELECT has_table_privilege('anon', 'public.pro_trials', 'INSERT');
+--       SELECT has_table_privilege('anon', 'public.pro_trials', 'UPDATE');
+--       SELECT has_table_privilege('anon', 'public.pro_trials', 'DELETE');
 --   5. SELECT proname, prosrc FROM pg_proc WHERE proname IN
 --      ('handle_new_user', 'activate_trial_on_confirmation',
 --       'start_my_pro_trial', 'get_my_pro_access_status');

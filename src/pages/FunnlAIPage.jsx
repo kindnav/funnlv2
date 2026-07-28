@@ -3,6 +3,7 @@ import ReactMarkdown from 'react-markdown'
 import { Link } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { getProAccessStatus } from '../lib/pro-access-status'
+import { classifyProStatus } from '../lib/pro-ui-status'
 import { track } from '../lib/analytics'
 import { extractInvokeError } from '../lib/ai-chat-error'
 import { buildProviderMessages, isRetryEligible } from '../lib/ai-chat-conversation'
@@ -76,10 +77,14 @@ function FunnlAIPage() {
   const [messages, setMessages]           = useState([INITIAL_MESSAGE])
   const [input, setInput]                 = useState('')
   const [loading, setLoading]             = useState(false)
-  // true while a status Retry is in flight — prevents duplicate concurrent retries
+  // UI display state for Retry button
   const [isRetrying, setIsRetrying]       = useState(false)
-  const bottomRef = useRef(null)
-  const inputRef  = useRef(null)
+  const bottomRef      = useRef(null)
+  const inputRef       = useRef(null)
+  // Synchronous ref guard for duplicate retry requests: state alone cannot prevent
+  // two rapid clicks from both passing the `if (isRetrying)` check before the
+  // first setState re-render fires. The ref is checked and set synchronously.
+  const isRetryingRef  = useRef(false)
   // Per-instance request gate — prevents stale AI responses from mutating state
   // after startNewChat() or a newer sendMessage() supersedes an in-flight request.
   const gateRef   = useRef(null)
@@ -89,13 +94,21 @@ function FunnlAIPage() {
     // Single server-authoritative call — never uses browser Date for access decisions.
     // Returns null on failure; we treat that as "status unavailable" (not "not Pro")
     // so a transient RPC error doesn't silently lock out Pro users from the UI.
-    getProAccessStatus().then(status => {
+    // The `active` flag prevents stale state updates if the component unmounts
+    // while the request is in flight (user navigates away before it resolves).
+    let active = true
+    async function checkPro() {
+      const status = await getProAccessStatus()
+      if (!active) return
       setProStatus(status ?? 'error')
       setIsCheckingPro(false)
-    })
+    }
+    checkPro()
+    return () => { active = false }
   }, [])
 
-  const isProUser = proStatus !== 'error' && proStatus?.can_use_pro === true
+  const displayStatus = classifyProStatus(proStatus)
+  const isProUser = displayStatus === 'permanent' || displayStatus === 'trial'
 
   useEffect(() => {
     if (isProUser) bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -282,14 +295,20 @@ function FunnlAIPage() {
   }
 
   // Retries the Pro status check when the initial getProAccessStatus() call failed.
-  // Guard prevents duplicate concurrent retries. A successful retry transitions
-  // the page directly to the correct state (Pro chat or non-Pro locked screen).
+  // isRetryingRef is a synchronous guard that prevents two rapid clicks from both
+  // entering before the first setIsRetrying(true) re-render fires.
+  // try/finally guarantees isRetrying always resets even on unexpected errors.
   async function retryProStatus() {
-    if (isRetrying) return
+    if (isRetryingRef.current) return
+    isRetryingRef.current = true
     setIsRetrying(true)
-    const status = await getProAccessStatus()
-    setProStatus(status ?? 'error')
-    setIsRetrying(false)
+    try {
+      const status = await getProAccessStatus()
+      setProStatus(status ?? 'error')
+    } finally {
+      isRetryingRef.current = false
+      setIsRetrying(false)
+    }
   }
 
   function handleKeyDown(e) {
@@ -360,7 +379,7 @@ function FunnlAIPage() {
 
       {/* ── Messages / locked state ─────────────────────────────────────────────── */}
       <div className="flex-1 overflow-y-auto min-h-0 px-4 md:px-8 py-5">
-        {proStatus === 'error' ? (
+        {displayStatus === 'unavailable' ? (
           /* Status unavailable — distinct from confirmed non-Pro or expired trial.
              Never shows false access info; shows neutral message + Retry only. */
           <div className="flex flex-col items-center justify-center min-h-[300px] h-full text-center gap-5 py-12">
@@ -532,7 +551,7 @@ function FunnlAIPage() {
 
       {/* ── Input bar ───────────────────────────────────────────────────────────── */}
       <div className="flex-none px-4 md:px-8 pb-6 pt-3 border-t border-line-1">
-        {proStatus === 'error' ? (
+        {displayStatus === 'unavailable' ? (
           /* Status unavailable — neutral disabled bar, no "AI only for Pro" claim */
           <div className="flex items-center bg-input border border-line-2 rounded-[20px] cursor-not-allowed opacity-40 select-none">
             <span className="flex-1 text-[14.5px] text-lower pl-5 py-[15px]">Unable to verify access…</span>

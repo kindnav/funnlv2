@@ -1206,6 +1206,8 @@ New module `supabase/functions/ai-chat/providerCall.js` (plain JS, importable fr
 
 After second-pass Codex corrections (branch `review/pro-trial-7-days`): **562 total across 15 suites** (37 csv-header + 62 ai-helpers + 33 theme + 15 parse-provider-response + 43 normalize-messages + 19 ai-chat-error + 72 ai-chat + 28 ai-chat-conversation + 117 ai-chat-provider + 37 sanitize-reply + 9 contact-link-validator + 4 extract-children-text + 13 ai-chat-request-gate + 36 pro-trial + 37 pro-entitlement). All 562 pass.
 
+After third-pass Codex corrections (branch `review/pro-trial-7-days`): **586 total across 17 suites** (37 csv-header + 62 ai-helpers + 33 theme + 15 parse-provider-response + 43 normalize-messages + 19 ai-chat-error + 72 ai-chat + 28 ai-chat-conversation + 117 ai-chat-provider + 37 sanitize-reply + 9 contact-link-validator + 4 extract-children-text + 13 ai-chat-request-gate + 36 pro-trial + 38 pro-entitlement + 11 pro-access-status + 12 pro-ui-status). All 586 pass.
+
 **Deployment status:** Deployed as PR #21 (2026-07-27). Production ai-chat v12. Frontend live at main SHA `030e315`. Rollback: Edge Function — Supabase dashboard → ai-chat → Deployment history → activate version 11.
 
 ---

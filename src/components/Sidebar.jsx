@@ -51,8 +51,12 @@ function Sidebar() {
         const uid = data.user.id
         // Fetch profile for display (display_name). Entitlement via server-authoritative RPC
         // so can_use_pro uses the DB clock, not the browser's new Date().
+        // Profile query gets a defensive .catch() so a thrown SDK exception (network
+        // error, etc.) cannot suppress the Pro badge by rejecting the entire Promise.all.
+        // getProAccessStatus() never throws — it always resolves to an object or null.
         Promise.all([
-          supabase.from('profiles').select('display_name').eq('id', uid).maybeSingle(),
+          supabase.from('profiles').select('display_name').eq('id', uid).maybeSingle()
+            .catch(() => ({ data: null })),
           getProAccessStatus(),
         ]).then(([{ data: p }, status]) => {
           setProfile(p)

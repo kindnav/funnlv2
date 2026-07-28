@@ -393,6 +393,61 @@ await test('profile with ai_enabled=true always wins over all trial states', () 
   }
 })
 
+// ── Concurrency regression: both queries must start before either resolves ────
+// Verifies Promise.all (concurrent) vs two sequential awaits.
+// If the implementation were sequential, only one entry would appear in `started`
+// before the first promise resolves. With Promise.all, both .maybeSingle() calls
+// fire synchronously during the loadProEntitlement call — before any await completes.
+
+await test('loadProEntitlement: both queries start concurrently before either resolves', async () => {
+  let resolveProfile, resolveTrial
+  const profilePromise = new Promise(r => { resolveProfile = r })
+  const trialPromise   = new Promise(r => { resolveTrial = r })
+
+  const started = []
+
+  const client = {
+    from(table) {
+      return {
+        select() {
+          return {
+            eq(_col, _val) {
+              return {
+                maybeSingle() {
+                  // Record which table query was started — synchronously on call.
+                  started.push(table)
+                  if (table === 'profiles')   return profilePromise
+                  if (table === 'pro_trials') return trialPromise
+                  return Promise.resolve({ data: null, error: null })
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Start without awaiting — both Promise.all arms begin synchronously.
+  const resultPromise = loadProEntitlement(client, 'user-id')
+
+  // Both maybeSingle() calls happen synchronously during Promise.all setup.
+  // A sequential implementation would only have started one query here.
+  assert.ok(started.includes('profiles'),   'profiles query must start before either resolves')
+  assert.ok(started.includes('pro_trials'), 'pro_trials query must start before either resolves')
+  assert.strictEqual(started.length, 2, 'both queries must have started before any resolves')
+
+  // Resolve both and collect the final result.
+  resolveProfile({ data: { ai_enabled: true }, error: null })
+  resolveTrial({ data: ACTIVE_TRIAL,           error: null })
+
+  const result = await resultPromise
+  assert.strictEqual(result.profileError, false)
+  assert.strictEqual(result.trialError, false)
+  assert.deepStrictEqual(result.profile, { ai_enabled: true })
+  assert.deepStrictEqual(result.trial, ACTIVE_TRIAL)
+})
+
 // ── localStorage analytics deduplication is per-browser (documented, not enforced in code) ──
 // The pro_trial_started event uses localStorage keyed by userId. Tests for the dedup
 // logic itself live in WelcomePage.jsx (a React component — not testable in plain Node.js).
