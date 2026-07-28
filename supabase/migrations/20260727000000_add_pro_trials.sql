@@ -46,9 +46,20 @@
 --   2. SELECT relrowsecurity FROM pg_class WHERE relname = 'pro_trials';  -- must be true
 --   3. SELECT policyname, cmd FROM pg_policies WHERE tablename = 'pro_trials';
 --      -- exactly one SELECT policy, no INSERT/UPDATE/DELETE policies
---   4. SELECT grantee, privilege_type FROM information_schema.role_table_grants
---      WHERE table_name = 'pro_trials';
---      -- authenticated: SELECT only; anon: none
+--   4a. SELECT grantee, privilege_type FROM information_schema.role_table_grants
+--       WHERE table_name = 'pro_trials' ORDER BY grantee, privilege_type;
+--       -- authenticated: SELECT only; anon: none; service_role: all privileges
+--   4b. Verify authenticated lacks all dangerous privileges (all must return false):
+--       SELECT has_table_privilege('authenticated', 'public.pro_trials', 'INSERT');
+--       SELECT has_table_privilege('authenticated', 'public.pro_trials', 'UPDATE');
+--       SELECT has_table_privilege('authenticated', 'public.pro_trials', 'DELETE');
+--       SELECT has_table_privilege('authenticated', 'public.pro_trials', 'TRUNCATE');
+--       SELECT has_table_privilege('authenticated', 'public.pro_trials', 'REFERENCES');
+--       SELECT has_table_privilege('authenticated', 'public.pro_trials', 'TRIGGER');
+--   4c. Verify service_role has write access (all must return true):
+--       SELECT has_table_privilege('service_role', 'public.pro_trials', 'INSERT');
+--       SELECT has_table_privilege('service_role', 'public.pro_trials', 'UPDATE');
+--       SELECT has_table_privilege('service_role', 'public.pro_trials', 'DELETE');
 --   5. SELECT proname, prosrc FROM pg_proc WHERE proname IN
 --      ('handle_new_user', 'activate_trial_on_confirmation',
 --       'start_my_pro_trial', 'get_my_pro_access_status');
@@ -84,13 +95,19 @@ CREATE TABLE public.pro_trials (
 ALTER TABLE public.pro_trials ENABLE ROW LEVEL SECURITY;
 
 -- ── Explicit privilege hardening for pro_trials ───────────────────────────────
--- Revoke everything first, then grant only what is needed.
--- Service-role bypasses RLS and does not need explicit grants here.
+-- Supabase grants INSERT, SELECT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER,
+-- and MAINTAIN to authenticated on all new public tables by default. RLS does NOT
+-- protect against TRUNCATE — a REVOKE ALL is required to block it.
+--
+-- Pattern: REVOKE ALL from every role first, then GRANT only what is needed.
+-- service_role must receive an explicit GRANT ALL so Edge Functions (which use
+-- the service-role key to bypass RLS) can write to the table.
 
-REVOKE ALL ON public.pro_trials FROM PUBLIC;
-REVOKE ALL ON public.pro_trials FROM anon;
-REVOKE INSERT, UPDATE, DELETE ON public.pro_trials FROM authenticated;
-GRANT SELECT ON public.pro_trials TO authenticated;
+REVOKE ALL ON TABLE public.pro_trials FROM PUBLIC;
+REVOKE ALL ON TABLE public.pro_trials FROM anon;
+REVOKE ALL ON TABLE public.pro_trials FROM authenticated;
+GRANT SELECT ON TABLE public.pro_trials TO authenticated;
+GRANT ALL ON TABLE public.pro_trials TO service_role;
 
 -- RLS policy: read own row only.
 -- (select auth.uid()) subquery form evaluated once per query, not per row.
@@ -314,10 +331,22 @@ REVOKE EXECUTE ON FUNCTION public.get_my_pro_access_status() FROM PUBLIC, anon;
 --   a) handle_new_user() for auto-confirmed accounts.
 --   b) on_email_confirmed trigger for normal email confirmation flow.
 --
--- Justified retention: the trigger fires inside the auth system. If a transient
--- error, delayed webhook, or edge-case routing causes the trigger to silently
--- fail, this RPC provides a safety net. WelcomePage.jsx calls it as fire-and-
--- forget after the user lands on the confirmation page.
+-- Justified retention: in normal flow the on_email_confirmed trigger activates
+-- the trial atomically on confirmation. This RPC is an idempotent reconciliation
+-- step for confirmed users whose pro_trials row still has started_at IS NULL —
+-- e.g., if the trigger did not fire due to transient infrastructure issues or
+-- edge-case routing. WelcomePage.jsx calls it fire-and-forget before reading
+-- authoritative status from get_my_pro_access_status().
+--
+-- IMPORTANT LIMITATIONS (not the primary activation mechanism):
+--   - Only updates an existing eligible row (started_at IS NULL).
+--     Does NOT create a missing pro_trials row.
+--   - Does NOT backfill pre-migration users who have no pro_trials row.
+--   - Cannot extend or restart an already-started or expired trial.
+--   - Note: a PostgreSQL trigger failure aborts the enclosing transaction
+--     (confirmation itself also fails in that case). The scenario this RPC
+--     recovers from is a confirmed user with an eligible row that was never
+--     activated — not a trigger that ran but produced incorrect data.
 --
 -- INVARIANTS:
 --   - never resets or extends an existing trial (WHERE started_at IS NULL)
