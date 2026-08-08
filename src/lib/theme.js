@@ -1,15 +1,15 @@
 // Theme management: Dark / Light / System
 // Persists in localStorage. Applies by stamping data-theme on <html>.
 // Tailwind v4 token overrides in index.css respond to that attribute.
-// Default when no preference is stored: dark.
+// Default when no preference is stored: light (Paper theme).
 
 // ── Pure functions — no browser globals, safe to import and call in Node.js ──
 
 export const VALID_THEMES = new Set(['dark', 'light', 'system'])
 
-/** Returns the theme string if valid, otherwise 'dark'. */
+/** Returns the theme string if valid, otherwise 'light' (Paper default). */
 export function normalizeThemePreference(value) {
-  return VALID_THEMES.has(value) ? value : 'dark'
+  return VALID_THEMES.has(value) ? value : 'light'
 }
 
 /** Returns the CSS color-scheme value for a given theme. */

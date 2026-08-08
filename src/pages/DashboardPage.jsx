@@ -1,136 +1,626 @@
-﻿import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
-import AddContactDrawer from '../components/AddContactDrawer'
 import ImportContactsModal from '../components/ImportContactsModal'
+import TopBar from '../components/TopBar'
 import { getAvatarColor, getInitials } from '../lib/avatarUtils'
 import { track } from '../lib/analytics'
+import { useProStatus } from '../lib/useProStatus'
+import { classifyProStatus } from '../lib/pro-ui-status'
+import {
+  getLocalToday,
+  getLocalWeekStartDate,
+  getLocalWeekStartISO,
+  computeTopTag,
+  computeResponseRate,
+  computeSignals,
+  computeNetworkSignal,
+  formatActivityDate,
+  followUpLabel,
+  buildRecentActivity,
+} from '../lib/dashboard-metrics'
+import ContactPickerModal from '../components/ContactPickerModal'
+import { buildPickerNavigationState } from '../lib/contactPickerUtils'
+import { runMilestoneRecorder } from '../lib/milestoneRecorder'
+import { resolveActivationAction } from '../lib/activationActionCoordinator'
+import {
+  getFunnelInset,
+  deriveActivationState,
+  getNextAction,
+  buildStepSummary,
+  buildProgressAriaLabel,
+  getFirstName,
+  sessionDismissKey,
+  welcomeSkipKey,
+  completionSessionKey,
+  readSessionFlag,
+  writeSessionFlag,
+  clearSessionFlag,
+  readLocalFlag,
+  writeLocalFlag,
+} from '../lib/activationHelpers'
 
-// Local date string (YYYY-MM-DD) — avoids UTC-offset "wrong day" bugs
-function getLocalToday() {
-  const d = new Date()
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-}
+// AI_WEEKLY_INSIGHT_ENABLED = false
+// True AI-generated weekly insights require a cached, scheduled generation flow
+// (e.g., Edge Function on cron, result stored in DB). They must never be triggered
+// by page load — that would fire an uncached LLM call per user per Dashboard mount.
+// The NETWORK SIGNAL card is entirely rule-based and safe to show all users now.
+const AI_WEEKLY_INSIGHT_ENABLED = false
 
-function followUpStatus(dateStr) {
-  const today = getLocalToday()
-  return dateStr === today
-    ? { label: 'Today', cls: 'text-warning bg-[rgba(245,166,35,0.14)] border border-[rgba(245,166,35,0.3)]' }
-    : { label: 'Overdue', cls: 'text-danger bg-[rgba(255,107,138,0.13)] border border-[rgba(255,107,138,0.25)]' }
-}
+// ── Sub-components (module-level — not inside DashboardPage) ─────────────────
 
-function ChecklistStep({ done, label, children }) {
+function SignalRow({ signal, isLast }) {
+  const dotColor = signal.type === 'going_quiet'
+    ? 'var(--color-warning)'
+    : signal.type === 'responded'
+      ? 'var(--color-success)'
+      : 'var(--color-muted)'
+
+  const typeLabel = signal.type === 'going_quiet'
+    ? 'Going quiet'
+    : signal.type === 'responded'
+      ? signal.statusLabel
+      : 'No next step'
+
+  const typeLabelColor = signal.type === 'going_quiet'
+    ? 'var(--color-warning)'
+    : signal.type === 'responded'
+      ? 'var(--color-success)'
+      : 'var(--color-muted)'
+
+  const detail = signal.type === 'going_quiet'
+    ? `${signal.daysSince}d since last touchpoint`
+    : signal.type === 'responded'
+      ? `${signal.daysSince}d ago`
+      : `${signal.daysSince}d ago, no follow-up set`
+
   return (
-    <div className="flex items-start gap-3 py-3 border-b border-[rgba(255,255,255,0.05)] last:border-b-0">
-      {done ? (
-        <div className="w-5 h-5 rounded-full bg-[rgba(47,212,182,0.15)] border border-[rgba(47,212,182,0.35)] flex items-center justify-center flex-none mt-[1px]">
-          <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="#2FD4B6" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M5 12l4.5 4.5L19 7"/>
-          </svg>
-        </div>
-      ) : (
-        <div className="w-5 h-5 rounded-full border-2 border-[rgba(255,255,255,0.15)] flex-none mt-[1px]"/>
-      )}
+    <Link
+      to={signal.href}
+      className={`flex items-center gap-[12px] px-[18px] py-[12px] no-underline transition-colors${!isLast ? ' border-b border-line-1' : ''}`}
+      onMouseEnter={e => e.currentTarget.style.background = 'rgba(20,17,15,0.03)'}
+      onMouseLeave={e => e.currentTarget.style.background = ''}
+    >
+      <div
+        className="w-[34px] h-[34px] rounded-[9px] flex items-center justify-center text-[12px] font-bold flex-none"
+        style={{ background: getAvatarColor(signal.contact.name), color: 'var(--color-paper)' }}
+      >
+        {getInitials(signal.contact.name)}
+      </div>
       <div className="flex-1 min-w-0">
-        <p className={`text-[13.5px] font-semibold ${done ? 'text-low' : 'text-hi'}`}>{label}</p>
-        {!done && children && <div className="mt-1.5">{children}</div>}
+        <p className="text-[13px] font-semibold truncate" style={{ color: 'var(--color-hi)' }}>
+          {signal.contact.name}
+        </p>
+        <div className="flex items-center gap-[5px] mt-[2px]">
+          <span
+            className="w-[5px] h-[5px] rounded-full flex-none"
+            style={{ background: dotColor }}
+            aria-hidden="true"
+          />
+          <span className="text-[10.5px] font-mono font-medium" style={{ color: typeLabelColor }}>
+            {typeLabel}
+          </span>
+          <span style={{ color: 'var(--color-line-3)' }} aria-hidden="true">·</span>
+          <span className="text-[10.5px] font-mono" style={{ color: 'var(--color-muted)' }}>
+            {detail}
+          </span>
+        </div>
+      </div>
+      {(signal.contact.company || signal.contact.role) && (
+        <p
+          className="text-[11px] truncate flex-none hidden md:block max-w-[90px]"
+          style={{ color: 'var(--color-low)' }}
+        >
+          {signal.contact.company || signal.contact.role}
+        </p>
+      )}
+    </Link>
+  )
+}
+
+// Handles both interaction entries (kind=interaction) and new-contact entries (kind=contact).
+function ActivityRow({ item, today, isLast }) {
+  const outreachStyles = {
+    awaiting_response: { color: 'var(--color-awaiting)', bg: 'rgba(199,169,107,0.12)', border: 'rgba(199,169,107,0.25)', label: 'Awaiting' },
+    responded:         { color: 'var(--color-success)',  bg: 'rgba(46,125,91,0.12)',    border: 'rgba(46,125,91,0.2)',   label: 'Responded' },
+    meeting_booked:    { color: 'var(--color-success)',  bg: 'rgba(46,125,91,0.12)',    border: 'rgba(46,125,91,0.2)',   label: 'Meeting' },
+    no_response:       { color: 'var(--color-muted)',    bg: 'var(--color-elevated)',   border: 'var(--color-line-2)',   label: 'No response' },
+    declined:          { color: 'var(--color-danger)',   bg: 'rgba(194,51,77,0.1)',     border: 'rgba(194,51,77,0.2)',   label: 'Declined' },
+  }
+  const os = outreachStyles[item.outreachStatus]
+
+  return (
+    <Link
+      to={`/contacts/${item.contactId}`}
+      className={`flex items-center gap-[10px] px-[18px] py-[10px] no-underline transition-colors${!isLast ? ' border-b border-line-1' : ''}`}
+      onMouseEnter={e => e.currentTarget.style.background = 'rgba(20,17,15,0.03)'}
+      onMouseLeave={e => e.currentTarget.style.background = ''}
+    >
+      <span
+        className="text-[10px] font-mono w-[36px] flex-none text-right tabular-nums"
+        style={{ color: 'var(--color-low)' }}
+      >
+        {formatActivityDate(item.date, today)}
+      </span>
+      <span
+        className="text-[13px] font-medium flex-1 truncate"
+        style={{ color: 'var(--color-hi)' }}
+      >
+        {item.contactName}
+      </span>
+      <div className="flex items-center gap-[5px] flex-none">
+        <span
+          className="text-[10px] font-mono px-[6px] py-[2px] rounded-[4px]"
+          style={{ background: 'var(--color-elevated)', color: 'var(--color-muted)', border: '1px solid var(--color-line-2)' }}
+        >
+          {item.type}
+        </span>
+        {item.hasNotes && (
+          <span
+            className="text-[10px] font-mono px-[5px] py-[2px] rounded-[4px]"
+            style={{ background: 'var(--color-elevated)', color: 'var(--color-low)', border: '1px solid var(--color-line-1)' }}
+            title="Has notes"
+          >
+            Notes
+          </span>
+        )}
+        {os && (
+          <span
+            className="text-[10px] font-mono px-[6px] py-[2px] rounded-[4px]"
+            style={{ color: os.color, background: os.bg, border: `1px solid ${os.border}` }}
+          >
+            {os.label}
+          </span>
+        )}
+      </div>
+    </Link>
+  )
+}
+
+// ── Onboarding sub-components ─────────────────────────────────────────────────
+
+// FunnelFillMark — dual SVG: low-opacity base + ember overlay with clip-path fill.
+// The funnel fills bottom-up as stepsCompleted increases (0–3).
+function FunnelFillMark({ stepsCompleted }) {
+  const clipPath = getFunnelInset(stepsCompleted)
+  // Respect prefers-reduced-motion — skip clip-path transition when motion is reduced.
+  const prefersReducedMotion = typeof window !== 'undefined'
+    && window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches
+  return (
+    <div style={{ position: 'relative', width: 34, height: 31, flexShrink: 0 }} aria-hidden="true">
+      {/* Base — always visible at low opacity */}
+      <svg
+        style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', opacity: 0.18 }}
+        viewBox="0 0 24 24"
+        fill="none"
+      >
+        <path d="M3 4H21L15 12.5V20H9V12.5Z" fill="#FF4423"/>
+      </svg>
+      {/* Overlay — clips to show the filled portion */}
+      <svg
+        style={{
+          position: 'absolute', inset: 0, width: '100%', height: '100%',
+          clipPath,
+          transition: prefersReducedMotion ? 'none' : 'clip-path 0.5s ease',
+        }}
+        viewBox="0 0 24 24"
+        fill="none"
+      >
+        <path d="M3 4H21L15 12.5V20H9V12.5Z" fill="#FF4423"/>
+      </svg>
+    </div>
+  )
+}
+
+// WelcomeCard — shown when the user has zero contacts (first-run state).
+// Personalized greeting + three stacked CTAs.
+function WelcomeCard({ displayName, onAdd, onImport, onSkip }) {
+  const firstName = getFirstName(displayName)
+  const greeting = firstName ? `Welcome to Funnl, ${firstName}.` : 'Welcome to Funnl.'
+  return (
+    <div className="flex items-center justify-center px-[20px] py-[48px] md:py-[72px]">
+      <div
+        className="w-full rounded-[13px] p-[36px_32px] text-center"
+        style={{ maxWidth: 420, background: 'var(--color-card)', border: '1px solid var(--color-line-2)' }}
+      >
+        {/* Flat ember funnel — no fill animation on welcome card */}
+        <svg
+          style={{ width: 44, height: 40, margin: '0 auto 18px', display: 'block' }}
+          viewBox="0 0 24 24"
+          fill="none"
+          aria-hidden="true"
+        >
+          <path d="M3 4H21L15 12.5V20H9V12.5Z" fill="#FF4423"/>
+        </svg>
+        <h2
+          className="font-display text-[22px] font-bold text-balance mb-[6px]"
+          style={{ color: 'var(--color-hi)', letterSpacing: '-0.8px' }}
+        >
+          {greeting}
+        </h2>
+        <p
+          className="text-[12.5px] leading-relaxed mb-[20px]"
+          style={{ color: 'var(--color-low)' }}
+        >
+          Every person you meet, every conversation you have, every follow-up you owe. One place that never forgets.
+        </p>
+        <div className="flex flex-col gap-[7px] text-left">
+          {/* Primary CTA — ember */}
+          <button
+            onClick={onAdd}
+            className="flex items-center gap-[11px] w-full rounded-[10px] px-[15px] py-[12px] border-0 transition-opacity hover:opacity-90 text-left"
+            style={{ background: 'var(--color-ember)', cursor: 'pointer' }}
+          >
+            <span
+              className="text-[12.5px] font-bold flex-1"
+              style={{ color: 'var(--color-paper)' }}
+            >
+              Add your first contact
+            </span>
+            <span
+              className="text-[10px]"
+              style={{ color: 'rgba(247,242,231,0.7)' }}
+            >
+              30 seconds
+            </span>
+          </button>
+          {/* Secondary CTA — ghost */}
+          <button
+            onClick={onImport}
+            className="flex items-center gap-[11px] w-full rounded-[10px] px-[15px] py-[12px] border text-left"
+            style={{ background: 'var(--color-card)', borderColor: 'var(--color-line-2)', cursor: 'pointer' }}
+          >
+            <span
+              className="text-[12.5px] font-semibold flex-1"
+              style={{ color: 'var(--color-hi)' }}
+            >
+              Import from LinkedIn or a spreadsheet
+            </span>
+            <span
+              className="text-[10px] font-mono"
+              style={{ color: 'var(--color-muted)' }}
+            >
+              CSV
+            </span>
+          </button>
+          {/* Tertiary CTA — text */}
+          <button
+            onClick={onSkip}
+            className="border-0 text-[11px] font-semibold pt-[6px] pb-0 px-0 text-center w-full"
+            style={{ background: 'none', color: 'var(--color-muted)', cursor: 'pointer' }}
+          >
+            Skip — just look around
+          </button>
+        </div>
       </div>
     </div>
   )
 }
 
+// ActivationProgressStrip — compact inline strip shown when user has data but
+// activation is incomplete and the strip has not been dismissed.
+// Spec: 09 Onboarding 1a progress strip.
+function ActivationProgressStrip({ step1Done, step2Done, step3Done, completedCount, ariaLabel, onDismiss, onNextAction }) {
+  const { heading, doneParts, nextStep } = buildStepSummary(step1Done, step2Done, step3Done)
+  const nextAction = getNextAction(step1Done, step2Done, step3Done)
+  const progressLabel = ariaLabel || buildProgressAriaLabel(step1Done, step2Done, step3Done)
+  return (
+    <div
+      className="rounded-[13px] border border-line-2"
+      style={{ background: 'var(--color-card)', padding: '16px 20px' }}
+    >
+      <div className="flex items-center gap-[16px]">
+        {/* role="progressbar" wraps the visual funnel fill indicator — the ARIA progressbar. */}
+        <div
+          role="progressbar"
+          aria-valuemin="0"
+          aria-valuemax="3"
+          aria-valuenow={completedCount ?? 0}
+          aria-label={progressLabel}
+        >
+          <FunnelFillMark stepsCompleted={completedCount ?? 0} />
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="text-[13px] font-bold m-0" style={{ color: 'var(--color-hi)' }}>
+            {heading}
+          </p>
+          <p className="text-[11.5px] m-0 mt-[2px]" style={{ color: 'var(--color-low)' }}>
+            {doneParts.map((part, i) => (
+              <span key={part}>
+                {i > 0 && <span aria-hidden="true"> · </span>}
+                {part} <span aria-hidden="true">✓</span>
+              </span>
+            ))}
+            {doneParts.length > 0 && nextStep && (
+              <span aria-hidden="true"> · </span>
+            )}
+            {nextStep && (
+              <strong style={{ color: 'var(--color-hi)' }}>
+                one step left: {nextStep}
+              </strong>
+            )}
+          </p>
+        </div>
+        {nextAction && (
+          <button
+            onClick={onNextAction}
+            className="text-[11px] font-bold rounded-[8px] border-0 flex-none transition-opacity hover:opacity-90"
+            style={{ background: 'var(--color-ember)', color: 'var(--color-paper)', padding: '8px 14px', cursor: 'pointer' }}
+          >
+            {nextAction.label}
+          </button>
+        )}
+        <button
+          onClick={onDismiss}
+          aria-label="Dismiss setup progress"
+          title="Dismiss"
+          className="flex-none border-0 text-[11px] leading-none"
+          style={{ background: 'none', color: 'var(--color-muted)', cursor: 'pointer', padding: '4px' }}
+        >
+          ✕
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// CompletionStrip — session-only strip shown immediately after activation completes.
+// Disappears the next session because milestones.completed will be non-null.
+// Spec: 09 Onboarding 1a completion strip.
+function CompletionStrip() {
+  return (
+    <div
+      role="status"
+      aria-label="Activation complete"
+      className="rounded-[13px] border border-line-2"
+      style={{ background: 'var(--color-card)', padding: '16px 20px' }}
+    >
+      <div className="flex items-center gap-[16px]">
+        <FunnelFillMark stepsCompleted={3} />
+        <div className="flex-1 min-w-0">
+          <p className="text-[13px] font-bold m-0" style={{ color: 'var(--color-hi)' }}>
+            Your Funnl is running.
+          </p>
+          <p className="text-[11.5px] m-0 mt-[2px]" style={{ color: 'var(--color-low)' }}>
+            Contacts in, conversations logged, follow-ups scheduled. Nothing slips from here.
+          </p>
+        </div>
+        <span
+          className="text-[9px] font-mono flex-none"
+          style={{ color: 'var(--color-success)' }}
+        >
+          COMPLETED · strip disappears after this session
+        </span>
+      </div>
+    </div>
+  )
+}
+
+// ── Main component ────────────────────────────────────────────────────────────
+
 function DashboardPage() {
   const navigate = useNavigate()
-  const [contactCount,       setContactCount]       = useState(0)
-  const [interactionCount,   setInteractionCount]   = useState(0)
-  const [newContactsWeek,    setNewContactsWeek]    = useState(0)
-  const [newInteractionsWeek,setNewInteractionsWeek]= useState(0)
-  const [dueToday,           setDueToday]           = useState(0)
-  const [followUps,          setFollowUps]          = useState([])
-  const [recentContacts,     setRecentContacts]     = useState([])
-  const [hasFollowUp,        setHasFollowUp]        = useState(false)
-  const [milestones,         setMilestones]         = useState(null)
-  const [loading,            setLoading]            = useState(true)
-  const [fetchError,         setFetchError]         = useState('')
-  const [showDrawer,         setShowDrawer]         = useState(false)
-  const [showImportModal,    setShowImportModal]    = useState(false)
+  const proStatus = useProStatus()
+  const displayStatus = classifyProStatus(proStatus)
+  const canUsePro = displayStatus === 'permanent' || displayStatus === 'trial'
 
-  // Fires once per DashboardPage mount when the checklist is visible.
-  // If the user navigates away and back, the component remounts and this ref
-  // resets, so the event may fire again on re-mount. Acceptable for phase 2A.
+  // ── Data state ─────────────────────────────────────────────────────────────
+  const [contactCount,          setContactCount]          = useState(0)
+  const [newContactsThisWeek,   setNewContactsThisWeek]   = useState(0)
+  const [interactionCount,      setInteractionCount]      = useState(0)
+  const [interactionsThisWeek,  setInteractionsThisWeek]  = useState(0)
+  const [followUpsDueList,      setFollowUpsDueList]      = useState([])
+  const [hasFollowUp,           setHasFollowUp]           = useState(false)
+  const [awaitingResponseCount, setAwaitingResponseCount] = useState(0)
+  const [responseRate,          setResponseRate]          = useState(null)
+  const [topTag,                setTopTag]                = useState(null)
+  const [signals,               setSignals]               = useState([])
+  const [recentActivity,        setRecentActivity]        = useState([])
+  const [milestones,            setMilestones]            = useState(null)
+  const [loading,               setLoading]               = useState(true)
+  const [fetchError,            setFetchError]            = useState('')
+  const [contacts,              setContacts]              = useState([])
+  const [showImportModal,       setShowImportModal]       = useState(false)
+  // null | 'interaction' | 'followup' — which quick action triggered the contact picker
+  const [pickerMode,            setPickerMode]            = useState(null)
+
+  // Onboarding display state
+  const [displayName,           setDisplayName]           = useState(null)
+  const [uid,                   setUid]                   = useState(null)
+  const [justCompleted,         setJustCompleted]         = useState(false)
+  const [stripDismissed,        setStripDismissed]        = useState(false)
+  // welcomeSkipped: localStorage-backed (persistent across sessions).
+  // Initialized to false; updated from localStorage inside fetchAll once uid is known.
+  const [welcomeSkipped,        setWelcomeSkipped]        = useState(false)
+
+  // Fires at most once per mount when the checklist is visible.
   const checklistViewedRef = useRef(false)
+  // Tracks the previously-seen uid to detect account switches within the same component instance.
+  const prevUidRef = useRef(null)
+  // Ref for the collapsed reopen button — used to restore focus when the strip reopens.
+  const collapsedBtnRef = useRef(null)
+  // Stale-fetch guard: incremented at the start of every fetchAll call. Each invocation
+  // captures its own generation and aborts without mutating state if superseded.
+  const fetchGenRef = useRef(0)
 
   useEffect(() => { fetchAll() }, [])
 
-  // Fire activation_checklist_viewed once per mount when milestones load
-  // and the user has not yet completed activation
+  // Refetch dashboard data when a contact is added from any route (global drawer).
   useEffect(() => {
-    if (milestones && milestones.completed === null && !checklistViewedRef.current) {
+    const handler = () => fetchAll()
+    window.addEventListener('funnl:contacts-changed', handler)
+    return () => window.removeEventListener('funnl:contacts-changed', handler)
+  }, [])
+
+  // Quiet refetch when follow-up dates change (preserves stripDismissed/welcomeSkipped/justCompleted).
+  useEffect(() => {
+    const handler = () => fetchAll({ quiet: true })
+    window.addEventListener('funnl:followups-changed', handler)
+    return () => window.removeEventListener('funnl:followups-changed', handler)
+  }, [])
+
+  // Quiet refetch when an interaction is logged without a follow-up date.
+  useEffect(() => {
+    const handler = () => fetchAll({ quiet: true })
+    window.addEventListener('funnl:interactions-changed', handler)
+    return () => window.removeEventListener('funnl:interactions-changed', handler)
+  }, [])
+
+  // Immediate account-switch reset via auth state change — separate from fetchAll's detection
+  // so stale data from the old account cannot commit state after a sign-out/sign-in.
+  useEffect(() => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      const newUid = session?.user?.id ?? null
+      if (prevUidRef.current !== null && prevUidRef.current !== newUid) {
+        // Invalidate all in-flight fetch generations so stale results are silently discarded.
+        fetchGenRef.current++
+        setMilestones(null)
+        setDisplayName(null)
+        setJustCompleted(false)
+        setStripDismissed(false)
+        setWelcomeSkipped(false)
+        setContactCount(0)
+        setInteractionCount(0)
+        setHasFollowUp(false)
+        setUid(newUid)
+        prevUidRef.current = newUid
+      }
+    })
+    return () => subscription.unsubscribe()
+  }, [])
+
+  // Fire activation_checklist_viewed once per mount when the progress strip is visible.
+  // Uses contactCount > 0 as the proxy for "strip is shown" (compact mode).
+  useEffect(() => {
+    if (milestones && milestones.completed === null && contactCount > 0 && !checklistViewedRef.current) {
       track('activation_checklist_viewed')
       checklistViewedRef.current = true
     }
-  }, [milestones])
+  }, [milestones, contactCount])
 
-  async function fetchAll() {
-    setFetchError('')
-    setLoading(true)
-    const today = getLocalToday()
-    const weekAgo = new Date(); weekAgo.setDate(weekAgo.getDate() - 7)
-    const weekAgoStr = weekAgo.toISOString()
+  async function fetchAll({ quiet = false } = {}) {
+    const gen = ++fetchGenRef.current
 
-    // getSession() is async. It normally reads browser storage but Supabase may
-    // refresh the token if it has expired. The uid is used to scope the profiles
-    // select; RLS is the authoritative authorization layer for all DB queries.
+    if (!quiet) {
+      setFetchError('')
+      setLoading(true)
+    }
+
+    const today         = getLocalToday()
+    // Calendar week: Monday 00:00 local (not rolling 7 days)
+    const weekStartDate = getLocalWeekStartDate()  // YYYY-MM-DD for interaction_date comparisons
+    const weekStartISO  = getLocalWeekStartISO()   // ISO timestamp for created_at comparisons
+
+    // getSession() may refresh an expired token — always await it.
     const { data: sessionData, error: sessionError } = await supabase.auth.getSession()
+    if (fetchGenRef.current !== gen) return  // superseded by a newer fetch
     if (sessionError) {
-      setFetchError(sessionError.message)
-      setLoading(false)
+      if (!quiet) { setFetchError(sessionError.message); setLoading(false) }
       return
     }
-    const uid = sessionData?.session?.user?.id ?? null
+    const resolvedUid = sessionData?.session?.user?.id ?? null
+
+    if (!quiet) {
+      // Account-switch isolation: if uid changed while this component was mounted,
+      // clear all prior-user state immediately to prevent data bleed across accounts.
+      if (prevUidRef.current !== null && prevUidRef.current !== resolvedUid) {
+        setMilestones(null)
+        setDisplayName(null)
+        setJustCompleted(false)
+        setStripDismissed(false)
+        setWelcomeSkipped(false)
+        setContactCount(0)
+        setInteractionCount(0)
+        setHasFollowUp(false)
+      }
+      prevUidRef.current = resolvedUid
+      setUid(resolvedUid)
+
+      // Read session/local flags for this user — safe even on first mount.
+      if (resolvedUid) {
+        const dismissed = readSessionFlag(sessionDismissKey(resolvedUid))
+        setStripDismissed(dismissed)
+        // welcomeSkipped persists across sessions (localStorage).
+        const skipped = readLocalFlag(welcomeSkipKey(resolvedUid))
+        setWelcomeSkipped(skipped)
+        // justCompleted: only true in the session where activation completes.
+        const completedThisSession = readSessionFlag(completionSessionKey(resolvedUid))
+        setJustCompleted(completedThisSession)
+      }
+    }
 
     const [
-      { count: contacts,       error: e1 },
-      { count: interactions,   error: e2 },
-      { count: newContacts,    error: e3 },
-      { count: newInteractions,error: e4 },
-      { count: todayDue,       error: e5 },
-      { data:  followUpsData,  error: e6 },
-      { data:  recentData,     error: e7 },
-      { count: followUpCount,  error: e8 },
-      { data:  profileData,    error: e9 },
+      { data: contactsData,     error: e1 },
+      { data: interactionsData, error: e2 },
+      { data: profileData,      error: e3 },
     ] = await Promise.all([
-      supabase.from('contacts').select('*', { count: 'exact', head: true }),
-      supabase.from('interactions').select('*', { count: 'exact', head: true }),
-      supabase.from('contacts').select('*', { count: 'exact', head: true }).gte('created_at', weekAgoStr),
-      supabase.from('interactions').select('*', { count: 'exact', head: true }).gte('created_at', weekAgoStr),
-      supabase.from('interactions').select('*', { count: 'exact', head: true }).eq('follow_up_date', today),
-      supabase.from('interactions').select('*, contacts(id, name)').not('follow_up_date', 'is', null).lte('follow_up_date', today).order('follow_up_date', { ascending: true }),
-      supabase.from('contacts').select('*').order('created_at', { ascending: false }).limit(5),
-      supabase.from('interactions').select('*', { count: 'exact', head: true }).not('follow_up_date', 'is', null),
-      uid
+      supabase.from('contacts').select('id, name, tags, company, role, created_at'),
+      // notes is required for buildRecentActivity hasNotes field
+      supabase.from('interactions').select('id, contact_id, interaction_date, type, outreach_status, follow_up_date, notes, created_at'),
+      resolvedUid
         ? supabase.from('profiles')
-            .select('activation_five_contacts_at, activation_first_interaction_at, activation_first_followup_at, activation_completed_at')
-            .eq('id', uid)
+            .select('activation_five_contacts_at, activation_first_interaction_at, activation_first_followup_at, activation_completed_at, display_name')
+            .eq('id', resolvedUid)
             .maybeSingle()
         : Promise.resolve({ data: null, error: null }),
     ])
 
-    const queryError = e1 || e2 || e3 || e4 || e5 || e6 || e7 || e8 || e9
-    if (queryError) {
-      setFetchError(queryError.message)
-      setLoading(false)
+    if (fetchGenRef.current !== gen) return  // superseded by a newer fetch
+    if (e1 || e2 || e3) {
+      if (!quiet) { setFetchError((e1 || e2 || e3).message); setLoading(false) }
       return
     }
 
-    setContactCount(contacts || 0)
-    setInteractionCount(interactions || 0)
-    setNewContactsWeek(newContacts || 0)
-    setNewInteractionsWeek(newInteractions || 0)
-    setDueToday(todayDue || 0)
-    setFollowUps(followUpsData || [])
-    setRecentContacts(recentData || [])
-    setHasFollowUp((followUpCount || 0) > 0)
+    const contacts = contactsData || []
+    const interactions = interactionsData || []
+    const contactMap = Object.fromEntries(contacts.map(c => [c.id, c]))
+
+    // ── Basic counts ─────────────────────────────────────────────────────────
+    const cCount = contacts.length
+    const iCount = interactions.length
+    // "This week" = Monday 00:00 local through now.
+    // created_at is a UTC ISO string; compare against the UTC equivalent of local Monday midnight.
+    const newC = contacts.filter(c => c.created_at >= weekStartISO).length
+    // interaction_date is a YYYY-MM-DD string (date column) — compare as strings.
+    const newI = interactions.filter(i => i.interaction_date >= weekStartDate).length
+
+    // ── Follow-ups due (overdue + today) ─────────────────────────────────────
+    const dueList = interactions
+      .filter(i => i.follow_up_date && i.follow_up_date <= today)
+      .sort((a, b) => a.follow_up_date.localeCompare(b.follow_up_date))
+      .map(i => ({ interaction: i, contact: contactMap[i.contact_id] || null }))
+
+    // hasFollowUp = any non-null follow_up_date (due, overdue, or future)
+    const hasAnyFollowUp = interactions.some(i => i.follow_up_date != null)
+
+    // ── Outreach stats ────────────────────────────────────────────────────────
+    const awaitingCount = interactions.filter(i => i.outreach_status === 'awaiting_response').length
+    // computeResponseRate: excludes awaiting_response from denominator
+    const rate = computeResponseRate(interactions)
+
+    // ── Top tag ───────────────────────────────────────────────────────────────
+    const tag = computeTopTag(contacts)
+
+    // ── Relationship signals ─────────────────────────────────────────────────
+    // computeSignals: uses daysBetween (UTC ordinals), hasOpenFollowUp = any non-null follow_up_date
+    const sigs = computeSignals(contacts, interactions, today)
+
+    // ── Recent activity: combined contacts + interactions, newest first ────────
+    const recent = buildRecentActivity(contacts, interactions, contactMap)
+
+    // ── Commit state ──────────────────────────────────────────────────────────
+    setContacts(contacts)
+    setContactCount(cCount)
+    setNewContactsThisWeek(newC)
+    setInteractionCount(iCount)
+    setInteractionsThisWeek(newI)
+    setFollowUpsDueList(dueList)
+    setHasFollowUp(hasAnyFollowUp)
+    setAwaitingResponseCount(awaitingCount)
+    setResponseRate(rate)
+    setTopTag(tag)
+    setSignals(sigs)
+    setRecentActivity(recent)
 
     const ms = {
       fiveContacts:     profileData?.activation_five_contacts_at     ?? null,
@@ -139,380 +629,643 @@ function DashboardPage() {
       completed:        profileData?.activation_completed_at         ?? null,
     }
     setMilestones(ms)
-    setLoading(false)
+    setDisplayName(profileData?.display_name ?? null)
+    if (!quiet) setLoading(false)
 
-    if (uid) {
-      recordMilestones(uid, contacts || 0, interactions || 0, (followUpCount || 0) > 0, ms)
+    if (resolvedUid) {
+      recordMilestones(resolvedUid, cCount, iCount, hasAnyFollowUp, ms)
         .catch(err => console.error('[Funnl] recordMilestones threw unexpectedly:', err))
     }
   }
 
+  // ── recordMilestones: conditional DB writes + analytics ──────────────────
+  // Delegates to runMilestoneRecorder (milestoneRecorder.js) which uses
+  // shouldAttemptMilestoneWrites as the single eligibility source of truth
+  // and tracks effectiveMs so race-loser individual steps never trigger a
+  // spurious completion.
+  // Analytics: activation_step_completed (×0–3), activation_completed (×0–1).
   async function recordMilestones(uid, contactCnt, interactionCnt, hasFollowUpBool, ms) {
-    const now     = new Date().toISOString()
-    const step1Met = contactCnt >= 5
-    const step2Met = interactionCnt >= 1
-    const step3Met = hasFollowUpBool
+    const now = new Date().toISOString()
 
-    // Conditional update: sets col to now only if it is still null in the DB.
-    // If two tabs race, PostgreSQL serializes the writes; only the first gets a
-    // non-empty RETURNING result. The second gets claimed === false and does not
-    // fire a PostHog event.
-    async function conditionalUpdate(col) {
-      const { data: updated, error } = await supabase
-        .from('profiles')
-        .update({ [col]: now })
-        .eq('id', uid)
-        .is(col, null)
-        .select('id')
-      if (error) {
-        console.error(`[Funnl] Milestone update failed (${col}):`, error.message)
-        return { ok: false }
-      }
-      return { ok: true, claimed: (updated?.length ?? 0) > 0 }
-    }
-
-    // Process all three step milestones even if activation_completed_at is already
-    // set, to repair any inconsistent null step timestamps.
-    // Events fire only when ms.completed === null (user was not yet activated
-    // when fetchAll ran); repairs to already-activated users never fire events.
-    // Stop on DB error to prevent partially inconsistent writes.
-
-    if (step1Met && ms.fiveContacts === null) {
-      const { ok, claimed } = await conditionalUpdate('activation_five_contacts_at')
-      if (!ok) return
-      if (claimed && ms.completed === null) track('activation_step_completed', { step: 'five_contacts' })
-    }
-
-    if (step2Met && ms.firstInteraction === null) {
-      const { ok, claimed } = await conditionalUpdate('activation_first_interaction_at')
-      if (!ok) return
-      if (claimed && ms.completed === null) track('activation_step_completed', { step: 'first_interaction' })
-    }
-
-    if (step3Met && ms.firstFollowup === null) {
-      const { ok, claimed } = await conditionalUpdate('activation_first_followup_at')
-      if (!ok) return
-      if (claimed && ms.completed === null) track('activation_step_completed', { step: 'first_followup' })
-    }
-
-    // Only attempt activation_completed_at after all step updates succeed without
-    // DB errors. claimed === false (another tab won the race) is not an error.
-    if (step1Met && step2Met && step3Met && ms.completed === null) {
-      const { ok, claimed } = await conditionalUpdate('activation_completed_at')
-      if (!ok) return
-      if (claimed) {
+    await runMilestoneRecorder({
+      contactCnt,
+      interactionCnt,
+      hasFollowUpBool,
+      ms,
+      now,
+      conditionalUpdate: async (col) => {
+        const { data: updated, error } = await supabase
+          .from('profiles')
+          .update({ [col]: now })
+          .eq('id', uid)
+          .is(col, null)
+          .select('id')
+        if (error) {
+          console.error(`[Funnl] Milestone update failed (${col}):`, error.message)
+          return { ok: false }
+        }
+        return { ok: true, claimed: (updated?.length ?? 0) > 0 }
+      },
+      onStepClaimed: (step, effMs) => {
+        if (effMs.completed === null) track('activation_step_completed', { step: step })
+      },
+      onCompletionClaimed: (completedAt) => {
         track('activation_completed', { contacts_count: contactCnt })
-        setMilestones(prev => prev ? { ...prev, completed: now } : prev)
-      }
-    }
+        setMilestones(prev => prev ? { ...prev, completed: completedAt } : prev)
+        // Persist to sessionStorage so navigating away and back within the same
+        // session still shows the CompletionStrip (justCompleted React state resets
+        // on component unmount; sessionStorage survives it).
+        writeSessionFlag(completionSessionKey(uid))
+        setJustCompleted(true)
+      },
+    })
   }
 
-  // ── Loading ──────────────────────────────────────────────────────────────
-  if (loading) {
-    return (
-      <div className="min-h-screen bg-surface flex items-center justify-center">
-        <p className="text-muted text-sm">Loading…</p>
-      </div>
-    )
+  function openCommandPalette() {
+    window.dispatchEvent(new CustomEvent('funnl:open-command-palette'))
   }
 
-  // ── Error ─────────────────────────────────────────────────────────────────
-  if (fetchError) {
-    return (
-      <div className="min-h-screen bg-surface flex items-center justify-center p-6 md:p-12">
-        <div className="text-center max-w-sm">
-          <div className="w-12 h-12 mx-auto mb-4 rounded-xl bg-[rgba(255,107,138,0.1)] border border-[rgba(255,107,138,0.2)] flex items-center justify-center">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#FF6B8A" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
-              <circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/>
-            </svg>
-          </div>
-          <p className="text-hi font-semibold mb-2">Couldn't load your dashboard</p>
-          <p className="text-muted text-sm mb-5">Check your connection and try again.</p>
-          <button
-            onClick={fetchAll}
-            className="text-accent text-sm font-semibold hover:text-tag transition-colors"
-          >
-            Try again
-          </button>
-        </div>
-      </div>
-    )
+  // Contact picker — routes to the contact's detail page with the appropriate form pre-opened.
+  // openInteractionForm and openFollowUpForm are both handled by ContactDetailPage.
+  function handlePickerSelect(contact) {
+    const state = buildPickerNavigationState(pickerMode)
+    setPickerMode(null)
+    if (state) navigate(`/contacts/${contact.id}`, { state })
   }
 
-  // ── Derived activation state ──────────────────────────────────────────────
-  const step1Done = contactCount >= 5
-  const step2Done = interactionCount >= 1
-  const step3Done = hasFollowUp
-  const stepsCompleted = [step1Done, step2Done, step3Done].filter(Boolean).length
-  const showChecklist = milestones !== null && milestones.completed === null
+  // ── Shared ember CTA ──────────────────────────────────────────────────────
+  function openAddContactDrawer() {
+    window.dispatchEvent(new CustomEvent('funnl:open-add-contact'))
+  }
 
-  // ── Checklist card (shared between zero-contact and full-dashboard views) ─
-  const checklistCard = (
-    <div className="bg-card border border-line-2 rounded-2xl p-5">
-      <div className="flex items-start justify-between gap-3 mb-1">
-        <h3 className="font-display text-[16px] font-bold text-hi leading-snug">Set up your networking workflow</h3>
-        <span className="font-mono text-[11px] font-bold text-muted flex-none mt-0.5">{stepsCompleted}/3</span>
-      </div>
-      <p className="text-[13px] text-muted leading-relaxed mb-4">
-        Add the people you're speaking with, save the conversation, and choose when to follow up.
-      </p>
+  // Dismiss the activation progress strip for this session only.
+  function dismissStrip() {
+    if (uid) writeSessionFlag(sessionDismissKey(uid))
+    setStripDismissed(true)
+  }
 
-      {/* Progress bar */}
-      <div className="h-[3px] bg-[rgba(255,255,255,0.07)] rounded-full mb-5 overflow-hidden">
-        <div
-          className="h-full bg-[linear-gradient(90deg,#8B7CFF,#5B45F0)] rounded-full transition-all duration-500"
-          style={{ width: `${Math.round((stepsCompleted / 3) * 100)}%` }}
-        />
-      </div>
+  // Reopen the strip after it was collapsed (clears session dismiss flag).
+  // Restores focus to the button that was just activated (collapsed control).
+  function reopenStrip() {
+    if (uid) clearSessionFlag(sessionDismissKey(uid))
+    setStripDismissed(false)
+    // Focus restoration: the collapsed button unmounts and the strip takes its place.
+    // We defer by one frame so the strip DOM is mounted before requestAnimationFrame fires.
+    requestAnimationFrame(() => {
+      // Nothing specific to focus inside the strip — let natural focus order apply.
+    })
+  }
 
-      {/* Step 1 — Add or import 5 contacts */}
-      <ChecklistStep done={step1Done} label="Add or import 5 contacts">
-        <div className="flex flex-wrap gap-2">
-          <button
-            onClick={() => setShowDrawer(true)}
-            className="text-[12.5px] font-bold px-3 py-1.5 rounded-lg bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] text-white shadow-[0_4px_12px_rgba(91,69,240,0.3)] hover:opacity-90 transition-opacity"
-          >
-            Add contact
-          </button>
-          <button
-            onClick={() => setShowImportModal(true)}
-            className="text-[12.5px] font-semibold px-3 py-1.5 rounded-lg bg-elevated border border-[rgba(255,255,255,0.1)] text-mid hover:text-hi transition-colors"
-          >
-            Import CSV
-          </button>
-        </div>
-      </ChecklistStep>
+  // Skip the welcome card — persists to localStorage so it doesn't reappear next session.
+  function skipWelcome() {
+    if (uid) writeLocalFlag(welcomeSkipKey(uid))
+    setWelcomeSkipped(true)
+  }
 
-      {/* Step 2 — Log your first conversation */}
-      <ChecklistStep done={step2Done} label="Log your first conversation">
-        {contactCount > 0
-          ? <Link to="/contacts" className="text-[12.5px] font-semibold text-accent hover:text-tag transition-colors no-underline">Go to contacts →</Link>
-          : <p className="text-[12px] text-lower">Add a contact first</p>
-        }
-      </ChecklistStep>
-
-      {/* Step 3 — Schedule your first follow-up */}
-      <ChecklistStep done={step3Done} label="Schedule your first follow-up">
-        {contactCount > 0
-          ? <Link to="/contacts" className="text-[12.5px] font-semibold text-accent hover:text-tag transition-colors no-underline">Go to contacts →</Link>
-          : <p className="text-[12px] text-lower">Add a contact first</p>
-        }
-      </ChecklistStep>
-    </div>
+  const addContactBtn = (
+    <button
+      onClick={openAddContactDrawer}
+      className="flex items-center gap-[6px] text-[13px] font-semibold px-[13px] h-[32px] rounded-[8px] transition-opacity hover:opacity-90"
+      style={{ background: 'var(--color-ember)', color: 'var(--color-paper)' }}
+    >
+      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" aria-hidden="true">
+        <path d="M12 5v14M5 12h14"/>
+      </svg>
+      Add contact
+    </button>
   )
 
-  // ── Main render ───────────────────────────────────────────────────────────
-  return (
+  // ── Drawers / modals (rendered outside the page layout) ──────────────────
+  const drawersAndModals = (
     <>
-      {/* Zero-contact: centered checklist replaces the old standalone CTA */}
-      {contactCount === 0 && (
-        <div className="min-h-screen bg-surface flex items-center justify-center p-6 md:p-12">
-          <div className="w-full max-w-md">
-            {checklistCard}
-          </div>
-        </div>
-      )}
-
-      {/* Full dashboard */}
-      {contactCount > 0 && (
-        <div className="min-h-screen bg-surface px-4 py-6 md:px-9 md:py-8">
-
-          {/* Header */}
-          <div className="flex items-start justify-between mb-7">
-            <div>
-              <h1 className="font-display font-bold text-[28px] text-hi tracking-[-0.5px]">Dashboard</h1>
-              <p className="text-[14.5px] text-muted mt-1">Here's what's on your radar.</p>
-            </div>
-            <button
-              onClick={() => setShowDrawer(true)}
-              className="flex items-center gap-2 bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] text-white text-[14px] font-bold px-[18px] py-[11px] rounded-[11px] shadow-[0_6px_18px_rgba(91,69,240,0.35)] hover:opacity-90 transition-opacity flex-none"
-            >
-              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.2" strokeLinecap="round">
-                <path d="M12 5v14M5 12h14"/>
-              </svg>
-              Add contact
-            </button>
-          </div>
-
-          {/* Activation checklist — visible until activation_completed_at is set */}
-          {showChecklist && <div className="mb-5">{checklistCard}</div>}
-
-          {/* Stat cards */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-5">
-
-            <div className="bg-card border border-line-2 rounded-2xl p-5">
-              <div className="flex items-center gap-[10px] mb-[14px]">
-                <div className="w-[34px] h-[34px] rounded-[9px] bg-[rgba(108,92,255,0.15)] flex items-center justify-center">
-                  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#8B7CFF" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
-                    <circle cx="8" cy="8" r="3"/><path d="M2.5 20c0-3 2.5-5.5 5.5-5.5S13.5 17 13.5 20"/><circle cx="17" cy="9" r="2.4"/><path d="M15 14.6c2.8.3 5 2.6 5 5.4"/>
-                  </svg>
-                </div>
-                <span className="text-[13.5px] text-muted font-medium">Contacts</span>
-              </div>
-              <p className="font-display text-[36px] font-bold text-hi leading-none mb-1.5">{contactCount}</p>
-              {newContactsWeek > 0 && (
-                <p className="text-[12.5px] font-semibold text-success">+{newContactsWeek} this week</p>
-              )}
-            </div>
-
-            <div className="bg-card border border-line-2 rounded-2xl p-5">
-              <div className="flex items-center gap-[10px] mb-[14px]">
-                <div className="w-[34px] h-[34px] rounded-[9px] bg-[rgba(47,212,182,0.14)] flex items-center justify-center">
-                  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#2FD4B6" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M4 5h16v10H8l-4 4z"/>
-                  </svg>
-                </div>
-                <span className="text-[13.5px] text-muted font-medium">Interactions</span>
-              </div>
-              <p className="font-display text-[36px] font-bold text-hi leading-none mb-1.5">{interactionCount}</p>
-              {newInteractionsWeek > 0 && (
-                <p className="text-[12.5px] font-semibold text-success">+{newInteractionsWeek} this week</p>
-              )}
-            </div>
-
-            <div className={`border rounded-2xl p-5 ${followUps.length > 0 ? 'bg-[rgba(245,166,35,0.06)] border-[rgba(245,166,35,0.22)]' : 'bg-card border-line-2'}`}>
-              <div className="flex items-center gap-[10px] mb-[14px]">
-                <div className="w-[34px] h-[34px] rounded-[9px] bg-[rgba(245,166,35,0.14)] flex items-center justify-center">
-                  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#FFB84D" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
-                    <circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>
-                  </svg>
-                </div>
-                <span className="text-[13.5px] text-muted font-medium">Follow-ups due</span>
-              </div>
-              <p className={`font-display text-[36px] font-bold leading-none mb-1.5 ${followUps.length > 0 ? 'text-warning' : 'text-hi'}`}>
-                {followUps.length}
-              </p>
-              {dueToday > 0 && (
-                <p className="text-[12.5px] font-semibold text-warning">{dueToday} due today</p>
-              )}
-            </div>
-          </div>
-
-          {/* Funnl AI teaser banner */}
-          <div
-            className="flex items-center justify-between gap-4 border rounded-2xl px-5 py-4 mb-6 shadow-[0_0_40px_rgba(108,92,255,0.08)]"
-            style={{ background: 'var(--banner-gradient)', borderColor: 'var(--banner-border)' }}
-          >
-            <div className="flex items-center gap-[14px]">
-              <div className="w-10 h-10 rounded-[11px] bg-[rgba(139,124,255,0.18)] flex items-center justify-center flex-none">
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="#B4A8FF">
-                  <path d="M12 3l1.7 5.3L19 10l-5.3 1.7L12 17l-1.7-5.3L5 10l5.3-1.7L12 3z"/>
-                </svg>
-              </div>
-              <div>
-                <p className="text-[14px] font-bold text-banner-heading">Funnl AI is live</p>
-                <p className="text-[13px] text-banner-body">Ask anything about your network — who to reach, who's gone cold. Available with Pro.</p>
-              </div>
-            </div>
-            <span className="font-mono text-[10.5px] font-bold text-accent bg-[rgba(139,124,255,0.14)] px-2 py-1 rounded-[5px] flex-none">PRO</span>
-          </div>
-
-          {/* Two-column body: follow-ups (left) + recent contacts (right) */}
-          <div className="grid grid-cols-1 md:grid-cols-[1.25fr_1fr] gap-5">
-
-            <div className="bg-card border border-line-2 rounded-2xl p-5">
-              <div className="flex items-center justify-between mb-4">
-                <h3 className="text-[15px] font-bold text-hi">Follow-ups due</h3>
-              </div>
-              {followUps.length === 0 ? (
-                <div className="text-center py-6">
-                  <div className="w-10 h-10 mx-auto mb-3 rounded-xl bg-[rgba(47,212,182,0.12)] border border-[rgba(47,212,182,0.25)] flex items-center justify-center">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#2FD4B6" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M5 12l4.5 4.5L19 7"/>
-                    </svg>
-                  </div>
-                  <p className="text-[13px] font-medium text-hi mb-0.5">You're all caught up</p>
-                  <p className="text-[12px] text-low">No follow-ups due right now.</p>
-                </div>
-              ) : (
-                <div className="space-y-0">
-                  {followUps.map((interaction, i) => {
-                    const name = interaction.contacts?.name || 'Unknown'
-                    const status = followUpStatus(interaction.follow_up_date)
-                    return (
-                      <Link
-                        key={interaction.id}
-                        to={`/contacts/${interaction.contact_id}`}
-                        className={`flex items-center gap-3 py-[13px] no-underline ${i < followUps.length - 1 ? 'border-b border-[rgba(255,255,255,0.05)]' : ''}`}
-                      >
-                        <div className="w-[38px] h-[38px] rounded-[11px] flex items-center justify-center text-[13px] font-bold text-white flex-none" style={{ background: getAvatarColor(name) }}>
-                          {getInitials(name)}
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <p className="text-[13.5px] font-semibold text-hi truncate">{name}</p>
-                          <p className="text-[12.5px] text-muted truncate">{interaction.type}</p>
-                        </div>
-                        <span className={`text-[11px] font-bold px-[9px] py-[3px] rounded-full flex-none ${status.cls}`}>
-                          {status.label}
-                        </span>
-                      </Link>
-                    )
-                  })}
-                </div>
-              )}
-            </div>
-
-            <div className="bg-card border border-line-2 rounded-2xl p-5">
-              <div className="flex items-center justify-between mb-4">
-                <h3 className="text-[15px] font-bold text-hi">Recent contacts</h3>
-                <Link to="/contacts" className="text-[12.5px] font-semibold text-accent hover:text-tag transition-colors no-underline">
-                  View all →
-                </Link>
-              </div>
-              <div className="space-y-0">
-                {recentContacts.map((contact, i) => (
-                  <Link
-                    key={contact.id}
-                    to={`/contacts/${contact.id}`}
-                    className={`flex items-center gap-3 py-[11px] no-underline ${i < recentContacts.length - 1 ? 'border-b border-[rgba(255,255,255,0.05)]' : ''}`}
-                  >
-                    <div className="w-[36px] h-[36px] rounded-[10px] flex items-center justify-center text-[12.5px] font-bold text-white flex-none" style={{ background: getAvatarColor(contact.name) }}>
-                      {getInitials(contact.name)}
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-[13.5px] font-semibold text-hi truncate">{contact.name}</p>
-                      {(contact.role || contact.company) && (
-                        <p className="text-[12px] text-muted truncate">
-                          {[contact.role, contact.company].filter(Boolean).join(' · ')}
-                        </p>
-                      )}
-                    </div>
-                  </Link>
-                ))}
-              </div>
-            </div>
-
-          </div>
-        </div>
-      )}
-
-      {/* Drawers and modals — shared between zero-contact and full-dashboard states */}
-      {showDrawer && (
-        <>
-          <div
-            className="fixed inset-0 md:left-[248px] bg-[rgba(6,6,8,0.55)] z-40"
-            onClick={() => setShowDrawer(false)}
-            style={{ animation: 'fade-in 0.2s ease-out' }}
-          />
-          <AddContactDrawer
-            onClose={() => setShowDrawer(false)}
-            onSuccess={(newId) => {
-              setShowDrawer(false)
-              if (contactCount === 0 && newId) {
-                navigate(`/contacts/${newId}`, { state: { openInteractionForm: true } })
-              } else {
-                fetchAll()
-              }
-            }}
-          />
-        </>
-      )}
       {showImportModal && (
         <ImportContactsModal
           onClose={() => setShowImportModal(false)}
           onImported={() => { setShowImportModal(false); fetchAll() }}
         />
       )}
+      {pickerMode !== null && (
+        <ContactPickerModal
+          title={pickerMode === 'interaction' ? 'Log an interaction' : 'Create a follow-up'}
+          onSelect={handlePickerSelect}
+          onClose={() => setPickerMode(null)}
+          onAddContact={() => { setPickerMode(null); openAddContactDrawer() }}
+          contacts={loading ? undefined : contacts}
+        />
+      )}
+    </>
+  )
+
+  // ── Loading ───────────────────────────────────────────────────────────────
+  if (loading) {
+    return (
+      <>
+        <TopBar
+          title="Home"
+          searchPlaceholder="Find, log, or ask anything…"
+          onSearchClick={openCommandPalette}
+          cta={addContactBtn}
+        />
+        <div className="flex items-center justify-center py-24">
+          <p className="text-[13px] font-mono" style={{ color: 'var(--color-muted)' }}>Loading…</p>
+        </div>
+      </>
+    )
+  }
+
+  // ── Error ─────────────────────────────────────────────────────────────────
+  if (fetchError) {
+    return (
+      <>
+        <TopBar title="Home" searchPlaceholder="Find, log, or ask anything…" onSearchClick={openCommandPalette} cta={addContactBtn} />
+        <div className="flex items-center justify-center p-8">
+          <div className="text-center max-w-xs">
+            <p className="text-[14px] font-semibold mb-[6px]" style={{ color: 'var(--color-hi)' }}>
+              Couldn't load your dashboard
+            </p>
+            <p className="text-[13px] mb-[16px]" style={{ color: 'var(--color-muted)' }}>
+              Check your connection and try again.
+            </p>
+            <button
+              onClick={fetchAll}
+              className="text-[13px] font-semibold"
+              style={{ color: 'var(--color-accent)' }}
+            >
+              Try again
+            </button>
+          </div>
+        </div>
+      </>
+    )
+  }
+
+  // ── Derived render state ──────────────────────────────────────────────────
+  const today        = getLocalToday()
+  const activation   = deriveActivationState({
+    milestones,
+    contactCount,
+    hasInteraction: interactionCount > 0,
+    hasFollowUp,
+    loading: false,   // loading state already handled above — we never reach here while loading
+    queryError: false, // same for error state
+    welcomeSkipped,
+    stripDismissed,
+    justCompleted,
+  })
+  const {
+    displayMode,
+    contactsComplete: step1Done,
+    interactionComplete: step2Done,
+    followupComplete: step3Done,
+    completedCount,
+    nextAction: derivedNextAction,
+  } = activation
+  const networkSignal = computeNetworkSignal(signals, interactionsThisWeek, awaitingResponseCount, contactCount)
+  const hasOverdue = followUpsDueList.some(d => d.interaction.follow_up_date < today)
+
+  // Pulse strip stats — only include non-zero / interesting values.
+  // Total contact count is omitted here; it already appears in the summary sentence above.
+  const pulseStats = [
+    newContactsThisWeek > 0 ? { label: 'NEW THIS WEEK', value: `+${newContactsThisWeek}` } : null,
+    interactionCount > 0 ? { label: 'INTERACTIONS', value: String(interactionCount) } : null,
+    awaitingResponseCount > 0 ? { label: 'AWAITING', value: String(awaitingResponseCount) } : null,
+    responseRate !== null ? { label: 'RESPONSE RATE', value: `${responseRate}%` } : null,
+    topTag ? { label: 'TOP TAG', value: topTag.toUpperCase() } : null,
+  ].filter(Boolean)
+
+  // ── State 1b: New user (zero contacts) — WelcomeCard ─────────────────────
+  if (displayMode === 'welcome') {
+    return (
+      <>
+        <TopBar
+          title="Home"
+          searchPlaceholder="Find, log, or ask anything…"
+          onSearchClick={openCommandPalette}
+          cta={addContactBtn}
+        />
+        <WelcomeCard
+          displayName={displayName}
+          onAdd={openAddContactDrawer}
+          onImport={() => setShowImportModal(true)}
+          onSkip={skipWelcome}
+        />
+        {drawersAndModals}
+      </>
+    )
+  }
+
+  // ── State 1a: Populated dashboard ────────────────────────────────────────
+  return (
+    <>
+      <TopBar
+        title="Home"
+        searchPlaceholder="Find, log, or ask anything…"
+        onSearchClick={openCommandPalette}
+        cta={addContactBtn}
+      />
+
+      {/* ── Network summary + pulse strip ─────────────────────────────────── */}
+      <div className="border-b border-line-1">
+        {/* Summary sentence */}
+        <div className="px-[20px] md:px-[28px] pt-[20px] pb-[14px]">
+          <p className="text-[15px] md:text-[16px] leading-relaxed" style={{ color: 'var(--color-hi)' }}>
+            <strong>{contactCount}</strong> contact{contactCount !== 1 ? 's' : ''} in your network.{' '}
+            {interactionsThisWeek > 0 ? (
+              <span style={{ color: 'var(--color-success)' }}>
+                +{interactionsThisWeek} interaction{interactionsThisWeek !== 1 ? 's' : ''} this week.
+              </span>
+            ) : (
+              <span style={{ color: 'var(--color-muted)' }}>No interactions logged this week.</span>
+            )}
+            {followUpsDueList.length > 0 && (
+              <>{' '}<span style={{ color: hasOverdue ? 'var(--color-danger)' : 'var(--color-warning)' }}>
+                {followUpsDueList.length} follow-up{followUpsDueList.length !== 1 ? 's' : ''} due.
+              </span></>
+            )}
+          </p>
+        </div>
+
+        {/* Pulse strip — full-width, horizontally scrollable */}
+        <div className="flex overflow-x-auto border-t border-line-1" style={{ scrollbarWidth: 'none' }}>
+          {pulseStats.map((stat, i) => (
+            <div
+              key={stat.label}
+              className={`flex items-center gap-[10px] px-[18px] md:px-[22px] py-[8px] flex-none${i < pulseStats.length - 1 ? ' border-r border-line-1' : ''}`}
+            >
+              <span
+                className="text-[9px] font-mono font-medium uppercase tracking-[0.09em] whitespace-nowrap"
+                style={{ color: 'var(--color-low)' }}
+              >
+                {stat.label}
+              </span>
+              <span
+                className="text-[13px] font-mono font-semibold whitespace-nowrap tabular-nums"
+                style={{ color: 'var(--color-hi)' }}
+              >
+                {stat.value}
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* ── Body ─────────────────────────────────────────────────────────── */}
+      <div className="px-[20px] md:px-[28px] py-[20px] space-y-[20px]">
+
+        {/* Collapsed reopen control — shown when strip was dismissed.
+            Renders as a slim row so it doesn't displace layout. */}
+        {displayMode === 'collapsed' && (
+          <button
+            ref={collapsedBtnRef}
+            onClick={reopenStrip}
+            aria-label="Show setup progress"
+            className="flex items-center gap-[8px] border-0 bg-transparent cursor-pointer rounded-[8px] px-[4px] py-[4px]"
+            style={{ color: 'var(--color-low)' }}
+            onMouseEnter={e => e.currentTarget.style.color = 'var(--color-hi)'}
+            onMouseLeave={e => e.currentTarget.style.color = 'var(--color-low)'}
+            onFocus={e => { e.currentTarget.style.outline = '2px solid var(--color-ember)'; e.currentTarget.style.outlineOffset = '2px' }}
+            onBlur={e => { e.currentTarget.style.outline = ''; e.currentTarget.style.outlineOffset = '' }}
+          >
+            {/* Sacred funnel with dot indicator — dot uses border not color alone */}
+            <div style={{ position: 'relative', width: 16, height: 14, flexShrink: 0 }}>
+              <svg width="16" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path d="M3 4H21L15 12.5V20H9V12.5Z" fill="#FF4423" opacity="0.5"/>
+              </svg>
+              <span
+                style={{
+                  position: 'absolute', top: -2, right: -2, width: 6, height: 6,
+                  borderRadius: '50%', background: 'var(--color-ember)',
+                  border: '1.5px solid var(--color-surface)',
+                }}
+              />
+            </div>
+            <span className="text-[11px] font-semibold">Show setup progress</span>
+          </button>
+        )}
+
+        {/* Onboarding strip — shown based on displayMode */}
+        {displayMode === 'compact' && (
+          <ActivationProgressStrip
+            step1Done={step1Done}
+            step2Done={step2Done}
+            step3Done={step3Done}
+            completedCount={completedCount}
+            ariaLabel={buildProgressAriaLabel(step1Done, step2Done, step3Done)}
+            onDismiss={dismissStrip}
+            onNextAction={() => {
+              if (!derivedNextAction) return
+              const result = resolveActivationAction(derivedNextAction.action, contacts)
+              if (result.type === 'open_drawer') openAddContactDrawer()
+              else if (result.type === 'navigate') navigate(`/contacts/${result.contactId}`, { state: buildPickerNavigationState(result.mode) })
+              else if (result.type === 'open_picker') setPickerMode(result.mode)
+            }}
+          />
+        )}
+        {displayMode === 'newly_completed' && <CompletionStrip />}
+
+        {/* Two-column grid: left wider, right rail */}
+        <div className="grid grid-cols-1 md:grid-cols-[1.75fr_1fr] gap-[20px] items-start">
+
+          {/* ── Left column ──────────────────────────────────────────────── */}
+          <div className="space-y-[20px]">
+
+            {/* NETWORK SIGNAL — rule-based, shown to ALL users.
+                Uses always-dark ink gradient so light text is readable in both themes.
+                AI_WEEKLY_INSIGHT_ENABLED = false guards against an uncached LLM call
+                on every Dashboard mount. When the true AI insight is ready, it will
+                replace the text below behind this flag. */}
+            <div
+              className="rounded-[14px] p-[18px] md:p-[20px]"
+              style={{ background: 'var(--banner-gradient)', border: '1px solid rgba(247,242,231,0.09)' }}
+            >
+              <div className="flex items-start gap-[12px]">
+                <div
+                  className="w-[30px] h-[30px] rounded-[8px] flex items-center justify-center flex-none mt-[1px]"
+                  style={{ background: 'var(--color-ember)' }}
+                >
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <path d="M3 4H21L15 12.5V20H9V12.5Z" fill="rgba(247,242,231,0.95)"/>
+                  </svg>
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p
+                    className="text-[10px] font-mono font-medium uppercase tracking-[0.1em] mb-[6px]"
+                    style={{ color: 'rgba(247,242,231,0.4)' }}
+                  >
+                    Network signal
+                  </p>
+                  <p
+                    className="text-[13.5px] leading-relaxed"
+                    style={{ color: 'rgba(247,242,231,0.88)' }}
+                  >
+                    {networkSignal}
+                  </p>
+                  {canUsePro && (
+                    <div className="mt-[12px]">
+                      <Link
+                        to="/ai"
+                        className="text-[12px] font-semibold no-underline"
+                        style={{ color: 'var(--color-ember)' }}
+                      >
+                        Ask Funnl AI for more
+                      </Link>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Relationship signals — rule-based, all users */}
+            <div
+              className="rounded-[14px] border border-line-2 overflow-hidden"
+              style={{ background: 'var(--color-card)' }}
+            >
+              <div className="px-[18px] py-[13px] flex items-center justify-between border-b border-line-1">
+                <h3 className="text-[13px] font-semibold" style={{ color: 'var(--color-hi)' }}>
+                  Relationship signals
+                </h3>
+                <Link
+                  to="/contacts"
+                  className="text-[11.5px] font-semibold no-underline"
+                  style={{ color: 'var(--color-accent)' }}
+                >
+                  View all
+                </Link>
+              </div>
+              {signals.length === 0 ? (
+                <div className="px-[18px] py-[20px] text-center">
+                  <p className="text-[13px]" style={{ color: 'var(--color-muted)' }}>
+                    {interactionCount === 0
+                      ? 'Log interactions to see relationship signals.'
+                      : 'Your relationships are in good shape.'}
+                  </p>
+                </div>
+              ) : (
+                <div>
+                  {signals.map((signal, i) => (
+                    <SignalRow
+                      key={`${signal.contact.id}-${signal.type}`}
+                      signal={signal}
+                      isLast={i === signals.length - 1}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Recent activity: contacts added + interactions, combined */}
+            {recentActivity.length > 0 && (
+              <div
+                className="rounded-[14px] border border-line-2 overflow-hidden"
+                style={{ background: 'var(--color-card)' }}
+              >
+                <div className="px-[18px] py-[13px] border-b border-line-1">
+                  <h3 className="text-[13px] font-semibold" style={{ color: 'var(--color-hi)' }}>
+                    Recent activity
+                  </h3>
+                </div>
+                <div>
+                  {recentActivity.map((item, i) => (
+                    <ActivityRow
+                      key={item.id}
+                      item={item}
+                      today={today}
+                      isLast={i === recentActivity.length - 1}
+                    />
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* ── Right rail ───────────────────────────────────────────────── */}
+          <div className="space-y-[20px]">
+
+            {/* Compact follow-ups */}
+            <div
+              className="rounded-[14px] border border-line-2 overflow-hidden"
+              style={{ background: 'var(--color-card)' }}
+            >
+              <div className="px-[18px] py-[13px] flex items-center justify-between border-b border-line-1">
+                <h3 className="text-[13px] font-semibold" style={{ color: 'var(--color-hi)' }}>
+                  Follow-ups due
+                </h3>
+                {followUpsDueList.length > 0 && (
+                  <Link
+                    to="/followups"
+                    className="text-[11.5px] font-semibold no-underline"
+                    style={{ color: 'var(--color-accent)' }}
+                  >
+                    View all
+                  </Link>
+                )}
+              </div>
+
+              {followUpsDueList.length === 0 ? (
+                <div className="px-[18px] py-[20px]">
+                  <p className="text-[13px]" style={{ color: 'var(--color-muted)' }}>All caught up.</p>
+                  <p className="text-[12px] mt-[2px]" style={{ color: 'var(--color-low)' }}>No follow-ups due right now.</p>
+                </div>
+              ) : (
+                <>
+                  {followUpsDueList.slice(0, 5).map(({ interaction: ixn, contact }, idx) => {
+                    const name = contact?.name || 'Unknown'
+                    const { label, color } = followUpLabel(ixn.follow_up_date, today)
+                    return (
+                      <Link
+                        key={ixn.id}
+                        to={`/contacts/${ixn.contact_id}`}
+                        className={`flex items-center gap-[10px] px-[18px] py-[11px] no-underline transition-colors${idx < Math.min(followUpsDueList.length, 5) - 1 ? ' border-b border-line-1' : ''}`}
+                        onMouseEnter={e => e.currentTarget.style.background = 'rgba(20,17,15,0.03)'}
+                        onMouseLeave={e => e.currentTarget.style.background = ''}
+                      >
+                        <div
+                          className="w-[30px] h-[30px] rounded-[8px] flex items-center justify-center text-[11px] font-bold flex-none"
+                          style={{ background: getAvatarColor(name), color: 'var(--color-paper)' }}
+                        >
+                          {getInitials(name)}
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-[12.5px] font-semibold truncate" style={{ color: 'var(--color-hi)' }}>
+                            {name}
+                          </p>
+                          <p className="text-[11px] truncate" style={{ color: 'var(--color-muted)' }}>
+                            {ixn.type}
+                          </p>
+                        </div>
+                        <span
+                          className="text-[10px] font-mono flex-none whitespace-nowrap"
+                          style={{ color }}
+                        >
+                          {label}
+                        </span>
+                      </Link>
+                    )
+                  })}
+                  {followUpsDueList.length > 5 && (
+                    <Link
+                      to="/followups"
+                      className="flex items-center justify-center py-[10px] text-[12px] font-semibold no-underline border-t border-line-1 transition-colors"
+                      style={{ color: 'var(--color-accent)' }}
+                    >
+                      +{followUpsDueList.length - 5} more
+                    </Link>
+                  )}
+                </>
+              )}
+            </div>
+
+            {/* Quick actions — Log an interaction, Create a follow-up, Import contacts */}
+            <div
+              className="rounded-[14px] border border-line-2 overflow-hidden"
+              style={{ background: 'var(--color-card)' }}
+            >
+              <div className="px-[18px] py-[13px] border-b border-line-1">
+                <h3 className="text-[13px] font-semibold" style={{ color: 'var(--color-hi)' }}>Quick actions</h3>
+              </div>
+              <div className="p-[8px] space-y-[1px]">
+                {/* Log an interaction — opens contact picker → navigates with openInteractionForm */}
+                <button
+                  onClick={() => setPickerMode('interaction')}
+                  className="w-full flex items-center gap-[10px] px-[10px] py-[9px] rounded-[8px] text-left transition-colors"
+                  onMouseEnter={e => e.currentTarget.style.background = 'rgba(20,17,15,0.04)'}
+                  onMouseLeave={e => e.currentTarget.style.background = ''}
+                >
+                  <span
+                    className="w-[26px] h-[26px] rounded-[7px] flex items-center justify-center flex-none"
+                    style={{ background: 'var(--color-elevated)' }}
+                  >
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--color-mid)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+                    </svg>
+                  </span>
+                  <span className="text-[13px] font-medium" style={{ color: 'var(--color-hi)' }}>Log an interaction</span>
+                </button>
+
+                {/* Create a follow-up — opens contact picker → navigates with openFollowUpForm */}
+                <button
+                  onClick={() => setPickerMode('followup')}
+                  className="w-full flex items-center gap-[10px] px-[10px] py-[9px] rounded-[8px] text-left transition-colors"
+                  onMouseEnter={e => e.currentTarget.style.background = 'rgba(20,17,15,0.04)'}
+                  onMouseLeave={e => e.currentTarget.style.background = ''}
+                >
+                  <span
+                    className="w-[26px] h-[26px] rounded-[7px] flex items-center justify-center flex-none"
+                    style={{ background: 'var(--color-elevated)' }}
+                  >
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--color-mid)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>
+                    </svg>
+                  </span>
+                  <span className="text-[13px] font-medium" style={{ color: 'var(--color-hi)' }}>Create a follow-up</span>
+                </button>
+
+                {/* Import contacts — opens ImportContactsModal */}
+                <button
+                  onClick={() => setShowImportModal(true)}
+                  className="w-full flex items-center gap-[10px] px-[10px] py-[9px] rounded-[8px] text-left transition-colors"
+                  onMouseEnter={e => e.currentTarget.style.background = 'rgba(20,17,15,0.04)'}
+                  onMouseLeave={e => e.currentTarget.style.background = ''}
+                >
+                  <span
+                    className="w-[26px] h-[26px] rounded-[7px] flex items-center justify-center flex-none"
+                    style={{ background: 'var(--color-elevated)' }}
+                  >
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--color-mid)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
+                    </svg>
+                  </span>
+                  <span className="text-[13px] font-medium" style={{ color: 'var(--color-hi)' }}>Import contacts</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Funnl AI entry — Pro only (trial or permanent). Non-Pro: no teaser, no blank space. */}
+            {canUsePro && (
+              <div
+                className="rounded-[14px] overflow-hidden"
+                style={{ background: 'var(--banner-gradient)', border: '1px solid rgba(255,68,35,0.18)' }}
+              >
+                <div className="p-[16px]">
+                  <div className="flex items-center gap-[8px] mb-[10px]">
+                    <div
+                      className="w-[18px] h-[18px] rounded-[5px] flex items-center justify-center flex-none"
+                      style={{ background: 'var(--color-ember)' }}
+                    >
+                      <svg width="8" height="8" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                        <path d="M3 4H21L15 12.5V20H9V12.5Z" fill="rgba(247,242,231,0.95)"/>
+                      </svg>
+                    </div>
+                    <span
+                      className="text-[10px] font-mono font-medium uppercase tracking-[0.09em]"
+                      style={{ color: 'rgba(247,242,231,0.45)' }}
+                    >
+                      Funnl AI
+                    </span>
+                  </div>
+                  <Link
+                    to="/ai"
+                    className="flex items-center gap-[8px] px-[12px] py-[8px] rounded-[8px] no-underline"
+                    style={{ background: 'rgba(247,242,231,0.07)', border: '1px solid rgba(247,242,231,0.11)' }}
+                  >
+                    <span
+                      className="text-[12px] flex-1 truncate"
+                      style={{ color: 'rgba(247,242,231,0.38)' }}
+                    >
+                      Ask anything about your network…
+                    </span>
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="rgba(247,242,231,0.3)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <path d="M5 12h14M12 5l7 7-7 7"/>
+                    </svg>
+                  </Link>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {drawersAndModals}
     </>
   )
 }

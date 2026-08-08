@@ -10,13 +10,13 @@ function ContactListItem({ contact, onDeleteRequest }) {
   return (
     <div
       onClick={() => navigate(`/contacts/${contact.id}`)}
-      className="group bg-card border border-line-2 rounded-2xl p-[18px] cursor-pointer hover:border-[rgba(139,124,255,0.3)] transition-colors flex flex-col gap-[13px]"
+      className="group bg-card border border-line-2 rounded-2xl p-[18px] cursor-pointer hover:border-line-3 transition-colors flex flex-col gap-[13px]"
     >
       {/* Top row: avatar + name/role + icon buttons */}
       <div className="flex items-start gap-3">
         <div
-          className="w-[46px] h-[46px] rounded-[13px] flex items-center justify-center text-[15px] font-bold text-white flex-none"
-          style={{ background: getAvatarColor(contact.name) }}
+          className="w-[46px] h-[46px] rounded-[13px] flex items-center justify-center text-[15px] font-bold flex-none"
+          style={{ background: getAvatarColor(contact.name), color: 'var(--color-paper)' }}
         >
           {getInitials(contact.name)}
         </div>
@@ -37,9 +37,9 @@ function ContactListItem({ contact, onDeleteRequest }) {
               href={`mailto:${contact.email}`}
               onClick={(e) => e.stopPropagation()}
               title={contact.email}
-              className="w-8 h-8 rounded-[9px] bg-elevated border border-line-2 flex items-center justify-center hover:border-[rgba(139,124,255,0.4)] transition-colors"
+              className="w-8 h-8 rounded-[9px] bg-elevated border border-line-2 flex items-center justify-center hover:border-line-3 transition-colors"
             >
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#8A8A94" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--color-low)" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
                 <rect x="3" y="5" width="18" height="14" rx="2.5"/><path d="m3 7 9 6 9-6"/>
               </svg>
             </a>
@@ -48,7 +48,7 @@ function ContactListItem({ contact, onDeleteRequest }) {
               title="No email saved"
               className="w-8 h-8 rounded-[9px] bg-elevated border border-line-2 flex items-center justify-center opacity-25"
             >
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#8A8A94" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--color-low)" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
                 <rect x="3" y="5" width="18" height="14" rx="2.5"/><path d="m3 7 9 6 9-6"/>
               </svg>
             </div>
@@ -61,14 +61,16 @@ function ContactListItem({ contact, onDeleteRequest }) {
               rel="noopener noreferrer"
               onClick={(e) => e.stopPropagation()}
               title="Open LinkedIn"
-              className="w-8 h-8 rounded-[9px] bg-elevated border border-line-2 flex items-center justify-center hover:border-[rgba(139,124,255,0.4)] transition-colors text-[#8A8A94] text-[12px] font-bold font-mono"
+              className="w-8 h-8 rounded-[9px] bg-elevated border border-line-2 flex items-center justify-center hover:border-line-3 transition-colors text-[12px] font-bold font-mono"
+              style={{ color: 'var(--color-low)' }}
             >
               in
             </a>
           ) : (
             <div
               title="No LinkedIn saved"
-              className="w-8 h-8 rounded-[9px] bg-elevated border border-line-2 flex items-center justify-center opacity-25 text-[#8A8A94] text-[12px] font-bold font-mono"
+              className="w-8 h-8 rounded-[9px] bg-elevated border border-line-2 flex items-center justify-center opacity-25 text-[12px] font-bold font-mono"
+              style={{ color: 'var(--color-low)' }}
             >
               in
             </div>
@@ -95,7 +97,7 @@ function ContactListItem({ contact, onDeleteRequest }) {
           {contact.tags.map((tag) => (
             <span
               key={tag}
-              className="text-[11px] font-semibold text-tag bg-[rgba(108,92,255,0.13)] border border-[rgba(108,92,255,0.22)] px-[9px] py-[3px] rounded-full"
+              className="text-[11px] font-semibold text-tag bg-elevated border border-line-2 px-[9px] py-[3px] rounded-full"
             >
               {tag}
             </span>
@@ -105,7 +107,7 @@ function ContactListItem({ contact, onDeleteRequest }) {
 
       {/* Footer: relationship_type + how_met */}
       {(contact.relationship_type || contact.how_met) && (
-        <div className="flex items-center gap-1.5 text-[12px] text-low border-t border-[rgba(255,255,255,0.05)] pt-[11px] min-w-0">
+        <div className="flex items-center gap-1.5 text-[12px] text-low border-t border-line-1 pt-[11px] min-w-0">
           {contact.relationship_type && (
             <span className="text-[11.5px] font-semibold text-accent shrink-0">{contact.relationship_type}</span>
           )}

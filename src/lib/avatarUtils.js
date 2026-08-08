@@ -1,10 +1,10 @@
 const AVATAR_COLORS = [
-  'linear-gradient(135deg,#8B7CFF,#5B45F0)',
-  'linear-gradient(135deg,#2FD4B6,#20A896)',
-  'linear-gradient(135deg,#FF6B8A,#F5A623)',
-  'linear-gradient(135deg,#4DA3FF,#2D7BE0)',
-  'linear-gradient(135deg,#F5A623,#E8872A)',
-  'linear-gradient(135deg,#C77DFF,#9B4FE0)',
+  'linear-gradient(135deg,#A84B27,#6A2D15)',
+  'linear-gradient(135deg,#186B5A,#0D4438)',
+  'linear-gradient(135deg,#A33558,#8A3A15)',
+  'linear-gradient(135deg,#2B68C2,#163D7A)',
+  'linear-gradient(135deg,#8C5003,#5A3400)',
+  'linear-gradient(135deg,#7C5A3A,#5A3E25)',
 ]
 
 export function getAvatarColor(name) {

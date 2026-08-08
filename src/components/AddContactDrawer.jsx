@@ -1,56 +1,107 @@
-﻿import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
-import { canUseAI } from '../lib/ai'
 import { track } from '../lib/analytics'
+import { useProStatus } from '../lib/useProStatus'
+import { classifyProStatus } from '../lib/pro-ui-status'
+import { findDuplicate } from '../lib/contactFormUtils'
+import { viewExistingRoute } from '../lib/interactionFormUtils'
 
 function normalizeUrl(url) {
-  const s = url.trim()
+  const s = (url || '').trim()
   if (!s) return null
   if (s.startsWith('http://') || s.startsWith('https://')) return s
   return 'https://' + s
 }
 
-const iCls = 'w-full bg-input border border-line-3 rounded-xl px-[13px] py-[11px] text-[13.5px] text-hi placeholder-[#54545E] outline-none focus:border-[rgba(139,124,255,0.5)] transition-colors'
-const iClsAI = 'w-full bg-[rgba(139,124,255,0.06)] border border-[rgba(139,124,255,0.35)] rounded-xl px-[13px] py-[11px] text-[13.5px] text-hi placeholder-[#54545E] outline-none focus:border-[rgba(139,124,255,0.5)] transition-colors'
+// Standard input (ember-tinted focus to match page theme)
+const iCls = 'w-full bg-input border border-line-3 rounded-xl px-[13px] py-[11px] text-[13.5px] text-hi placeholder-lower outline-none focus:border-[rgba(255,68,35,0.4)] transition-colors'
+// AI-filled input — restrained ember tint so the highlight is distinct but subtle
+const iClsAI = 'w-full bg-[rgba(255,68,35,0.05)] border border-[rgba(255,68,35,0.3)] rounded-xl px-[13px] py-[11px] text-[13.5px] text-hi placeholder-lower outline-none focus:border-[rgba(255,68,35,0.4)] transition-colors'
 const sCls = `${iCls} cursor-pointer`
 const lCls = 'mb-[7px] block text-[12.5px] font-semibold text-mid'
 
-function AddContactDrawer({ onClose, onSuccess }) {
-  const [name, setName] = useState('')
-  const [company, setCompany] = useState('')
-  const [role, setRole] = useState('')
-  const [howMet, setHowMet] = useState('')
-  const [relationshipType, setRelationshipType] = useState('')
-  const [relationshipNote, setRelationshipNote] = useState('')
-  const [email, setEmail] = useState('')
-  const [linkedinUrl, setLinkedinUrl] = useState('')
-  const [tagsInput, setTagsInput] = useState('')
+// contact=null  → add mode; all fields start empty
+// contact={...} → edit mode; fields pre-populated from contact object
+// contacts=[..] → list of existing contacts for duplicate detection (pass [] to skip)
+// onSuccess({ id, isFirstContact }) → called after successful save.
+//   Add mode: isFirstContact=true when this was the user's very first contact.
+//   Edit mode: isFirstContact is always false.
+function AddContactDrawer({ contact, contacts = [], onClose, onSuccess, initialName = '' }) {
+  const isEditMode = !!contact
+  const navigate = useNavigate()
+
+  // Form fields — pre-populated in edit mode; initialName pre-fills name in add mode
+  const [name,             setName]             = useState(contact?.name               ?? initialName ?? '')
+  const [company,          setCompany]          = useState(contact?.company             ?? '')
+  const [role,             setRole]             = useState(contact?.role                ?? '')
+  const [howMet,           setHowMet]           = useState(contact?.how_met             ?? '')
+  const [relationshipType, setRelationshipType] = useState(contact?.relationship_type   ?? '')
+  const [relationshipNote, setRelationshipNote] = useState(contact?.relationship_note   ?? '')
+  const [email,            setEmail]            = useState(contact?.email               ?? '')
+  const [linkedinUrl,      setLinkedinUrl]      = useState(contact?.linkedin_url        ?? '')
+  const [tagsInput,        setTagsInput]        = useState(
+    contact?.tags ? contact.tags.join(', ') : ''
+  )
   const [submitting, setSubmitting] = useState(false)
-  const [error, setError] = useState('')
+  const [error,      setError]      = useState('')
+
+  // Pro status for AI Fill gate (add mode only)
+  const proStatus = useProStatus()
+  const proClass  = classifyProStatus(proStatus)
+  const showAIFill = !isEditMode && (proClass === 'permanent' || proClass === 'trial')
 
   // AI Fill state
-  const [isProUser, setIsProUser] = useState(false)
-  const [aiText, setAiText] = useState('')
-  const [aiLoading, setAiLoading] = useState(false)
-  const [aiError, setAiError] = useState('')
-  const [aiFilledFields, setAiFilledFields] = useState(new Set())
+  const [aiText,              setAiText]              = useState('')
+  const [aiLoading,           setAiLoading]           = useState(false)
+  const [aiError,             setAiError]             = useState('')
+  const [aiFilledFields,      setAiFilledFields]      = useState(new Set())
   const [aiFollowUpSuggestion, setAiFollowUpSuggestion] = useState('')
 
-  // Check Pro status on mount
+  // Live duplicate check (excluding self in edit mode)
+  const duplicate = findDuplicate(contacts, name, company, isEditMode ? contact?.id : undefined)
+
+  const drawerRef       = useRef(null)
+  const restoreFocusRef = useRef(null)
+
+  // Snapshot focused element on mount; restore it when drawer unmounts
   useEffect(() => {
-    supabase.auth.getUser().then(({ data }) => {
-      if (data.user) canUseAI(data.user.id).then(setIsProUser)
-    })
+    restoreFocusRef.current = document.activeElement
+    return () => {
+      try { restoreFocusRef.current?.focus() } catch (_) {}
+    }
   }, [])
 
-  // Close on Escape key
+  // Focus trap: Tab/Shift+Tab cycles within the drawer; Escape closes
   useEffect(() => {
-    function onKey(e) { if (e.key === 'Escape') onClose() }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
+    const el = drawerRef.current
+    if (!el) return
+
+    function getFocusable() {
+      return [...el.querySelectorAll(
+        'input, select, textarea, button:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      )].filter(n => !n.disabled && getComputedStyle(n).display !== 'none')
+    }
+
+    function onKey(e) {
+      if (e.key === 'Escape') { onClose(); return }
+      if (e.key !== 'Tab') return
+      const els = getFocusable()
+      if (!els.length) return
+      const first = els[0]
+      const last  = els[els.length - 1]
+      if (e.shiftKey) {
+        if (document.activeElement === first) { e.preventDefault(); last.focus() }
+      } else {
+        if (document.activeElement === last) { e.preventDefault(); first.focus() }
+      }
+    }
+
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
   }, [onClose])
 
-  // Lock background scroll while drawer is open
+  // Scroll-lock the main content area while drawer is open
   useEffect(() => {
     const mainEl = document.querySelector('main')
     if (!mainEl) return
@@ -58,12 +109,10 @@ function AddContactDrawer({ onClose, onSuccess }) {
     return () => { mainEl.style.overflowY = '' }
   }, [])
 
-  // Returns the highlighted input class if AI filled this field, otherwise the standard class
   function inputCls(field) {
     return aiFilledFields.has(field) ? iClsAI : iCls
   }
 
-  // When the user manually edits an AI-filled field, remove its highlight
   function clearAiFill(field) {
     setAiFilledFields(prev => {
       const next = new Set(prev)
@@ -90,32 +139,26 @@ function AddContactDrawer({ onClose, onSuccess }) {
       return
     }
 
-    const contact = data?.contact
-    if (!contact || typeof contact !== 'object') {
+    const parsed = data?.contact
+    if (!parsed || typeof parsed !== 'object') {
       setAiError('Could not parse the text — please try again.')
       return
     }
 
-    // Fill form fields and track which ones were filled so they can be highlighted
     const filled = new Set()
-    if (contact.name)                { setName(contact.name);                          filled.add('name') }
-    if (contact.company)             { setCompany(contact.company);                    filled.add('company') }
-    if (contact.role)                { setRole(contact.role);                          filled.add('role') }
-    if (contact.how_met)             { setHowMet(contact.how_met);                     filled.add('howMet') }
-    if (contact.email)               { setEmail(contact.email);                        filled.add('email') }
-    if (contact.linkedin_url)        { setLinkedinUrl(contact.linkedin_url);           filled.add('linkedinUrl') }
-    if (contact.tags?.length)        { setTagsInput(contact.tags.join(', '));          filled.add('tags') }
-    if (contact.relationship_note)   { setRelationshipNote(contact.relationship_note); filled.add('relationshipNote') }
+    if (parsed.name)              { setName(parsed.name);                          filled.add('name') }
+    if (parsed.company)           { setCompany(parsed.company);                    filled.add('company') }
+    if (parsed.role)              { setRole(parsed.role);                          filled.add('role') }
+    if (parsed.how_met)           { setHowMet(parsed.how_met);                     filled.add('howMet') }
+    if (parsed.email)             { setEmail(parsed.email);                        filled.add('email') }
+    if (parsed.linkedin_url)      { setLinkedinUrl(parsed.linkedin_url);           filled.add('linkedinUrl') }
+    if (parsed.tags?.length)      { setTagsInput(parsed.tags.join(', '));          filled.add('tags') }
+    if (parsed.relationship_note) { setRelationshipNote(parsed.relationship_note); filled.add('relationshipNote') }
 
     setAiFilledFields(filled)
-
-    // Behavior-only event — number of fields filled, no contact content
     track('ai_fill_used', { fields_filled: filled.size })
 
-    // follow_up_suggestion lives on interactions, not contacts — show it as a reminder
-    if (contact.follow_up_suggestion) {
-      setAiFollowUpSuggestion(contact.follow_up_suggestion)
-    }
+    if (parsed.follow_up_suggestion) setAiFollowUpSuggestion(parsed.follow_up_suggestion)
   }
 
   async function handleSubmit(e) {
@@ -123,103 +166,123 @@ function AddContactDrawer({ onClose, onSuccess }) {
     setError('')
 
     const trimmedName = name.trim()
-    if (!trimmedName) {
-      setError('Name is required.')
-      return
-    }
+    if (!trimmedName) { setError('Name is required.'); return }
 
     setSubmitting(true)
-
     const tags = tagsInput.split(',').map(t => t.trim()).filter(Boolean)
-
-    const { data: newContact, error } = await supabase.from('contacts').insert([{
-      name: trimmedName,
-      company: company || null,
-      role: role || null,
-      how_met: howMet || null,
-      email: email || null,
-      linkedin_url: normalizeUrl(linkedinUrl),
-      tags: tags.length > 0 ? tags : null,
+    const payload = {
+      name:              trimmedName,
+      company:           company || null,
+      role:              role || null,
+      how_met:           howMet || null,
+      email:             email || null,
+      linkedin_url:      normalizeUrl(linkedinUrl),
+      tags:              tags.length > 0 ? tags : null,
       relationship_type: relationshipType || null,
       relationship_note: relationshipNote.trim() || null,
-    }]).select('id').single()
-
-    setSubmitting(false)
-
-    if (error) {
-      setError(error.message)
-      return
     }
 
-    // Behavior-only — booleans and no contact content
-    track('contact_added', {
-      via_ai_fill: aiFilledFields.size > 0,
-      has_tags: tags.length > 0,
-      has_relationship_type: !!relationshipType,
-    })
+    if (isEditMode) {
+      const { error: updateError } = await supabase.from('contacts').update(payload).eq('id', contact.id)
+      setSubmitting(false)
+      if (updateError) { setError(updateError.message); return }
+      onSuccess?.({ id: contact.id, isFirstContact: false })
+    } else {
+      const { data: newContact, error: insertError } = await supabase
+        .from('contacts').insert([payload]).select('id').single()
+      setSubmitting(false)
+      if (insertError) { setError(insertError.message); return }
 
-    // Check if this is the user's very first contact (activation moment)
-    const { count } = await supabase.from('contacts').select('id', { count: 'exact', head: true })
-    if (count === 1) track('first_contact_added')
+      track('contact_added', {
+        via_ai_fill: aiFilledFields.size > 0,
+        has_tags: tags.length > 0,
+        has_relationship_type: !!relationshipType,
+      })
 
-    onSuccess?.(newContact?.id ?? null)
+      // Post-insert count query is authoritative: if count===1 this is the first contact.
+      const { count } = await supabase.from('contacts').select('id', { count: 'exact', head: true })
+      const isFirstContact = count === 1
+      if (isFirstContact) track('first_contact_added')
+
+      onSuccess?.({ id: newContact?.id ?? null, isFirstContact })
+    }
   }
+
+  const title     = isEditMode ? 'Edit contact' : 'Add contact'
+  const saveLabel = submitting ? 'Saving…' : isEditMode ? 'Save changes' : 'Save contact'
 
   return (
     <form
+      ref={drawerRef}
       onSubmit={handleSubmit}
-      className="fixed inset-y-0 right-0 w-full md:w-[452px] bg-card border-l border-line-3 z-50 flex flex-col shadow-[-30px_0_60px_rgba(0,0,0,0.5)]"
-      style={{ animation: 'slide-in-right 0.25s ease-out' }}
+      className="fixed inset-y-0 right-0 w-full md:w-[440px] z-50 flex flex-col"
+      style={{
+        background: 'var(--color-card)',
+        borderLeft: '1px solid var(--color-line-3)',
+        boxShadow: '-30px 0 60px rgba(0,0,0,0.3)',
+        animation: 'slide-in-right 0.25s ease-out',
+      }}
+      aria-label={title}
     >
       {/* Header */}
       <div className="flex items-center justify-between px-[26px] py-[22px] border-b border-line-1 flex-none">
-        <h2 className="font-display text-[19px] font-bold text-hi">Add contact</h2>
+        <h2 className="font-display text-[18px] font-bold text-hi">{title}</h2>
         <button
           type="button"
           onClick={onClose}
-          className="w-[34px] h-[34px] rounded-[9px] bg-elevated border border-[rgba(255,255,255,0.08)] flex items-center justify-center hover:border-[rgba(255,255,255,0.18)] transition-colors"
+          aria-label="Close"
+          className="w-[34px] h-[34px] rounded-[9px] border border-line-2 flex items-center justify-center hover:border-line-3 transition-colors focus:outline-none focus:ring-1 focus:ring-[var(--color-ember)]"
+          style={{ background: 'var(--color-elevated)' }}
         >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#A0A0AD" strokeWidth="2" strokeLinecap="round">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--color-mid)" strokeWidth="2" strokeLinecap="round">
             <path d="M6 6l12 12M18 6L6 18"/>
           </svg>
         </button>
       </div>
 
-      {/* Scrollable form body */}
+      {/* Scrollable body */}
       <div className="flex-1 overflow-y-auto px-[26px] py-[22px] space-y-4">
 
-        {/* ── AI Fill section (Pro users only) ── */}
-        {isProUser && (
-          <div className="p-4 bg-elevated border border-[rgba(139,124,255,0.22)] rounded-xl">
-            {/* Label row */}
+        {/* ── AI Fill (add mode + Pro/trial only) ── */}
+        {showAIFill && (
+          <div className="p-4 rounded-xl border border-[rgba(255,68,35,0.18)]" style={{ background: 'var(--color-elevated)' }}>
             <div className="flex items-center gap-2 mb-3">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="#8B7CFF">
+              <svg width="14" height="14" viewBox="0 0 24 24" style={{ fill: 'var(--color-ember)' }}>
                 <path d="M12 3l1.7 5.3L19 10l-5.3 1.7L12 17l-1.7-5.3L5 10l5.3-1.7L12 3z"/>
               </svg>
               <span className="text-[13px] font-bold text-hi">AI Fill</span>
-              <span className="text-[10px] font-bold font-mono text-accent bg-[rgba(139,124,255,0.15)] px-1.5 py-0.5 rounded-[5px] tracking-[0.5px]">PRO</span>
+              <span
+                className="text-[10px] font-bold font-mono px-1.5 py-0.5 rounded-[5px] tracking-[0.5px]"
+                style={{ color: 'var(--color-ember)', background: 'rgba(255,68,35,0.1)' }}
+              >
+                {proClass === 'trial' ? 'TRIAL' : 'PRO'}
+              </span>
             </div>
 
-            {/* Textarea */}
             <textarea
               value={aiText}
               onChange={e => setAiText(e.target.value)}
-              placeholder="Paste anything about this person — name, company, where you met, skills, follow-up timing..."
+              placeholder="Paste anything about this person — name, company, where you met, follow-up timing…"
               rows={3}
-              className="w-full bg-input border border-line-3 rounded-xl px-[13px] py-[11px] text-[13.5px] text-hi placeholder-[#54545E] outline-none focus:border-[rgba(139,124,255,0.5)] transition-colors resize-none"
+              className="w-full bg-input border border-line-3 rounded-xl px-[13px] py-[11px] text-[13.5px] text-hi placeholder-lower outline-none focus:border-[rgba(255,68,35,0.4)] transition-colors resize-none"
             />
 
-            {/* Error */}
             {aiError && (
-              <p className="text-[12px] text-danger mt-2">{aiError}</p>
+              <p className="text-[12px] mt-2" style={{ color: 'var(--color-danger)' }}>{aiError}</p>
             )}
 
-            {/* Parse button */}
             <button
               type="button"
               onClick={handleAIParse}
               disabled={aiLoading || !aiText.trim()}
-              className="mt-2.5 w-full flex items-center justify-center gap-2 bg-[rgba(139,124,255,0.14)] border border-[rgba(139,124,255,0.45)] text-accent text-[13px] font-bold rounded-[10px] py-2.5 hover:bg-[rgba(139,124,255,0.22)] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              className="mt-2.5 w-full flex items-center justify-center gap-2 text-[13px] font-bold rounded-[10px] py-2.5 border transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+              style={{
+                color: 'var(--color-ember)',
+                background: 'rgba(255,68,35,0.07)',
+                borderColor: 'rgba(255,68,35,0.3)',
+              }}
+              onMouseEnter={e => !e.currentTarget.disabled && (e.currentTarget.style.background = 'rgba(255,68,35,0.12)')}
+              onMouseLeave={e => (e.currentTarget.style.background = 'rgba(255,68,35,0.07)')}
             >
               {aiLoading ? (
                 <>
@@ -238,16 +301,14 @@ function AddContactDrawer({ onClose, onSuccess }) {
               )}
             </button>
 
-            {/* Post-parse feedback */}
             {aiFilledFields.size > 0 && (
               <p className="text-[11px] text-muted mt-2.5 text-center leading-relaxed">
-                Fields highlighted in purple were filled by AI — review and edit before saving.
+                AI-filled fields are highlighted — review before saving.
               </p>
             )}
 
-            {/* Follow-up suggestion (lives on interactions, not contacts — show as a reminder) */}
             {aiFollowUpSuggestion && (
-              <div className="mt-2.5 flex items-start gap-2 px-3 py-2 bg-[rgba(255,184,77,0.08)] border border-[rgba(255,184,77,0.2)] rounded-lg">
+              <div className="mt-2.5 flex items-start gap-2 px-3 py-2 rounded-lg border border-[rgba(255,184,77,0.2)]" style={{ background: 'rgba(255,184,77,0.08)' }}>
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#FFB84D" strokeWidth="2" strokeLinecap="round" className="flex-none mt-[1px]">
                   <circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>
                 </svg>
@@ -259,20 +320,55 @@ function AddContactDrawer({ onClose, onSuccess }) {
           </div>
         )}
 
-        {/* ── Manual form fields ── */}
+        {/* ── Duplicate warning ── */}
+        {duplicate && (
+          <div
+            className="flex items-start gap-3 px-4 py-3 rounded-xl border border-[rgba(255,184,77,0.3)]"
+            style={{ background: 'rgba(255,184,77,0.07)' }}
+            role="alert"
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--color-warning)" strokeWidth="2" strokeLinecap="round" className="flex-none mt-[1px]">
+              <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+              <line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+            </svg>
+            <div className="flex-1 min-w-0">
+              <p className="text-[12.5px] leading-relaxed text-warning">
+                <strong>{duplicate.name}</strong>
+                {duplicate.company ? ` at ${duplicate.company}` : ''} already exists.
+                You can still save if this is a different person.
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  const route = viewExistingRoute(duplicate.id)
+                  onClose()
+                  if (route) navigate(route)
+                }}
+                className="mt-1.5 text-[12px] font-semibold text-warning underline underline-offset-2 hover:opacity-75 transition-opacity"
+              >
+                View existing →
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* ── Name ── */}
         <div>
-          <label className={lCls}>Name <span className="text-accent">*</span></label>
+          <label className={lCls}>
+            Name <span style={{ color: 'var(--color-ember)' }}>*</span>
+          </label>
           <input
             value={name}
             onChange={e => { setName(e.target.value); clearAiFill('name') }}
             required
-            autoFocus
+            autoFocus={!isEditMode}
             className={inputCls('name')}
             placeholder="Full name"
           />
         </div>
 
-        <div className="grid grid-cols-2 gap-3">
+        {/* ── Company + Role ── */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           <div>
             <label className={lCls}>Company</label>
             <input
@@ -293,6 +389,7 @@ function AddContactDrawer({ onClose, onSuccess }) {
           </div>
         </div>
 
+        {/* ── How you met ── */}
         <div>
           <label className={lCls}>How you met</label>
           <input
@@ -303,7 +400,8 @@ function AddContactDrawer({ onClose, onSuccess }) {
           />
         </div>
 
-        <div className="grid grid-cols-2 gap-3">
+        {/* ── Relationship type + Tags ── */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           <div>
             <label className={lCls}>Relationship type</label>
             <select
@@ -332,6 +430,7 @@ function AddContactDrawer({ onClose, onSuccess }) {
           </div>
         </div>
 
+        {/* ── Why this person matters ── */}
         <div>
           <label className={lCls}>Why this person matters</label>
           <input
@@ -342,6 +441,7 @@ function AddContactDrawer({ onClose, onSuccess }) {
           />
         </div>
 
+        {/* ── Email ── */}
         <div>
           <label className={lCls}>Email</label>
           <input
@@ -353,6 +453,7 @@ function AddContactDrawer({ onClose, onSuccess }) {
           />
         </div>
 
+        {/* ── LinkedIn URL ── */}
         <div>
           <label className={lCls}>LinkedIn URL</label>
           <input
@@ -363,7 +464,9 @@ function AddContactDrawer({ onClose, onSuccess }) {
           />
         </div>
 
-        {error && <p className="text-sm text-danger">{error}</p>}
+        {error && (
+          <p className="text-sm" style={{ color: 'var(--color-danger)' }}>{error}</p>
+        )}
       </div>
 
       {/* Sticky footer */}
@@ -371,16 +474,18 @@ function AddContactDrawer({ onClose, onSuccess }) {
         <button
           type="button"
           onClick={onClose}
-          className="flex-1 bg-transparent text-mid border border-[rgba(255,255,255,0.1)] rounded-[11px] py-3 text-[14px] font-semibold hover:text-hi hover:border-[rgba(255,255,255,0.18)] transition-colors"
+          className="flex-1 text-[14px] font-semibold rounded-[11px] py-3 border border-line-2 hover:border-line-3 transition-colors focus:outline-none focus:ring-1 focus:ring-[var(--color-ember)]"
+          style={{ background: 'var(--color-elevated)', color: 'var(--color-mid)' }}
         >
           Cancel
         </button>
         <button
           type="submit"
           disabled={submitting}
-          className="flex-1 bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] text-white text-[14px] font-bold rounded-[11px] py-3 shadow-[0_6px_18px_rgba(91,69,240,0.35)] hover:opacity-90 transition-opacity disabled:opacity-40"
+          className="flex-1 text-[14px] font-bold rounded-[11px] py-3 hover:opacity-90 transition-opacity disabled:opacity-40 focus:outline-none focus:ring-2 focus:ring-[var(--color-ember)]"
+          style={{ background: 'var(--color-ember)', color: 'var(--color-paper)' }}
         >
-          {submitting ? 'Saving…' : 'Save contact'}
+          {saveLabel}
         </button>
       </div>
     </form>

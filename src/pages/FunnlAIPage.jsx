@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate, useLocation } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
-import { getProAccessStatus } from '../lib/pro-access-status'
+import { useProStatus, useProRefresh } from '../lib/useProStatus'
 import { classifyProStatus } from '../lib/pro-ui-status'
 import { track } from '../lib/analytics'
 import { extractInvokeError } from '../lib/ai-chat-error'
@@ -10,34 +10,240 @@ import { buildProviderMessages, isRetryEligible } from '../lib/ai-chat-conversat
 import { isValidContactLink } from '../lib/contactLinkValidator'
 import { extractChildrenText } from '../lib/extractChildrenText'
 import { createRequestGate } from '../lib/ai-chat-request-gate'
+import { getAvatarColor, getInitials } from '../lib/avatarUtils'
+import TopBar from '../components/TopBar'
+import {
+  MAX_HISTORY_SESSIONS, historyKey, currentKey,
+  INITIAL_MESSAGE, TICKER_PHRASES,
+  extractContactRefs, sessionTitle, relativeTime,
+  HISTORY_VERSION, validateContactRefs, isArchivable,
+  parseStoredHistory, genMsgId, revalidateHistorySession,
+  parseStoredCurrentSession,
+} from '../lib/ai-history'
 
-// Markdown component overrides — applied only to assistant messages.
-// Raw HTML is not rendered (react-markdown default, kept intentionally).
+// ── Icons ─────────────────────────────────────────────────────────────────────
+
+const SparkleIcon = ({ size = 13 }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+    <path d="M12 3l1.7 5.3L19 10l-5.3 1.7L12 17l-1.7-5.3L5 10l5.3-1.7L12 3z"/>
+  </svg>
+)
+const SendIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M12 19V5M6 11l6-6 6 6"/>
+  </svg>
+)
+const HistoryIcon = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-3.5"/>
+  </svg>
+)
+
+// ── WorkTicker ────────────────────────────────────────────────────────────────
+
+function WorkTicker() {
+  const [idx, setIdx] = useState(0)
+  const prefersReduced = typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+  useEffect(() => {
+    if (prefersReduced) return
+    const t = setInterval(() => setIdx(i => (i + 1) % TICKER_PHRASES.length), 1800)
+    return () => clearInterval(t)
+  }, [prefersReduced])
+  return (
+    <div className="flex items-center gap-2.5 py-1" aria-live="polite" role="status" aria-label="Funnl AI is working">
+      <div className="w-6 h-6 rounded-[8px] flex items-center justify-center flex-shrink-0 text-white" style={{ background: 'var(--color-ember)' }}>
+        <SparkleIcon size={11}/>
+      </div>
+      <span className="font-mono text-[13px]" style={{ color: 'var(--color-ember)' }}>{TICKER_PHRASES[idx]}</span>
+    </div>
+  )
+}
+
+// ── Mobile history modal ──────────────────────────────────────────────────────
+
+function HistoryModal({
+  open, onClose, history, currentSessionId,
+  onLoadSession, onNewChat, triggerRef,
+}) {
+  const dialogRef        = useRef(null)
+  const firstFocusRef    = useRef(null)
+
+  // Move focus into dialog when opened
+  useEffect(() => {
+    if (!open) return
+    const timer = setTimeout(() => firstFocusRef.current?.focus(), 30)
+    return () => clearTimeout(timer)
+  }, [open])
+
+  // Restore focus to trigger button when closed
+  useEffect(() => {
+    if (!open) triggerRef?.current?.focus()
+  }, [open, triggerRef])
+
+  // Focus trap + Escape
+  useEffect(() => {
+    if (!open) return
+    function handleKeyDown(e) {
+      if (e.key === 'Escape') { onClose(); return }
+      if (e.key !== 'Tab') return
+      const focusable = dialogRef.current?.querySelectorAll(
+        'button:not([disabled]), [href], [tabindex]:not([tabindex="-1"])'
+      )
+      if (!focusable?.length) return
+      const first = focusable[0]
+      const last  = focusable[focusable.length - 1]
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault(); last.focus()
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault(); first.focus()
+      }
+    }
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [open, onClose])
+
+  // Body scroll lock
+  useEffect(() => {
+    if (!open) return
+    const prev = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => { document.body.style.overflow = prev }
+  }, [open])
+
+  if (!open) return null
+  return (
+    <div
+      style={{ position: 'fixed', inset: 0, zIndex: 50 }}
+      onClick={onClose}
+      aria-hidden="false"
+    >
+      {/* Backdrop */}
+      <div style={{ position: 'fixed', inset: 0, background: 'var(--color-backdrop)' }} aria-hidden="true"/>
+      {/* Sheet */}
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="ai-history-modal-title"
+        onClick={e => e.stopPropagation()}
+        style={{
+          position: 'fixed', bottom: 0, left: 0, right: 0,
+          maxHeight: '70dvh', display: 'flex', flexDirection: 'column',
+          background: 'var(--color-elevated)',
+          borderTop: '1px solid var(--color-line-2)',
+          borderRadius: '16px 16px 0 0',
+        }}
+      >
+        <div className="flex items-center justify-between px-4 py-3 border-b border-line-1 flex-none">
+          <h2 id="ai-history-modal-title" className="text-[14px] font-semibold text-hi">Conversations</h2>
+          <button
+            type="button" onClick={onClose}
+            className="text-[12px] text-low hover:text-mid transition-colors px-2 py-1 rounded-lg hover:bg-card"
+            aria-label="Close conversation history">
+            Close
+          </button>
+        </div>
+        <div className="p-3 border-b border-line-1 flex-none">
+          <button
+            ref={firstFocusRef}
+            type="button"
+            onClick={() => { onNewChat(); onClose() }}
+            className="w-full text-[13px] font-semibold py-2.5 rounded-xl transition-colors"
+            style={{ color: 'var(--color-ember)', background: 'rgba(255,68,35,0.08)', border: '1px solid rgba(255,68,35,0.2)' }}
+            aria-label="Start a new conversation">
+            + New chat
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto py-1" role="list" aria-label="Past conversations">
+          {history.length === 0 ? (
+            <p className="text-[12px] text-lower text-center py-5 px-4">No past conversations</p>
+          ) : history.map(session => (
+            <button
+              key={session.id}
+              type="button"
+              role="listitem"
+              onClick={() => { onLoadSession(session); onClose() }}
+              className="w-full text-left px-4 py-3 transition-colors hover:bg-card"
+              aria-current={session.id === currentSessionId ? 'true' : undefined}
+              aria-label={session.title + ', ' + relativeTime(session.createdAt)}>
+              <p className="text-[13px] font-medium text-hi truncate leading-snug">{session.title}</p>
+              <p className="text-[11px] text-lower mt-0.5">{relativeTime(session.createdAt)}</p>
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── ContactRefCard ────────────────────────────────────────────────────────────
+
+// Always uses validated DB data (name, company, role) — never raw provider content.
+function ContactRefCard({ name, contactId, company, role }) {
+  const navigate = useNavigate()
+  const initials = getInitials(name)
+  const avatarBg = getAvatarColor(name)
+  const subtitle = [role, company].filter(Boolean).join(' · ')
+  return (
+    <div className="flex items-center gap-3 px-3 py-2.5 rounded-xl" style={{ background: 'var(--color-elevated)', border: '1px solid var(--color-line-2)' }}>
+      <div className="w-8 h-8 rounded-full flex items-center justify-center font-bold text-[12px] flex-shrink-0" style={{ background: avatarBg, color: 'var(--color-paper)' }} aria-hidden="true">
+        {initials}
+      </div>
+      <div className="flex-1 min-w-0">
+        <p className="text-[13.5px] font-semibold text-hi truncate">{name}</p>
+        {subtitle && <p className="text-[11.5px] text-muted truncate">{subtitle}</p>}
+      </div>
+      <div className="flex items-center gap-2 flex-shrink-0">
+        <button type="button"
+          onClick={() => navigate('/contacts/' + contactId, { state: { openFollowUpForm: true } })}
+          className="text-[11.5px] font-medium px-2.5 py-1.5 rounded-lg transition-colors"
+          style={{ color: 'var(--color-ember)', background: 'rgba(255,68,35,0.09)', border: '1px solid rgba(255,68,35,0.2)' }}>
+          Set follow-up
+        </button>
+        <Link to={'/contacts/' + contactId}
+          onClick={e => { e.stopPropagation(); track('ai_contact_link_clicked', { source: 'ai_response' }) }}
+          aria-label={'Open ' + name + "'s contact"}
+          className="text-[11.5px] font-medium px-2.5 py-1.5 rounded-lg transition-colors"
+          style={{ color: 'var(--color-mid)', background: 'var(--color-card)', border: '1px solid var(--color-line-2)' }}>
+          Open →
+        </Link>
+      </div>
+    </div>
+  )
+}
+
+// ── Markdown overrides ────────────────────────────────────────────────────────
+
+// Module-level — no component state. Analytics in onClick only, never in render.
 const mdComponents = {
-  p:      ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
-  ul:     ({ children }) => <ul className="list-disc pl-4 mb-2 space-y-0.5">{children}</ul>,
-  ol:     ({ children }) => <ol className="list-decimal pl-4 mb-2 space-y-0.5">{children}</ol>,
-  li:     ({ children }) => <li>{children}</li>,
+  p:      ({ children }) => <p className="mb-2 last:mb-0 leading-relaxed text-hi">{children}</p>,
+  ul:     ({ children }) => <ul className="list-disc pl-4 mb-2 space-y-0.5 text-hi">{children}</ul>,
+  ol:     ({ children }) => <ol className="list-decimal pl-4 mb-2 space-y-0.5 text-hi">{children}</ol>,
+  li:     ({ children }) => <li className="leading-relaxed">{children}</li>,
   strong: ({ children }) => <strong className="font-semibold text-hi">{children}</strong>,
   em:     ({ children }) => <em className="italic">{children}</em>,
-  a:      ({ href, children }) => {
+  h1:     ({ children }) => <h3 className="font-semibold text-[15px] mb-1.5 mt-3 first:mt-0 text-hi">{children}</h3>,
+  h2:     ({ children }) => <h4 className="font-semibold text-[14px] mb-1 mt-2.5 first:mt-0 text-hi">{children}</h4>,
+  h3:     ({ children }) => <h5 className="font-semibold text-[13.5px] mb-1 mt-2 first:mt-0 text-hi">{children}</h5>,
+  a: ({ href, children }) => {
     if (isValidContactLink(href)) {
-      const name = extractChildrenText(children)
-      const ariaLabel = name ? `Open ${name}'s contact` : 'Open contact details'
+      const name      = extractChildrenText(children)
+      const ariaLabel = name ? 'Open ' + name + "'s contact" : 'Open contact details'
+      // Analytics in onClick only — never fires during render.
       return (
-        <Link
-          to={href}
-          aria-label={ariaLabel}
+        <Link to={href} aria-label={ariaLabel}
           onClick={() => track('ai_contact_link_clicked', { source: 'ai_response' })}
-          className="text-accent underline hover:opacity-80 transition-opacity"
-        >
+          className="font-medium underline underline-offset-2 transition-opacity hover:opacity-70"
+          style={{ color: 'var(--color-ember)' }}>
           {children}
         </Link>
       )
     }
-    return <span>{children}</span>
+    return <span style={{ color: 'var(--color-mid)' }}>{children}</span>
   },
 }
+
+// ── Starter prompts ───────────────────────────────────────────────────────────
 
 const STARTER_PROMPTS = [
   "Who haven't I followed up with?",
@@ -46,231 +252,223 @@ const STARTER_PROMPTS = [
   "Who should I be thinking about reaching out to?",
 ]
 
-const INITIAL_MESSAGE = {
-  role: 'assistant',
-  content: "Your network is loaded. Ask me anything about your contacts — who you know somewhere, who's gone quiet, what your follow-up situation looks like, or whatever you're wondering about.",
-  // localOnly: this greeting is frontend-only and must never be sent to the provider.
-  // buildProviderMessages() in ai-chat-conversation.js filters it out before invocation.
-  // The Edge Function rejects any conversation that starts with an assistant message.
-  localOnly: true,
-}
-
-const SparkleIcon = ({ size = 13 }) => (
-  <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor">
-    <path d="M12 3l1.7 5.3L19 10l-5.3 1.7L12 17l-1.7-5.3L5 10l5.3-1.7L12 3z"/>
-  </svg>
-)
-
-const SendIcon = () => (
-  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-    <path d="M12 19V5M6 11l6-6 6 6"/>
-  </svg>
-)
+// ── Main component ────────────────────────────────────────────────────────────
 
 function FunnlAIPage() {
-  const [isCheckingPro, setIsCheckingPro] = useState(true)
-  // null = loading, object = loaded (check .can_use_pro), 'error' = status unavailable
-  const [proStatus, setProStatus]         = useState(null)
-  // Message shape: { role, content, error?, truncated? }
-  // error: { code, message, retryable, request_id } — present on failed user messages only
-  // truncated: true — present on assistant messages where stop_reason was max_tokens
-  const [messages, setMessages]           = useState([INITIAL_MESSAGE])
-  const [input, setInput]                 = useState('')
-  const [loading, setLoading]             = useState(false)
-  // UI display state for Retry button
-  const [isRetrying, setIsRetrying]       = useState(false)
-  const bottomRef      = useRef(null)
-  const inputRef       = useRef(null)
-  // Synchronous ref guard for duplicate retry requests: state alone cannot prevent
-  // two rapid clicks from both passing the `if (isRetrying)` check before the
-  // first setState re-render fires. The ref is checked and set synchronously.
-  const isRetryingRef  = useRef(false)
-  // Per-instance request gate — prevents stale AI responses from mutating state
-  // after startNewChat() or a newer sendMessage() supersedes an in-flight request.
-  const gateRef   = useRef(null)
-  if (!gateRef.current) gateRef.current = createRequestGate()
-
-  useEffect(() => {
-    // Single server-authoritative call — never uses browser Date for access decisions.
-    // Returns null on failure; we treat that as "status unavailable" (not "not Pro")
-    // so a transient RPC error doesn't silently lock out Pro users from the UI.
-    // The `active` flag prevents stale state updates if the component unmounts
-    // while the request is in flight (user navigates away before it resolves).
-    let active = true
-    async function checkPro() {
-      const status = await getProAccessStatus()
-      if (!active) return
-      setProStatus(status ?? 'error')
-      setIsCheckingPro(false)
-    }
-    checkPro()
-    return () => { active = false }
-  }, [])
-
+  // Pro status entirely from the shared provider — no local override.
+  // useProRefresh() updates all consumers (Sidebar, Settings, FunnlAIPage).
+  const proStatus     = useProStatus()
+  const proRefresh    = useProRefresh()
   const displayStatus = classifyProStatus(proStatus)
-  const isProUser = displayStatus === 'permanent' || displayStatus === 'trial'
+  const isProUser     = displayStatus === 'permanent' || displayStatus === 'trial'
+  const isCheckingPro = proStatus === null
 
+  const [userId,      setUserId]      = useState(null)
+  const [contacts,    setContacts]    = useState([]) // [{id,name,company,role}] for ref validation
+  const [history,     setHistory]     = useState([])
+  const [messages,    setMessages]    = useState([INITIAL_MESSAGE])
+  const [input,       setInput]       = useState('')
+  const [loading,     setLoading]     = useState(false)
+  const [isRetrying,  setIsRetrying]  = useState(false)
+  const [historyOpen, setHistoryOpen] = useState(false)
+
+  const isRetryingRef       = useRef(false)
+  const bottomRef           = useRef(null)
+  const inputRef            = useRef(null)
+  const historyTriggerRef   = useRef(null) // for focus restoration after mobile modal closes
+  const gateRef             = useRef(null)
+  if (!gateRef.current) gateRef.current = createRequestGate()
+  const currentSessionIdRef = useRef(null) // stable ID for the active conversation
+  const pendingFocusRef     = useRef(false) // focus composer after Pro resolves
+  const prevUserIdRef       = useRef(null)  // detect genuine account switches
+  const isComposingRef      = useRef(false) // IME composition guard
+
+  const navigate = useNavigate()
+  const location = useLocation()
+
+  // Mount: populate input from router state prefill (user must submit explicitly),
+  // load userId, contacts, and localStorage history/current session.
+  useEffect(() => {
+    const aiPrompt = location.state?.aiPrompt
+    if (typeof aiPrompt === 'string' && aiPrompt.trim()) {
+      setInput(aiPrompt.trim())
+      pendingFocusRef.current = true
+      // Clear consumed router state so refresh/back do not re-insert the prompt
+      navigate(location.pathname, { replace: true, state: {} })
+    }
+    let active = true
+    async function init() {
+      const { data: { session } } = await supabase.auth.getSession()
+      if (!active || !session?.user?.id) return
+      const uid = session.user.id
+      setUserId(uid)
+      // Load contacts for contact-reference validation
+      const { data: contactData } = await supabase
+        .from('contacts')
+        .select('id, name, company, role')
+        .eq('user_id', uid)
+      if (active && Array.isArray(contactData)) setContacts(contactData)
+      // Load archived history
+      setHistory(parseStoredHistory(localStorage.getItem(historyKey(uid))))
+      // Restore in-progress session using validated parser
+      const stored = parseStoredCurrentSession(localStorage.getItem(currentKey(uid)))
+      if (active && stored.length > 0) setMessages([INITIAL_MESSAGE, ...stored])
+    }
+    init()
+    return () => { active = false }
+  }, []) // mount only
+
+  // Account-switch isolation: when userId changes mid-session (not first load),
+  // clear all per-user state before re-loading the new user's data.
+  useEffect(() => {
+    if (!userId) return
+    if (prevUserIdRef.current && prevUserIdRef.current !== userId) {
+      gateRef.current.invalidate()
+      setMessages([INITIAL_MESSAGE])
+      setHistory([])
+      setContacts([])
+      setInput('')
+      setLoading(false)
+      currentSessionIdRef.current = null
+    }
+    prevUserIdRef.current = userId
+  }, [userId])
+
+  // Focus the composer once Pro status resolves (handles the prefill case).
+  // Never auto-submits — the user must press Enter or click Send.
+  useEffect(() => {
+    if (!isCheckingPro && pendingFocusRef.current) {
+      pendingFocusRef.current = false
+      inputRef.current?.focus()
+    }
+  }, [isCheckingPro])
+
+  // Persist current session
+  useEffect(() => {
+    if (!userId) return
+    const toStore = messages.filter(m => !m.localOnly && !m.error)
+    if (toStore.length === 0) localStorage.removeItem(currentKey(userId))
+    else try { localStorage.setItem(currentKey(userId), JSON.stringify(toStore)) } catch { /* ignore */ }
+  }, [messages, userId])
+
+  // Scroll to bottom
   useEffect(() => {
     if (isProUser) bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, loading, isProUser])
 
-  // Sends a new user message. Keeps the message visible on failure with an
-  // inline error and Retry button — does not revert or restore to the input.
-  //
-  // A unique request token is acquired at the start via gate.begin(). Every
-  // post-await branch (success, error, catch, finally) checks gate.isCurrent(token)
-  // before mutating state or firing analytics. startNewChat() calls gate.invalidate()
-  // first, so any in-flight request finds its token stale and aborts cleanly.
+  // ── Archive / load ─────────────────────────────────────────────────────────
+
+  function archiveCurrentSession(currentMessages, uid) {
+    if (!isArchivable(currentMessages) || !uid) return
+    // Reuse the stable session ID if one exists; prevents duplicate history entries
+    // when archiveCurrentSession is called multiple times for the same session.
+    const sessionId = currentSessionIdRef.current ??
+      ((typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : String(Date.now()))
+    currentSessionIdRef.current = sessionId
+    const session = {
+      v: HISTORY_VERSION,
+      id: sessionId,
+      title: sessionTitle(currentMessages),
+      createdAt: new Date().toISOString(),
+      messages: currentMessages.filter(m => !m.localOnly && !m.error),
+    }
+    setHistory(prev => {
+      // Remove any existing entry with this ID before prepending (upsert semantics)
+      const deduped  = prev.filter(s => s.id !== sessionId)
+      const updated  = [session, ...deduped].slice(0, MAX_HISTORY_SESSIONS)
+      try { localStorage.setItem(historyKey(uid), JSON.stringify(updated)) } catch { /* ignore */ }
+      return updated
+    })
+  }
+
+  // ── Send / retry ───────────────────────────────────────────────────────────
+
   async function sendMessage(text) {
-    const trimmed = text.trim()
+    const trimmed = (text ?? '').trim()
     if (!trimmed || loading) return
-
-    const gate  = gateRef.current
-    const token = gate.begin()  // invalidates any prior in-flight token
-
-    const userMsg      = { role: 'user', content: trimmed }
+    const gate = gateRef.current
+    const token = gate.begin()
+    const userMsg = { id: genMsgId(), role: 'user', content: trimmed }
     const nextMessages = [...messages, userMsg]
-
     setMessages(nextMessages)
     setInput('')
     setLoading(true)
     if (inputRef.current) inputRef.current.style.height = 'auto'
-
     try {
       const { data, error: fnError } = await supabase.functions.invoke('ai-chat', {
-        body: {
-          messages: buildProviderMessages(nextMessages),
-          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-        },
+        body: { messages: buildProviderMessages(nextMessages), timezone: Intl.DateTimeFormat().resolvedOptions().timeZone },
       })
-
-      // Check after invoke — startNewChat may have fired while the request was in-flight.
       if (!gate.isCurrent(token)) return
-
       const invokeError = await extractInvokeError(fnError, data)
-
-      // Check after the async error normalizer — another await point.
       if (!gate.isCurrent(token)) return
-
       if (invokeError) {
         track('ai_assistant_failed', { code: invokeError.code, retryable: invokeError.retryable })
-        setMessages(prev => {
-          const updated = [...prev]
-          updated[updated.length - 1] = { ...userMsg, error: invokeError }
-          return updated
-        })
+        setMessages(prev => { const u = [...prev]; u[u.length - 1] = { ...userMsg, error: invokeError }; return u })
         return
       }
-
       if (!data?.reply) {
-        const fallback = { code: 'empty_provider_response', message: 'No response received — please try again.', retryable: true, request_id: data?.request_id ?? null }
-        track('ai_assistant_failed', { code: fallback.code, retryable: fallback.retryable })
-        setMessages(prev => {
-          const updated = [...prev]
-          updated[updated.length - 1] = { ...userMsg, error: fallback }
-          return updated
-        })
+        const fb = { code: 'empty_provider_response', message: 'No response received — please try again.', retryable: true, request_id: data?.request_id ?? null }
+        track('ai_assistant_failed', { code: fb.code, retryable: fb.retryable })
+        setMessages(prev => { const u = [...prev]; u[u.length - 1] = { ...userMsg, error: fb }; return u })
         return
       }
-
       track('ai_assistant_used')
-      const assistantMsg = { role: 'assistant', content: data.reply }
-      if (data.truncated) assistantMsg.truncated = true
-      setMessages(prev => {
-        const updated = [...prev]
-        // Clear the user message (keep it clean — no error field on success)
-        updated[updated.length - 1] = userMsg
-        return [...updated, assistantMsg]
-      })
+      const aMsg = { id: genMsgId(), role: 'assistant', content: data.reply }
+      if (data.truncated) aMsg.truncated = true
+      setMessages(prev => { const u = [...prev]; u[u.length - 1] = userMsg; return [...u, aMsg] })
     } catch {
       if (!gate.isCurrent(token)) return
-      const fallback = { code: 'internal_error', message: 'Something went wrong — please try again.', retryable: true, request_id: null }
-      track('ai_assistant_failed', { code: fallback.code, retryable: fallback.retryable })
-      setMessages(prev => {
-        const updated = [...prev]
-        updated[updated.length - 1] = { ...userMsg, error: fallback }
-        return updated
-      })
+      const fb = { code: 'internal_error', message: 'Something went wrong — please try again.', retryable: true, request_id: null }
+      track('ai_assistant_failed', { code: fb.code, retryable: fb.retryable })
+      setMessages(prev => { const u = [...prev]; u[u.length - 1] = { ...userMsg, error: fb }; return u })
     } finally {
-      // Only clear loading if this request is still the current one.
-      // A newer request's finally block will clear loading for itself.
       if (gate.isCurrent(token)) setLoading(false)
     }
   }
 
-  // Retries the failed message at the given index. Clears the error inline so
-  // the message remains visible, then resends without adding a new visible prompt.
-  // Uses the same request-token pattern as sendMessage.
   async function retryMessage(index) {
     if (loading) return
-
-    const gate  = gateRef.current
-    const token = gate.begin()  // invalidates any prior in-flight token
-
-    setMessages(prev => prev.map((m, i) =>
-      i === index ? { role: m.role, content: m.content } : m
-    ))
+    const gate = gateRef.current
+    const token = gate.begin()
+    // Clear the error, preserve the stable ID
+    setMessages(prev => prev.map((m, i) => i === index ? { id: m.id, role: m.role, content: m.content } : m))
     setLoading(true)
-
     try {
-      // Build provider payload using the cleared (no-error) message state.
-      // Because setMessages above is async, we construct the payload directly.
-      const retryMessages = messages.map((m, i) =>
-        i === index ? { role: m.role, content: m.content } : m
-      )
+      const retryMsgs = messages.map((m, i) => i === index ? { role: m.role, content: m.content } : m)
       const { data, error: fnError } = await supabase.functions.invoke('ai-chat', {
-        body: {
-          messages: buildProviderMessages(retryMessages),
-          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-        },
+        body: { messages: buildProviderMessages(retryMsgs), timezone: Intl.DateTimeFormat().resolvedOptions().timeZone },
       })
-
       if (!gate.isCurrent(token)) return
-
       const invokeError = await extractInvokeError(fnError, data)
-
       if (!gate.isCurrent(token)) return
-
       if (invokeError) {
         track('ai_assistant_failed', { code: invokeError.code, retryable: invokeError.retryable })
-        setMessages(prev => prev.map((m, i) =>
-          i === index ? { ...m, error: invokeError } : m
-        ))
+        setMessages(prev => prev.map((m, i) => i === index ? { ...m, error: invokeError } : m))
         return
       }
-
       if (!data?.reply) {
-        const fallback = { code: 'empty_provider_response', message: 'No response received — please try again.', retryable: true, request_id: data?.request_id ?? null }
-        track('ai_assistant_failed', { code: fallback.code, retryable: fallback.retryable })
-        setMessages(prev => prev.map((m, i) =>
-          i === index ? { ...m, error: fallback } : m
-        ))
+        const fb = { code: 'empty_provider_response', message: 'No response received — please try again.', retryable: true, request_id: data?.request_id ?? null }
+        track('ai_assistant_failed', { code: fb.code, retryable: fb.retryable })
+        setMessages(prev => prev.map((m, i) => i === index ? { ...m, error: fb } : m))
         return
       }
-
       track('ai_assistant_used')
-      const assistantMsg = { role: 'assistant', content: data.reply }
-      if (data.truncated) assistantMsg.truncated = true
+      const aMsg = { id: genMsgId(), role: 'assistant', content: data.reply }
+      if (data.truncated) aMsg.truncated = true
       setMessages(prev => {
-        const updated = prev.map((m, i) =>
-          i === index ? { role: m.role, content: m.content } : m
-        )
-        return [...updated, assistantMsg]
+        const u = prev.map((m, i) => i === index ? { id: m.id, role: m.role, content: m.content } : m)
+        return [...u, aMsg]
       })
     } catch {
       if (!gate.isCurrent(token)) return
-      const fallback = { code: 'internal_error', message: 'Something went wrong — please try again.', retryable: true, request_id: null }
-      track('ai_assistant_failed', { code: fallback.code, retryable: fallback.retryable })
-      setMessages(prev => prev.map((m, i) =>
-        i === index ? { ...m, error: fallback } : m
-      ))
+      const fb = { code: 'internal_error', message: 'Something went wrong — please try again.', retryable: true, request_id: null }
+      track('ai_assistant_failed', { code: fb.code, retryable: fb.retryable })
+      setMessages(prev => prev.map((m, i) => i === index ? { ...m, error: fb } : m))
     } finally {
       if (gate.isCurrent(token)) setLoading(false)
     }
   }
 
-  // Removes the failed message from history and restores its text to the input
-  // so the user can edit before re-sending.
   function dismissError(index) {
     const text = messages[index]?.content ?? ''
     setMessages(prev => prev.filter((_, i) => i !== index))
@@ -278,44 +476,57 @@ function FunnlAIPage() {
     inputRef.current?.focus()
   }
 
-  // Resets the conversation to just the INITIAL_MESSAGE greeting.
-  // Clears all messages, loading state, and the input box.
-  // Does not affect contacts or stored data in the database.
-  //
-  // gate.invalidate() runs synchronously before state resets, poisoning any
-  // in-flight token. The in-flight request will find isCurrent() false at its
-  // next post-await check and return without mutating the reset conversation.
-  function startNewChat(source = 'user_action') {
+  function startNewChat(source) {
     gateRef.current.invalidate()
+    archiveCurrentSession(messages, userId)
+    currentSessionIdRef.current = null
     setMessages([INITIAL_MESSAGE])
     setInput('')
     setLoading(false)
-    track('ai_chat_reset', { source })
+    if (userId) localStorage.removeItem(currentKey(userId))
+    track('ai_chat_reset', { source: source ?? 'user_action' })
     inputRef.current?.focus()
   }
 
-  // Retries the Pro status check when the initial getProAccessStatus() call failed.
-  // isRetryingRef is a synchronous guard that prevents two rapid clicks from both
-  // entering before the first setIsRetrying(true) re-render fires.
-  // try/finally guarantees isRetrying always resets even on unexpected errors.
+  function loadSession(session) {
+    // Invalidate any in-flight request first
+    gateRef.current.invalidate()
+    setLoading(false)
+    // Archive the outgoing conversation (only if switching away from a different session)
+    if (currentSessionIdRef.current !== session.id) {
+      archiveCurrentSession(messages, userId)
+    }
+    currentSessionIdRef.current = session.id
+    // Revalidate contact refs against currently authenticated user's contacts
+    // so deleted contacts do not retain Open/Set follow-up actions.
+    const revalidated = revalidateHistorySession(session, contacts)
+    const hydrated = revalidated.messages.map(m => m.id ? m : { ...m, id: genMsgId() })
+    setMessages([INITIAL_MESSAGE, ...hydrated])
+    setHistoryOpen(false)
+    if (userId) try { localStorage.setItem(currentKey(userId), JSON.stringify(session.messages)) } catch { /* ignore */ }
+  }
+
   async function retryProStatus() {
     if (isRetryingRef.current) return
     isRetryingRef.current = true
     setIsRetrying(true)
     try {
-      const status = await getProAccessStatus()
-      setProStatus(status ?? 'error')
+      await proRefresh()
     } finally {
       isRetryingRef.current = false
       setIsRetrying(false)
     }
   }
 
+  // ── Keyboard handlers ──────────────────────────────────────────────────────
+
+  function handleCompositionStart() { isComposingRef.current = true  }
+  function handleCompositionEnd()   { isComposingRef.current = false }
+
   function handleKeyDown(e) {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault()
-      sendMessage(input)
-    }
+    // Do not submit during IME composition (CJK, etc.)
+    if (e.nativeEvent?.isComposing || isComposingRef.current) return
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(input) }
   }
 
   function handleInputChange(e) {
@@ -324,280 +535,280 @@ function FunnlAIPage() {
     e.target.style.height = Math.min(e.target.scrollHeight, 120) + 'px'
   }
 
-  const hasUserMessaged = messages.some(m => m.role === 'user')
+  // ── Render helpers ─────────────────────────────────────────────────────────
 
+  const hasUserMessaged = messages.some(m => m.role === 'user' && !m.localOnly)
+
+  // Loading screen — shown while Pro status RPC is in flight
   if (isCheckingPro) {
     return (
-      <div className="h-full flex items-center justify-center bg-surface">
-        <div className="w-5 h-5 rounded-full border-2 border-accent border-t-transparent animate-spin"/>
+      <div className="h-full flex items-center justify-center" style={{ background: 'var(--color-surface)' }}>
+        <div className="w-5 h-5 rounded-full border-2 animate-spin" style={{ borderColor: 'rgba(255,68,35,0.25)', borderTopColor: 'var(--color-ember)' }}/>
       </div>
     )
   }
 
-  return (
-    <div
-      className="h-full flex flex-col bg-surface"
-      style={{ backgroundImage: 'radial-gradient(circle at 50% -10%, rgba(108,92,255,0.09), transparent 45%)' }}
-    >
-
-      {/* ── Header ─────────────────────────────────────────────────────────────── */}
-      <div className="flex items-center gap-[11px] px-4 md:px-8 py-[22px] border-b border-line-1 flex-none">
-        <div className="w-9 h-9 rounded-[10px] bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] flex items-center justify-center shadow-[0_4px_16px_rgba(91,69,240,0.4)] flex-none text-white">
-          <SparkleIcon size={19}/>
-        </div>
-        <div className="flex-1">
-          <div className="flex items-center gap-2">
-            <span className="text-[16px] font-bold text-hi">Funnl AI</span>
-            {/* Permanent Pro always shows PRO badge, regardless of trial state */}
-            {isProUser && proStatus?.permanent_pro && (
-              <span className="font-mono text-[9.5px] font-bold tracking-[0.5px] text-accent bg-[rgba(139,124,255,0.22)] px-1.5 py-0.5 rounded-[5px]">
-                PRO
-              </span>
-            )}
-            {/* Trial users (not permanent Pro) show a days-remaining countdown */}
-            {isProUser && !proStatus?.permanent_pro && proStatus?.trial_active && (
-              <span className="font-mono text-[9.5px] font-bold tracking-[0.5px] text-warning bg-[rgba(255,184,77,0.15)] px-1.5 py-0.5 rounded-[5px]">
-                {proStatus.days_remaining === 1 ? '1 DAY LEFT' : `${proStatus.days_remaining} DAYS LEFT`}
-              </span>
-            )}
+  function renderLocked() {
+    if (displayStatus === 'unavailable') {
+      return (
+        <div className="flex flex-col items-center justify-center min-h-[300px] h-full text-center gap-5 py-12">
+          <div className="w-14 h-14 rounded-2xl flex items-center justify-center" style={{ background: 'var(--color-elevated)', border: '1px solid var(--color-line-2)', color: 'var(--color-low)' }}>
+            <SparkleIcon size={22}/>
           </div>
-          <p className="text-[12.5px] text-muted">
-            {isProUser
-              ? 'Your networking thinking partner'
-              : 'Available with Pro access'}
-          </p>
+          <div className="max-w-[260px]" aria-live="polite" role="status">
+            <h3 className="font-display text-[18px] font-bold text-hi mb-2">Pro status unavailable</h3>
+            <p className="text-[13px] leading-relaxed text-muted mb-4">We couldn't verify your Pro access right now. Please try again.</p>
+            <button onClick={retryProStatus} disabled={isRetrying} className="text-[13px] font-semibold transition-opacity disabled:opacity-40" style={{ color: 'var(--color-ember)' }}>
+              {isRetrying ? 'Checking…' : 'Retry'}
+            </button>
+          </div>
         </div>
-        {isProUser && hasUserMessaged && (
-          <button
-            onClick={() => startNewChat('user_action')}
-            className="text-[12px] text-low hover:text-mid transition-colors px-2 py-1 rounded-lg hover:bg-elevated flex-none"
-          >
-            Start new chat
-          </button>
-        )}
-      </div>
-
-      {/* ── Messages / locked state ─────────────────────────────────────────────── */}
-      <div className="flex-1 overflow-y-auto min-h-0 px-4 md:px-8 py-5">
-        {displayStatus === 'unavailable' ? (
-          /* Status unavailable — distinct from confirmed non-Pro or expired trial.
-             Never shows false access info; shows neutral message + Retry only. */
-          <div className="flex flex-col items-center justify-center min-h-[300px] h-full text-center gap-5 py-12">
-            <div className="w-[64px] h-[64px] rounded-[18px] bg-elevated border border-line-2 flex items-center justify-center text-low">
-              <SparkleIcon size={28}/>
-            </div>
-            <div className="max-w-[280px]" aria-live="polite" role="status">
-              <h3 className="font-display text-[19px] font-bold text-hi mb-2">Pro status unavailable</h3>
-              <p className="text-[13.5px] leading-relaxed text-muted mb-4">
-                We couldn't verify your Pro access right now. Please try again.
+      )
+    }
+    return (
+      <div className="flex flex-col items-center justify-center min-h-[300px] h-full text-center gap-5 py-12">
+        <div className="w-14 h-14 rounded-2xl flex items-center justify-center opacity-60 text-white" style={{ background: 'var(--color-ember)' }}>
+          <SparkleIcon size={22}/>
+        </div>
+        <div className="max-w-[260px]">
+          {proStatus?.trial_expired ? (
+            <>
+              <h3 className="font-display text-[18px] font-bold text-hi mb-2">Your trial has ended</h3>
+              <p className="text-[13px] leading-relaxed text-muted">
+                Your 7-day free trial ended on{' '}
+                {new Date(proStatus.ends_at).toLocaleDateString('en-US', { month: 'long', day: 'numeric' })}.
+                Contact us to continue with Funnl Pro.
               </p>
-              <button
-                onClick={retryProStatus}
-                disabled={isRetrying}
-                className="text-[13.5px] font-semibold text-accent hover:opacity-80 transition-opacity disabled:opacity-40"
-              >
-                {isRetrying ? 'Checking…' : 'Retry'}
-              </button>
-            </div>
-          </div>
-        ) : isProUser ? (
-          <div className="space-y-4">
+            </>
+          ) : (
+            <>
+              <h3 className="font-display text-[18px] font-bold text-hi mb-2">AI only available for Pro</h3>
+              <p className="text-[13px] leading-relaxed text-muted">Ask anything about your network — who's gone cold, who you know at a specific company, what to follow up on next.</p>
+            </>
+          )}
+        </div>
+      </div>
+    )
+  }
 
-            {/* Chat messages */}
-            {messages.map((msg, i) => (
-              <div key={i}>
-                <div className={`flex items-start ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                  {msg.role === 'assistant' && (
-                    <div className="w-[28px] h-[28px] rounded-[8px] bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] flex items-center justify-center flex-none mr-2.5 mt-0.5 text-white">
-                      <SparkleIcon size={13}/>
-                    </div>
-                  )}
-                  <div className={`max-w-[80%] md:max-w-[68%] px-4 py-3 text-[14px] leading-relaxed rounded-2xl ${
-                    msg.role === 'user'
-                      ? `bg-[rgba(139,124,255,0.14)] border border-[rgba(139,124,255,0.45)] text-hi rounded-tr-sm whitespace-pre-wrap${msg.error ? ' opacity-60' : ''}`
-                      : 'bg-card border border-line-2 text-muted rounded-tl-sm'
-                  }`}>
-                    {msg.role === 'assistant' ? (
-                      <ReactMarkdown components={mdComponents}>{msg.content}</ReactMarkdown>
+  function renderComposer() {
+    const disabledBar = placeholder => (
+      <div className="flex items-center rounded-[20px] cursor-not-allowed opacity-40 select-none" style={{ background: 'var(--color-input)', border: '1px solid var(--color-line-2)' }}>
+        <span className="flex-1 text-[14px] text-lower pl-5 py-[14px]">{placeholder}</span>
+        <div className="flex-none p-2">
+          <div className="w-9 h-9 rounded-[12px] flex items-center justify-center text-white" style={{ background: 'var(--color-ember)' }}><SendIcon/></div>
+        </div>
+      </div>
+    )
+    if (displayStatus === 'unavailable') return disabledBar('Unable to verify access…')
+    if (!isProUser)                       return disabledBar('AI only available for Pro…')
+    return (
+      <>
+        <div className="flex items-end rounded-[20px] transition-all duration-150" style={{ background: 'var(--color-input)', border: '1px solid var(--color-line-3)' }}>
+          <textarea ref={inputRef} value={input} onChange={handleInputChange}
+            onKeyDown={handleKeyDown}
+            onCompositionStart={handleCompositionStart}
+            onCompositionEnd={handleCompositionEnd}
+            placeholder="Ask about your network…" rows={1} disabled={loading}
+            className="flex-1 bg-transparent text-[14px] text-hi outline-none resize-none disabled:opacity-50 leading-relaxed pl-5 pr-2 py-[14px]"
+            aria-label="Message Funnl AI"/>
+          <div className="flex-none p-2">
+            <button type="button" onClick={() => sendMessage(input)} disabled={loading || !input.trim()}
+              className="w-9 h-9 rounded-[12px] flex items-center justify-center transition-all disabled:opacity-30 active:scale-95 text-white"
+              style={{ background: 'var(--color-ember)' }} aria-label="Send message">
+              <SendIcon/>
+            </button>
+          </div>
+        </div>
+        <p className="text-[11px] text-lower text-center mt-2">Enter to send · Shift+Enter for new line</p>
+      </>
+    )
+  }
+
+  // ── Pro badge for TopBar actions slot ──────────────────────────────────────
+
+  const proBadge = displayStatus === 'permanent' ? (
+    <span className="font-mono text-[9.5px] font-bold tracking-[0.5px] px-1.5 py-0.5 rounded-[5px]"
+      style={{ color: 'var(--color-ember)', background: 'rgba(255,68,35,0.1)', border: '1px solid rgba(255,68,35,0.22)' }}>
+      PRO
+    </span>
+  ) : displayStatus === 'trial' && (proStatus?.days_remaining ?? 0) > 0 ? (
+    <span className="font-mono text-[9.5px] font-bold tracking-[0.5px] px-1.5 py-0.5 rounded-[5px]"
+      style={{ color: 'var(--color-warning)', background: 'rgba(165,106,0,0.1)', border: '1px solid rgba(165,106,0,0.2)' }}>
+      {proStatus.days_remaining === 1 ? '1 DAY LEFT' : proStatus.days_remaining + ' DAYS LEFT'}
+    </span>
+  ) : null
+
+  // TopBar workspace toolbar actions: Pro badge + mobile history trigger
+  const topBarActions = (
+    <>
+      {proBadge}
+      {/* Mobile history trigger — desktop rail is always visible */}
+      <button
+        ref={historyTriggerRef}
+        type="button"
+        onClick={() => setHistoryOpen(o => !o)}
+        className="md:hidden flex items-center gap-1.5 text-[12px] font-medium px-3 py-1.5 rounded-xl transition-colors"
+        style={{ color: 'var(--color-mid)', background: 'var(--color-elevated)', border: '1px solid var(--color-line-2)' }}
+        aria-expanded={historyOpen}
+        aria-controls="ai-history-modal"
+        aria-label="Open conversation history">
+        <HistoryIcon/>
+        <span className="hidden xs:inline">History</span>
+      </button>
+    </>
+  )
+
+  // TopBar CTA: New chat (shown once user has sent a message)
+  const newChatCta = isProUser && hasUserMessaged ? (
+    <button type="button" onClick={() => startNewChat('user_action')}
+      className="text-[12px] font-semibold px-3 py-1.5 rounded-xl transition-colors"
+      style={{ color: 'var(--color-ember)', background: 'rgba(255,68,35,0.08)', border: '1px solid rgba(255,68,35,0.18)' }}
+      aria-label="Start a new conversation">
+      + New chat
+    </button>
+  ) : null
+
+  // ── Page render ────────────────────────────────────────────────────────────
+
+  return (
+    <div className="h-full flex flex-col" style={{ background: 'var(--color-surface)' }}>
+
+      {/* Shared TopBar — no competing custom sticky header */}
+      <TopBar title="Funnl AI" actions={topBarActions} cta={newChatCta}
+        searchPlaceholder="Find, log, or ask anything…"
+        onSearchClick={() => window.dispatchEvent(new CustomEvent('funnl:open-command-palette'))}/>
+
+      {/* Workspace: history rail (desktop) + conversation column */}
+      <div className="flex-1 flex overflow-hidden min-h-0">
+
+        {/* History rail — desktop only, 190px, always visible */}
+        <aside className="hidden md:flex flex-col flex-none border-r border-line-1" style={{ width: 190, background: 'var(--color-elevated)' }} aria-label="Conversation history">
+          <div className="p-3 border-b border-line-1 flex-shrink-0">
+            <button type="button" onClick={() => startNewChat('user_action')}
+              className="w-full text-[12.5px] font-semibold py-2 rounded-xl text-left px-3 transition-colors"
+              style={{ color: 'var(--color-ember)', background: 'rgba(255,68,35,0.08)', border: '1px solid rgba(255,68,35,0.2)' }}
+              aria-label="Start a new conversation">
+              + New chat
+            </button>
+          </div>
+          <div className="flex-1 overflow-y-auto py-1" role="list" aria-label="Past conversations">
+            {history.length === 0 ? (
+              <p className="text-[11.5px] text-lower px-3 py-5 text-center leading-relaxed">Past conversations will appear here</p>
+            ) : history.map(session => (
+              <button key={session.id} type="button" onClick={() => loadSession(session)}
+                className="w-full text-left px-3 py-2.5 transition-colors hover:bg-card"
+                aria-current={session.id === currentSessionIdRef.current ? 'true' : undefined}
+                aria-label={session.title + ', ' + relativeTime(session.createdAt)}>
+                <p className="text-[12px] font-medium text-hi truncate leading-snug">{session.title}</p>
+                <p className="text-[10.5px] text-lower mt-0.5">{relativeTime(session.createdAt)}</p>
+              </button>
+            ))}
+          </div>
+        </aside>
+
+        {/* Main conversation column */}
+        <div className="flex-1 flex flex-col overflow-hidden min-w-0">
+
+          {/* Conversation / locked */}
+          <div className="flex-1 overflow-y-auto min-h-0 px-4 md:px-6 py-5">
+            {!isProUser ? renderLocked() : (
+              <div className="space-y-5 max-w-[680px] mx-auto">
+                {messages.map(msg => (
+                  <div key={msg.id}>
+                    {msg.role === 'user' ? (
+                      <div className="flex justify-end">
+                        <div className="max-w-[80%] md:max-w-[70%]">
+                          <div className={'inline-block px-4 py-2.5 rounded-2xl text-[14px] leading-relaxed whitespace-pre-wrap text-white' + (msg.error ? ' opacity-50' : '')}
+                            style={{ background: 'var(--color-ember)', borderBottomRightRadius: 6 }}>
+                            {msg.content}
+                          </div>
+                          {msg.error && (
+                            <div className="flex flex-col items-end gap-1.5 mt-2" aria-live="polite" role="status">
+                              <p className="text-[12px] text-danger leading-snug text-right">{msg.error.message}</p>
+                              {msg.error.request_id && <p className="text-[10.5px] font-mono text-lower">Support ref: {msg.error.request_id}</p>}
+                              <div className="flex gap-3 items-center flex-wrap justify-end">
+                                <button type="button" onClick={() => {
+                                  const idx = messages.indexOf(msg)
+                                  if (idx >= 0) dismissError(idx)
+                                }} className="text-[11.5px] text-low hover:text-mid transition-colors">Dismiss</button>
+                                {isRetryEligible(messages, messages.indexOf(msg)) && (
+                                  <button type="button" onClick={() => retryMessage(messages.indexOf(msg))} disabled={loading}
+                                    className="text-[11.5px] font-medium transition-opacity disabled:opacity-40" style={{ color: 'var(--color-ember)' }}>Retry</button>
+                                )}
+                                {msg.error.code === 'invalid_request' && (
+                                  <button type="button" onClick={() => startNewChat('ai_error_recovery')}
+                                    className="text-[11.5px] font-medium transition-opacity" style={{ color: 'var(--color-ember)' }}>Start new chat</button>
+                                )}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      </div>
                     ) : (
-                      msg.content
+                      <div>
+                        <div className="flex items-center gap-2 mb-2">
+                          <div className="w-6 h-6 rounded-[8px] flex items-center justify-center flex-none text-white" style={{ background: 'var(--color-ember)' }}><SparkleIcon size={11}/></div>
+                          <span className="font-mono text-[10.5px] text-lower">Funnl AI</span>
+                        </div>
+                        <div className="ml-8 p-4 rounded-2xl text-[14px]" style={{ background: 'var(--color-card)', border: '1px solid var(--color-line-2)' }}>
+                          <ReactMarkdown components={mdComponents}>{msg.content}</ReactMarkdown>
+                          {msg.truncated && <p className="text-[11px] italic mt-3 text-lower">Response may be cut short — feel free to ask a follow-up.</p>}
+                        </div>
+                        {!msg.localOnly && (() => {
+                          // Use revalidated refs if available (from loadSession); otherwise validate live.
+                          const refs = extractContactRefs(msg.content)
+                          const validRefs = msg._validContactRefs ?? validateContactRefs(refs, contacts)
+                          return validRefs.length > 0 ? (
+                            <div className="ml-8 mt-2 space-y-2">
+                              {validRefs.map(ref => (
+                                <ContactRefCard
+                                  key={ref.contactId}
+                                  name={ref.name}
+                                  contactId={ref.contactId}
+                                  company={ref.company}
+                                  role={ref.role}
+                                />
+                              ))}
+                            </div>
+                          ) : null
+                        })()}
+                      </div>
                     )}
                   </div>
-                </div>
-
-                {/* Truncation note for long assistant responses */}
-                {msg.role === 'assistant' && msg.truncated && (
-                  <div className="flex justify-start pl-[44px] mt-1">
-                    <p className="text-[11px] text-lower italic">Response may be cut short — feel free to ask a follow-up.</p>
-                  </div>
-                )}
-
-                {/* Inline error indicator for failed user messages */}
-                {msg.role === 'user' && msg.error && (
-                  <div
-                    className="flex justify-end mt-2 pr-0.5"
-                    aria-live="polite"
-                    role="status"
-                  >
-                    <div className="flex flex-col items-end gap-1.5 max-w-[80%] md:max-w-[68%]">
-                      <p className="text-[12px] text-danger leading-snug text-right">
-                        {msg.error.message}
-                      </p>
-                      {msg.error.request_id && (
-                        <p className="text-[10.5px] text-lower font-mono">
-                          Support ref: {msg.error.request_id}
-                        </p>
-                      )}
-                      <div className="flex gap-3 items-center flex-wrap justify-end">
-                        {/* Dismiss: always shown — removes the failed message and
-                            restores text to the input so the user can edit. */}
-                        <button
-                          onClick={() => dismissError(i)}
-                          className="text-[11.5px] text-low hover:text-mid transition-colors"
-                        >
-                          Dismiss
-                        </button>
-                        {/* Retry: only for retryable errors on the last message.
-                            Non-retryable errors (invalid_request, prompt_too_long,
-                            pro_required) do not show Retry — resending is futile. */}
-                        {isRetryEligible(messages, i) && (
-                          <button
-                            onClick={() => retryMessage(i)}
-                            disabled={loading}
-                            className="text-[11.5px] text-accent hover:opacity-80 transition-opacity disabled:opacity-40 font-medium"
-                          >
-                            Retry
-                          </button>
-                        )}
-                        {/* Start new chat: shown for conversation-history errors where
-                            editing the prompt alone cannot fix the underlying issue. */}
-                        {msg.error.code === 'invalid_request' && (
-                          <button
-                            onClick={() => startNewChat('ai_error_recovery')}
-                            className="text-[11.5px] text-accent hover:opacity-80 transition-opacity font-medium"
-                          >
-                            Start new chat
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                )}
-              </div>
-            ))}
-
-            {/* Starter prompts — visible until first user message */}
-            {!hasUserMessaged && (
-              <div className="flex flex-wrap gap-2 pl-[36px]">
-                {STARTER_PROMPTS.map(prompt => (
-                  <button
-                    key={prompt}
-                    onClick={() => sendMessage(prompt)}
-                    className="text-[12.5px] text-mid bg-elevated border border-line-2 px-[13px] py-[7px] rounded-full hover:border-[rgba(139,124,255,0.45)] hover:text-hi transition-colors"
-                  >
-                    {prompt}
-                  </button>
                 ))}
-              </div>
-            )}
-
-            {/* Thinking dots */}
-            {loading && (
-              <div className="flex items-start justify-start">
-                <div className="w-[28px] h-[28px] rounded-[8px] bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] flex items-center justify-center flex-none mr-2.5 mt-0.5 text-white">
-                  <SparkleIcon size={13}/>
-                </div>
-                <div className="bg-card border border-line-2 rounded-2xl rounded-tl-sm px-4 py-[14px]">
-                  <div className="flex gap-[5px] items-center">
-                    <span className="w-[6px] h-[6px] rounded-full bg-low animate-bounce" style={{ animationDelay: '0ms' }}/>
-                    <span className="w-[6px] h-[6px] rounded-full bg-low animate-bounce" style={{ animationDelay: '160ms' }}/>
-                    <span className="w-[6px] h-[6px] rounded-full bg-low animate-bounce" style={{ animationDelay: '320ms' }}/>
+                {!hasUserMessaged && (
+                  <div className="flex flex-wrap gap-2 ml-8">
+                    {STARTER_PROMPTS.map(prompt => (
+                      <button key={prompt} type="button" onClick={() => sendMessage(prompt)}
+                        className="text-[12.5px] font-medium px-4 py-2 rounded-full transition-colors"
+                        style={{ color: 'var(--color-mid)', background: 'var(--color-elevated)', border: '1px solid var(--color-line-2)' }}>
+                        {prompt}
+                      </button>
+                    ))}
                   </div>
-                </div>
+                )}
+                {loading && <div className="ml-8"><WorkTicker/></div>}
+                <div ref={bottomRef}/>
               </div>
             )}
+          </div>
 
-            <div ref={bottomRef}/>
-          </div>
-        ) : (
-          /* Locked state — non-Pro */
-          <div className="flex flex-col items-center justify-center min-h-[300px] h-full text-center gap-5 py-12">
-            <div className="w-[64px] h-[64px] rounded-[18px] bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] flex items-center justify-center text-white opacity-50 shadow-[0_12px_40px_rgba(91,69,240,0.35)]">
-              <SparkleIcon size={28}/>
-            </div>
-            <div className="max-w-[280px]">
-              {/* proStatus is always a loaded object here (error branch handled above) */}
-              {proStatus?.trial_expired ? (
-                <>
-                  <h3 className="font-display text-[19px] font-bold text-hi mb-2">Your trial has ended</h3>
-                  <p className="text-[13.5px] leading-relaxed text-muted">
-                    Your 7-day free trial ended on{' '}
-                    {new Date(proStatus.ends_at).toLocaleDateString('en-US', { month: 'long', day: 'numeric' })}.
-                    Contact us to continue with Funnl Pro.
-                  </p>
-                </>
-              ) : (
-                <>
-                  <h3 className="font-display text-[19px] font-bold text-hi mb-2">AI only available for Pro</h3>
-                  <p className="text-[13.5px] leading-relaxed text-muted">
-                    Ask anything about your network — who's gone cold, who you know at a specific company, what to follow up on next.
-                  </p>
-                </>
-              )}
-            </div>
-          </div>
-        )}
+          {/* Composer */}
+          <div className="flex-none px-4 md:px-6 pb-5 pt-3 border-t border-line-1">{renderComposer()}</div>
+        </div>
       </div>
 
-      {/* ── Input bar ───────────────────────────────────────────────────────────── */}
-      <div className="flex-none px-4 md:px-8 pb-6 pt-3 border-t border-line-1">
-        {displayStatus === 'unavailable' ? (
-          /* Status unavailable — neutral disabled bar, no "AI only for Pro" claim */
-          <div className="flex items-center bg-input border border-line-2 rounded-[20px] cursor-not-allowed opacity-40 select-none">
-            <span className="flex-1 text-[14.5px] text-lower pl-5 py-[15px]">Unable to verify access…</span>
-            <div className="flex-none p-[10px]">
-              <div className="w-9 h-9 rounded-[12px] bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] flex items-center justify-center">
-                <SendIcon/>
-              </div>
-            </div>
-          </div>
-        ) : isProUser ? (
-          <>
-            <div className="flex items-end bg-input border border-line-3 rounded-[20px] focus-within:border-[rgba(139,124,255,0.45)] focus-within:shadow-[0_0_0_3px_rgba(139,124,255,0.07)] transition-all duration-150">
-              <textarea
-                ref={inputRef}
-                value={input}
-                onChange={handleInputChange}
-                onKeyDown={handleKeyDown}
-                placeholder="Ask about your network…"
-                rows={1}
-                disabled={loading}
-                className="flex-1 bg-transparent text-[14.5px] text-hi placeholder-[#54545E] outline-none resize-none disabled:opacity-50 leading-relaxed pl-5 pr-2 py-[15px]"
-              />
-              <div className="flex-none p-[10px]">
-                <button
-                  onClick={() => sendMessage(input)}
-                  disabled={loading || !input.trim()}
-                  className="w-9 h-9 rounded-[12px] bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] flex items-center justify-center hover:opacity-90 active:scale-95 transition-all disabled:opacity-20 shadow-[0_4px_12px_rgba(91,69,240,0.25)]"
-                >
-                  <SendIcon/>
-                </button>
-              </div>
-            </div>
-            <p className="text-[11px] text-lower text-center mt-2.5">Enter to send · Shift+Enter for new line</p>
-          </>
-        ) : (
-          <div className="flex items-center bg-input border border-line-2 rounded-[20px] cursor-not-allowed opacity-40 select-none">
-            <span className="flex-1 text-[14.5px] text-lower pl-5 py-[15px]">AI only available for Pro…</span>
-            <div className="flex-none p-[10px]">
-              <div className="w-9 h-9 rounded-[12px] bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] flex items-center justify-center">
-                <SendIcon/>
-              </div>
-            </div>
-          </div>
-        )}
-      </div>
-
+      {/* Mobile history modal — fixed position, accessible dialog */}
+      <HistoryModal
+        open={historyOpen}
+        onClose={() => setHistoryOpen(false)}
+        history={history}
+        currentSessionId={currentSessionIdRef.current}
+        onLoadSession={loadSession}
+        onNewChat={() => startNewChat('user_action')}
+        triggerRef={historyTriggerRef}
+      />
     </div>
   )
 }

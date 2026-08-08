@@ -1,526 +1,775 @@
-﻿import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { identifyUser, track } from '../lib/analytics'
+import AuthShell, { FUNNEL_PATH } from '../components/AuthShell'
+import {
+  buildWelcomeRedirectUrl,
+  buildResetRedirectUrl,
+  parseResetSuccessState,
+  resendCooldownExpiry,
+  resendCooldownRemaining,
+  createSubmitToken,
+  normalizeEmail,
+  normalizeOrigin,
+  validateOrigin,
+  validatePassword,
+  validatePasswordConfirmation,
+  validationToError,
+  classifyAuthError,
+  classifySignInResult,
+  classifySignUpResult,
+  classifyResendResult,
+  getInvalidFields,
+  safeSignInDestination,
+  PASSWORD_MIN_LENGTH,
+} from '../lib/authHelpers'
 
-// Redirect URLs: www subdomain in production, current origin in local dev.
-// import.meta.env.PROD is true in Vite production builds, false in dev server.
-const welcomeRedirectUrl = import.meta.env.PROD
-  ? 'https://www.getfunnl.com/welcome'
-  : `${window.location.origin}/welcome`
+// ---------------------------------------------------------------------------
+// Trusted origin resolution (computed once at module load)
+// ---------------------------------------------------------------------------
+// Architecture:
+//   1. Read VITE_APP_ORIGIN (optional build-time env var). If present and valid,
+//      use it — this supports deployments where the redirect domain differs from
+//      the serving origin (e.g. a CNAME alias).
+//   2. Otherwise fall back to window.location.origin, which is always correct for
+//      localhost, Vercel preview URLs, and production without any hardcoding.
+//
+// Never: query parameters, route state, form values, or hardcoded domain strings.
 
-const resetRedirectUrl = import.meta.env.PROD
-  ? 'https://www.getfunnl.com/reset-password'
-  : `${window.location.origin}/reset-password`
+function resolveAppOrigin() {
+  const configured = import.meta.env.VITE_APP_ORIGIN
+  if (configured) {
+    const result = validateOrigin(configured)
+    if (result.valid) return result.origin
+    // Misconfigured VITE_APP_ORIGIN: fall through and warn.
+    console.warn('[Funnl] VITE_APP_ORIGIN is set but not a valid HTTP/HTTPS origin:', configured)
+  }
+  // Use the current browser origin. normalizeOrigin strips any trailing slash.
+  return normalizeOrigin(window.location.origin)
+}
 
-// Must be outside SignInPage to avoid remount on every keystroke
-function InputWrapper({ children }) {
+const APP_ORIGIN        = resolveAppOrigin()
+const welcomeRedirectUrl = buildWelcomeRedirectUrl(APP_ORIGIN)
+const resetRedirectUrl   = buildResetRedirectUrl(APP_ORIGIN)
+
+// ---------------------------------------------------------------------------
+// Input field wrapper -- Paper theme (always light, never adapts to dark mode)
+// ---------------------------------------------------------------------------
+
+function FieldWrapper({ children, hasError }) {
+  const border = hasError
+    ? 'border-[#C2334D] focus-within:border-[#C2334D] focus-within:shadow-[0_0_0_3px_rgba(194,51,77,0.12)]'
+    : 'border-[#DDD5C8] focus-within:border-[rgba(255,68,35,0.5)] focus-within:shadow-[0_0_0_3px_rgba(255,68,35,0.10)]'
   return (
-    <div className="flex items-center gap-[10px] rounded-xl border border-[rgba(255,255,255,0.09)] bg-[#131318] px-[14px] py-[13px] focus-within:border-[rgba(139,124,255,0.5)] focus-within:shadow-[0_0_0_3px_rgba(108,92,255,0.12)] transition-[border-color,box-shadow] duration-150">
+    <div className={`flex items-center gap-[10px] rounded-xl border bg-white px-[14px] py-[13px] transition-[border-color,box-shadow] motion-reduce:transition-none ${border}`}>
       {children}
     </div>
   )
 }
 
+// ---------------------------------------------------------------------------
+// Icon helpers (Paper theme -- no purple)
+// ---------------------------------------------------------------------------
+
+function EnvelopeIcon() {
+  return (
+    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#8C857A" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="flex-none" aria-hidden="true">
+      <rect x="3" y="5" width="18" height="14" rx="2.5"/><path d="m3 7 9 6 9-6"/>
+    </svg>
+  )
+}
+
+function LockIcon() {
+  return (
+    <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#8C857A" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="flex-none" aria-hidden="true">
+      <rect x="4" y="10" width="16" height="10" rx="2.5"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>
+    </svg>
+  )
+}
+
+// Shared class strings for Paper inputs and labels
+const inputCls = 'flex-1 min-w-0 bg-transparent text-[14px] text-[#1C1510] placeholder-[#B0A898] outline-none'
+const labelCls = 'block text-[13px] font-semibold text-[#4A3C2E] mb-2'
+
+// Ember primary button (flat, no gradient, no glow)
+const btnPrimary = 'w-full bg-ember hover:bg-ember-hover text-white text-[15px] font-bold py-[14px] rounded-xl transition-colors motion-reduce:transition-none disabled:opacity-50 disabled:cursor-not-allowed'
+const btnSecondary = 'w-full bg-[#EDE9E2] hover:bg-[#E3DDD5] text-[#1C1510] text-[15px] font-bold py-[14px] rounded-xl transition-colors motion-reduce:transition-none disabled:opacity-50 disabled:cursor-not-allowed'
+
+// ---------------------------------------------------------------------------
+// SignInPage
+// ---------------------------------------------------------------------------
+
 function SignInPage() {
   const location = useLocation()
-  const navigate = useNavigate()
-  const [mode, setMode] = useState(location.pathname === '/signup' ? 'signup' : 'signin') // 'signin' | 'signup' | 'pending' | 'forgot' | 'reset-sent'
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
+  const navigate  = useNavigate()
+  const mountedRef = useRef(true)
+
+  // Stale-request protection: each async handler captures a token at start and compares
+  // it after every await. switchMode() invalidates the current token so in-flight
+  // requests from the previous mode cannot mutate state in the new mode.
+  const currentOperationRef = useRef(0)
+
+  // 'signin' | 'signup' | 'pending' | 'forgot' | 'reset-sent'
+  const [mode, setMode] = useState(location.pathname === '/signup' ? 'signup' : 'signin')
+
+  const [email,           setEmail]           = useState('')
+  const [password,        setPassword]        = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
-  const [error, setError] = useState('')
-  const [loading, setLoading] = useState(false)
-  const [resendLoading, setResendLoading] = useState(false)
-  const [resendCooldown, setResendCooldown] = useState(0)
-  const [resendStatus, setResendStatus] = useState('idle') // 'idle' | 'sent' | 'error'
-  const [resendError, setResendError] = useState('')
+  // null = no error; object = { code, message, fields, level } from classifyAuthError/validationToError
+  const [error,           setError]           = useState(null)
+  const [loading,         setLoading]         = useState(false)
+  const [resendLoading,   setResendLoading]   = useState(false)
+
+  // Expiry-timestamp approach for cooldown (more accurate than decrement-only state
+  // across background tabs).
+  const [resendExpiresAt, setResendExpiresAt] = useState(null)
   const resendTimerRef = useRef(null)
+  const [cooldownRemaining, setCooldownRemaining] = useState(0)
 
-  // Captured once on mount — shows after arriving from /reset-password
-  const [showResetBanner] = useState(!!location.state?.passwordReset)
+  const [resendStatus, setResendStatus] = useState('idle') // 'idle' | 'sent' | 'error'
+  const [resendError,  setResendError]  = useState('')
 
-  // Keep form in sync if React Router reuses this component without remounting.
-  // mode is in deps because the guards read it; the guards prevent resets during pending/forgot/reset-sent.
+  // Captured once on mount via lazy initializer -- parseResetSuccessState validates shape.
+  // Cleared from history state immediately in a mount-only effect so refresh and Back
+  // do not re-show the banner.
+  const [showResetBanner] = useState(() => parseResetSuccessState(location.state))
+
   useEffect(() => {
-    if (location.pathname === '/signup' && mode !== 'signup' && mode !== 'pending' && mode !== 'forgot' && mode !== 'reset-sent') {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
+
+  // Clear reset-success route state after reading it once.
+  // Replace-navigation removes the state so the banner never re-appears on refresh or Back.
+  useEffect(() => {
+    if (showResetBanner) {
+      navigate(location.pathname, { replace: true, state: {} })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []) // mount-only -- location.pathname and showResetBanner are stable at first render
+
+  // Keep mode in sync when React Router reuses this component without remounting.
+  useEffect(() => {
+    const p = location.pathname
+    if (p === '/signup' && mode !== 'signup' && mode !== 'pending' && mode !== 'forgot' && mode !== 'reset-sent') {
       setMode('signup')
-    } else if (location.pathname === '/signin' && mode !== 'signin' && mode !== 'pending' && mode !== 'forgot' && mode !== 'reset-sent') {
+    } else if (p === '/signin' && mode !== 'signin' && mode !== 'pending' && mode !== 'forgot' && mode !== 'reset-sent') {
       setMode('signin')
     }
   }, [location.pathname, mode])
 
-  // Fire once per arrival at signup mode: on initial mount at /signup AND on /signin → /signup navigation.
+  // Fire once per arrival at signup mode (mount at /signup OR navigation from /signin).
   useEffect(() => {
     if (mode === 'signup') track('signup_started')
   }, [mode])
 
-  // Clean up the resend countdown timer on unmount.
+  // Cooldown tick -- updates cooldownRemaining every second while an expiry is active.
   useEffect(() => {
-    return () => { if (resendTimerRef.current) clearInterval(resendTimerRef.current) }
-  }, [])
+    if (!resendExpiresAt) {
+      setCooldownRemaining(0)
+      return
+    }
+    function tick() {
+      const remaining = resendCooldownRemaining(resendExpiresAt, Date.now())
+      if (!mountedRef.current) return
+      setCooldownRemaining(remaining)
+      if (remaining <= 0) {
+        clearInterval(resendTimerRef.current)
+        resendTimerRef.current = null
+        setResendExpiresAt(null)
+      }
+    }
+    tick()
+    resendTimerRef.current = setInterval(tick, 1000)
+    return () => {
+      clearInterval(resendTimerRef.current)
+      resendTimerRef.current = null
+    }
+  }, [resendExpiresAt])
 
   function startResendCooldown() {
-    if (resendTimerRef.current) clearInterval(resendTimerRef.current)
-    setResendCooldown(60)
-    resendTimerRef.current = setInterval(() => {
-      setResendCooldown(prev => {
-        if (prev <= 1) {
-          clearInterval(resendTimerRef.current)
-          resendTimerRef.current = null
-          return 0
-        }
-        return prev - 1
-      })
-    }, 1000)
+    setResendExpiresAt(resendCooldownExpiry(Date.now()))
   }
 
+  // Switches mode and clears all form state.
+  // Invalidates any in-flight async operation so its resolved value cannot
+  // mutate state that now belongs to the new mode.
   function switchMode(newMode) {
+    currentOperationRef.current = createSubmitToken()
+    setLoading(false)
+    setResendLoading(false)
     setMode(newMode)
     setEmail('')
     setPassword('')
     setConfirmPassword('')
-    setError('')
+    setError(null)
     setResendStatus('idle')
     setResendError('')
-    setResendCooldown(0)
-    if (resendTimerRef.current) {
-      clearInterval(resendTimerRef.current)
-      resendTimerRef.current = null
-    }
+    setResendExpiresAt(null)
+    setCooldownRemaining(0)
+    clearInterval(resendTimerRef.current)
+    resendTimerRef.current = null
   }
+
+  // ---------------------------------------------------------------------------
+  // Handlers
+  // ---------------------------------------------------------------------------
 
   async function handleSignIn(e) {
     e.preventDefault()
-    setError('')
+    if (loading) return
+    setError(null)
     setLoading(true)
-    const { data, error } = await supabase.auth.signInWithPassword({ email, password })
+    const token = createSubmitToken()
+    currentOperationRef.current = token
+
+    const { data, error: authError } = await supabase.auth.signInWithPassword({
+      email: normalizeEmail(email),
+      password,
+    })
+
+    if (!mountedRef.current || token !== currentOperationRef.current) return
     setLoading(false)
-    if (error) { setError(error.message); return }
+
+    const result = classifySignInResult(data, authError)
+    if (result.outcome !== 'authenticated') {
+      setError(result.authError ?? classifyAuthError(null))
+      return
+    }
     try {
-      if (data.user) identifyUser(data.user.id, data.user.email)
+      if (result.user) identifyUser(result.user.id, result.user.email)
       track('user_signed_in')
     } catch {
       // Analytics must never block sign-in.
     }
-    navigate('/', { replace: true })
+    if (!mountedRef.current || token !== currentOperationRef.current) return
+    // Use the actual intended destination the user was heading to before being redirected
+    // to sign in. App.jsx stores it in location.state.from via the unauthenticated wildcard.
+    navigate(safeSignInDestination(location.state?.from), { replace: true })
   }
 
   async function handleSignUp(e) {
     e.preventDefault()
-    setError('')
-    if (password !== confirmPassword) { setError('Passwords do not match.'); return }
-    if (password.length < 6) { setError('Password must be at least 6 characters.'); return }
+    if (loading) return
+    setError(null)
+
+    // Client-side validation before the server call.
+    // validationToError produces the same { code, message, fields, level } shape as
+    // classifyAuthError so all callers treat validation and server errors identically.
+    const pwError = validationToError(validatePassword(password), 'password')
+    if (pwError) { setError(pwError); return }
+    const cfError = validationToError(validatePasswordConfirmation(password, confirmPassword), 'confirm')
+    if (cfError) { setError(cfError); return }
+
     setLoading(true)
-    const { error } = await supabase.auth.signUp({
-      email,
+    const token = createSubmitToken()
+    currentOperationRef.current = token
+
+    const { data, error: authError } = await supabase.auth.signUp({
+      email: normalizeEmail(email),
       password,
       options: { emailRedirectTo: welcomeRedirectUrl },
     })
+
+    if (!mountedRef.current || token !== currentOperationRef.current) return
     setLoading(false)
-    if (error) { setError(error.message); return }
+
+    const result = classifySignUpResult(data, authError)
+    if (result.outcome === 'error' || result.outcome === 'malformed') {
+      setError(result.authError ?? classifyAuthError(null))
+      return
+    }
+    if (!mountedRef.current || token !== currentOperationRef.current) return
     track('user_signed_up')
+    // Clear passwords from memory before entering pending state.
+    // Pending context holds only the normalized email (displayed for confirmation).
+    setPassword('')
+    setConfirmPassword('')
     startResendCooldown()
     setMode('pending')
   }
 
   async function handleForgotPassword(e) {
     e.preventDefault()
-    setError('')
+    if (loading) return
+    setError(null)
     setLoading(true)
-    const { error } = await supabase.auth.resetPasswordForEmail(email, {
-      redirectTo: resetRedirectUrl,
-    })
+    const token = createSubmitToken()
+    currentOperationRef.current = token
+
+    const { error: authError } = await supabase.auth.resetPasswordForEmail(
+      normalizeEmail(email),
+      { redirectTo: resetRedirectUrl }
+    )
+
+    if (!mountedRef.current || token !== currentOperationRef.current) return
     setLoading(false)
-    if (error) { setError(error.message); return }
+
+    if (authError) {
+      const classified = classifyAuthError(authError)
+      // Only surface errors where retrying with the same email cannot help.
+      // For rate-limiting or network failures the user must act before retrying.
+      // For unknown accounts (and all other codes) we still show the success state
+      // to avoid revealing whether an address is registered (anti-enumeration).
+      if (classified.code === 'rate_limited' || classified.code === 'network_error') {
+        setError(classified)
+        return
+      }
+    }
+    if (!mountedRef.current || token !== currentOperationRef.current) return
     setMode('reset-sent')
   }
 
   async function handleResend() {
-    if (resendLoading || resendCooldown > 0) return
-
+    if (resendLoading || cooldownRemaining > 0) return
+    // Guard: resend requires a valid pending email (set during sign-up).
+    const pendingEmail = normalizeEmail(email)
+    if (!pendingEmail) return
     setResendLoading(true)
     setResendStatus('idle')
     setResendError('')
+    const token = createSubmitToken()
+    currentOperationRef.current = token
 
     try {
-      const { error } = await supabase.auth.resend({
+      const { error: resendErr } = await supabase.auth.resend({
         type: 'signup',
-        email,
+        email: pendingEmail,
         options: { emailRedirectTo: welcomeRedirectUrl },
       })
+      if (!mountedRef.current || token !== currentOperationRef.current) return
+      // Additional guards after await:
+      // - mode must still be 'pending' (switchMode() updates currentOperationRef, so
+      //   the token check above already covers mode switches; this is a redundant
+      //   defense against any code path that changes mode without updating the token)
+      // - the pending email must still match what was submitted (prevents a stale
+      //   resend from claiming a different address's slot)
+      if (mode !== 'pending' || normalizeEmail(email) !== pendingEmail) return
 
-      if (error) {
+      const result = classifyResendResult(resendErr)
+      if (result.outcome === 'error') {
         setResendStatus('error')
-        setResendError('Something went wrong. Please try again.')
+        setResendError(result.authError.message)
         return
       }
-
       setResendStatus('sent')
       startResendCooldown()
-    } catch {
+    } catch (ex) {
+      if (!mountedRef.current || token !== currentOperationRef.current) return
+      const result = classifyResendResult(ex)
       setResendStatus('error')
-      setResendError('Something went wrong. Please try again.')
+      setResendError(result.authError.message)
     } finally {
-      setResendLoading(false)
+      // Only clear loading if this operation is still the current one.
+      if (mountedRef.current && token === currentOperationRef.current) {
+        setResendLoading(false)
+      }
     }
   }
 
-  // ── Shared pieces ──────────────────────────────────────────────────────────
+  // ---------------------------------------------------------------------------
+  // Logo lockup (used in all modes at top of form panel)
+  // No glow shadow -- the funnel mark never uses box-shadow.
+  // ---------------------------------------------------------------------------
 
-  const logoTileSmall = (
-    <div className="w-[36px] h-[36px] rounded-[10px] bg-[#4B3AF0] flex items-center justify-center shadow-[0_4px_14px_rgba(75,58,240,0.4)] flex-none">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-        <path d="M3 4H21L15 12.5V20H9V12.5Z" fill="white"/>
-      </svg>
+  const logoLockup = (
+    <div className="flex items-center gap-[10px] mb-12">
+      <div className="w-[34px] h-[34px] rounded-[9px] bg-ember flex items-center justify-center flex-none">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d={FUNNEL_PATH} fill="white"/>
+        </svg>
+      </div>
+      <span className="font-display font-bold text-[21px] text-[#1C1510] tracking-[-0.4px]">Funnl</span>
     </div>
   )
 
-  const envelopeIcon = (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#8B7CFF" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="flex-none">
-      <rect x="3" y="5" width="18" height="14" rx="2.5"/><path d="m3 7 9 6 9-6"/>
-    </svg>
-  )
+  // ---------------------------------------------------------------------------
+  // Pending confirmation
+  // ---------------------------------------------------------------------------
 
-  const lockIcon = (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#6C6C78" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className="flex-none">
-      <rect x="4" y="10" width="16" height="10" rx="2.5"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>
-    </svg>
-  )
+  if (mode === 'pending') {
+    const resendDisabled = resendLoading || cooldownRemaining > 0
+    return (
+      <AuthShell>
+        {logoLockup}
 
-  const inputCls = 'flex-1 bg-transparent text-[14px] text-[#F4F3F8] placeholder-[#54545E] outline-none'
-  const labelCls = 'block text-[13px] font-semibold text-[#C7C7D1] mb-2'
-
-  // ── Shared right panel ─────────────────────────────────────────────────────
-
-  const rightPanel = (
-    <div
-      className="hidden lg:flex w-[520px] flex-col justify-center p-14 relative overflow-hidden"
-      style={{ background: 'linear-gradient(150deg,#3A2D66,#1C1633 55%,#100D1E)' }}
-    >
-      <div className="absolute top-[-80px] right-[-80px] w-[320px] h-[320px] rounded-full pointer-events-none"
-        style={{ background: 'radial-gradient(circle,rgba(139,124,255,0.35),transparent 70%)' }}/>
-      <div className="absolute bottom-[-100px] left-[-60px] w-[280px] h-[280px] rounded-full pointer-events-none"
-        style={{ background: 'radial-gradient(circle,rgba(47,212,182,0.16),transparent 70%)' }}/>
-
-      <div className="relative">
-        <div className="w-16 h-16 rounded-[18px] bg-[#4B3AF0] flex items-center justify-center shadow-[0_12px_40px_rgba(75,58,240,0.5)] mb-9">
-          <svg width="32" height="32" viewBox="0 0 24 24" fill="none">
-            <path d="M3 4H21L15 12.5V20H9V12.5Z" fill="white"/>
+        <div className="w-12 h-12 rounded-[14px] bg-[rgba(255,68,35,0.1)] flex items-center justify-center mb-5">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#FF4423" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <rect x="3" y="5" width="18" height="14" rx="2.5"/><path d="m3 7 9 6 9-6"/>
           </svg>
         </div>
 
-        <h3 className="font-display text-[34px] font-bold text-white leading-[1.25] mb-[14px] tracking-[-0.5px]">
-          Your networking, organized.
-        </h3>
-        <p className="text-[15px] leading-[1.6] text-[rgba(255,255,255,0.7)] mb-10 max-w-[380px]">
-          Track every contact, coffee chat, and follow-up, and let Funnl AI tell you who to reach next.
+        <h1 className="font-display text-[30px] font-bold text-[#1C1510] mb-3 tracking-[-0.4px]">
+          Check your email
+        </h1>
+        <p className="text-[15px] leading-relaxed text-[#6B5A4A] mb-2">
+          We sent a confirmation link to{' '}
+          <span className="font-semibold text-[#1C1510]">{email}</span>.
+        </p>
+        <p className="text-[15px] leading-relaxed text-[#6B5A4A] mb-8">
+          Click that link to verify your account. Check your spam or promotions folder if you don't see it within a few minutes.
         </p>
 
-        <div className="flex flex-col gap-[14px]">
-          <div className="flex items-center gap-[14px] bg-[rgba(255,255,255,0.05)] border border-[rgba(255,255,255,0.08)] rounded-[14px] px-[18px] py-4">
-            <div className="w-[38px] h-[38px] rounded-[11px] bg-[rgba(139,124,255,0.22)] flex items-center justify-center flex-none">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#B4A8FF" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
-                <circle cx="8" cy="8" r="3"/><path d="M2.5 20c0-3 2.5-5.5 5.5-5.5S13.5 17 13.5 20"/><circle cx="17" cy="9" r="2.4"/><path d="M15 14.6c2.8.3 5 2.6 5 5.4"/>
-              </svg>
-            </div>
-            <div>
-              <p className="text-[14px] font-bold text-white">Every contact in one place</p>
-              <p className="text-[12.5px] text-[rgba(255,255,255,0.55)]">Recruiters, alumni, and referrals organized by tag.</p>
-            </div>
-          </div>
+        <div className="mb-6">
+          <button
+            type="button"
+            onClick={handleResend}
+            disabled={resendDisabled}
+            className="w-full py-3 rounded-xl border border-[#DDD5C8] bg-white text-[14px] font-semibold text-[#6B5A4A] hover:text-[#1C1510] hover:border-[#C8BFB5] transition-colors motion-reduce:transition-none disabled:opacity-50 disabled:cursor-not-allowed"
+            aria-label={cooldownRemaining > 0 ? `Resend available in ${cooldownRemaining} seconds` : 'Resend confirmation email'}
+          >
+            {resendLoading
+              ? 'Sending...'
+              : cooldownRemaining > 0
+                ? `Resend in ${cooldownRemaining}s`
+                : 'Resend confirmation email'}
+          </button>
 
-          <div className="flex items-center gap-[14px] bg-[rgba(255,255,255,0.05)] border border-[rgba(255,255,255,0.08)] rounded-[14px] px-[18px] py-4">
-            <div className="w-[38px] h-[38px] rounded-[11px] bg-[rgba(47,212,182,0.18)] flex items-center justify-center flex-none">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#6EE7D6" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
-                <circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>
-              </svg>
-            </div>
-            <div>
-              <p className="text-[14px] font-bold text-white">Never miss a follow-up</p>
-              <p className="text-[12.5px] text-[rgba(255,255,255,0.55)]">Follow-up dates keep your outreach on track.</p>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-[14px] bg-[rgba(255,255,255,0.05)] border border-[rgba(255,255,255,0.08)] rounded-[14px] px-[18px] py-4">
-            <div className="w-[38px] h-[38px] rounded-[11px] bg-[rgba(245,166,35,0.18)] flex items-center justify-center flex-none">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="#FFB84D">
-                <path d="M12 3l1.7 5.3L19 10l-5.3 1.7L12 17l-1.7-5.3L5 10l5.3-1.7L12 3z"/>
-              </svg>
-            </div>
-            <div>
-              <p className="text-[14px] font-bold text-white">AI-guided outreach</p>
-              <p className="text-[12.5px] text-[rgba(255,255,255,0.55)]">Funnl AI drafts messages and suggests who to reach.</p>
-            </div>
+          {/* Live region for resend status -- polite so screen readers announce after button response */}
+          <div aria-live="polite" aria-atomic="true">
+            {resendStatus === 'sent' && (
+              <p className="mt-3 text-[13px] text-[#2E7D5B] font-medium text-center">
+                Sent -- check your inbox and spam folder.
+              </p>
+            )}
+            {resendStatus === 'error' && (
+              <p role="alert" className="mt-3 text-[13px] text-[#C2334D] text-center">
+                {resendError}
+              </p>
+            )}
           </div>
         </div>
-      </div>
-    </div>
-  )
 
-  // ── Pending confirmation screen ────────────────────────────────────────────
-
-  if (mode === 'pending') {
-    const resendDisabled = resendLoading || resendCooldown > 0
-    return (
-      <div className="flex min-h-screen">
-        <div className="flex flex-1 flex-col justify-center bg-[#0A0A0C] px-6 md:px-[88px]">
-          <div className="mx-auto w-full max-w-[400px]">
-            <div className="flex items-center gap-[11px] mb-14">
-              {logoTileSmall}
-              <span className="font-display font-bold text-[23px] text-[#F4F3F8] tracking-[-0.5px]">Funnl</span>
-            </div>
-
-            <div className="w-14 h-14 rounded-2xl bg-[rgba(139,124,255,0.12)] flex items-center justify-center mb-6">
-              <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#8B7CFF" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
-                <rect x="3" y="5" width="18" height="14" rx="2.5"/><path d="m3 7 9 6 9-6"/>
-              </svg>
-            </div>
-
-            <h1 className="font-display text-[32px] font-bold text-[#F4F3F8] mb-3 tracking-[-0.5px]">Check your email</h1>
-            <p className="text-[15px] leading-relaxed text-[#9A9AA5] mb-2">
-              We sent a confirmation link to{' '}
-              <span className="font-semibold text-[#F4F3F8]">{email}</span>.
-            </p>
-            <p className="text-[15px] leading-relaxed text-[#9A9AA5] mb-8">
-              Click that link to verify your account. Check your spam or promotions folder if you don't see it.
-            </p>
-
-            <div className="mb-8">
-              <button
-                type="button"
-                onClick={handleResend}
-                disabled={resendDisabled}
-                className="w-full py-3 rounded-xl border border-[rgba(255,255,255,0.09)] bg-[#1A1A21] text-[14px] font-semibold text-[#A0A0AD] hover:text-[#F4F3F8] hover:border-[rgba(139,124,255,0.4)] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {resendLoading
-                  ? 'Sending…'
-                  : resendCooldown > 0
-                    ? `Resend in ${resendCooldown}s`
-                    : 'Resend confirmation email'}
-              </button>
-
-              {resendStatus === 'sent' && (
-                <p aria-live="polite" className="mt-2.5 text-[13px] text-success text-center">Sent — check your inbox and spam folder.</p>
-              )}
-              {resendStatus === 'error' && (
-                <p role="alert" className="mt-2.5 text-[13px] text-danger text-center">{resendError}</p>
-              )}
-            </div>
-
-            <button
-              type="button"
-              onClick={() => switchMode('signin')}
-              className="w-full bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] text-white text-[15px] font-bold py-[14px] rounded-xl shadow-[0_8px_22px_rgba(91,69,240,0.4)] hover:opacity-90 transition-opacity"
-            >
-              Back to Sign In
-            </button>
-          </div>
-        </div>
-        {rightPanel}
-      </div>
+        <button
+          type="button"
+          onClick={() => { switchMode('signin'); navigate('/signin') }}
+          className={btnPrimary}
+        >
+          Back to sign in
+        </button>
+      </AuthShell>
     )
   }
 
-  // ── Reset link sent screen ─────────────────────────────────────────────────
+  // ---------------------------------------------------------------------------
+  // Reset link sent
+  // ---------------------------------------------------------------------------
 
   if (mode === 'reset-sent') {
     return (
-      <div className="flex min-h-screen">
-        <div className="flex flex-1 flex-col justify-center bg-[#0A0A0C] px-6 md:px-[88px]">
-          <div className="mx-auto w-full max-w-[400px]">
-            <div className="flex items-center gap-[11px] mb-14">
-              {logoTileSmall}
-              <span className="font-display font-bold text-[23px] text-[#F4F3F8] tracking-[-0.5px]">Funnl</span>
-            </div>
-            <h1 className="font-display text-[32px] font-bold text-[#F4F3F8] mb-3 tracking-[-0.5px]">Check your email</h1>
-            <p className="text-[15px] leading-relaxed text-[#9A9AA5] mb-2">
-              We sent a password reset link to{' '}
-              <span className="font-semibold text-[#F4F3F8]">{email}</span>.
-            </p>
-            <p className="text-[15px] leading-relaxed text-[#9A9AA5] mb-8">
-              Click that link to set a new password, then come back here and sign in.
-            </p>
-            <p className="text-[13.5px] text-[#6C6C78] mb-8">
-              Didn't receive it? Check your spam folder, or{' '}
-              <button onClick={() => switchMode('forgot')} className="text-accent underline hover:text-tag transition-colors">
-                try again
-              </button>.
-            </p>
-            <button
-              onClick={() => switchMode('signin')}
-              className="w-full bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] text-white text-[15px] font-bold py-[14px] rounded-xl shadow-[0_8px_22px_rgba(91,69,240,0.4)] hover:opacity-90 transition-opacity"
-            >
-              Back to Sign In
-            </button>
-          </div>
-        </div>
-        {rightPanel}
-      </div>
+      <AuthShell>
+        {logoLockup}
+
+        <h1 className="font-display text-[30px] font-bold text-[#1C1510] mb-3 tracking-[-0.4px]">
+          Check your email
+        </h1>
+        <p className="text-[15px] leading-relaxed text-[#6B5A4A] mb-2">
+          If an account exists for that email, a reset link has been sent.
+        </p>
+        <p className="text-[15px] leading-relaxed text-[#6B5A4A] mb-3">
+          Click the link in the email to set a new password, then come back and sign in.
+        </p>
+        <p className="text-[13px] text-[#8C857A] mb-8">
+          Didn't receive it? Check your spam folder, or{' '}
+          <button
+            onClick={() => switchMode('forgot')}
+            className="text-[#FF4423] underline hover:text-[#D6330F] transition-colors motion-reduce:transition-none"
+          >
+            try again
+          </button>.
+        </p>
+        <button
+          type="button"
+          onClick={() => { switchMode('signin'); navigate('/signin') }}
+          className={btnPrimary}
+        >
+          Back to sign in
+        </button>
+      </AuthShell>
     )
   }
 
-  // ── Sign in / Sign up / Forgot password screen ─────────────────────────────
+  // ---------------------------------------------------------------------------
+  // Sign in / Sign up / Forgot password
+  // ---------------------------------------------------------------------------
+
+  const isSignInMode  = mode === 'signin'
+  const isSignUpMode  = mode === 'signup'
+  const isForgotMode  = mode === 'forgot'
+
+  // Derive field-level aria-invalid from the structured error's fields array.
+  // getInvalidFields(fields) never parses message strings -- copy changes cannot break targeting.
+  const invalidFields = getInvalidFields(error?.fields ?? [])
+
+  // aria-describedby linkage
+  const errorId = error?.message ? 'auth-form-error' : undefined
 
   return (
-    <div className="flex min-h-screen">
-      <div className="flex flex-1 flex-col justify-center bg-[#0A0A0C] px-6 md:px-[88px]">
-        <div className="mx-auto w-full max-w-[400px]">
+    <AuthShell>
+      {logoLockup}
 
-          {/* Logo lockup */}
-          <div className="flex items-center gap-[11px] mb-14">
-            {logoTileSmall}
-            <span className="font-display font-bold text-[23px] text-[#F4F3F8] tracking-[-0.5px]">Funnl</span>
+      {/* Password-reset success banner -- consumed once on mount, never re-shown on refresh */}
+      {isSignInMode && showResetBanner && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="flex items-center gap-3 mb-6 rounded-xl border border-[rgba(46,125,91,0.3)] bg-[rgba(46,125,91,0.08)] px-4 py-3"
+        >
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#2E7D5B" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className="flex-none" aria-hidden="true">
+            <path d="M20 6L9 17l-5-5"/>
+          </svg>
+          <p className="text-[13.5px] text-[#2E7D5B] font-medium">
+            Password updated. Sign in with your new password.
+          </p>
+        </div>
+      )}
+
+      {/* Page heading */}
+      <h1 className="font-display text-[32px] font-bold text-[#1C1510] tracking-[-0.5px] mb-2">
+        {isSignInMode ? 'Welcome back.' : isSignUpMode ? 'Create account' : 'Reset your password'}
+      </h1>
+
+      {/* Supporting copy */}
+      {isSignInMode && (
+        <p className="text-[15px] text-[#6B5A4A] mb-8">
+          Sign in to pick up where your network left off.
+        </p>
+      )}
+      {isSignUpMode && (
+        <p className="text-[15px] text-[#6B5A4A] mb-8">
+          Start turning networking conversations into follow-ups that lead somewhere.
+        </p>
+      )}
+      {isForgotMode && (
+        <p className="text-[15px] text-[#6B5A4A] mb-8">
+          Enter your email and we'll send you a reset link.
+        </p>
+      )}
+
+      {/* Form-level error live region */}
+      {error?.message && (
+        <div
+          id="auth-form-error"
+          role="alert"
+          aria-live="assertive"
+          className="flex items-start gap-2.5 mb-5 rounded-xl border border-[rgba(194,51,77,0.25)] bg-[rgba(194,51,77,0.07)] px-4 py-3"
+        >
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#C2334D" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className="flex-none mt-0.5" aria-hidden="true">
+            <circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/>
+          </svg>
+          <p className="text-[13.5px] text-[#C2334D] font-medium">{error.message}</p>
+        </div>
+      )}
+
+      {/* Sign in form */}
+      {isSignInMode && (
+        <form onSubmit={handleSignIn} noValidate className="space-y-5" aria-label="Sign in">
+          <div>
+            <label htmlFor="si-email" className={labelCls}>Email</label>
+            <FieldWrapper hasError={!!invalidFields.email}>
+              <EnvelopeIcon/>
+              <input
+                id="si-email"
+                type="email"
+                value={email}
+                onChange={e => setEmail(e.target.value)}
+                required
+                autoFocus
+                autoComplete="email"
+                inputMode="email"
+                className={inputCls}
+                placeholder="alex@university.edu"
+                aria-invalid={invalidFields.email ? 'true' : undefined}
+                aria-describedby={errorId}
+              />
+            </FieldWrapper>
+          </div>
+          <div>
+            <label htmlFor="si-password" className={labelCls}>Password</label>
+            <FieldWrapper hasError={!!invalidFields.password}>
+              <LockIcon/>
+              <input
+                id="si-password"
+                type="password"
+                value={password}
+                onChange={e => setPassword(e.target.value)}
+                required
+                autoComplete="current-password"
+                className={inputCls}
+                placeholder="Enter password"
+                aria-invalid={invalidFields.password ? 'true' : undefined}
+                aria-describedby={errorId}
+              />
+            </FieldWrapper>
+            <button
+              type="button"
+              onClick={() => switchMode('forgot')}
+              className="mt-2 text-[12.5px] text-[#8C857A] hover:text-[#FF4423] transition-colors motion-reduce:transition-none"
+            >
+              Forgot password?
+            </button>
           </div>
 
-          {/* Password reset success banner */}
-          {mode === 'signin' && showResetBanner && (
-            <div className="flex items-center gap-3 mb-6 rounded-xl border border-[rgba(47,212,182,0.25)] bg-[rgba(47,212,182,0.08)] px-4 py-3">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#2FD4B6" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className="flex-none">
-                <path d="M20 6L9 17l-5-5"/>
-              </svg>
-              <p className="text-[13.5px] text-success font-medium">Password updated — sign in with your new password.</p>
-            </div>
-          )}
+          <button
+            type="submit"
+            disabled={loading}
+            className={`${btnPrimary} mt-1`}
+            aria-busy={loading}
+          >
+            {loading ? 'Signing in...' : 'Sign in'}
+          </button>
 
-          {/* Heading + subtitle */}
-          <h1 className="font-display text-[34px] font-bold text-[#F4F3F8] tracking-[-0.5px] mb-2">
-            {mode === 'signin' ? 'Welcome back' : mode === 'signup' ? 'Create account' : 'Reset your password'}
-          </h1>
-          {mode === 'signin' && (
-            <p className="text-[15px] text-[#9A9AA5] mb-[34px]">Sign in to pick up where your network left off.</p>
-          )}
-          {mode === 'signup' && (
-            <p className="text-[15px] text-[#9A9AA5] mb-[34px]">Start turning networking conversations into follow-ups that lead somewhere.</p>
-          )}
-          {mode === 'forgot' && (
-            <p className="text-[15px] text-[#9A9AA5] mb-[34px]">Enter your email and we'll send you a reset link.</p>
-          )}
+          <p className="text-center text-[13.5px] text-[#8C857A] pt-1">
+            Don't have an account?{' '}
+            <button
+              type="button"
+              onClick={() => { switchMode('signup'); navigate('/signup') }}
+              className="text-[#FF4423] font-semibold hover:text-[#D6330F] transition-colors motion-reduce:transition-none"
+            >
+              Create one
+            </button>
+          </p>
+        </form>
+      )}
 
-          {/* Sign-in form */}
-          {mode === 'signin' && (
-            <form onSubmit={handleSignIn} className="space-y-5">
-              <div>
-                <label className={labelCls}>Email</label>
-                <InputWrapper>
-                  {envelopeIcon}
-                  <input id="email" type="email" value={email} onChange={e => setEmail(e.target.value)}
-                    required autoFocus className={inputCls} placeholder="alex@university.edu"/>
-                </InputWrapper>
-              </div>
-              <div>
-                <label className={labelCls}>Password</label>
-                <InputWrapper>
-                  {lockIcon}
-                  <input id="password" type="password" value={password} onChange={e => setPassword(e.target.value)}
-                    required className={inputCls} placeholder="Enter password"/>
-                </InputWrapper>
-                <button
-                  type="button"
-                  onClick={() => switchMode('forgot')}
-                  className="mt-2 text-[12.5px] text-low hover:text-accent transition-colors"
-                >
-                  Forgot password?
-                </button>
-              </div>
+      {/* Sign up form */}
+      {isSignUpMode && (
+        <form onSubmit={handleSignUp} noValidate className="space-y-5" aria-label="Create account">
+          <div>
+            <label htmlFor="su-email" className={labelCls}>Email</label>
+            <FieldWrapper hasError={!!invalidFields.email}>
+              <EnvelopeIcon/>
+              <input
+                id="su-email"
+                type="email"
+                value={email}
+                onChange={e => setEmail(e.target.value)}
+                required
+                autoFocus
+                autoComplete="email"
+                inputMode="email"
+                className={inputCls}
+                placeholder="you@university.edu"
+                aria-invalid={invalidFields.email ? 'true' : undefined}
+                aria-describedby={errorId}
+              />
+            </FieldWrapper>
+          </div>
+          <div>
+            <label htmlFor="su-password" className={labelCls}>
+              Password
+              <span className="font-normal text-[#8C857A] ml-1">-- at least {PASSWORD_MIN_LENGTH} characters</span>
+            </label>
+            <FieldWrapper hasError={!!invalidFields.password}>
+              <LockIcon/>
+              <input
+                id="su-password"
+                type="password"
+                value={password}
+                onChange={e => setPassword(e.target.value)}
+                required
+                autoComplete="new-password"
+                className={inputCls}
+                placeholder={`At least ${PASSWORD_MIN_LENGTH} characters`}
+                aria-invalid={invalidFields.password ? 'true' : undefined}
+                aria-describedby={errorId}
+              />
+            </FieldWrapper>
+          </div>
+          <div>
+            <label htmlFor="su-confirm" className={labelCls}>Confirm password</label>
+            <FieldWrapper hasError={!!invalidFields.confirm}>
+              <LockIcon/>
+              <input
+                id="su-confirm"
+                type="password"
+                value={confirmPassword}
+                onChange={e => setConfirmPassword(e.target.value)}
+                required
+                autoComplete="new-password"
+                className={inputCls}
+                placeholder="Re-enter your password"
+                aria-invalid={invalidFields.confirm ? 'true' : undefined}
+                aria-describedby={errorId}
+              />
+            </FieldWrapper>
+          </div>
 
-              {error && <p className="text-sm text-danger">{error}</p>}
+          <button
+            type="submit"
+            disabled={loading}
+            className={`${btnPrimary} mt-1`}
+            aria-busy={loading}
+          >
+            {loading ? 'Creating account...' : 'Create account'}
+          </button>
 
-              <button type="submit" disabled={loading}
-                className="w-full bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] text-white text-[15px] font-bold py-[14px] rounded-xl shadow-[0_8px_22px_rgba(91,69,240,0.4)] hover:opacity-90 transition-opacity disabled:opacity-50 mt-1">
-                {loading ? 'Signing in…' : 'Sign in'}
-              </button>
+          <p className="text-center text-[13.5px] text-[#8C857A] pt-1">
+            Already have an account?{' '}
+            <button
+              type="button"
+              onClick={() => { switchMode('signin'); navigate('/signin') }}
+              className="text-[#FF4423] font-semibold hover:text-[#D6330F] transition-colors motion-reduce:transition-none"
+            >
+              Sign in
+            </button>
+          </p>
+        </form>
+      )}
 
-              <p className="text-center text-[13.5px] text-[#6C6C78] pt-2">
-                Don't have an account?{' '}
-                <button type="button" onClick={() => { switchMode('signup'); navigate('/signup') }} className="text-accent font-semibold hover:text-tag transition-colors">
-                  Create one
-                </button>
-              </p>
-            </form>
-          )}
+      {/* Forgot password form */}
+      {isForgotMode && (
+        <form onSubmit={handleForgotPassword} noValidate className="space-y-5" aria-label="Reset password">
+          <div>
+            <label htmlFor="fp-email" className={labelCls}>Email</label>
+            <FieldWrapper hasError={!!invalidFields.email}>
+              <EnvelopeIcon/>
+              <input
+                id="fp-email"
+                type="email"
+                value={email}
+                onChange={e => setEmail(e.target.value)}
+                required
+                autoFocus
+                autoComplete="email"
+                inputMode="email"
+                className={inputCls}
+                placeholder="alex@university.edu"
+                aria-invalid={invalidFields.email ? 'true' : undefined}
+                aria-describedby={errorId}
+              />
+            </FieldWrapper>
+          </div>
 
-          {/* Sign-up form */}
-          {mode === 'signup' && (
-            <form onSubmit={handleSignUp} className="space-y-5">
-              <div>
-                <label className={labelCls}>Email</label>
-                <InputWrapper>
-                  {envelopeIcon}
-                  <input id="signup-email" type="email" value={email} onChange={e => setEmail(e.target.value)}
-                    required autoFocus className={inputCls} placeholder="you@university.edu"/>
-                </InputWrapper>
-              </div>
-              <div>
-                <label className={labelCls}>Password</label>
-                <InputWrapper>
-                  {lockIcon}
-                  <input id="signup-password" type="password" value={password} onChange={e => setPassword(e.target.value)}
-                    required className={inputCls} placeholder="At least 6 characters"/>
-                </InputWrapper>
-              </div>
-              <div>
-                <label className={labelCls}>Confirm Password</label>
-                <InputWrapper>
-                  {lockIcon}
-                  <input id="confirm-password" type="password" value={confirmPassword} onChange={e => setConfirmPassword(e.target.value)}
-                    required className={inputCls} placeholder="Re-enter your password"/>
-                </InputWrapper>
-              </div>
+          <button
+            type="submit"
+            disabled={loading}
+            className={btnPrimary}
+            aria-busy={loading}
+          >
+            {loading ? 'Sending...' : 'Send reset link'}
+          </button>
 
-              {error && <p className="text-sm text-danger">{error}</p>}
+          <p className="text-center text-[13.5px] text-[#8C857A] pt-1">
+            <button
+              type="button"
+              onClick={() => { switchMode('signin'); navigate('/signin') }}
+              className="text-[#FF4423] font-semibold hover:text-[#D6330F] transition-colors motion-reduce:transition-none"
+            >
+              Back to sign in
+            </button>
+          </p>
+        </form>
+      )}
 
-              <button type="submit" disabled={loading}
-                className="w-full bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] text-white text-[15px] font-bold py-[14px] rounded-xl shadow-[0_8px_22px_rgba(91,69,240,0.4)] hover:opacity-90 transition-opacity disabled:opacity-50 mt-1">
-                {loading ? 'Creating account…' : 'Create account'}
-              </button>
-
-              <p className="text-center text-[13.5px] text-[#6C6C78] pt-2">
-                Already have an account?{' '}
-                <button type="button" onClick={() => { switchMode('signin'); navigate('/signin') }} className="text-accent font-semibold hover:text-tag transition-colors">
-                  Sign in
-                </button>
-              </p>
-            </form>
-          )}
-
-          {/* Forgot password form */}
-          {mode === 'forgot' && (
-            <form onSubmit={handleForgotPassword} className="space-y-5">
-              <div>
-                <label className={labelCls}>Email</label>
-                <InputWrapper>
-                  {envelopeIcon}
-                  <input id="forgot-email" type="email" value={email} onChange={e => setEmail(e.target.value)}
-                    required autoFocus className={inputCls} placeholder="alex@university.edu"/>
-                </InputWrapper>
-              </div>
-
-              {error && <p className="text-sm text-danger">{error}</p>}
-
-              <button type="submit" disabled={loading}
-                className="w-full bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] text-white text-[15px] font-bold py-[14px] rounded-xl shadow-[0_8px_22px_rgba(91,69,240,0.4)] hover:opacity-90 transition-opacity disabled:opacity-50">
-                {loading ? 'Sending…' : 'Send reset link'}
-              </button>
-
-              <p className="text-center text-[13.5px] text-[#6C6C78] pt-2">
-                <button type="button" onClick={() => switchMode('signin')} className="text-accent font-semibold hover:text-tag transition-colors">
-                  ← Back to sign in
-                </button>
-              </p>
-            </form>
-          )}
-
-        </div>
-
-        {/* Privacy policy link */}
-        <p className="text-center text-[12px] text-[#4A4A56] mt-6">
-          <Link to="/privacy" className="hover:text-[#6C6C78] transition-colors no-underline">Privacy Policy</Link>
-        </p>
-
-      </div>
-      {rightPanel}
-    </div>
+      {/* Privacy link -- bottom of form area */}
+      <p className="text-center text-[12px] text-[#8C857A] mt-8">
+        <Link to="/privacy" className="hover:text-[#6B5A4A] transition-colors motion-reduce:transition-none no-underline">
+          Privacy Policy
+        </Link>
+      </p>
+    </AuthShell>
   )
 }
 

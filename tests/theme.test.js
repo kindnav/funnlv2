@@ -63,12 +63,12 @@ test('auto, Dark, LIGHT are not valid', () => {
 // ── normalizeThemePreference ─────────────────────────────────────────────────
 console.log('\nnormalizeThemePreference')
 
-test('returns "dark" for missing/invalid value', () => {
-  assert.strictEqual(normalizeThemePreference(null), 'dark')
-  assert.strictEqual(normalizeThemePreference(undefined), 'dark')
-  assert.strictEqual(normalizeThemePreference(''), 'dark')
-  assert.strictEqual(normalizeThemePreference('auto'), 'dark')
-  assert.strictEqual(normalizeThemePreference('System'), 'dark')
+test('returns "light" for missing/invalid value (Paper default)', () => {
+  assert.strictEqual(normalizeThemePreference(null), 'light')
+  assert.strictEqual(normalizeThemePreference(undefined), 'light')
+  assert.strictEqual(normalizeThemePreference(''), 'light')
+  assert.strictEqual(normalizeThemePreference('auto'), 'light')
+  assert.strictEqual(normalizeThemePreference('System'), 'light')
 })
 
 test('returns the value unchanged for valid themes', () => {
@@ -95,9 +95,9 @@ test('system → "light dark"', () => {
 // ── readThemePreference ───────────────────────────────────────────────────────
 console.log('\nreadThemePreference')
 
-test('returns "dark" when nothing stored (default)', () => {
+test('returns "light" when nothing stored (Paper default)', () => {
   const s = makeStorage()
-  assert.strictEqual(readThemePreference(s), 'dark')
+  assert.strictEqual(readThemePreference(s), 'light')
 })
 
 test('returns stored "dark"', () => {
@@ -115,19 +115,19 @@ test('returns stored "system"', () => {
   assert.strictEqual(readThemePreference(s), 'system')
 })
 
-test('returns "dark" for invalid stored value "auto"', () => {
+test('returns "light" for invalid stored value "auto" (Paper default)', () => {
   const s = makeStorage(); s.setItem('funnl-theme', 'auto')
-  assert.strictEqual(readThemePreference(s), 'dark')
+  assert.strictEqual(readThemePreference(s), 'light')
 })
 
-test('returns "dark" for invalid stored value empty string', () => {
+test('returns "light" for invalid stored value empty string (Paper default)', () => {
   const s = makeStorage(); s.setItem('funnl-theme', '')
-  assert.strictEqual(readThemePreference(s), 'dark')
+  assert.strictEqual(readThemePreference(s), 'light')
 })
 
-test('returns "dark" for invalid stored value "System" (wrong case)', () => {
+test('returns "light" for invalid stored value "System" (wrong case)', () => {
   const s = makeStorage(); s.setItem('funnl-theme', 'System')
-  assert.strictEqual(readThemePreference(s), 'dark')
+  assert.strictEqual(readThemePreference(s), 'light')
 })
 
 // ── writeThemePreference ──────────────────────────────────────────────────────
@@ -169,10 +169,10 @@ test('system → data-theme="system", colorScheme="light dark"', () => {
   assert.strictEqual(root.style.colorScheme, 'light dark')
 })
 
-test('invalid value falls back to data-theme="dark"', () => {
+test('invalid value falls back to data-theme="light" (Paper default)', () => {
   const root = makeRoot()
   applyThemeToRoot(root, 'invalid')
-  assert.strictEqual(root.dataset.theme, 'dark')
+  assert.strictEqual(root.dataset.theme, 'light')
 })
 
 test('always sets an explicit data-theme attribute (no undefined)', () => {
@@ -186,10 +186,10 @@ test('always sets an explicit data-theme attribute (no undefined)', () => {
 // ── Combined: readThemePreference + applyThemeToRoot (initTheme equivalent) ───
 console.log('\nreadThemePreference + applyThemeToRoot (initTheme equivalent)')
 
-test('no stored value → applies dark', () => {
+test('no stored value → applies light (Paper default)', () => {
   const s = makeStorage(); const root = makeRoot()
   applyThemeToRoot(root, readThemePreference(s))
-  assert.strictEqual(root.dataset.theme, 'dark')
+  assert.strictEqual(root.dataset.theme, 'light')
 })
 
 test('stored "light" → applies light', () => {
@@ -198,10 +198,10 @@ test('stored "light" → applies light', () => {
   assert.strictEqual(root.dataset.theme, 'light')
 })
 
-test('stored invalid value → applies dark', () => {
+test('stored invalid value → applies light (Paper default)', () => {
   const s = makeStorage(); s.setItem('funnl-theme', 'auto'); const root = makeRoot()
   applyThemeToRoot(root, readThemePreference(s))
-  assert.strictEqual(root.dataset.theme, 'dark')
+  assert.strictEqual(root.dataset.theme, 'light')
 })
 
 // ── Pre-paint script in index.html ────────────────────────────────────────────
@@ -216,9 +216,9 @@ test('pre-paint script references the funnl-theme storage key', () => {
     'Script must read from the "funnl-theme" localStorage key')
 })
 
-test('pre-paint script has a dark fallback', () => {
-  assert.ok(indexHtml.includes("'dark'") || indexHtml.includes('"dark"'),
-    'Script must fall back to "dark" when no valid theme is stored')
+test('pre-paint script has a light fallback (Paper default)', () => {
+  assert.ok(indexHtml.includes("'light'") || indexHtml.includes('"light"'),
+    'Script must fall back to "light" when no valid theme is stored')
 })
 
 test('pre-paint script stamps data-theme on the root element', () => {
@@ -237,8 +237,8 @@ test('pre-paint script covers all three valid themes', () => {
   assert.ok(indexHtml.includes('system'), 'system must appear in pre-paint script area')
 })
 
-test('pre-paint and readThemePreference agree: no stored value → dark', () => {
-  assert.strictEqual(normalizeThemePreference(null), 'dark')
+test('pre-paint and readThemePreference agree: no stored value → light', () => {
+  assert.strictEqual(normalizeThemePreference(null), 'light')
 })
 
 test('pre-paint and readThemePreference agree: stored "light" → light', () => {
@@ -252,9 +252,9 @@ test('pre-paint and readThemePreference agree: "system" → "light dark" colorSc
   assert.strictEqual(resolveColorScheme('system'), 'light dark')
 })
 
-test('pre-paint and readThemePreference agree: invalid stored → dark', () => {
+test('pre-paint and readThemePreference agree: invalid stored → light', () => {
   const s = makeStorage(); s.setItem('funnl-theme', 'auto')
-  assert.strictEqual(readThemePreference(s), 'dark')
+  assert.strictEqual(readThemePreference(s), 'light')
 })
 
 // ── Summary ───────────────────────────────────────────────────────────────────

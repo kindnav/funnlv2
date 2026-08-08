@@ -1,23 +1,30 @@
-﻿import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useParams, Link, useLocation, useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { getAvatarColor, getInitials } from '../lib/avatarUtils'
 import { track } from '../lib/analytics'
+import { CONTACT_AI_ENABLED, snoozeOptionToDate } from '../lib/contactDirectoryUtils'
+import { effectiveOutreachStatus } from '../lib/contactFormUtils'
+import { typeChangeFields, followUpDateChanged, shouldFireOutreachChangeOnEdit } from '../lib/interactionFormUtils'
+import { clearCompletionFields } from '../lib/followUpUtils'
+import { completeFollowUp, snoozeFollowUp as snoozeFollowUpAction } from '../lib/followUpActions'
+import TopBar from '../components/TopBar'
+import AddContactDrawer from '../components/AddContactDrawer'
+import LogInteractionSheet from '../components/LogInteractionSheet'
 
-function normalizeUrl(url) {
-  const s = (url || '').trim()
-  if (!s) return null
-  if (s.startsWith('http://') || s.startsWith('https://')) return s
-  return 'https://' + s
-}
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
-// ── Local date (YYYY-MM-DD) — avoids UTC-offset "wrong day" bugs ─────────────
 function getLocalToday() {
   const d = new Date()
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
 
-// ── Relative date — parses YYYY-MM-DD as local midnight to avoid UTC offset bugs ──
+function getLocalDateOffset(days) {
+  const d = new Date()
+  d.setDate(d.getDate() + days)
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
 function relativeDate(dateStr) {
   const [y, m, d] = dateStr.split('-').map(Number)
   const date = new Date(y, m - 1, d)
@@ -35,16 +42,32 @@ function relativeDate(dateStr) {
   return years === 1 ? '1 year ago' : `${years} years ago`
 }
 
-// ── Interaction type colours + icons ───────────────────────────────────────
-const TYPE_STYLES = {
-  'Coffee chat': { bg: 'rgba(245,166,35,0.15)', stroke: '#FFB84D' },
-  'Email':       { bg: 'rgba(108,92,255,0.15)', stroke: '#8B7CFF' },
-  'Event':       { bg: 'rgba(47,212,182,0.14)', stroke: '#2FD4B6' },
-  'Call':        { bg: 'rgba(77,163,255,0.15)', stroke: '#4DA3FF' },
-  'Message':     { bg: 'rgba(199,125,255,0.15)', stroke: '#C77DFF' },
-  'Other':       { bg: 'rgba(255,255,255,0.07)', stroke: '#A0A0AD' },
+function formatFollowUpLabel(dateStr, today) {
+  if (!dateStr) return null
+  if (dateStr === today) return 'Today'
+  const cmp = dateStr.localeCompare(today)
+  const label = relativeDate(dateStr)
+  return cmp < 0 ? `${label} (overdue)` : label
 }
-function typeStyle(t) { return TYPE_STYLES[t] || TYPE_STYLES['Other'] }
+
+// ── Interaction type colors (named constants — no periwinkle) ──────────────────
+
+const IC_COFFEE  = { bg: 'rgba(199,169,107,0.15)', stroke: '#C7A96B' }      // gold tint
+const IC_EMAIL   = { bg: 'rgba(255,68,35,0.12)',   stroke: 'var(--color-ember)' } // ember tint
+const IC_EVENT   = { bg: 'rgba(47,212,182,0.12)',  stroke: 'var(--color-success)' } // success tint
+const IC_CALL    = { bg: 'rgba(140,133,122,0.12)', stroke: '#8C857A' }  // neutral
+const IC_MESSAGE = { bg: 'rgba(140,133,122,0.12)', stroke: '#8C857A' }  // neutral
+const IC_OTHER   = { bg: 'rgba(140,133,122,0.12)', stroke: '#8C857A' }      // neutral
+
+const TYPE_STYLES = {
+  'Coffee chat': IC_COFFEE,
+  'Email':       IC_EMAIL,
+  'Event':       IC_EVENT,
+  'Call':        IC_CALL,
+  'Message':     IC_MESSAGE,
+  'Other':       IC_OTHER,
+}
+function typeStyle(t) { return TYPE_STYLES[t] || IC_OTHER }
 
 function TypeIcon({ type, color }) {
   const p = { width: 16, height: 16, viewBox: '0 0 24 24', fill: 'none', stroke: color, strokeWidth: 1.8, strokeLinecap: 'round', strokeLinejoin: 'round' }
@@ -56,8 +79,9 @@ function TypeIcon({ type, color }) {
   return <svg {...p}><circle cx="12" cy="12" r="4" fill={color} stroke="none"/></svg>
 }
 
-// ── Shared form input styles ───────────────────────────────────────────────
-const iCls = 'w-full bg-input border border-line-3 rounded-xl px-[13px] py-[11px] text-[13.5px] text-hi placeholder-[#54545E] outline-none focus:border-[rgba(139,124,255,0.5)] transition-colors'
+// ── Shared form styles ────────────────────────────────────────────────────────
+
+const iCls = 'w-full bg-input border border-line-3 rounded-xl px-[13px] py-[11px] text-[13.5px] text-hi placeholder-lower outline-none focus:border-[rgba(255,68,35,0.4)] transition-colors'
 const lCls = 'mb-[7px] block text-[12.5px] font-semibold text-mid'
 const sCls = `${iCls} cursor-pointer`
 const TYPE_OPTIONS = ['Coffee chat', 'Email', 'Event', 'Call', 'Message', 'Other']
@@ -69,25 +93,82 @@ const OUTREACH_STATUS_LABELS = {
   'no_response':       'No response',
   'declined':          'Declined',
 }
-
 const OUTREACH_STATUS_STYLES = {
-  'awaiting_response': { text: '#FFB84D', bg: 'rgba(255,184,77,0.1)',    border: 'rgba(255,184,77,0.25)' },
-  'responded':         { text: '#2FD4B6', bg: 'rgba(47,212,182,0.1)',    border: 'rgba(47,212,182,0.25)' },
-  'meeting_booked':    { text: '#8B7CFF', bg: 'rgba(139,124,255,0.1)',   border: 'rgba(139,124,255,0.25)' },
-  'no_response':       { text: '#6C6C78', bg: 'rgba(255,255,255,0.04)',  border: 'rgba(255,255,255,0.1)' },
-  'declined':          { text: '#FF6B8A', bg: 'rgba(255,107,138,0.1)',   border: 'rgba(255,107,138,0.25)' },
+  'awaiting_response': { text: 'var(--color-warning)',  bg: 'rgba(199,169,107,0.12)', border: 'rgba(199,169,107,0.25)' },
+  'responded':         { text: 'var(--color-success)',  bg: 'rgba(47,212,182,0.12)',  border: 'rgba(47,212,182,0.2)'  },
+  'meeting_booked':    { text: 'var(--color-success)',  bg: 'rgba(47,212,182,0.12)',  border: 'rgba(47,212,182,0.2)'  },
+  'no_response':       { text: 'var(--color-muted)',    bg: 'var(--color-elevated)',  border: 'var(--color-line-2)'   },
+  'declined':          { text: 'var(--color-danger)',   bg: 'rgba(194,51,77,0.1)',    border: 'rgba(194,51,77,0.2)'   },
 }
-
 function OutreachStatusBadge({ status }) {
   const s = OUTREACH_STATUS_STYLES[status]
   if (!s) return null
   return (
-    <span
-      className="inline-block text-[11px] font-mono font-semibold px-2 py-[3px] rounded-full border"
-      style={{ color: s.text, background: s.bg, borderColor: s.border }}
-    >
+    <span className="inline-block text-[11px] font-mono font-semibold px-2 py-[3px] rounded-full border"
+      style={{ color: s.text, background: s.bg, borderColor: s.border }}>
       {OUTREACH_STATUS_LABELS[status] || status}
     </span>
+  )
+}
+
+// ── Snooze dropdown ───────────────────────────────────────────────────────────
+
+function SnoozeMenu({ onSnooze, onClose, saving, error }) {
+  const ref = useRef(null)
+  const [customDate, setCustomDate] = useState('')
+
+  useEffect(() => {
+    function onClick(e) { if (ref.current && !ref.current.contains(e.target)) onClose() }
+    document.addEventListener('mousedown', onClick)
+    return () => document.removeEventListener('mousedown', onClick)
+  }, [onClose])
+
+  const presets = [
+    { label: 'Tomorrow', option: 'tomorrow'   },
+    { label: '3 days',   option: 'three_days' },
+    { label: '1 week',   option: 'one_week'   },
+  ]
+
+  const minDate = getLocalDateOffset(1)
+
+  return (
+    <div ref={ref}
+      className="absolute left-0 top-full mt-1 z-20 min-w-[164px] rounded-xl border border-line-3 shadow-[0_8px_24px_rgba(0,0,0,0.25)]"
+      style={{ background: 'var(--color-card)' }}>
+      <div className="p-1">
+        {presets.map(o => (
+          <button key={o.option} onClick={() => onSnooze(o.option)}
+            disabled={saving}
+            className="w-full text-left text-[12.5px] font-medium text-hi px-3 py-[9px] rounded-lg hover:bg-elevated transition-colors block disabled:opacity-40 disabled:cursor-not-allowed">
+            {o.label}
+          </button>
+        ))}
+      </div>
+      <div className="border-t border-line-2 px-3 py-2.5 space-y-2">
+        <input
+          type="date"
+          value={customDate}
+          min={minDate}
+          disabled={saving}
+          onChange={e => setCustomDate(e.target.value)}
+          className="w-full bg-input border border-line-3 rounded-lg px-3 py-[7px] text-[12.5px] text-hi outline-none focus:border-[rgba(255,68,35,0.4)] transition-colors disabled:opacity-40"
+        />
+        <button
+          type="button"
+          onClick={() => customDate && onSnooze('custom', customDate)}
+          disabled={!customDate || saving}
+          className="w-full text-[12.5px] font-semibold text-mid border border-line-2 rounded-lg px-3 py-[6px] hover:text-hi hover:border-line-3 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          style={{ background: 'var(--color-elevated)' }}
+        >
+          {saving ? 'Saving…' : 'Set custom date'}
+        </button>
+      </div>
+      {error && (
+        <div className="px-3 pb-2.5 text-[11.5px] font-medium" style={{ color: 'var(--color-danger)' }}>
+          {error}
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -103,10 +184,7 @@ function ContactDetailPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
 
-  const [isEditing, setIsEditing] = useState(false)
-  const [editForm, setEditForm] = useState({})
-  const [saving, setSaving] = useState(false)
-  const [saveError, setSaveError] = useState('')
+  const [editDrawerOpen, setEditDrawerOpen] = useState(false)
 
   const [confirmingDelete, setConfirmingDelete] = useState(false)
 
@@ -117,14 +195,9 @@ function ContactDetailPage() {
   const [interactionDate, setInteractionDate] = useState(getLocalToday)
   const [notes, setNotes] = useState('')
   const [followUpDate, setFollowUpDate] = useState('')
-
   const [outreachStatus, setOutreachStatus] = useState('')
-  // trackOutreach: explicit opt-in flag for the new interaction log form.
-  // Email/Message: defaults false; user must check "This was outreach I sent" to enable.
-  // Call/Other: manual status select, no checkbox (trackOutreach stays false).
-  // Coffee chat/Event: outreach tracking hidden entirely; always saves null.
   const [trackOutreach, setTrackOutreach] = useState(false)
-  const [loggedMsg, setLoggedMsg]         = useState(false)
+  const [loggedMsg, setLoggedMsg] = useState(false)
   const [loggedWarning, setLoggedWarning] = useState('')
 
   const [editingInteractionId, setEditingInteractionId] = useState(null)
@@ -134,26 +207,48 @@ function ContactDetailPage() {
   const [deletingInteractionId, setDeletingInteractionId] = useState(null)
   const [interactionsError, setInteractionsError] = useState('')
 
-  const interactionFormRef    = useRef(null)
-  const sourceFollowUpIdRef   = useRef(null)
-  const loggedWarningTimerRef = useRef(null)
-  const prevTypeRef           = useRef(type)
+  // Follow-up action state
+  const [doneLoading, setDoneLoading]   = useState(false)
+  const [doneError, setDoneError]       = useState('')
+  const [snoozeLoading, setSnoozeLoading] = useState(false)
+  const [snoozeMenuOpen, setSnoozeMenuOpen] = useState(false)
+  const [snoozeError, setSnoozeError] = useState('')
 
-  // Cleanup loggedWarning timer on unmount
+  const interactionFormRef   = useRef(null)
+  const followUpDateInputRef = useRef(null)
+  const focusFollowUpRef     = useRef(false)
+  const sourceFollowUpIdRef  = useRef(null)
+  const loggedWarningTimerRef = useRef(null)
+  // Ref to the Log interaction button — receives focus when the mobile sheet closes.
+  const logCTARef            = useRef(null)
+  // Tracks whether focus was on a mobile trigger before the sheet opened.
+  const sheetPrevFocusRef    = useRef(null)
+
   useEffect(() => () => {
     if (loggedWarningTimerRef.current) clearTimeout(loggedWarningTimerRef.current)
   }, [])
 
-  // Clear outreach tracking state when the interaction type changes.
-  // User must explicitly opt in via checkbox for Email/Message.
-  // Coffee chat/Event hide outreach tracking entirely.
+  // Capture/restore focus for the mobile bottom sheet.
   useEffect(() => {
-    const prev = prevTypeRef.current
-    if (prev === type) return
-    prevTypeRef.current = type
-    setTrackOutreach(false)
-    setOutreachStatus('')
-  }, [type])
+    if (showForm) {
+      sheetPrevFocusRef.current = document.activeElement
+    } else if (sheetPrevFocusRef.current) {
+      const el = sheetPrevFocusRef.current
+      sheetPrevFocusRef.current = null
+      if (window.innerWidth < 768) setTimeout(() => el?.focus(), 0)
+    }
+  }, [showForm])
+
+  // Explicit type-change handler — used by both the desktop form and mobile sheet.
+  // Resets outreach state on any actual type change; no-ops for same-type reselection.
+  function handleTypeChange(newType) {
+    const fields = typeChangeFields(type, newType)
+    if (fields) {
+      setTrackOutreach(false)
+      setOutreachStatus('')
+    }
+    setType(newType)
+  }
 
   const fetchContact = useCallback(async () => {
     const { data, error } = await supabase.from('contacts').select('*').eq('id', id).single()
@@ -162,9 +257,11 @@ function ContactDetailPage() {
   }, [id])
 
   const fetchInteractions = useCallback(async () => {
-    const { data, error } = await supabase.from('interactions').select('*').eq('contact_id', id).order('interaction_date', { ascending: false })
+    const { data, error } = await supabase
+      .from('interactions').select('*').eq('contact_id', id)
+      .order('interaction_date', { ascending: false })
     if (error) {
-      setInteractionsError('Couldn\'t load interactions. Refresh to try again.')
+      setInteractionsError("Couldn't load interactions. Refresh to try again.")
     } else {
       setInteractionsError('')
       setInteractions(data)
@@ -178,48 +275,27 @@ function ContactDetailPage() {
 
   useEffect(() => {
     if (location.state?.openInteractionForm) {
-      // Capture sourceFollowUpId into a ref before navigate clears the Router state
       if (location.state.sourceFollowUpId) {
         sourceFollowUpIdRef.current = location.state.sourceFollowUpId
       }
       setShowForm(true)
       navigate(location.pathname, { replace: true, state: {} })
+    } else if (location.state?.openFollowUpForm) {
+      focusFollowUpRef.current = true
+      setShowForm(true)
+      navigate(location.pathname, { replace: true, state: {} })
     }
   }, [location.state, location.pathname, navigate])
 
-  // Runs whenever showForm or loading changes — handles the case where the form
-  // was requested before the contact finished loading (ref is null until loading=false)
   useEffect(() => {
     if (showForm && !loading) {
       interactionFormRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      if (focusFollowUpRef.current) {
+        focusFollowUpRef.current = false
+        setTimeout(() => followUpDateInputRef.current?.focus(), 300)
+      }
     }
   }, [showForm, loading])
-
-  function startEdit() {
-    setEditForm({
-      name: contact.name, company: contact.company || '', role: contact.role || '',
-      howMet: contact.how_met || '', email: contact.email || '', linkedinUrl: contact.linkedin_url || '',
-      tagsInput: contact.tags ? contact.tags.join(', ') : '',
-      relationshipType: contact.relationship_type || '',
-      relationshipNote: contact.relationship_note || '',
-    })
-    setSaveError(''); setIsEditing(true)
-  }
-
-  async function handleSave(e) {
-    e.preventDefault(); setSaving(true); setSaveError('')
-    const tags = editForm.tagsInput.split(',').map(t => t.trim()).filter(Boolean)
-    const { error } = await supabase.from('contacts').update({
-      name: editForm.name, company: editForm.company || null, role: editForm.role || null,
-      how_met: editForm.howMet || null, email: editForm.email || null, linkedin_url: normalizeUrl(editForm.linkedinUrl),
-      tags: tags.length > 0 ? tags : null,
-      relationship_type: editForm.relationshipType || null,
-      relationship_note: editForm.relationshipNote.trim() || null,
-    }).eq('id', id)
-    setSaving(false)
-    if (error) { setSaveError(error.message); return }
-    setIsEditing(false); fetchContact()
-  }
 
   async function handleDelete() {
     const { error } = await supabase.from('contacts').delete().eq('id', id)
@@ -227,52 +303,96 @@ function ContactDetailPage() {
     navigate('/contacts')
   }
 
+  // ── Follow-up Done / Snooze ───────────────────────────────────────────────
+
+  async function handleDoneFollowUp(interactionId) {
+    const target = interactions.find(i => i.id === interactionId)
+    if (!target) return
+    setDoneLoading(true)
+    try {
+      const result = await completeFollowUp(target, {
+        client: supabase,
+        track,
+        dispatch: () => window.dispatchEvent(new Event('funnl:followups-changed')),
+      })
+      if (!result.ok) {
+        setDoneError(result.errorMessage)
+        return
+      }
+      setSnoozeMenuOpen(false)
+      setDoneError('')
+      fetchInteractions()
+    } finally {
+      setDoneLoading(false)
+    }
+  }
+
+  // option: 'tomorrow' | 'three_days' | 'one_week' | 'custom'
+  // customDate: YYYY-MM-DD string (only when option === 'custom')
+  async function handleSnoozeFollowUp(option, customDate) {
+    if (!snoozeMenuOpen) return  // guard stale clicks
+    setSnoozeLoading(true)
+    setSnoozeError('')
+
+    const nextFollowUp = interactions.find(i => i.follow_up_date)
+    if (!nextFollowUp) { setSnoozeLoading(false); setSnoozeMenuOpen(false); return }
+
+    const result = await snoozeFollowUpAction(nextFollowUp, option, customDate, getLocalToday(), {
+      client: supabase,
+      track,
+      dispatch: () => window.dispatchEvent(new Event('funnl:followups-changed')),
+    })
+    setSnoozeLoading(false)
+    if (!result.ok) {
+      setSnoozeError(result.errorMessage || "Couldn't update the date. Try again.")
+      return  // keep menu open — snoozeMenuOpen stays true, controls re-enabled
+    }
+
+    setSnoozeMenuOpen(false)
+    fetchInteractions()
+  }
+
+  // ── Interaction CRUD ──────────────────────────────────────────────────────
+
   function startEditInteraction(interaction) {
     setInteractionEditForm({
       type: interaction.type || 'Coffee chat', date: interaction.interaction_date,
       notes: interaction.notes || '', followUpDate: interaction.follow_up_date || '',
       outreachStatus: interaction.outreach_status || '',
       trackOutreach: !!interaction.outreach_status,
-      // Stored for analytics comparison in handleSaveInteraction — not saved to DB
       _originalOutreachStatus: interaction.outreach_status || '',
+      _originalFollowUpDate: interaction.follow_up_date || '',
     })
     setInteractionSaveError(''); setEditingInteractionId(interaction.id)
   }
 
   async function handleSaveInteraction(e) {
     e.preventDefault(); setSavingInteraction(true); setInteractionSaveError('')
-
-    // Type-aware effective outreach status — mirrors the new interaction form logic.
-    // Email/Message: only saved when user has opted in (trackOutreach checkbox).
-    // Call/Other: saved directly from the select (user chose explicitly).
-    // Coffee chat/Event: always null (no outreach tracking shown).
     const editType = interactionEditForm.type
-    const effectiveOutreach = (() => {
-      if (editType === 'Email' || editType === 'Message') {
-        return interactionEditForm.trackOutreach ? interactionEditForm.outreachStatus || null : null
-      }
-      if (editType === 'Call' || editType === 'Other') {
-        return interactionEditForm.outreachStatus || null
-      }
-      return null
-    })()
-
+    const effectiveOutreach = effectiveOutreachStatus(
+      editType, interactionEditForm.trackOutreach, interactionEditForm.outreachStatus
+    )
+    const finalFollowUpDate = interactionEditForm.followUpDate || null
     const { error } = await supabase.from('interactions').update({
       type: interactionEditForm.type, interaction_date: interactionEditForm.date,
-      notes: interactionEditForm.notes || null, follow_up_date: interactionEditForm.followUpDate || null,
+      notes: interactionEditForm.notes || null, follow_up_date: finalFollowUpDate,
       outreach_status: effectiveOutreach,
+      ...(followUpDateChanged(originalFollowUpDate, finalFollowUpDate) ? clearCompletionFields() : {}),
     }).eq('id', editingInteractionId)
     setSavingInteraction(false)
     if (error) { setInteractionSaveError(error.message); return }
 
-    // Fire analytics when outreach_status actually changed (including cleared)
+    // Outreach analytics — fire only when the status actually changed.
     const prevStatus = interactionEditForm._originalOutreachStatus || null
-    const newStatus  = effectiveOutreach
-    if (newStatus !== prevStatus) {
-      track('outreach_status_changed', {
-        status: newStatus || 'cleared',
-        context: 'edit_interaction',
-      })
+    if (shouldFireOutreachChangeOnEdit(prevStatus, effectiveOutreach)) {
+      track('outreach_status_changed', { status: effectiveOutreach || null, context: 'edit_interaction' })
+    }
+
+    // Dispatch follow-up badge refresh only when the date was genuinely added,
+    // changed, or removed. Passing through an identical value must not dispatch.
+    const originalFollowUpDate = interactionEditForm._originalFollowUpDate ?? ''
+    if (followUpDateChanged(originalFollowUpDate, finalFollowUpDate)) {
+      window.dispatchEvent(new Event('funnl:followups-changed'))
     }
 
     setEditingInteractionId(null); fetchInteractions()
@@ -285,14 +405,7 @@ function ContactDetailPage() {
 
   async function handleLogInteraction(e) {
     e.preventDefault(); setSubmitting(true); setFormError('')
-    // Effective outreach status: only save when opt-in is active (Email/Message)
-    // or when manually set (Call/Other). Not saved for Coffee chat/Event.
-    const effectiveOutreach = (() => {
-      if (type === 'Email' || type === 'Message') return trackOutreach ? outreachStatus || null : null
-      if (type === 'Call' || type === 'Other')    return outreachStatus || null
-      return null
-    })()
-
+    const effectiveOutreach = effectiveOutreachStatus(type, trackOutreach, outreachStatus)
     const { error } = await supabase.from('interactions').insert([{
       contact_id: id, type, interaction_date: interactionDate,
       notes: notes || null, follow_up_date: followUpDate || null,
@@ -300,48 +413,43 @@ function ContactDetailPage() {
     }])
     setSubmitting(false)
     if (error) { setFormError(error.message); return }
-
-    // Behavior-only — interaction_type is a controlled dropdown value, not freeform content.
-    // has_notes is a boolean; the note text itself is never sent.
-    track('interaction_logged', {
-      interaction_type: type,
-      has_follow_up: !!followUpDate,
-      has_notes: !!notes,
-    })
-    if (followUpDate) track('followup_set')
-    if (effectiveOutreach) {
-      track('outreach_status_changed', { status: effectiveOutreach, context: 'new_interaction' })
+    track('interaction_logged', { interaction_type: type, has_follow_up: !!followUpDate, has_notes: !!notes })
+    window.dispatchEvent(new Event('funnl:interactions-changed'))
+    if (followUpDate) {
+      track('followup_set')
+      window.dispatchEvent(new Event('funnl:followups-changed'))
     }
+    if (effectiveOutreach) track('outreach_status_changed', { status: effectiveOutreach, context: 'new_interaction' })
 
-    // Log Result flow: clear the old source follow-up date after the new interaction is saved
     const srcId = sourceFollowUpIdRef.current
     if (srcId) {
-      sourceFollowUpIdRef.current = null  // clear before async op to prevent double-fire
+      sourceFollowUpIdRef.current = null
+      const srcInteraction = interactions.find(i => i.id === srcId)
+      const logResultPayload = completionPayload(
+        srcInteraction?.follow_up_date || null,
+        'log_result',
+        new Date().toISOString()
+      )
       const { error: clearError } = await supabase
-        .from('interactions')
-        .update({ follow_up_date: null })
-        .eq('id', srcId)
-        .eq('contact_id', id)   // scope to this contact for safety
+        .from('interactions').update(logResultPayload)
+        .eq('id', srcId).eq('contact_id', id)
       if (clearError) {
-        console.error('[Funnl] Log Result: interaction saved but old follow-up clear failed:', clearError.message)
+        console.error('[Funnl] Log Result: follow-up clear failed:', clearError.message)
         if (loggedWarningTimerRef.current) clearTimeout(loggedWarningTimerRef.current)
         setLoggedWarning("Interaction logged, but the previous follow-up couldn't be cleared — remove it from Follow-ups manually.")
         loggedWarningTimerRef.current = setTimeout(() => setLoggedWarning(''), 8000)
-        // do not dispatch badge event or track followup_completed on partial failure
       } else {
         window.dispatchEvent(new Event('funnl:followups-changed'))
-        track('followup_completed', { method: 'log_result' })
+        track('followup_completed')
       }
     }
 
-    // Reset form to clean state (type back to Coffee chat so trackOutreach auto-clears)
-    prevTypeRef.current = 'Coffee chat'
     setType('Coffee chat'); setNotes(''); setFollowUpDate(''); setOutreachStatus(''); setTrackOutreach(false)
     setShowForm(false); fetchInteractions()
     setLoggedMsg(true); setTimeout(() => setLoggedMsg(false), 3000)
   }
 
-  // ── Loading / error screens ──────────────────────────────────────────────
+  // ── Loading / error screens ───────────────────────────────────────────────
 
   if (loading) {
     return (
@@ -353,549 +461,558 @@ function ContactDetailPage() {
 
   if (error || !contact) {
     return (
-      <div className="min-h-screen bg-surface px-4 py-6 md:px-9 md:py-8">
+      <div className="min-h-screen bg-surface px-4 py-6">
         <Link to="/contacts" className="text-sm font-medium text-accent hover:text-tag no-underline">← Contacts</Link>
         <p className="mt-4 text-sm text-danger">{error || 'Contact not found.'}</p>
       </div>
     )
   }
 
-  // ── Derived values ───────────────────────────────────────────────────────
+  // ── Derived values ────────────────────────────────────────────────────────
   const today = getLocalToday()
-  const overdueFollowUp = interactions
-    .filter(i => i.follow_up_date && i.follow_up_date <= today)
+
+  // Any open follow-up, earliest first (not just overdue)
+  const nextFollowUp = interactions
+    .filter(i => i.follow_up_date)
     .sort((a, b) => a.follow_up_date.localeCompare(b.follow_up_date))[0] || null
-  const hasAnyDetails = contact.email || contact.linkedin_url || contact.how_met ||
-    contact.relationship_type || contact.relationship_note
-  // Latest interaction with an outreach_status set — derived from already-loaded interactions,
-  // no extra query. Sorted by interaction_date descending so the most recent status shows.
+
+  const nextFollowUpIsOverdue = nextFollowUp && nextFollowUp.follow_up_date < today
+  const nextFollowUpIsToday  = nextFollowUp && nextFollowUp.follow_up_date === today
+
   const latestOutreach = interactions
     .filter(i => i.outreach_status)
     .sort((a, b) => b.interaction_date.localeCompare(a.interaction_date))[0] || null
 
-  // ── Render ───────────────────────────────────────────────────────────────
+  const hasAnyDetails = contact.email || contact.linkedin_url || contact.how_met ||
+    contact.relationship_type || contact.relationship_note || latestOutreach
+
+  // ── Render ────────────────────────────────────────────────────────────────
 
   return (
-    <div className="min-h-screen bg-surface px-4 py-6 md:px-9 md:py-8">
+    <div className="min-h-screen bg-surface">
 
-      {/* Back link */}
-      <Link to="/contacts" className="inline-flex items-center gap-1.5 text-[13px] font-semibold text-muted hover:text-hi transition-colors no-underline mb-5">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M15 18l-6-6 6-6"/>
-        </svg>
-        Contacts
-      </Link>
-
-      {/* ── EDIT MODE: full edit form replacing hero + body ── */}
-      {isEditing ? (
-        <div className="bg-card border border-line-2 rounded-[18px] p-6">
-          <h2 className="font-display text-[19px] font-bold text-hi mb-5">Edit contact</h2>
-          <form onSubmit={handleSave} className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="col-span-2">
-              <label className={lCls}>Name <span className="text-accent">*</span></label>
-              <input value={editForm.name} onChange={e => setEditForm({ ...editForm, name: e.target.value })} required className={iCls}/>
-            </div>
-            <div>
-              <label className={lCls}>Company</label>
-              <input value={editForm.company} onChange={e => setEditForm({ ...editForm, company: e.target.value })} className={iCls} placeholder="Goldman Sachs"/>
-            </div>
-            <div>
-              <label className={lCls}>Role</label>
-              <input value={editForm.role} onChange={e => setEditForm({ ...editForm, role: e.target.value })} className={iCls} placeholder="Summer Analyst"/>
-            </div>
-            <div className="col-span-2">
-              <label className={lCls}>How you met</label>
-              <input value={editForm.howMet} onChange={e => setEditForm({ ...editForm, howMet: e.target.value })} className={iCls} placeholder="Spring Career Fair"/>
-            </div>
-            <div>
-              <label className={lCls}>Email</label>
-              <input type="email" value={editForm.email} onChange={e => setEditForm({ ...editForm, email: e.target.value })} className={iCls} placeholder="name@company.com"/>
-            </div>
-            <div>
-              <label className={lCls}>LinkedIn URL</label>
-              <input value={editForm.linkedinUrl} onChange={e => setEditForm({ ...editForm, linkedinUrl: e.target.value })} className={iCls} placeholder="linkedin.com/in/…"/>
-            </div>
-            <div>
-              <label className={lCls}>Tags</label>
-              <input value={editForm.tagsInput} onChange={e => setEditForm({ ...editForm, tagsInput: e.target.value })} className={iCls} placeholder="alumni, recruiter, target firm"/>
-              <p className="mt-1.5 text-[11px] text-lower">Separate with commas</p>
-            </div>
-            <div>
-              <label className={lCls}>Relationship type</label>
-              <select value={editForm.relationshipType} onChange={e => setEditForm({ ...editForm, relationshipType: e.target.value })} className={sCls}>
-                <option value="">— not set —</option>
-                <option>Mentor</option>
-                <option>Collaborator</option>
-                <option>Referral path</option>
-                <option>Potential employer</option>
-                <option>Connector</option>
-                <option>Other</option>
-              </select>
-            </div>
-            <div className="col-span-2">
-              <label className={lCls}>Why this person matters</label>
-              <input value={editForm.relationshipNote} onChange={e => setEditForm({ ...editForm, relationshipNote: e.target.value })} className={iCls} placeholder="e.g. Can intro me to the PM team at Stripe"/>
-            </div>
-            {saveError && <p className="col-span-2 text-sm text-danger">{saveError}</p>}
-            <div className="col-span-2 flex gap-3 pt-1">
-              <button type="submit" disabled={saving} className="flex-1 bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] text-white text-[14px] font-bold py-3 rounded-[11px] shadow-[0_6px_18px_rgba(91,69,240,0.35)] hover:opacity-90 transition-opacity disabled:opacity-40">
-                {saving ? 'Saving…' : 'Save changes'}
-              </button>
-              <button type="button" onClick={() => setIsEditing(false)} className="px-5 text-[14px] font-semibold text-mid bg-elevated border border-line-3 rounded-[11px] hover:text-hi transition-colors">
-                Cancel
-              </button>
-            </div>
-          </form>
-        </div>
-      ) : (
-        <>
-          {/* ── HERO CARD ── */}
-          <div className="bg-card border border-line-2 rounded-[18px] p-[22px_24px] flex flex-col md:flex-row items-start justify-between gap-4 mb-3">
-            {/* Avatar + name + tags */}
-            <div className="flex gap-[18px] items-start flex-1 min-w-0">
-              <div
-                className="w-[66px] h-[66px] rounded-[18px] flex items-center justify-center text-[24px] font-bold text-white flex-none"
-                style={{ background: getAvatarColor(contact.name) }}
+      {/* ── TopBar (shared component) ── */}
+      <TopBar
+        breadcrumb={
+          <Link to="/contacts"
+            className="inline-flex items-center gap-1 text-[12.5px] font-medium hover:text-hi transition-colors no-underline"
+            style={{ color: 'var(--color-mid)' }}>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <path d="M15 18l-6-6 6-6"/>
+            </svg>
+            <span>Contacts</span>
+          </Link>
+        }
+        title={contact.name}
+        actions={
+          <>
+            <button
+              onClick={() => setEditDrawerOpen(true)}
+              className="hidden md:inline-flex items-center text-[12.5px] font-semibold px-3 h-8 rounded-[8px] border border-line-2 hover:border-line-3 transition-colors"
+              style={{ background: 'var(--color-elevated)', color: 'var(--color-mid)' }}
+            >
+              Edit
+            </button>
+            {contact.email && (
+              <a
+                href={`mailto:${contact.email}`}
+                title={contact.email}
+                className="w-8 h-8 hidden md:flex items-center justify-center rounded-[8px] border border-line-2 hover:border-line-3 transition-colors"
+                style={{ background: 'var(--color-elevated)' }}
               >
-                {getInitials(contact.name)}
-              </div>
-              <div className="min-w-0">
-                <h1 className="font-display text-[24px] font-bold text-hi tracking-[-0.3px] break-words">{contact.name}</h1>
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--color-low)" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="3" y="5" width="18" height="14" rx="2.5"/><path d="m3 7 9 6 9-6"/>
+                </svg>
+              </a>
+            )}
+          </>
+        }
+        cta={
+          <button
+            ref={logCTARef}
+            onClick={() => setShowForm(v => !v)}
+            className="h-8 flex items-center gap-[6px] px-[11px] rounded-[8px] text-[12.5px] font-semibold hover:opacity-90 transition-opacity"
+            style={{ background: 'var(--color-ember)', color: 'var(--color-paper)' }}
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.3" strokeLinecap="round">
+              <path d="M12 5v14M5 12h14"/>
+            </svg>
+            <span className="hidden md:inline">Log interaction</span>
+          </button>
+        }
+      />
+
+      {/* ── TWO-COLUMN LAYOUT ── */}
+      <div className="grid grid-cols-1 md:grid-cols-[270px_1fr]">
+
+          {/* ── LEFT: Context rail ── */}
+          <div className="md:border-r border-line-1 md:sticky md:top-[54px] md:h-[calc(100vh-54px)] md:overflow-y-auto">
+            <div className="p-5 space-y-5">
+
+              {/* Identity */}
+              <div className="text-center pb-5 border-b border-line-1">
+                <div
+                  className="w-[60px] h-[60px] rounded-[16px] mx-auto mb-3 flex items-center justify-center text-[22px] font-bold"
+                  style={{ background: getAvatarColor(contact.name), color: 'var(--color-paper)' }}
+                >
+                  {getInitials(contact.name)}
+                </div>
+                <h1 className="font-display text-[17px] font-bold text-hi leading-tight break-words">{contact.name}</h1>
                 {(contact.role || contact.company) && (
-                  <p className="text-[14.5px] text-muted mt-0.5 break-words">
+                  <p className="text-[12.5px] text-muted mt-1 break-words">
                     {[contact.role, contact.company].filter(Boolean).join(' · ')}
                   </p>
                 )}
                 {contact.tags && contact.tags.length > 0 && (
-                  <div className="flex flex-wrap gap-1.5 mt-[11px]">
+                  <div className="flex flex-wrap gap-1.5 mt-3 justify-center">
                     {contact.tags.map(tag => (
-                      <span key={tag} className="text-[11px] font-semibold text-tag bg-[rgba(108,92,255,0.13)] border border-[rgba(108,92,255,0.22)] px-[10px] py-[3px] rounded-full">
+                      <span key={tag} className="text-[11px] font-semibold text-tag bg-elevated border border-line-2 px-[9px] py-[3px] rounded-full">
                         {tag}
                       </span>
                     ))}
                   </div>
                 )}
+                {/* Mobile actions */}
+                <div className="flex gap-2 mt-4 md:hidden">
+                  <button onClick={() => setEditDrawerOpen(true)}
+                    className="flex-1 text-[12.5px] font-semibold py-[8px] rounded-[9px] border border-line-2 hover:border-line-3 transition-colors"
+                    style={{ background: 'var(--color-elevated)', color: 'var(--color-mid)' }}>
+                    Edit
+                  </button>
+                  {contact.email && (
+                    <a href={`mailto:${contact.email}`}
+                      className="flex-none px-3 flex items-center justify-center rounded-[9px] border border-line-2 hover:border-line-3 transition-colors"
+                      style={{ background: 'var(--color-elevated)' }}>
+                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--color-low)" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                        <rect x="3" y="5" width="18" height="14" rx="2.5"/><path d="m3 7 9 6 9-6"/>
+                      </svg>
+                    </a>
+                  )}
+                </div>
               </div>
-            </div>
 
-            {/* Action buttons */}
-            <div className="flex gap-[9px] flex-none items-center">
-              <button
-                onClick={() => setShowForm(v => !v)}
-                className="flex items-center gap-[7px] bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] text-white text-[13.5px] font-bold px-4 py-[10px] rounded-[11px] shadow-[0_6px_18px_rgba(91,69,240,0.35)] hover:opacity-90 transition-opacity"
-              >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M4 5h16v10H8l-4 4z"/>
-                </svg>
-                Log interaction
-              </button>
-              <button
-                onClick={startEdit}
-                className="bg-elevated text-hi border border-line-3 rounded-[11px] px-4 py-[10px] text-[13.5px] font-semibold hover:border-[rgba(255,255,255,0.2)] transition-colors"
-              >
-                Edit
-              </button>
-              {contact.email ? (
-                <a href={`mailto:${contact.email}`} title={contact.email} className="w-10 h-10 bg-elevated border border-line-3 rounded-[11px] flex items-center justify-center hover:border-[rgba(139,124,255,0.4)] transition-colors">
-                  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#8A8A94" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                    <rect x="3" y="5" width="18" height="14" rx="2.5"/><path d="m3 7 9 6 9-6"/>
-                  </svg>
-                </a>
-              ) : (
-                <div title="No email saved" className="w-10 h-10 bg-elevated border border-line-3 rounded-[11px] flex items-center justify-center opacity-25">
-                  <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#8A8A94" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                    <rect x="3" y="5" width="18" height="14" rx="2.5"/><path d="m3 7 9 6 9-6"/>
-                  </svg>
+              {/* Next step card */}
+              {nextFollowUp && (
+                <div className="rounded-xl border border-line-2 p-4" style={{ background: 'var(--color-card)' }}>
+                  <p className="text-[10.5px] font-bold uppercase tracking-wide text-low mb-2">Next step</p>
+                  <p className="text-[13px] font-semibold text-hi mb-1">Follow-up</p>
+                  <p className="text-[12.5px] font-medium mb-3"
+                    style={{ color: nextFollowUpIsOverdue ? 'var(--color-ember)' : nextFollowUpIsToday ? 'var(--color-warning)' : 'var(--color-muted)' }}>
+                    {formatFollowUpLabel(nextFollowUp.follow_up_date, today)}
+                  </p>
+                  <div className="flex gap-2 relative">
+                    <button
+                      onClick={() => handleDoneFollowUp(nextFollowUp.id)}
+                      disabled={doneLoading || snoozeLoading}
+                      className="flex-1 text-[12px] font-semibold py-[7px] rounded-[8px] border border-line-2 hover:border-line-3 transition-colors disabled:opacity-40"
+                      style={{ background: 'var(--color-elevated)', color: 'var(--color-hi)' }}
+                    >
+                      {doneLoading ? '…' : '✓ Done'}
+                    </button>
+                    <div className="relative">
+                      <button
+                        onClick={() => setSnoozeMenuOpen(v => !v)}
+                        disabled={doneLoading || snoozeLoading}
+                        className="text-[12px] font-semibold px-3 py-[7px] rounded-[8px] border border-line-2 hover:border-line-3 transition-colors disabled:opacity-40"
+                        style={{ background: 'var(--color-elevated)', color: 'var(--color-mid)' }}
+                      >
+                        Snooze
+                      </button>
+                      {snoozeMenuOpen && (
+                        <SnoozeMenu
+                          onSnooze={handleSnoozeFollowUp}
+                          onClose={() => { setSnoozeMenuOpen(false); setSnoozeError('') }}
+                          saving={snoozeLoading}
+                          error={snoozeError}
+                        />
+                      )}
+                    </div>
+                  </div>
+                  {doneError && (
+                    <p role="alert" className="text-[11.5px] mt-1.5 font-medium" style={{ color: 'var(--color-danger)' }}>
+                      {doneError}
+                    </p>
+                  )}
                 </div>
               )}
-            </div>
-          </div>
 
-          {/* Delete link + confirmation (below hero, separate from primary actions) */}
-          <div className="mb-6 px-1">
-            {confirmingDelete ? (
-              <div className="flex items-center gap-3 flex-wrap">
-                <p className="text-[12.5px] text-muted">This permanently deletes this contact and all their interactions.</p>
-                <button onClick={handleDelete} className="text-[12.5px] font-bold text-danger hover:opacity-80 transition-opacity">Yes, delete</button>
-                <button onClick={() => setConfirmingDelete(false)} className="text-[12.5px] font-medium text-low hover:text-mid transition-colors">Cancel</button>
-              </div>
-            ) : (
-              <button onClick={() => setConfirmingDelete(true)} className="text-[12.5px] font-medium text-lower hover:text-danger transition-colors">
-                Delete contact
-              </button>
-            )}
-          </div>
-
-          {/* ── TWO-COLUMN BODY ── */}
-          <div className="grid grid-cols-1 md:grid-cols-[1fr_1.35fr] gap-[18px]">
-
-            {/* LEFT: Details + Funnl AI placeholder */}
-            <div className="flex flex-col gap-[18px]">
-
-              {/* Details card */}
-              <div className="bg-card border border-line-2 rounded-2xl p-5">
-                <p className="text-[11.5px] font-bold tracking-[1px] text-lower uppercase font-mono mb-4">Details</p>
+              {/* Details */}
+              <div className="space-y-3 pb-5 border-b border-line-1">
+                <p className="text-[10.5px] font-bold tracking-[0.8px] text-lower uppercase font-mono">Details</p>
                 {hasAnyDetails ? (
-                  <div className="flex flex-col gap-[14px]">
+                  <div className="space-y-3">
                     {contact.email && (
                       <div>
-                        <p className="text-[12px] text-low mb-1">Email</p>
-                        <a href={`mailto:${contact.email}`} className="text-[13.5px] font-medium text-accent hover:text-tag transition-colors no-underline break-all">{contact.email}</a>
+                        <p className="text-[11.5px] text-low mb-0.5">Email</p>
+                        <a href={`mailto:${contact.email}`} className="text-[13px] font-medium text-accent hover:text-tag transition-colors no-underline break-all">{contact.email}</a>
                       </div>
                     )}
                     {contact.linkedin_url && (
                       <div>
-                        <p className="text-[12px] text-low mb-1">LinkedIn</p>
-                        <a href={contact.linkedin_url} target="_blank" rel="noopener noreferrer" className="text-[13.5px] font-medium text-accent hover:text-tag transition-colors no-underline break-all">{contact.linkedin_url}</a>
+                        <p className="text-[11.5px] text-low mb-0.5">LinkedIn</p>
+                        <a href={contact.linkedin_url} target="_blank" rel="noopener noreferrer" className="text-[13px] font-medium text-accent hover:text-tag transition-colors no-underline break-all">{contact.linkedin_url}</a>
                       </div>
                     )}
                     {contact.how_met && (
                       <div>
-                        <p className="text-[12px] text-low mb-1">How you met</p>
-                        <p className="text-[13.5px] font-medium text-hi">{contact.how_met}</p>
+                        <p className="text-[11.5px] text-low mb-0.5">How you met</p>
+                        <p className="text-[13px] font-medium text-hi">{contact.how_met}</p>
                       </div>
                     )}
                     {contact.relationship_type && (
                       <div>
-                        <p className="text-[12px] text-low mb-1">Relationship type</p>
-                        <span className="inline-block text-[11.5px] font-semibold text-accent bg-[rgba(139,124,255,0.14)] border border-[rgba(139,124,255,0.22)] px-[10px] py-[3px] rounded-full">
+                        <p className="text-[11.5px] text-low mb-0.5">Relationship</p>
+                        <span className="inline-block text-[11.5px] font-semibold text-accent bg-elevated border border-line-2 px-[10px] py-[3px] rounded-full">
                           {contact.relationship_type}
                         </span>
                       </div>
                     )}
                     {contact.relationship_note && (
                       <div>
-                        <p className="text-[12px] text-low mb-1">Why this person matters</p>
-                        <p className="text-[13.5px] font-medium text-hi leading-[1.5]">{contact.relationship_note}</p>
+                        <p className="text-[11.5px] text-low mb-0.5">Why they matter</p>
+                        <p className="text-[13px] font-medium text-hi leading-[1.5]">{contact.relationship_note}</p>
                       </div>
                     )}
                     {latestOutreach && (
                       <div>
-                        <p className="text-[12px] text-low mb-1.5">Latest outreach</p>
+                        <p className="text-[11.5px] text-low mb-1">Latest outreach</p>
                         <div className="flex items-center gap-2">
                           <OutreachStatusBadge status={latestOutreach.outreach_status} />
-                          <span className="text-[11.5px] text-low">{relativeDate(latestOutreach.interaction_date)}</span>
+                          <span className="text-[11px] text-low">{relativeDate(latestOutreach.interaction_date)}</span>
                         </div>
                       </div>
                     )}
                   </div>
                 ) : (
-                  <>
-                    {latestOutreach && (
-                      <div className="mb-4">
-                        <p className="text-[12px] text-low mb-1.5">Latest outreach</p>
-                        <div className="flex items-center gap-2">
-                          <OutreachStatusBadge status={latestOutreach.outreach_status} />
-                          <span className="text-[11.5px] text-low">{relativeDate(latestOutreach.interaction_date)}</span>
-                        </div>
-                      </div>
-                    )}
-                    <p className="text-[13px] text-low">No details saved yet. Click <button onClick={startEdit} className="text-accent hover:text-tag transition-colors">Edit</button> to add more.</p>
-                  </>
+                  <p className="text-[12.5px] text-low">
+                    No details saved yet.{' '}
+                    <button onClick={() => setEditDrawerOpen(true)} className="text-accent hover:text-tag transition-colors">Edit</button>
+                    {' '}to add more.
+                  </p>
                 )}
               </div>
 
-              {/* Funnl AI card — honest coming-soon placeholder */}
-              <div
-                className="border rounded-2xl p-5"
-                style={{ background: 'var(--banner-gradient)', borderColor: 'var(--banner-border)' }}
-              >
-                <div className="flex items-center gap-2 mb-2">
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="#B4A8FF">
-                    <path d="M12 3l1.7 5.3L19 10l-5.3 1.7L12 17l-1.7-5.3L5 10l5.3-1.7L12 3z"/>
-                  </svg>
-                  <span className="text-[13px] font-bold text-banner-heading">Funnl AI</span>
-                </div>
-                <p className="text-[12.5px] leading-[1.6] text-banner-body">
-                  Ask anything about this contact — their history, what to follow up on, how they connect to others in your network.
-                </p>
-                <Link to="/ai" className="inline-block font-mono text-[10.5px] text-accent mt-3 hover:underline">Open Funnl AI →</Link>
-              </div>
+              {/* Contact AI slot — deferred while CONTACT_AI_ENABLED is false */}
+              {/* CONTACT_AI_ENABLED = false → section removed entirely */}
 
-            </div>
-
-            {/* RIGHT: Follow-up callout + Interactions */}
-            <div className="flex flex-col gap-[18px]">
-
-              {/* Follow-up callout — only shown if there's a real overdue follow-up */}
-              {overdueFollowUp && (
-                <div className="bg-[rgba(245,166,35,0.08)] border border-[rgba(245,166,35,0.28)] rounded-2xl p-4 flex items-center gap-3">
-                  <div className="w-9 h-9 rounded-[10px] bg-[rgba(245,166,35,0.16)] flex items-center justify-center flex-none">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#FFB84D" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
-                      <circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>
-                    </svg>
-                  </div>
-                  <div className="min-w-0">
-                    <p className="text-[13.5px] font-bold text-hi truncate">{overdueFollowUp.type || 'Follow-up'}</p>
-                    <p className="text-[12.5px] text-[#C9A867]">
-                      {overdueFollowUp.follow_up_date === today ? 'Due today' : `Due ${relativeDate(overdueFollowUp.follow_up_date)}`}
+              {/* Delete */}
+              <div>
+                {confirmingDelete ? (
+                  <div className="space-y-2">
+                    <p className="text-[12px] text-muted leading-snug">
+                      Permanently deletes this contact and all their interactions.
                     </p>
-                  </div>
-                </div>
-              )}
-
-              {/* Interactions card */}
-              <div className="bg-card border border-line-2 rounded-2xl p-5 flex-1">
-                <div className="flex items-center justify-between mb-4">
-                  <p className="text-[11.5px] font-bold tracking-[1px] text-lower uppercase font-mono">Interactions</p>
-                  <button
-                    onClick={() => setShowForm(v => !v)}
-                    className="text-[12.5px] font-bold text-accent hover:text-tag transition-colors"
-                  >
-                    {showForm ? 'Cancel' : '+ Log'}
-                  </button>
-                </div>
-
-                {/* Success banner — visible for 3s after logging */}
-                {loggedMsg && (
-                  <div className="flex items-center gap-2 mb-3 px-3 py-2 rounded-xl bg-[rgba(47,212,182,0.1)] border border-[rgba(47,212,182,0.22)]">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#2FD4B6" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M20 6L9 17l-5-5"/>
-                    </svg>
-                    <p className="text-[12.5px] text-success font-medium">Interaction logged</p>
-                  </div>
-                )}
-
-                {/* Partial-success warning — shown when Log Result's old follow-up clear fails */}
-                {loggedWarning && (
-                  <div className="flex items-start gap-2 mb-3 px-3 py-2 rounded-xl bg-[rgba(255,184,77,0.08)] border border-[rgba(255,184,77,0.2)]">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#FFB84D" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-none mt-[1px]">
-                      <circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/>
-                    </svg>
-                    <p className="text-[12.5px] text-warning font-medium leading-relaxed">{loggedWarning}</p>
-                  </div>
-                )}
-
-                {/* Log interaction form */}
-                {showForm && (
-                  <form ref={interactionFormRef} onSubmit={handleLogInteraction} className="mb-5 space-y-3 bg-elevated border border-line-2 rounded-xl p-4">
-                    <div>
-                      <label className={lCls}>Type</label>
-                      <select value={type} onChange={e => setType(e.target.value)} className={sCls}>
-                        {TYPE_OPTIONS.map(o => <option key={o}>{o}</option>)}
-                      </select>
+                    <div className="flex gap-3">
+                      <button onClick={handleDelete} className="text-[12.5px] font-bold text-danger hover:opacity-80 transition-opacity">Yes, delete</button>
+                      <button onClick={() => setConfirmingDelete(false)} className="text-[12.5px] font-medium text-low hover:text-mid transition-colors">Cancel</button>
                     </div>
-                    <div>
-                      <label className={lCls}>Date <span className="text-accent">*</span></label>
-                      <input type="date" value={interactionDate} onChange={e => setInteractionDate(e.target.value)} required className={iCls}/>
-                    </div>
-                    <div>
-                      <label className={lCls}>Notes</label>
-                      <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={3} placeholder="What did you talk about? Any key takeaways?" className={`${iCls} resize-y min-h-[80px]`}/>
-                    </div>
-                    <div>
-                      <label className={lCls}>Follow-up date</label>
-                      <input type="date" value={followUpDate} onChange={e => setFollowUpDate(e.target.value)} className={iCls}/>
-                    </div>
-                    {/* Outreach tracking — behavior varies by interaction type */}
-                    {(type === 'Email' || type === 'Message') && (
-                      <div className="space-y-2.5">
-                        {/* Explicit opt-in — user must mark this as outreach they sent */}
-                        <label className="flex items-center gap-2.5 cursor-pointer select-none">
-                          <input
-                            type="checkbox"
-                            checked={trackOutreach}
-                            onChange={e => {
-                              setTrackOutreach(e.target.checked)
-                              if (e.target.checked && !outreachStatus) setOutreachStatus('awaiting_response')
-                              if (!e.target.checked) setOutreachStatus('')
-                            }}
-                            className="w-4 h-4 accent-[#8B7CFF] cursor-pointer"
-                          />
-                          <span className="text-[13px] font-semibold text-hi">This was outreach I sent</span>
-                        </label>
-                        <p className="text-[12px] text-lower">Track the response manually. Automatic inbox syncing is not enabled.</p>
-                        {trackOutreach && (
-                          <select value={outreachStatus} onChange={e => setOutreachStatus(e.target.value)} className={sCls}>
-                            <option value="awaiting_response">Awaiting response</option>
-                            <option value="responded">Responded</option>
-                            <option value="meeting_booked">Meeting booked</option>
-                            <option value="no_response">No response</option>
-                            <option value="declined">Declined</option>
-                          </select>
-                        )}
-                      </div>
-                    )}
-                    {(type === 'Call' || type === 'Other') && (
-                      <div>
-                        <label className={lCls}>
-                          Outreach status
-                          <span className="text-lower font-normal ml-1">— Track the outcome manually. Automatic syncing is not enabled.</span>
-                        </label>
-                        <select value={outreachStatus} onChange={e => setOutreachStatus(e.target.value)} className={sCls}>
-                          <option value="">— not set —</option>
-                          <option value="awaiting_response">Awaiting response</option>
-                          <option value="responded">Responded</option>
-                          <option value="meeting_booked">Meeting booked</option>
-                          <option value="no_response">No response</option>
-                          <option value="declined">Declined</option>
-                        </select>
-                      </div>
-                    )}
-                    {/* Coffee chat and Event: no outreach tracking section */}
-                    {formError && <p className="text-sm text-danger">{formError}</p>}
-                    <button type="submit" disabled={submitting} className="w-full bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] text-white text-[13.5px] font-bold py-[11px] rounded-[11px] shadow-[0_6px_18px_rgba(91,69,240,0.35)] hover:opacity-90 transition-opacity disabled:opacity-40">
-                      {submitting ? 'Saving…' : 'Save interaction'}
-                    </button>
-                  </form>
-                )}
-
-                {/* Interaction timeline */}
-                {interactionsError ? (
-                  <div className="text-center py-8">
-                    <p className="text-[13px] text-danger mb-2">{interactionsError}</p>
-                    <button onClick={fetchInteractions} className="text-[12px] text-accent hover:text-tag transition-colors">Try again</button>
-                  </div>
-                ) : interactions.length === 0 ? (
-                  <div className="text-center py-8">
-                    <p className="text-[13px] font-medium text-mid mb-1">No interactions yet</p>
-                    <p className="text-[12px] text-low">Click <span className="text-accent">+ Log</span> to record your first one.</p>
                   </div>
                 ) : (
-                  <div>
-                    {interactions.map((interaction, index) => {
-                      const isLast = index === interactions.length - 1
-                      const style = typeStyle(interaction.type)
-
-                      return (
-                        <div key={interaction.id} className="flex gap-[14px]">
-                          {/* Icon + connecting line */}
-                          <div className="flex flex-col items-center flex-none">
-                            <div className="w-[34px] h-[34px] rounded-[10px] flex items-center justify-center flex-none" style={{ background: style.bg }}>
-                              <TypeIcon type={interaction.type} color={style.stroke}/>
-                            </div>
-                            {!isLast && <div className="w-0.5 flex-1 bg-[rgba(255,255,255,0.07)] mt-1 min-h-[16px]"/>}
-                          </div>
-
-                          {/* Content */}
-                          <div className={`flex-1 min-w-0 ${!isLast ? 'pb-5' : ''}`}>
-                            {editingInteractionId === interaction.id ? (
-                              <form onSubmit={handleSaveInteraction} className="space-y-3 bg-elevated border border-line-2 rounded-xl p-3 mb-1">
-                                <div>
-                                  <label className={lCls}>Type</label>
-                                  <select
-                                    value={interactionEditForm.type}
-                                    onChange={e => {
-                                      const newType = e.target.value
-                                      const update = { ...interactionEditForm, type: newType }
-                                      if (newType === 'Coffee chat' || newType === 'Event') {
-                                        update.trackOutreach = false
-                                        update.outreachStatus = ''
-                                      }
-                                      setInteractionEditForm(update)
-                                    }}
-                                    className={sCls}
-                                  >
-                                    {TYPE_OPTIONS.map(o => <option key={o}>{o}</option>)}
-                                  </select>
-                                </div>
-                                <div>
-                                  <label className={lCls}>Date</label>
-                                  <input type="date" value={interactionEditForm.date} onChange={e => setInteractionEditForm({ ...interactionEditForm, date: e.target.value })} required className={iCls}/>
-                                </div>
-                                <div>
-                                  <label className={lCls}>Notes</label>
-                                  <textarea value={interactionEditForm.notes} onChange={e => setInteractionEditForm({ ...interactionEditForm, notes: e.target.value })} rows={3} className={`${iCls} resize-y`}/>
-                                </div>
-                                <div>
-                                  <label className={lCls}>Follow-up date</label>
-                                  <input type="date" value={interactionEditForm.followUpDate} onChange={e => setInteractionEditForm({ ...interactionEditForm, followUpDate: e.target.value })} className={iCls}/>
-                                </div>
-                                {/* Edit form: outreach tracking — type-aware */}
-                                {(interactionEditForm.type === 'Email' || interactionEditForm.type === 'Message') && (
-                                  <div className="space-y-2.5">
-                                    <label className="flex items-center gap-2.5 cursor-pointer select-none">
-                                      <input
-                                        type="checkbox"
-                                        checked={!!interactionEditForm.trackOutreach}
-                                        onChange={e => {
-                                          const checked = e.target.checked
-                                          setInteractionEditForm(prev => ({
-                                            ...prev,
-                                            trackOutreach: checked,
-                                            outreachStatus: checked ? (prev.outreachStatus || 'awaiting_response') : '',
-                                          }))
-                                        }}
-                                        className="w-4 h-4 accent-[#8B7CFF] cursor-pointer"
-                                      />
-                                      <span className="text-[13px] font-semibold text-hi">This was outreach I sent</span>
-                                    </label>
-                                    <p className="text-[12px] text-lower">Track the response manually. Automatic inbox syncing is not enabled.</p>
-                                    {interactionEditForm.trackOutreach && (
-                                      <select value={interactionEditForm.outreachStatus || ''} onChange={e => setInteractionEditForm({ ...interactionEditForm, outreachStatus: e.target.value })} className={sCls}>
-                                        <option value="awaiting_response">Awaiting response</option>
-                                        <option value="responded">Responded</option>
-                                        <option value="meeting_booked">Meeting booked</option>
-                                        <option value="no_response">No response</option>
-                                        <option value="declined">Declined</option>
-                                      </select>
-                                    )}
-                                  </div>
-                                )}
-                                {(interactionEditForm.type === 'Call' || interactionEditForm.type === 'Other') && (
-                                  <div>
-                                    <label className={lCls}>
-                                      Outreach status
-                                      <span className="text-lower font-normal ml-1">— Track the outcome manually. Automatic syncing is not enabled.</span>
-                                    </label>
-                                    <select value={interactionEditForm.outreachStatus || ''} onChange={e => setInteractionEditForm({ ...interactionEditForm, outreachStatus: e.target.value })} className={sCls}>
-                                      <option value="">— not set —</option>
-                                      <option value="awaiting_response">Awaiting response</option>
-                                      <option value="responded">Responded</option>
-                                      <option value="meeting_booked">Meeting booked</option>
-                                      <option value="no_response">No response</option>
-                                      <option value="declined">Declined</option>
-                                    </select>
-                                  </div>
-                                )}
-                                {/* Coffee chat and Event: no outreach tracking in edit form */}
-                                {interactionSaveError && <p className="text-sm text-danger">{interactionSaveError}</p>}
-                                <div className="flex gap-2">
-                                  <button type="submit" disabled={savingInteraction} className="flex-1 bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] text-white text-[13px] font-bold py-2.5 rounded-[10px] hover:opacity-90 transition-opacity disabled:opacity-40">
-                                    {savingInteraction ? 'Saving…' : 'Save'}
-                                  </button>
-                                  <button type="button" onClick={() => setEditingInteractionId(null)} className="px-4 text-[13px] font-semibold text-mid bg-card border border-line-3 rounded-[10px] hover:text-hi transition-colors">
-                                    Cancel
-                                  </button>
-                                </div>
-                              </form>
-                            ) : (
-                              <div className="pt-0.5">
-                                <div className="flex items-start justify-between gap-2 mb-1">
-                                  <div className="flex items-center gap-2 flex-wrap min-w-0">
-                                    <span className="text-[13.5px] font-bold text-hi">{interaction.type || 'Interaction'}</span>
-                                    {interaction.outreach_status && <OutreachStatusBadge status={interaction.outreach_status} />}
-                                  </div>
-                                  <div className="flex items-center gap-3 flex-none">
-                                    <span className="text-[11.5px] text-low">{relativeDate(interaction.interaction_date)}</span>
-                                    <button onClick={() => startEditInteraction(interaction)} className="text-[11.5px] font-medium text-lower hover:text-mid transition-colors">Edit</button>
-                                    {deletingInteractionId === interaction.id ? (
-                                      <span className="flex items-center gap-1.5">
-                                        <button onClick={() => handleDeleteInteraction(interaction.id)} className="text-[11.5px] font-bold text-danger hover:opacity-80 transition-opacity">Delete</button>
-                                        <button onClick={() => setDeletingInteractionId(null)} className="text-[11.5px] text-lower hover:text-mid transition-colors">Cancel</button>
-                                      </span>
-                                    ) : (
-                                      <button onClick={() => setDeletingInteractionId(interaction.id)} className="text-[11.5px] font-medium text-lower hover:text-danger transition-colors">Delete</button>
-                                    )}
-                                  </div>
-                                </div>
-                                {interaction.notes && (
-                                  <p className="text-[12.5px] leading-[1.55] text-muted whitespace-pre-wrap break-words mb-1.5">{interaction.notes}</p>
-                                )}
-                                {interaction.follow_up_date && (
-                                  <p className="text-[11.5px] font-medium text-warning">Follow up: {interaction.follow_up_date}</p>
-                                )}
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      )
-                    })}
-                  </div>
+                  <button onClick={() => setConfirmingDelete(true)} className="text-[12px] font-medium text-lower hover:text-danger transition-colors">
+                    Delete contact
+                  </button>
                 )}
               </div>
             </div>
           </div>
+
+          {/* ── RIGHT: Timeline ── */}
+          <div className="p-4 md:p-6">
+
+            {/* Success banner */}
+            {loggedMsg && (
+              <div className="flex items-center gap-2 mb-4 px-3 py-2 rounded-xl border"
+                style={{ background: 'rgba(47,212,182,0.08)', borderColor: 'rgba(47,212,182,0.22)' }}>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--color-success)" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M20 6L9 17l-5-5"/>
+                </svg>
+                <p className="text-[12.5px] text-success font-medium">Interaction logged</p>
+              </div>
+            )}
+
+            {/* Partial-success warning */}
+            {loggedWarning && (
+              <div className="flex items-start gap-2 mb-4 px-3 py-2 rounded-xl bg-[rgba(255,184,77,0.08)] border border-[rgba(255,184,77,0.2)]">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--color-warning)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-none mt-[1px]">
+                  <circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/>
+                </svg>
+                <p className="text-[12.5px] text-warning font-medium leading-relaxed">{loggedWarning}</p>
+              </div>
+            )}
+
+            {/* Interactions header */}
+            <div className="flex items-center justify-between mb-4">
+              <p className="text-[11.5px] font-bold tracking-[1px] text-lower uppercase font-mono">Interactions</p>
+              <button
+                onClick={() => setShowForm(v => !v)}
+                className="text-[12.5px] font-bold text-accent hover:text-tag transition-colors"
+              >
+                {showForm ? 'Cancel' : '+ Log'}
+              </button>
+            </div>
+
+            {/* Log interaction form — desktop only; mobile uses LogInteractionSheet */}
+            {showForm && (
+              <form ref={interactionFormRef} onSubmit={handleLogInteraction} className="hidden md:block mb-5 space-y-3 bg-elevated border border-line-2 rounded-xl p-4">
+                <div>
+                  <label className={lCls}>Type</label>
+                  <select value={type} onChange={e => handleTypeChange(e.target.value)} className={sCls}>
+                    {TYPE_OPTIONS.map(o => <option key={o}>{o}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className={lCls}>Date <span className="text-accent">*</span></label>
+                  <input type="date" value={interactionDate} onChange={e => setInteractionDate(e.target.value)} required className={iCls}/>
+                </div>
+                <div>
+                  <label className={lCls}>Notes</label>
+                  <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={3}
+                    placeholder="What did you talk about? Any key takeaways?"
+                    className={`${iCls} resize-y min-h-[80px]`}/>
+                </div>
+                <div>
+                  <label className={lCls}>Follow-up date</label>
+                  <input ref={followUpDateInputRef} type="date" value={followUpDate} onChange={e => setFollowUpDate(e.target.value)} className={iCls}/>
+                </div>
+                {(type === 'Email' || type === 'Message') && (
+                  <div className="space-y-2.5">
+                    <label className="flex items-center gap-2.5 cursor-pointer select-none">
+                      <input type="checkbox" checked={trackOutreach}
+                        onChange={e => {
+                          setTrackOutreach(e.target.checked)
+                          if (e.target.checked && !outreachStatus) setOutreachStatus('awaiting_response')
+                          if (!e.target.checked) setOutreachStatus('')
+                        }}
+                        className="w-4 h-4 accent-[#FF4423] cursor-pointer"/>
+                      <span className="text-[13px] font-semibold text-hi">This was outreach I sent</span>
+                    </label>
+                    <p className="text-[12px] text-lower">Track the response manually. Automatic inbox syncing is not enabled.</p>
+                    {trackOutreach && (
+                      <select value={outreachStatus} onChange={e => setOutreachStatus(e.target.value)} className={sCls}>
+                        <option value="awaiting_response">Awaiting response</option>
+                        <option value="responded">Responded</option>
+                        <option value="meeting_booked">Meeting booked</option>
+                        <option value="no_response">No response</option>
+                        <option value="declined">Declined</option>
+                      </select>
+                    )}
+                  </div>
+                )}
+                {(type === 'Call' || type === 'Other') && (
+                  <div>
+                    <label className={lCls}>
+                      Outreach status
+                      <span className="text-lower font-normal ml-1">— Track the outcome manually. Automatic syncing is not enabled.</span>
+                    </label>
+                    <select value={outreachStatus} onChange={e => setOutreachStatus(e.target.value)} className={sCls}>
+                      <option value="">— not set —</option>
+                      <option value="awaiting_response">Awaiting response</option>
+                      <option value="responded">Responded</option>
+                      <option value="meeting_booked">Meeting booked</option>
+                      <option value="no_response">No response</option>
+                      <option value="declined">Declined</option>
+                    </select>
+                  </div>
+                )}
+                {formError && <p className="text-sm text-danger">{formError}</p>}
+                <button type="submit" disabled={submitting}
+                  className="w-full text-[13.5px] font-bold py-[11px] rounded-[11px] hover:opacity-90 transition-opacity disabled:opacity-40"
+                  style={{ background: 'var(--color-ember)', color: 'var(--color-paper)' }}>
+                  {submitting ? 'Saving…' : 'Save interaction'}
+                </button>
+              </form>
+            )}
+
+            {/* Interaction timeline */}
+            {interactionsError ? (
+              <div className="text-center py-8">
+                <p className="text-[13px] text-danger mb-2">{interactionsError}</p>
+                <button onClick={fetchInteractions} className="text-[12px] text-accent hover:text-tag transition-colors">Try again</button>
+              </div>
+            ) : interactions.length === 0 ? (
+              <div className="text-center py-8">
+                <p className="text-[13px] font-medium text-mid mb-1">No interactions yet</p>
+                <p className="text-[12px] text-low">Click <span className="text-accent">+ Log</span> to record your first one.</p>
+              </div>
+            ) : (
+              <div>
+                {interactions.map((interaction, index) => {
+                  const isLast = index === interactions.length - 1
+                  const style = typeStyle(interaction.type)
+                  return (
+                    <div key={interaction.id} className="flex gap-[14px]">
+                      <div className="flex flex-col items-center flex-none">
+                        <div className="w-[34px] h-[34px] rounded-[10px] flex items-center justify-center flex-none" style={{ background: style.bg }}>
+                          <TypeIcon type={interaction.type} color={style.stroke}/>
+                        </div>
+                        {!isLast && <div className="w-0.5 flex-1 bg-line-1 mt-1 min-h-[16px]"/>}
+                      </div>
+                      <div className={`flex-1 min-w-0 ${!isLast ? 'pb-5' : ''}`}>
+                        {editingInteractionId === interaction.id ? (
+                          <form onSubmit={handleSaveInteraction} className="space-y-3 bg-elevated border border-line-2 rounded-xl p-3 mb-1">
+                            <div>
+                              <label className={lCls}>Type</label>
+                              <select value={interactionEditForm.type}
+                                onChange={e => {
+                                  const newType = e.target.value
+                                  const fields = typeChangeFields(interactionEditForm.type, newType)
+                                  setInteractionEditForm(prev => ({ ...prev, type: newType, ...(fields || {}) }))
+                                }}
+                                className={sCls}>
+                                {TYPE_OPTIONS.map(o => <option key={o}>{o}</option>)}
+                              </select>
+                            </div>
+                            <div>
+                              <label className={lCls}>Date</label>
+                              <input type="date" value={interactionEditForm.date}
+                                onChange={e => setInteractionEditForm({ ...interactionEditForm, date: e.target.value })}
+                                required className={iCls}/>
+                            </div>
+                            <div>
+                              <label className={lCls}>Notes</label>
+                              <textarea value={interactionEditForm.notes}
+                                onChange={e => setInteractionEditForm({ ...interactionEditForm, notes: e.target.value })}
+                                rows={3} className={`${iCls} resize-y`}/>
+                            </div>
+                            <div>
+                              <label className={lCls}>Follow-up date</label>
+                              <input type="date" value={interactionEditForm.followUpDate}
+                                onChange={e => setInteractionEditForm({ ...interactionEditForm, followUpDate: e.target.value })}
+                                className={iCls}/>
+                            </div>
+                            {(interactionEditForm.type === 'Email' || interactionEditForm.type === 'Message') && (
+                              <div className="space-y-2.5">
+                                <label className="flex items-center gap-2.5 cursor-pointer select-none">
+                                  <input type="checkbox" checked={!!interactionEditForm.trackOutreach}
+                                    onChange={e => {
+                                      const checked = e.target.checked
+                                      setInteractionEditForm(prev => ({
+                                        ...prev, trackOutreach: checked,
+                                        outreachStatus: checked ? (prev.outreachStatus || 'awaiting_response') : '',
+                                      }))
+                                    }}
+                                    className="w-4 h-4 accent-[#FF4423] cursor-pointer"/>
+                                  <span className="text-[13px] font-semibold text-hi">This was outreach I sent</span>
+                                </label>
+                                <p className="text-[12px] text-lower">Track the response manually. Automatic inbox syncing is not enabled.</p>
+                                {interactionEditForm.trackOutreach && (
+                                  <select value={interactionEditForm.outreachStatus || ''}
+                                    onChange={e => setInteractionEditForm({ ...interactionEditForm, outreachStatus: e.target.value })}
+                                    className={sCls}>
+                                    <option value="awaiting_response">Awaiting response</option>
+                                    <option value="responded">Responded</option>
+                                    <option value="meeting_booked">Meeting booked</option>
+                                    <option value="no_response">No response</option>
+                                    <option value="declined">Declined</option>
+                                  </select>
+                                )}
+                              </div>
+                            )}
+                            {(interactionEditForm.type === 'Call' || interactionEditForm.type === 'Other') && (
+                              <div>
+                                <label className={lCls}>
+                                  Outreach status
+                                  <span className="text-lower font-normal ml-1">— Track the outcome manually. Automatic syncing is not enabled.</span>
+                                </label>
+                                <select value={interactionEditForm.outreachStatus || ''}
+                                  onChange={e => setInteractionEditForm({ ...interactionEditForm, outreachStatus: e.target.value })}
+                                  className={sCls}>
+                                  <option value="">— not set —</option>
+                                  <option value="awaiting_response">Awaiting response</option>
+                                  <option value="responded">Responded</option>
+                                  <option value="meeting_booked">Meeting booked</option>
+                                  <option value="no_response">No response</option>
+                                  <option value="declined">Declined</option>
+                                </select>
+                              </div>
+                            )}
+                            {interactionSaveError && <p className="text-sm text-danger">{interactionSaveError}</p>}
+                            <div className="flex gap-2">
+                              <button type="submit" disabled={savingInteraction}
+                                className="flex-1 text-[13px] font-bold py-2.5 rounded-[10px] hover:opacity-90 transition-opacity disabled:opacity-40"
+                                style={{ background: 'var(--color-ember)', color: 'var(--color-paper)' }}>
+                                {savingInteraction ? 'Saving…' : 'Save'}
+                              </button>
+                              <button type="button" onClick={() => setEditingInteractionId(null)}
+                                className="px-4 text-[13px] font-semibold text-mid bg-card border border-line-3 rounded-[10px] hover:text-hi transition-colors">
+                                Cancel
+                              </button>
+                            </div>
+                          </form>
+                        ) : (
+                          <div className="pt-0.5">
+                            <div className="flex items-start justify-between gap-2 mb-1">
+                              <div className="flex items-center gap-2 flex-wrap min-w-0">
+                                <span className="text-[13.5px] font-bold text-hi">{interaction.type || 'Interaction'}</span>
+                                {interaction.outreach_status && <OutreachStatusBadge status={interaction.outreach_status} />}
+                              </div>
+                              <div className="flex items-center gap-3 flex-none">
+                                <span className="text-[11.5px] text-low">{relativeDate(interaction.interaction_date)}</span>
+                                <button onClick={() => startEditInteraction(interaction)} className="text-[11.5px] font-medium text-lower hover:text-mid transition-colors">Edit</button>
+                                {deletingInteractionId === interaction.id ? (
+                                  <span className="flex items-center gap-1.5">
+                                    <button onClick={() => handleDeleteInteraction(interaction.id)} className="text-[11.5px] font-bold text-danger hover:opacity-80 transition-opacity">Delete</button>
+                                    <button onClick={() => setDeletingInteractionId(null)} className="text-[11.5px] text-lower hover:text-mid transition-colors">Cancel</button>
+                                  </span>
+                                ) : (
+                                  <button onClick={() => setDeletingInteractionId(interaction.id)} className="text-[11.5px] font-medium text-lower hover:text-danger transition-colors">Delete</button>
+                                )}
+                              </div>
+                            </div>
+                            {interaction.notes && (
+                              <p className="text-[12.5px] leading-[1.55] text-muted whitespace-pre-wrap break-words mb-1.5">{interaction.notes}</p>
+                            )}
+                            {interaction.follow_up_date && (
+                              <p className="text-[11.5px] font-medium text-warning">Follow up: {interaction.follow_up_date}</p>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+
+      {/* Mobile bottom sheet — shown on small screens instead of the desktop inline form */}
+      <LogInteractionSheet
+        open={showForm}
+        onClose={() => setShowForm(false)}
+        contactName={contact?.name}
+        focusRestoreRef={logCTARef}
+        type={type}
+        onTypeChange={handleTypeChange}
+        interactionDate={interactionDate}
+        setInteractionDate={setInteractionDate}
+        notes={notes}
+        setNotes={setNotes}
+        followUpDate={followUpDate}
+        setFollowUpDate={setFollowUpDate}
+        trackOutreach={trackOutreach}
+        setTrackOutreach={setTrackOutreach}
+        outreachStatus={outreachStatus}
+        setOutreachStatus={setOutreachStatus}
+        onSubmit={handleLogInteraction}
+        submitting={submitting}
+        formError={formError}
+        followUpDateRef={followUpDateInputRef}
+      />
+
+      {/* Edit contact drawer */}
+      {editDrawerOpen && contact && (
+        <>
+          <div
+            className="fixed inset-0 z-40"
+            style={{ background: 'rgba(20,17,15,0.45)', animation: 'fade-in 0.2s ease-out' }}
+            onClick={() => setEditDrawerOpen(false)}
+          />
+          <AddContactDrawer
+            contact={contact}
+            onClose={() => setEditDrawerOpen(false)}
+            onSuccess={() => { setEditDrawerOpen(false); fetchContact() }}
+          />
         </>
       )}
     </div>

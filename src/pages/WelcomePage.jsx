@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { identifyUser, track } from '../lib/analytics'
 import { getProAccessStatus } from '../lib/pro-access-status'
+import { FUNNEL_PATH } from '../components/AuthShell'
 
 function WelcomePage() {
   const navigate = useNavigate()
@@ -10,7 +11,7 @@ function WelcomePage() {
   // null = loading, true = trial active, false = not active, 'error' = status unavailable
   const [trialDisplay, setTrialDisplay] = useState(null)
 
-  // Fire email_confirmed once per browser per user — fires only when Supabase has
+  // Fire email_confirmed once per browser per user -- fires only when Supabase has
   // verified the session and the email_confirmed_at timestamp is set.
   // localStorage prevents re-fires on refresh or repeat visits.
   // No PII in event properties; identifyUser() links the event to the PostHog person.
@@ -48,12 +49,12 @@ function WelcomePage() {
         // eligible pro_trials row still has started_at IS NULL (e.g., if the
         // on_email_confirmed trigger did not fire due to transient infrastructure
         // issues). This call is idempotent (WHERE started_at IS NULL guard) and
-        // only updates existing rows — it does not create missing rows or extend
+        // only updates existing rows -- it does not create missing rows or extend
         // existing trials. Failure is swallowed; getProAccessStatus() is authoritative.
         try {
           await supabase.rpc('start_my_pro_trial')
         } catch {
-          // Recovery failure is acceptable — primary trigger may have already fired
+          // Recovery failure is acceptable -- primary trigger may have already fired
         }
 
         // Server-authoritative status (DB clock, not browser Date)
@@ -82,7 +83,7 @@ function WelcomePage() {
 
   async function handleContinue() {
     setSigningOut(true)
-    // Sign out first — confirmation links auto-create a session; clear it so /signin renders
+    // Sign out first -- confirmation links auto-create a session; clear it so /signin renders
     // in the unauthenticated route tree. signOut() clears local storage regardless of server error.
     const { error } = await supabase.auth.signOut()
     if (error) console.error('Sign-out on welcome failed:', error.message)
@@ -90,61 +91,87 @@ function WelcomePage() {
   }
 
   return (
-    <div className="min-h-screen bg-base flex items-center justify-center p-6">
+    <div
+      className="min-h-screen flex items-center justify-center p-6"
+      style={{ backgroundColor: '#F7F2E7', colorScheme: 'light' }}
+    >
       <div className="w-full max-w-[400px] text-center">
 
-        {/* Logo mark */}
-        <div className="w-[52px] h-[52px] rounded-[14px] bg-[#4B3AF0] flex items-center justify-center mx-auto mb-8 shadow-[0_6px_20px_rgba(75,58,240,0.35)]">
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
-            <path d="M3 4H21L15 12.5V20H9V12.5Z" fill="white"/>
+        {/* Ember logo mark */}
+        <div
+          className="w-[52px] h-[52px] rounded-[14px] bg-ember flex items-center justify-center mx-auto mb-8"
+        >
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d={FUNNEL_PATH} fill="white"/>
           </svg>
         </div>
 
         {/* Success icon */}
-        <div className="w-[72px] h-[72px] rounded-full bg-[rgba(47,212,182,0.12)] border border-[rgba(47,212,182,0.28)] flex items-center justify-center mx-auto mb-6">
-          <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#2FD4B6" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+        <div
+          className="w-[72px] h-[72px] rounded-full flex items-center justify-center mx-auto mb-6"
+          style={{
+            backgroundColor: 'rgba(46,125,91,0.1)',
+            border: '1.5px solid rgba(46,125,91,0.3)',
+          }}
+        >
+          <svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#2E7D5B" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
             <path d="M20 6L9 17l-5-5"/>
           </svg>
         </div>
 
-        {/* Heading */}
-        <h1 className="font-display font-bold text-[28px] text-hi tracking-[-0.5px] mb-3">
-          You're all set
+        {/* Heading -- period is intentional (spec) */}
+        <h1 className="font-display font-bold text-[28px] tracking-[-0.5px] mb-3" style={{ color: '#1C1510' }}>
+          You're all set.
         </h1>
 
         {/* Body */}
-        <p className="text-[15px] text-muted leading-relaxed mb-4">
+        <p className="text-[15px] leading-relaxed mb-4" style={{ color: '#6B5A4A' }}>
           Your email is confirmed.<br/>You can sign in now.
         </p>
 
-        {/* Trial notice — server-authoritative */}
+        {/* Trial notice -- server-authoritative, loading skeleton skipped (brief) */}
         {trialDisplay === true && (
-          <div className="flex items-center gap-2 bg-[rgba(139,124,255,0.1)] border border-[rgba(139,124,255,0.25)] rounded-xl px-4 py-3 mb-6 text-left">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="#8B7CFF" className="flex-none">
+          <div
+            className="flex items-center gap-2 rounded-xl px-4 py-3 mb-6 text-left"
+            style={{
+              backgroundColor: 'rgba(255,68,35,0.08)',
+              border: '1.5px solid rgba(255,68,35,0.25)',
+            }}
+            role="status"
+            aria-live="polite"
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="#FF4423" className="flex-none" aria-hidden="true">
               <path d="M12 3l1.7 5.3L19 10l-5.3 1.7L12 17l-1.7-5.3L5 10l5.3-1.7L12 3z"/>
             </svg>
-            <p className="text-[13px] text-accent font-medium leading-snug">
-              Your 7-day Funnl Pro trial has started — explore AI features after signing in.
+            <p className="text-[13px] font-medium leading-snug" style={{ color: '#CC3000' }}>
+              Your 7-day Funnl Pro trial has started -- explore AI features after signing in.
             </p>
           </div>
         )}
 
-        {/* Status unavailable — neutral fallback (never shows false success) */}
+        {/* Status unavailable -- neutral fallback, never shows false success */}
         {trialDisplay === 'error' && (
-          <div className="bg-[rgba(255,255,255,0.04)] border border-line-1 rounded-xl px-4 py-3 mb-6 text-left">
-            <p className="text-[13px] text-muted leading-snug">
+          <div
+            className="rounded-xl px-4 py-3 mb-6 text-left"
+            style={{
+              backgroundColor: 'rgba(0,0,0,0.04)',
+              border: '1.5px solid rgba(0,0,0,0.1)',
+            }}
+          >
+            <p className="text-[13px] leading-snug" style={{ color: '#8C857A' }}>
               Account confirmed. Pro trial status will refresh after you sign in.
             </p>
           </div>
         )}
 
-        {/* Primary CTA */}
+        {/* Primary CTA -- Ember, flat, no gradient */}
         <button
           onClick={handleContinue}
           disabled={signingOut}
-          className="w-full bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] text-white text-[15px] font-bold rounded-[12px] py-[14px] shadow-[0_6px_20px_rgba(91,69,240,0.35)] hover:opacity-90 transition-opacity disabled:opacity-50"
+          className="w-full bg-ember hover:bg-ember-hover text-white text-[15px] font-bold rounded-[12px] py-[14px] transition-colors motion-reduce:transition-none disabled:opacity-50 disabled:cursor-not-allowed"
+          aria-busy={signingOut}
         >
-          {signingOut ? 'Signing out…' : 'Continue to sign in'}
+          {signingOut ? 'Signing out...' : 'Continue to sign in'}
         </button>
 
       </div>

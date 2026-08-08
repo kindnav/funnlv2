@@ -6,188 +6,196 @@
   --font-mono: 'JetBrains Mono', monospace;
   --font-display: 'Space Grotesk', sans-serif;
 
-  /* ── Background layers ──────────────────────────── */
-  --color-base: #060608;
-  --color-surface: #0B0B0E;
-  --color-sidebar: #100F14;
-  --color-card: #141419;
-  --color-elevated: #1A1A21;
-  --color-input: #131318;
+  /* ── Brand constants (never theme-dependent) ─────
+     ink and paper are fixed identities; ember is the
+     one primary action color used everywhere. */
+  --color-ink:        #14110F;
+  --color-paper:      #F7F2E7;
+  --color-ember:      #FF4423;
+  --color-ember-hover:#D6330F;
 
-  /* ── Brand accent ───────────────────────────────── */
-  --color-accent: #8B7CFF;
-  --color-accent-deep: #5B45F0;
+  /* ── Background layers (light "Paper" = default) ─
+     Rail is always ink regardless of theme —
+     the nav column lives in its own chromatic world. */
+  --color-base:     #F7F2E7;
+  --color-surface:  #F7F2E7;
+  --color-rail:     #14110F;
+  --color-card:     #FFFFFF;
+  --color-elevated: #F0EBD6;
+  --color-input:    #FFFFFF;
 
-  /* ── Semantic states ────────────────────────────── */
-  --color-success: #2FD4B6;
-  --color-warning: #FFB84D;
-  --color-warning-deep: #F5A623;
-  --color-danger: #FF6B8A;
+  /* ── Text scale (light default = dark ink) ─────── */
+  --color-hi:    #14110F;
+  --color-mid:   #52504B;
+  --color-muted: #6B655C;
+  --color-low:   #8C857A;
+  --color-lower: #8C857A;
 
-  /* ── Text scale ─────────────────────────────────── */
-  --color-hi: #F4F3F8;
-  --color-mid: #A0A0AD;
-  --color-muted: #9A9AA5;
-  --color-low: #6C6C78;
-  --color-lower: #54545E;
+  /* ── Brand accent (ember in new system) ─────────── */
+  --color-accent: #FF4423;
 
-  /* ── Tag / skill chip text ──────────────────────── */
-  --color-tag: #B4A8FF;
-  --color-skill: #9EA0AD;
+  /* ── Status colors ────────────────────────────────
+     Text-level: muted and always paired with a label.
+     Fill-level: used sparingly for badges/chips only. */
+  --color-success:      #2E7D5B;
+  --color-success-fill: #4F9A73;
+  --color-warning:      #A56A00;
+  --color-warning-fill: #E8A93B;
+  --color-danger:       #C2334D;
+  --color-awaiting:     #C7A96B;
 
-  /* ── Structural borders (theme-aware) ───────────────
-     line-1 / line-2 / line-3 replace dark-only arbitrary
-     border-[rgba(255,255,255,0.06/07/09)] usages.
-     Generates border-line-1, border-line-2, border-line-3 utilities. */
-  --color-line-1: rgba(255,255,255,0.06);
-  --color-line-2: rgba(255,255,255,0.07);
-  --color-line-3: rgba(255,255,255,0.09);
+  /* ── Tag chip text ─────────────────────────────── */
+  --color-tag:   #52504B;
+  --color-skill: #8C857A;
 
-  /* ── AI/Pro banner text tokens ──────────────────────
-     Used in the Dashboard teaser and Sidebar promo card.
-     Dark: near-white heading, soft lavender body.
-     Light: overridden below to dark text on light surface. */
-  --color-banner-heading: #F4F3F8;
-  --color-banner-body: #B0A8C8;
+  /* ── Structural hairlines (theme-aware) ──────────
+     line-1 / line-2 / line-3 generate
+     border-line-1, border-line-2, border-line-3. */
+  --color-line-1: rgba(20,17,15,0.08);
+  --color-line-2: rgba(20,17,15,0.10);
+  --color-line-3: rgba(20,17,15,0.15);
+
+  /* ── Banner tokens (AI card / promo) ────────────── */
+  --color-banner-heading: #14110F;
+  --color-banner-body:    #52504B;
+
+  /* ── Overlay backdrop ────────────────────────────
+     Used for modal/dialog scrims. Paper = ink at 55 %,
+     Night = ink at 72 % (darker content needs stronger dim). */
+  --color-backdrop: rgba(20,17,15,0.55);
 }
 
 @layer base {
   html {
-    background-color: #060608;
+    background-color: #F7F2E7;
   }
   body {
     font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
-    color: #F4F3F8;
+    color: #14110F;
     -webkit-font-smoothing: antialiased;
   }
 }
 
-/* ── Non-@theme banner vars (gradient + border) ──────────────────────────────
-   Default = dark. Light theme blocks override these below.
-   Used via inline style={{ background: 'var(--banner-gradient)', borderColor: 'var(--banner-border)' }}
-   because @theme does not accept gradient strings or rgba() values. */
+/* ── Non-@theme vars (gradients, rgba) ───────────────────────────────────────
+   Default = light. Dark theme block overrides below.
+   Used via inline style={{ background: 'var(--banner-gradient)' }} etc. */
 :root {
-  --banner-gradient: linear-gradient(135deg, #2A2140, #171227);
-  --banner-border: rgba(139, 124, 255, 0.28);
+  --banner-gradient: linear-gradient(135deg, #14110F, #241F1B);
+  --banner-border:   rgba(255,68,35,0.3);
 }
 
-/* ── Theme token overrides ────────────────────────────────────────────────────
-   Placed outside @layer base so unlayered specificity wins over layered rules.
+/* ── Dark (Night) theme overrides ────────────────────────────────────────────
+   Precedence (highest → lowest):
+     1. :root[data-theme="dark"]   — explicit user toggle
+     2. @media prefers-color-scheme: dark  :root:not([data-theme="light"])
+        — system preference, not overridden
+     3. @theme defaults above  — light Paper baseline */
 
-   `:root` === `html` in all browsers. `data-theme` is stamped on
-   document.documentElement (html) by src/lib/theme.js.
-
-   Precedence (highest to lowest):
-     1. :root[data-theme="light"] or :root[data-theme="dark"]  (explicit user choice)
-     2. @media (prefers-color-scheme: light) with :root:not([data-theme="dark"])
-        (system preference, not overridden by user)
-     3. @layer base defaults (dark)
-
-   Arbitrary-value classes (border-[rgba(...)], bg-[rgba(...)]) do NOT respond
-   to these token overrides — only the named token utilities like bg-card,
-   text-hi, bg-surface etc. automatically update. */
-
-@media (prefers-color-scheme: light) {
-  :root:not([data-theme="dark"]) {
-    background-color: #F9F8FF;
-    color: #1C1829;
-    --color-base:     #F9F8FF;
-    --color-surface:  #F4F3FC;
-    --color-sidebar:  #EAE8F5;
-    --color-card:     #FFFFFF;
-    --color-elevated: #EEEDF7;
-    --color-input:    #FAFAFE;
-    --color-hi:       #1C1829;
-    --color-mid:      #52526A;
-    --color-muted:    #5E5E78;
-    --color-low:      #8C8CA4;
-    --color-lower:    #6F6F8C;
-    --color-accent:   #5B45F0;
-    --color-success:  #0D7A65;
-    --color-warning:  #9A6000;
-    --color-danger:   #C42251;
-    --color-tag:      #5B45F0;
-    --color-skill:    #7A7A92;
-    --color-line-1:   rgba(0,0,0,0.07);
-    --color-line-2:   rgba(0,0,0,0.08);
-    --color-line-3:   rgba(0,0,0,0.10);
-    /* Banner tokens: light surface, dark text */
-    --color-banner-heading: #1C1829;
-    --color-banner-body:    #52526A;
-    --banner-gradient: linear-gradient(135deg, #EDE9FF, #E4E0F7);
-    --banner-border:   rgba(91, 69, 240, 0.25);
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    background-color: #14110F;
+    color: #F7F2E7;
+    --color-base:     #14110F;
+    --color-surface:  #14110F;
+    --color-card:     #1C1815;
+    --color-elevated: #241F1B;
+    --color-input:    #241F1B;
+    --color-hi:       #F7F2E7;
+    --color-mid:      #C7BFAE;
+    --color-muted:    #8C857A;
+    --color-low:      #6B655C;
+    --color-lower:    #52504B;
+    --color-accent:   #FF4423;
+    --color-success:  #4F9A73;
+    --color-warning:  #E8A93B;
+    --color-danger:   #E05574;
+    --color-tag:      #C7BFAE;
+    --color-skill:    #8C857A;
+    --color-line-1:   rgba(247,242,231,0.08);
+    --color-line-2:   rgba(247,242,231,0.09);
+    --color-line-3:   rgba(247,242,231,0.14);
+    --color-banner-heading: #F7F2E7;
+    --color-banner-body:    #C7BFAE;
+    --banner-gradient: linear-gradient(135deg, #14110F, #241F1B);
+    --banner-border:   rgba(255,68,35,0.3);
+    --color-backdrop: rgba(20,17,15,0.72);
   }
 }
 
-:root[data-theme="light"] {
-  background-color: #F9F8FF;
-  color: #1C1829;
-  --color-base:     #F9F8FF;
-  --color-surface:  #F4F3FC;
-  --color-sidebar:  #EAE8F5;
-  --color-card:     #FFFFFF;
-  --color-elevated: #EEEDF7;
-  --color-input:    #FAFAFE;
-  --color-hi:       #1C1829;
-  --color-mid:      #52526A;
-  --color-muted:    #5E5E78;
-  --color-low:      #8C8CA4;
-  --color-lower:    #6F6F8C;
-  --color-accent:   #5B45F0;
-  --color-success:  #0D7A65;
-  --color-warning:  #9A6000;
-  --color-danger:   #C42251;
-  --color-tag:      #5B45F0;
-  --color-skill:    #7A7A92;
-  --color-line-1:   rgba(0,0,0,0.07);
-  --color-line-2:   rgba(0,0,0,0.08);
-  --color-line-3:   rgba(0,0,0,0.10);
-  /* Banner tokens: light surface, dark text */
-  --color-banner-heading: #1C1829;
-  --color-banner-body:    #52526A;
-  --banner-gradient: linear-gradient(135deg, #EDE9FF, #E4E0F7);
-  --banner-border:   rgba(91, 69, 240, 0.25);
-}
-
 :root[data-theme="dark"] {
-  background-color: #060608;
-  color: #F4F3F8;
-  --color-base:     #060608;
-  --color-surface:  #0B0B0E;
-  --color-sidebar:  #100F14;
-  --color-card:     #141419;
-  --color-elevated: #1A1A21;
-  --color-input:    #131318;
-  --color-hi:       #F4F3F8;
-  --color-mid:      #A0A0AD;
-  --color-muted:    #9A9AA5;
-  --color-low:      #6C6C78;
-  --color-lower:    #54545E;
-  --color-tag:      #B4A8FF;
-  --color-skill:    #9EA0AD;
-  --color-line-1:   rgba(255,255,255,0.06);
-  --color-line-2:   rgba(255,255,255,0.07);
-  --color-line-3:   rgba(255,255,255,0.09);
-  /* Banner tokens: dark defaults */
-  --color-banner-heading: #F4F3F8;
-  --color-banner-body:    #B0A8C8;
-  --banner-gradient: linear-gradient(135deg, #2A2140, #171227);
-  --banner-border:   rgba(139, 124, 255, 0.28);
+  background-color: #14110F;
+  color: #F7F2E7;
+  --color-base:     #14110F;
+  --color-surface:  #14110F;
+  --color-card:     #1C1815;
+  --color-elevated: #241F1B;
+  --color-input:    #241F1B;
+  --color-hi:       #F7F2E7;
+  --color-mid:      #C7BFAE;
+  --color-muted:    #8C857A;
+  --color-low:      #6B655C;
+  --color-lower:    #52504B;
+  --color-accent:   #FF4423;
+  --color-success:  #4F9A73;
+  --color-warning:  #E8A93B;
+  --color-danger:   #E05574;
+  --color-tag:      #C7BFAE;
+  --color-skill:    #8C857A;
+  --color-line-1:   rgba(247,242,231,0.08);
+  --color-line-2:   rgba(247,242,231,0.09);
+  --color-line-3:   rgba(247,242,231,0.14);
+  --color-banner-heading: #F7F2E7;
+  --color-banner-body:    #C7BFAE;
+  --banner-gradient: linear-gradient(135deg, #14110F, #241F1B);
+  --banner-border:   rgba(255,68,35,0.3);
+  --color-backdrop: rgba(20,17,15,0.72);
 }
 
-/* ── Date picker: native calendar chrome tracks the active theme ─────────────
-   color-scheme tells the browser which OS chrome variant to render inside
-   input[type="date"]. Default is dark (matches the app default). */
-input[type="date"] {
-  color-scheme: dark;
+:root[data-theme="light"] {
+  background-color: #F7F2E7;
+  color: #14110F;
+  --color-base:     #F7F2E7;
+  --color-surface:  #F7F2E7;
+  --color-card:     #FFFFFF;
+  --color-elevated: #F0EBD6;
+  --color-input:    #FFFFFF;
+  --color-hi:       #14110F;
+  --color-mid:      #52504B;
+  --color-muted:    #6B655C;
+  --color-low:      #8C857A;
+  --color-lower:    #8C857A;
+  --color-accent:   #FF4423;
+  --color-success:  #2E7D5B;
+  --color-warning:  #A56A00;
+  --color-danger:   #C2334D;
+  --color-tag:      #52504B;
+  --color-skill:    #8C857A;
+  --color-line-1:   rgba(20,17,15,0.08);
+  --color-line-2:   rgba(20,17,15,0.10);
+  --color-line-3:   rgba(20,17,15,0.15);
+  --color-banner-heading: #14110F;
+  --color-banner-body:    #52504B;
+  --banner-gradient: linear-gradient(135deg, #14110F, #241F1B);
+  --banner-border:   rgba(255,68,35,0.3);
+  --color-backdrop: rgba(20,17,15,0.55);
+}
+
+/* ── Date / datetime-local pickers: native chrome tracks the active theme ── */
+input[type="date"],
+input[type="datetime-local"] {
+  color-scheme: light;
   cursor: pointer;
 }
-@media (prefers-color-scheme: light) {
-  :root:not([data-theme="dark"]) input[type="date"] { color-scheme: light; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) input[type="date"],
+  :root:not([data-theme="light"]) input[type="datetime-local"] { color-scheme: dark; }
 }
-:root[data-theme="light"] input[type="date"] { color-scheme: light; }
-:root[data-theme="dark"]  input[type="date"] { color-scheme: dark; }
+:root[data-theme="dark"]  input[type="date"],
+:root[data-theme="dark"]  input[type="datetime-local"] { color-scheme: dark; }
+:root[data-theme="light"] input[type="date"],
+:root[data-theme="light"] input[type="datetime-local"] { color-scheme: light; }
 
+/* ── Animations ──────────────────────────────────────────────────────────── */
 @keyframes slide-in-right {
   from { transform: translateX(100%); }
   to   { transform: translateX(0); }
@@ -198,7 +206,18 @@ input[type="date"] {
   to   { opacity: 1; }
 }
 
+@keyframes slide-in-bottom {
+  from { transform: translateY(100%); }
+  to   { transform: translateY(0); }
+}
+
 @keyframes funnl-marquee {
   from { transform: translateX(0); }
   to   { transform: translateX(-50%); }
+}
+
+@keyframes shimmer {
+  0%   { opacity: 0.4; }
+  50%  { opacity: 0.7; }
+  100% { opacity: 0.4; }
 }

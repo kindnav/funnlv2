@@ -15,6 +15,9 @@ dist-ssr
 # Environment variables (secret keys - never commit this)
 .env
 
+# Playwright browser verification artifacts (session-specific, not committed)
+stage2-screenshots/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

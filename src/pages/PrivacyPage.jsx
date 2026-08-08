@@ -28,7 +28,7 @@ function PrivacyPage() {
         {/* Header */}
         <div className="mb-10">
           <div className="flex items-center gap-3 mb-4">
-            <div className="w-9 h-9 rounded-[10px] bg-[#4B3AF0] flex items-center justify-center flex-none shadow-[0_4px_14px_rgba(75,58,240,0.4)]">
+            <div className="w-9 h-9 rounded-[10px] bg-ember flex items-center justify-center flex-none">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
                 <path d="M3 4H21L15 12.5V20H9V12.5Z" fill="white"/>
               </svg>
@@ -37,7 +37,7 @@ function PrivacyPage() {
           </div>
           <h1 className="font-display text-[32px] font-bold text-hi tracking-[-0.5px] mb-3">Privacy Policy</h1>
           <p className="text-[14px] text-low">Last updated: July 2026</p>
-          <div className="mt-4 px-4 py-3 bg-[rgba(139,124,255,0.07)] border border-[rgba(139,124,255,0.18)] rounded-xl">
+          <div className="mt-4 px-4 py-3 bg-elevated border border-line-1 rounded-xl">
             <p className="text-[13.5px] text-muted leading-relaxed">
               This is a plain-language privacy policy written in good faith. It is not a legal document drafted by a lawyer.
               If you have questions, email <a href="mailto:navbir12345@gmail.com" className="text-accent hover:text-tag no-underline">navbir12345@gmail.com</a>.

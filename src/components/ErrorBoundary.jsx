@@ -53,7 +53,7 @@ class ErrorBoundary extends Component {
             <button
               type="button"
               onClick={() => window.location.reload()}
-              className="w-full py-2.5 rounded-xl bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] text-white text-[14px] font-semibold"
+              className="w-full py-2.5 rounded-xl bg-ember text-white text-[14px] font-semibold"
             >
               Reload Funnl
             </button>
