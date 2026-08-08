@@ -38,6 +38,7 @@ function test(name, fn) {
 
 const cp = readFileSync(resolve('src/components/CommandPalette.jsx'), 'utf8')
 const contacts = readFileSync(resolve('src/pages/ContactsPage.jsx'), 'utf8')
+  .replace(/\r\n/g, '\n')
 
 // ── handoffRef declared ────────────────────────────────────────────────────────
 

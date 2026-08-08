@@ -60,7 +60,7 @@ export default function GlobalAddContactController() {
     function handler(e) {
       if (!shouldOpenDrawer(openRef.current)) return  // already open — no stacking
       focusRestoreRef.current = document.activeElement
-      // Read optional name prefill from CommandPalette "Add X as contact" action.
+      // Read optional prefills from event detail.
       const name = e?.detail?.prefillName ?? null
       setPrefillName(typeof name === 'string' && name.trim() ? name.trim() : null)
       // Increment openKey to guarantee AddContactDrawer remounts on every open,

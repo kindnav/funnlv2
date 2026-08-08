@@ -32,7 +32,7 @@ function AddContactDrawer({ contact, contacts = [], onClose, onSuccess, initialN
   const navigate = useNavigate()
 
   // Form fields — pre-populated in edit mode; initialName pre-fills name in add mode
-  const [name,             setName]             = useState(contact?.name               ?? initialName ?? '')
+  const [name,             setName]             = useState(contact?.name               ?? initialName   ?? '')
   const [company,          setCompany]          = useState(contact?.company             ?? '')
   const [role,             setRole]             = useState(contact?.role                ?? '')
   const [howMet,           setHowMet]           = useState(contact?.how_met             ?? '')

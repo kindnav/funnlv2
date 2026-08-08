@@ -19,6 +19,7 @@ import {
   followUpLabel,
   buildRecentActivity,
 } from '../lib/dashboard-metrics'
+import { computeTopFirms } from '../lib/firmMetrics'
 import ContactPickerModal from '../components/ContactPickerModal'
 import { buildPickerNavigationState } from '../lib/contactPickerUtils'
 import { runMilestoneRecorder } from '../lib/milestoneRecorder'
@@ -49,72 +50,69 @@ const AI_WEEKLY_INSIGHT_ENABLED = false
 
 // ── Sub-components (module-level — not inside DashboardPage) ─────────────────
 
-function SignalRow({ signal, isLast }) {
-  const dotColor = signal.type === 'going_quiet'
-    ? 'var(--color-warning)'
-    : signal.type === 'responded'
-      ? 'var(--color-success)'
-      : 'var(--color-muted)'
+// ── Top Firms sub-components ──────────────────────────────────────────────────
 
-  const typeLabel = signal.type === 'going_quiet'
-    ? 'Going quiet'
-    : signal.type === 'responded'
-      ? signal.statusLabel
-      : 'No next step'
+function TopFirmsCard({ firms }) {
+  const shown = firms.slice(0, 3)
 
-  const typeLabelColor = signal.type === 'going_quiet'
-    ? 'var(--color-warning)'
-    : signal.type === 'responded'
-      ? 'var(--color-success)'
-      : 'var(--color-muted)'
-
-  const detail = signal.type === 'going_quiet'
-    ? `${signal.daysSince}d since last touchpoint`
-    : signal.type === 'responded'
-      ? `${signal.daysSince}d ago`
-      : `${signal.daysSince}d ago, no follow-up set`
-
-  return (
-    <Link
-      to={signal.href}
-      className={`flex items-center gap-[12px] px-[18px] py-[12px] no-underline transition-colors${!isLast ? ' border-b border-line-1' : ''}`}
-      onMouseEnter={e => e.currentTarget.style.background = 'rgba(20,17,15,0.03)'}
-      onMouseLeave={e => e.currentTarget.style.background = ''}
-    >
-      <div
-        className="w-[34px] h-[34px] rounded-[9px] flex items-center justify-center text-[12px] font-bold flex-none"
-        style={{ background: getAvatarColor(signal.contact.name), color: 'var(--color-paper)' }}
-      >
-        {getInitials(signal.contact.name)}
-      </div>
-      <div className="flex-1 min-w-0">
-        <p className="text-[13px] font-semibold truncate" style={{ color: 'var(--color-hi)' }}>
-          {signal.contact.name}
-        </p>
-        <div className="flex items-center gap-[5px] mt-[2px]">
-          <span
-            className="w-[5px] h-[5px] rounded-full flex-none"
-            style={{ background: dotColor }}
-            aria-hidden="true"
-          />
-          <span className="text-[10.5px] font-mono font-medium" style={{ color: typeLabelColor }}>
-            {typeLabel}
-          </span>
-          <span style={{ color: 'var(--color-line-3)' }} aria-hidden="true">·</span>
-          <span className="text-[10.5px] font-mono" style={{ color: 'var(--color-muted)' }}>
-            {detail}
-          </span>
+  if (shown.length === 0) {
+    return (
+      <div className="rounded-[14px] border border-line-2 overflow-hidden" style={{ background: 'var(--color-card)' }}>
+        <div className="px-[16px] py-[11px] border-b border-line-1">
+          <h3 className="text-[12.5px] font-semibold" style={{ color: 'var(--color-hi)' }}>Top firms</h3>
+        </div>
+        <div className="px-[16px] py-[14px]">
+          <p className="text-[12px]" style={{ color: 'var(--color-muted)' }}>No firm activity yet.</p>
+          <p className="text-[11px] mt-[3px]" style={{ color: 'var(--color-low)' }}>
+            Add company names to your contacts to see them here.
+          </p>
         </div>
       </div>
-      {(signal.contact.company || signal.contact.role) && (
-        <p
-          className="text-[11px] truncate flex-none hidden md:block max-w-[90px]"
-          style={{ color: 'var(--color-low)' }}
+    )
+  }
+
+  return (
+    <div className="rounded-[14px] border border-line-2 overflow-hidden" style={{ background: 'var(--color-card)' }}>
+      <div className="px-[16px] py-[11px] flex items-center justify-between border-b border-line-1">
+        <h3 className="text-[12.5px] font-semibold" style={{ color: 'var(--color-hi)' }}>Top firms</h3>
+        <Link
+          to="/contacts"
+          className="text-[11px] font-semibold no-underline"
+          style={{ color: 'var(--color-accent)' }}
         >
-          {signal.contact.company || signal.contact.role}
-        </p>
-      )}
-    </Link>
+          View contacts
+        </Link>
+      </div>
+      <div>
+        {shown.map((f, i) => (
+          <Link
+            key={f.firm}
+            to={`/contacts?search=${encodeURIComponent(f.firm)}`}
+            className="flex items-center justify-between px-[16px] no-underline"
+            style={{
+              paddingTop: '10px',
+              paddingBottom: '10px',
+              borderBottom: i < shown.length - 1 ? '1px solid var(--color-line-1)' : undefined,
+            }}
+          >
+            <span
+              className="text-[12.5px] font-medium truncate mr-[8px]"
+              style={{ color: 'var(--color-hi)' }}
+            >
+              {f.firm}
+            </span>
+            <span
+              className="text-[11px] font-mono flex-none whitespace-nowrap"
+              style={{ color: 'var(--color-muted)' }}
+            >
+              {f.spokenWithCount > 0
+                ? `${f.spokenWithCount} spoken with`
+                : `${f.contactsCount} contact${f.contactsCount !== 1 ? 's' : ''}`}
+            </span>
+          </Link>
+        ))}
+      </div>
+    </div>
   )
 }
 
@@ -420,6 +418,7 @@ function DashboardPage() {
   const [loading,               setLoading]               = useState(true)
   const [fetchError,            setFetchError]            = useState('')
   const [contacts,              setContacts]              = useState([])
+  const [topFirms,              setTopFirms]              = useState([])
   const [showImportModal,       setShowImportModal]       = useState(false)
   // null | 'interaction' | 'followup' — which quick action triggered the contact picker
   const [pickerMode,            setPickerMode]            = useState(null)
@@ -482,6 +481,7 @@ function DashboardPage() {
         setContactCount(0)
         setInteractionCount(0)
         setHasFollowUp(false)
+        setTopFirms([])
         setUid(newUid)
         prevUidRef.current = newUid
       }
@@ -532,6 +532,7 @@ function DashboardPage() {
         setContactCount(0)
         setInteractionCount(0)
         setHasFollowUp(false)
+        setTopFirms([])
       }
       prevUidRef.current = resolvedUid
       setUid(resolvedUid)
@@ -608,6 +609,10 @@ function DashboardPage() {
     // ── Recent activity: combined contacts + interactions, newest first ────────
     const recent = buildRecentActivity(contacts, interactions, contactMap)
 
+    // ── Top firms ────────────────────────────────────────────────────────────
+    // Computed here while interactions is still in scope (it's a local const).
+    const firms = computeTopFirms(contacts, interactions)
+
     // ── Commit state ──────────────────────────────────────────────────────────
     setContacts(contacts)
     setContactCount(cCount)
@@ -621,6 +626,7 @@ function DashboardPage() {
     setTopTag(tag)
     setSignals(sigs)
     setRecentActivity(recent)
+    setTopFirms(firms)
 
     const ms = {
       fiveContacts:     profileData?.activation_five_contacts_at     ?? null,
@@ -1015,44 +1021,6 @@ function DashboardPage() {
               </div>
             </div>
 
-            {/* Relationship signals — rule-based, all users */}
-            <div
-              className="rounded-[14px] border border-line-2 overflow-hidden"
-              style={{ background: 'var(--color-card)' }}
-            >
-              <div className="px-[18px] py-[13px] flex items-center justify-between border-b border-line-1">
-                <h3 className="text-[13px] font-semibold" style={{ color: 'var(--color-hi)' }}>
-                  Relationship signals
-                </h3>
-                <Link
-                  to="/contacts"
-                  className="text-[11.5px] font-semibold no-underline"
-                  style={{ color: 'var(--color-accent)' }}
-                >
-                  View all
-                </Link>
-              </div>
-              {signals.length === 0 ? (
-                <div className="px-[18px] py-[20px] text-center">
-                  <p className="text-[13px]" style={{ color: 'var(--color-muted)' }}>
-                    {interactionCount === 0
-                      ? 'Log interactions to see relationship signals.'
-                      : 'Your relationships are in good shape.'}
-                  </p>
-                </div>
-              ) : (
-                <div>
-                  {signals.map((signal, i) => (
-                    <SignalRow
-                      key={`${signal.contact.id}-${signal.type}`}
-                      signal={signal}
-                      isLast={i === signals.length - 1}
-                    />
-                  ))}
-                </div>
-              )}
-            </div>
-
             {/* Recent activity: contacts added + interactions, combined */}
             {recentActivity.length > 0 && (
               <div
@@ -1154,6 +1122,9 @@ function DashboardPage() {
                 </>
               )}
             </div>
+
+            {/* Top firms — compact secondary telemetry */}
+            <TopFirmsCard firms={topFirms} />
 
             {/* Quick actions — Log an interaction, Create a follow-up, Import contacts */}
             <div

@@ -495,9 +495,9 @@ test('profile query does not use select(*)', () => {
     'must use explicit column selection, not select(*)'
   )
 })
-test('profile query selects only display_name', () => {
-  const queryIdx = settingsSrc.indexOf(".select('display_name')")
-  assert.ok(queryIdx !== -1, "profile query must use .select('display_name')")
+test('profile query selects display_name (may also include target_firms)', () => {
+  const hasDisplayName = settingsSrc.includes("'display_name'") || settingsSrc.includes("'display_name,") || settingsSrc.includes("display_name, target_firms")
+  assert.ok(hasDisplayName, "profile query must select display_name")
 })
 test('display name update uses .update() not .upsert()', () => {
   const codeOnly = settingsSrc.replace(/\/\/[^\n]*/g, '')

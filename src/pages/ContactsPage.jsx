@@ -373,7 +373,7 @@ function ContactsPage() {
   const [loading, setLoading] = useState(true)
   const [fetchError, setFetchError] = useState('')
   const [importOpen, setImportOpen] = useState(false)
-  const [searchQuery, setSearchQuery] = useState('')
+  const [searchQuery, setSearchQuery] = useState(() => new URLSearchParams(location.search).get('search') || '')
   const [expandedId, setExpandedId] = useState(null)
 
   // Individual contact delete
@@ -387,10 +387,15 @@ function ContactsPage() {
   const [deletingAll, setDeletingAll] = useState(false)
   const [deleteAllError, setDeleteAllError] = useState('')
 
-  // URL-based state: ?tag= and ?sort=
+  // URL-based state: ?tag=, ?sort=, and ?search= (one-way: URL → state only)
   const [searchParams, setSearchParams] = useSearchParams()
   const activeTag = searchParams.get('tag') || ''
   const activeSort = parseSortParam(searchParams.get('sort'))
+
+  // Sync searchQuery when ?search= param changes (e.g. arriving from Dashboard firm row).
+  // User typing does NOT write back to the URL — typing updates local state only.
+  const searchURLParam = searchParams.get('search') || ''
+  useEffect(() => { setSearchQuery(searchURLParam) }, [searchURLParam])
 
   function setActiveTag(tag) {
     setSearchParams(prev => {

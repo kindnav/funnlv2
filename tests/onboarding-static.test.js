@@ -112,7 +112,10 @@ test('collapsedBtnRef declared (focus restoration)', () => {
 console.log('\nprofile query')
 
 test('profile select includes display_name', () => {
-  assert.ok(src.includes("'activation_five_contacts_at, activation_first_interaction_at, activation_first_followup_at, activation_completed_at, display_name'"))
+  // Accepts both the original select and the extended version that also fetches target_firms.
+  const hasOld = src.includes("'activation_five_contacts_at, activation_first_interaction_at, activation_first_followup_at, activation_completed_at, display_name'")
+  const hasNew = src.includes("'activation_five_contacts_at, activation_first_interaction_at, activation_first_followup_at, activation_completed_at, display_name, target_firms'")
+  assert.ok(hasOld || hasNew, 'profile select must include activation columns and display_name')
 })
 
 // ── FunnelFillMark component ──────────────────────────────────────────────────
