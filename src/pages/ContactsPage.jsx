@@ -406,7 +406,10 @@ function ContactsPage() {
   const [deleteAllError, setDeleteAllError] = useState('')
 
   // View toggle — persisted to localStorage
-  const [viewMode, setViewMode] = useState(() => localStorage.getItem('funnl_contacts_view') || 'directory')
+  const [viewMode, setViewMode] = useState(() => {
+    const stored = localStorage.getItem('funnl_contacts_view')
+    return stored === 'table' ? 'table' : 'directory'
+  })
   const [tableSortCol, setTableSortCol] = useState(null)
   const [tableSortDir, setTableSortDir] = useState('asc')
 

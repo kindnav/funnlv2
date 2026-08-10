@@ -182,6 +182,23 @@ await atest('success fires followup_completed with log_result method when overri
   assert.deepStrictEqual(tracked[0].props, { method: 'log_result' })
 })
 
+await atest('invalid method value defaults to mark_done in analytics', async () => {
+  const { row, deps, tracked, getPayload } = successDeps()
+  await completeFollowUp(row, { ...deps, method: 'some_invalid_value' })
+  assert.strictEqual(tracked.length, 1)
+  assert.deepStrictEqual(tracked[0].props, { method: 'mark_done' })
+  assert.strictEqual(getPayload().follow_up_completion_method, 'mark_done')
+})
+
+await atest('missing method key defaults to mark_done in analytics', async () => {
+  const { row, deps, tracked, getPayload } = successDeps()
+  const { method: _omitted, ...depsWithoutMethod } = deps
+  await completeFollowUp(row, depsWithoutMethod)
+  assert.strictEqual(tracked.length, 1)
+  assert.deepStrictEqual(tracked[0].props, { method: 'mark_done' })
+  assert.strictEqual(getPayload().follow_up_completion_method, 'mark_done')
+})
+
 await atest('success dispatches funnl:followups-changed', async () => {
   const { row, deps, dispatched } = successDeps()
   await completeFollowUp(row, deps)
