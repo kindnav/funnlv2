@@ -440,7 +440,7 @@ function ContactDetailPage() {
         loggedWarningTimerRef.current = setTimeout(() => setLoggedWarning(''), 8000)
       } else {
         window.dispatchEvent(new Event('funnl:followups-changed'))
-        track('followup_completed')
+        track('followup_completed', { method: 'log_result' })
       }
     }
 

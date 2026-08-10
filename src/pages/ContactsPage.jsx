@@ -358,6 +358,24 @@ function DirectoryRow({ entry, expanded, onToggleExpand, onDeleteRequest }) {
 
 // ── ContactsPage ──────────────────────────────────────────────────────────────
 
+const TABLE_COLS = [
+  { key: 'name',              label: 'Name',         sortable: true },
+  { key: 'company',           label: 'Company',      sortable: true },
+  { key: 'role',              label: 'Role',         sortable: true },
+  { key: 'relationship_type', label: 'Relationship', sortable: true },
+  { key: 'tags',              label: 'Tags',         sortable: false },
+]
+
+function sortByColumn(entries, col, dir) {
+  if (!col) return entries
+  return [...entries].sort((a, b) => {
+    const aVal = col === 'tags' ? ((a.tags || [])[0] || '') : (a[col] || '')
+    const bVal = col === 'tags' ? ((b.tags || [])[0] || '') : (b[col] || '')
+    const cmp = aVal.toString().toLowerCase().localeCompare(bVal.toString().toLowerCase())
+    return dir === 'asc' ? cmp : -cmp
+  })
+}
+
 const SORT_LABELS = {
   attention: 'Needs attention',
   active: 'Recently active',
@@ -387,6 +405,11 @@ function ContactsPage() {
   const [deletingAll, setDeletingAll] = useState(false)
   const [deleteAllError, setDeleteAllError] = useState('')
 
+  // View toggle — persisted to localStorage
+  const [viewMode, setViewMode] = useState(() => localStorage.getItem('funnl_contacts_view') || 'directory')
+  const [tableSortCol, setTableSortCol] = useState(null)
+  const [tableSortDir, setTableSortDir] = useState('asc')
+
   // URL-based state: ?tag=, ?sort=, and ?search= (one-way: URL → state only)
   const [searchParams, setSearchParams] = useSearchParams()
   const activeTag = searchParams.get('tag') || ''
@@ -411,6 +434,22 @@ function ContactsPage() {
       if (sort && sort !== 'attention') next.set('sort', sort); else next.delete('sort')
       return next
     })
+  }
+
+  function handleViewChange(mode) {
+    setViewMode(mode)
+    setTableSortCol(null)
+    setTableSortDir('asc')
+    localStorage.setItem('funnl_contacts_view', mode)
+  }
+
+  function handleTableSort(col) {
+    if (tableSortCol === col) {
+      setTableSortDir(d => d === 'asc' ? 'desc' : 'asc')
+    } else {
+      setTableSortCol(col)
+      setTableSortDir('asc')
+    }
   }
 
   // Auto-open import modal when navigating via ?import=1.
@@ -514,6 +553,7 @@ function ContactsPage() {
     : sorted
 
   const displayCount = (searchQuery.trim() || activeTag || importBatchIds) ? displayEntries.length : contacts.length
+  const tableEntries = sortByColumn(displayEntries, tableSortCol, tableSortDir)
 
   return (
     <div className="min-h-screen bg-surface">
@@ -578,20 +618,55 @@ function ContactsPage() {
             )}
           </div>
 
-          {/* Sort selector */}
-          <select
-            value={activeSort}
-            onChange={e => setActiveSort(e.target.value)}
-            className="h-[38px] pl-[10px] pr-[28px] rounded-[9px] border border-line-2 text-[12.5px] font-medium outline-none cursor-pointer appearance-none transition-colors hover:border-line-3"
-            style={{
-              background: `var(--color-elevated) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%239A9AA5' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E") no-repeat right 8px center`,
-              color: 'var(--color-mid)',
-            }}
-          >
-            {Object.entries(SORT_LABELS).map(([val, label]) => (
-              <option key={val} value={val}>{label}</option>
-            ))}
-          </select>
+          {/* Sort selector — hidden in table view (column headers handle sorting there) */}
+          {viewMode === 'directory' && (
+            <select
+              value={activeSort}
+              onChange={e => setActiveSort(e.target.value)}
+              className="h-[38px] pl-[10px] pr-[28px] rounded-[9px] border border-line-2 text-[12.5px] font-medium outline-none cursor-pointer appearance-none transition-colors hover:border-line-3"
+              style={{
+                background: `var(--color-elevated) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%239A9AA5' stroke-width='2' stroke-linecap='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E") no-repeat right 8px center`,
+                color: 'var(--color-mid)',
+              }}
+            >
+              {Object.entries(SORT_LABELS).map(([val, label]) => (
+                <option key={val} value={val}>{label}</option>
+              ))}
+            </select>
+          )}
+
+          {/* View toggle — directory / table */}
+          <div className="flex items-center rounded-[9px] p-[3px] gap-[2px] border border-line-2" style={{ background: 'var(--color-elevated)' }}>
+            <button
+              onClick={() => handleViewChange('directory')}
+              title="List view"
+              aria-label="List view"
+              className={`w-[30px] h-[26px] rounded-[7px] flex items-center justify-center transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 ${
+                viewMode === 'directory' ? 'text-ember' : 'text-low hover:text-mid'
+              }`}
+              style={viewMode === 'directory' ? { background: 'rgba(255,68,35,0.1)' } : {}}
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                <line x1="3" y1="6" x2="21" y2="6"/>
+                <line x1="3" y1="12" x2="21" y2="12"/>
+                <line x1="3" y1="18" x2="21" y2="18"/>
+              </svg>
+            </button>
+            <button
+              onClick={() => handleViewChange('table')}
+              title="Table view"
+              aria-label="Table view"
+              className={`w-[30px] h-[26px] rounded-[7px] flex items-center justify-center transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 ${
+                viewMode === 'table' ? 'text-ember' : 'text-low hover:text-mid'
+              }`}
+              style={viewMode === 'table' ? { background: 'rgba(255,68,35,0.1)' } : {}}
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/>
+                <rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/>
+              </svg>
+            </button>
+          </div>
         </div>
 
         {/* Tag filter pills */}
@@ -720,7 +795,118 @@ function ContactsPage() {
             </button>
           </div>
 
+        ) : viewMode === 'table' ? (
+
+          /* ── TABLE VIEW ── */
+          <div className="border-b border-line-1 overflow-x-auto">
+            <table className="w-full min-w-[580px]" style={{ borderCollapse: 'collapse' }}>
+              <thead>
+                <tr className="border-b border-line-1" style={{ background: 'var(--color-elevated)' }}>
+                  {TABLE_COLS.map(col => (
+                    <th
+                      key={col.key}
+                      onClick={() => col.sortable && handleTableSort(col.key)}
+                      className={`px-4 py-[10px] text-left text-[11px] font-bold tracking-[0.8px] font-mono uppercase select-none transition-colors ${
+                        col.sortable ? 'cursor-pointer' : ''
+                      } ${tableSortCol === col.key ? 'text-mid' : 'text-lower hover:text-mid'}`}
+                    >
+                      <span className="flex items-center gap-1">
+                        {col.label}
+                        {col.sortable && tableSortCol === col.key && (
+                          <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="var(--color-ember)" strokeWidth="2.8" strokeLinecap="round">
+                            {tableSortDir === 'asc'
+                              ? <polyline points="18 15 12 9 6 15"/>
+                              : <polyline points="6 9 12 15 18 9"/>
+                            }
+                          </svg>
+                        )}
+                      </span>
+                    </th>
+                  ))}
+                  {/* Actions column — blank header */}
+                  <th className="w-10 px-3" />
+                </tr>
+              </thead>
+              <tbody>
+                {tableEntries.map(entry => (
+                  <tr
+                    key={entry.id}
+                    onClick={() => navigate(`/contacts/${entry.id}`)}
+                    className="group border-b border-line-1 last:border-b-0 cursor-pointer hover:bg-elevated transition-colors"
+                  >
+                    {/* Name + mini avatar */}
+                    <td className="px-4 py-3">
+                      <div className="flex items-center gap-2.5">
+                        <div
+                          className="w-7 h-7 rounded-lg flex-none flex items-center justify-center text-[10px] font-bold"
+                          style={{ background: getAvatarColor(entry.name), color: 'var(--color-paper)' }}
+                        >
+                          {getInitials(entry.name)}
+                        </div>
+                        <span className="text-[13.5px] font-semibold text-hi">{entry.name}</span>
+                      </div>
+                    </td>
+                    {/* Company */}
+                    <td className="px-4 py-3 text-[13.5px] text-muted">
+                      {entry.company || <span className="text-lower">—</span>}
+                    </td>
+                    {/* Role */}
+                    <td className="px-4 py-3 text-[13.5px] text-muted">
+                      {entry.role || <span className="text-lower">—</span>}
+                    </td>
+                    {/* Relationship type */}
+                    <td className="px-4 py-3">
+                      {entry.relationship_type
+                        ? <span className="text-[12.5px] font-semibold" style={{ color: 'var(--color-ember)' }}>{entry.relationship_type}</span>
+                        : <span className="text-[13px] text-lower">—</span>
+                      }
+                    </td>
+                    {/* Tags */}
+                    <td className="px-4 py-3">
+                      {entry.tags?.length > 0
+                        ? <div className="flex flex-wrap gap-1">
+                            {entry.tags.slice(0, 3).map(tag => (
+                              <span
+                                key={tag}
+                                className="text-[11px] font-semibold px-[7px] py-[2px] rounded-full border border-line-2"
+                                style={{ background: 'var(--color-elevated)', color: 'var(--color-muted)' }}
+                              >
+                                {tag}
+                              </span>
+                            ))}
+                            {entry.tags.length > 3 && (
+                              <span className="text-[11px] text-low">+{entry.tags.length - 3}</span>
+                            )}
+                          </div>
+                        : <span className="text-[13px] text-lower">—</span>
+                      }
+                    </td>
+                    {/* Log interaction — hover-reveal */}
+                    <td className="px-3 py-3 w-10">
+                      <button
+                        onClick={e => {
+                          e.stopPropagation()
+                          navigate(`/contacts/${entry.id}`, { state: { openInteractionForm: true } })
+                        }}
+                        title="Log interaction"
+                        aria-label={`Log interaction with ${entry.name}`}
+                        className="w-7 h-7 rounded-lg flex items-center justify-center border border-line-2 text-low hover:text-ember hover:border-line-3 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1"
+                        style={{ background: 'var(--color-card)' }}
+                      >
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
+                          <path d="M12 5v14M5 12h14"/>
+                        </svg>
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
         ) : (
+
+          /* ── DIRECTORY VIEW ── */
           <div className="border-b border-line-1">
             {displayEntries.map(entry => (
               <DirectoryRow

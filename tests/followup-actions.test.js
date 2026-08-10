@@ -166,12 +166,20 @@ await atest('DB update happens before analytics', async () => {
   assert.strictEqual(order[2], 'dispatch', 'dispatch after analytics')
 })
 
-await atest('success fires property-free followup_completed', async () => {
+await atest('success fires followup_completed with method property', async () => {
   const { row, deps, tracked } = successDeps()
   await completeFollowUp(row, deps)
   assert.strictEqual(tracked.length, 1)
   assert.strictEqual(tracked[0].ev, 'followup_completed')
-  assert.strictEqual(tracked[0].props, undefined)
+  assert.deepStrictEqual(tracked[0].props, { method: 'mark_done' })
+})
+
+await atest('success fires followup_completed with log_result method when overridden', async () => {
+  const { row, deps, tracked } = successDeps()
+  await completeFollowUp(row, { ...deps, method: 'log_result' })
+  assert.strictEqual(tracked.length, 1)
+  assert.strictEqual(tracked[0].ev, 'followup_completed')
+  assert.deepStrictEqual(tracked[0].props, { method: 'log_result' })
 })
 
 await atest('success dispatches funnl:followups-changed', async () => {

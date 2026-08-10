@@ -52,7 +52,7 @@ export async function completeFollowUp(interaction, deps = {}) {
   if (error || !data?.id) {
     return { ok: false, errorMessage: error?.message || 'Update failed' }
   }
-  track('followup_completed')
+  track('followup_completed', { method })
   dispatch()
   return { ok: true, errorMessage: null }
 }

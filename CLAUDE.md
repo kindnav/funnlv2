@@ -63,7 +63,7 @@ src/
     ImportContactsModal.jsx  3-step CSV import modal (upload → map → confirm). Two-pass header detection (Pass 1: header:false arrays → detectHeaderRow() finds real header, skipping preamble rows; Pass 2: reconstruct keyed objects from header row onward). Handles LinkedIn Connections exports (preamble + 'URL' column value-sniffed → linkedin_url when values contain linkedin.com). Shows teal detection banner in Step 2. Pro users get ai-map-csv Edge Function call on unresolved columns only (deterministic mappings take precedence). transformRow() applies the final assignment to all rows.
   pages/
     DashboardPage.jsx      Landing screen after login: stats, follow-ups due, recent contacts
-    ContactsPage.jsx       Contacts grid + search (name/company/role/tag/skill) + URL-based tag filter (?tag=recruiter)
+    ContactsPage.jsx       Contacts directory/table + search (name/company/role/tag) + URL-based tag filter (?tag=recruiter) + view toggle (directory/table, persisted to localStorage funnl_contacts_view). Table view has sortable columns (Name, Company, Role, Relationship) and Log Interaction hover-reveal button per row. Directory view is default.
     ContactDetailPage.jsx  Full contact profile: two-column on desktop, stacked on mobile
     LandingPage.jsx        Public marketing page at /; visible to logged-out users only; 11 sections; 3 tracked CTAs (nav/hero/bottom)
     SettingsPage.jsx       Account-card layout: display name input + Save; read-only email + joined date; sign out. Desktop only for v1.
@@ -116,7 +116,7 @@ supabase/
 | Path | Component | Notes |
 |---|---|---|
 | `/` | DashboardPage | Landing screen after login; activation checklist shown until all 3 steps complete |
-| `/contacts` | ContactsPage | Grid + search + filter; `?tag=recruiter` drives filter pills |
+| `/contacts` | ContactsPage | Directory/table view + search + filter; `?tag=recruiter` drives filter pills; view toggle persists to `localStorage` |
 | `/contacts/:id` | ContactDetailPage | Full profile + interaction timeline |
 | `/followups` | FollowUpsPage | Real data — overdue/today/upcoming buckets; Mark Done, Snooze, Log Result complete |
 | `/ai` | FunnlAIPage | Working AI chat for Pro users; locked state for non-Pro |
@@ -144,7 +144,7 @@ supabase/
 | `contact_added` | AddContactDrawer after insert | `{ via_ai_fill, has_tags, has_relationship_type }` — booleans only | Overall usage |
 | `interaction_logged` | ContactDetailPage handleLogInteraction | `{ interaction_type, has_follow_up, has_notes }` — controlled enum + booleans | Core value / retention signal |
 | `followup_set` | ContactDetailPage handleLogInteraction (when followUpDate set) | none | Feature usage |
-| `followup_completed` | FollowUpsPage handleDone / ContactDetailPage handleLogInteraction (via Log Result) | none | Core loop closure |
+| `followup_completed` | FollowUpsPage handleDone / ContactDetailPage handleLogInteraction (via Log Result) | `{ method: 'mark_done'\|'log_result' }` — via `completeFollowUp` `deps.method`; Mark Done → `'mark_done'`, Log Result → `'log_result'` | Core loop closure |
 | `followup_snoozed` | FollowUpsPage handleSnooze | `{ option: 'tomorrow'\|'three_days'\|'one_week'\|'custom' }` — controlled enum only | Feature usage |
 | `csv_import_used` | ImportContactsModal handleImport | `{ contacts_imported: number, ai_assisted: boolean }` | Feature usage |
 | `ai_assistant_used` | FunnlAIPage sendMessage on success | none | AI feature usage |
@@ -375,6 +375,7 @@ The contacts page filter pills use `useSearchParams`. Active tag is stored as `?
 | Follow-up dates on interactions | ✅ (stored; displayed on dashboard and detail page) |
 | Search contacts by name, company, role, tag | ✅ |
 | Filter contacts by tag (URL-based) | ✅ |
+| **Contacts table/spreadsheet view** | ✅ View toggle (directory / table) in ContactsPage search bar. Table view has sortable columns: Name, Company, Role, Relationship. Tags column shown but not sortable (multi-value). Log Interaction hover-reveal button per row navigates to contact detail with `openInteractionForm: true`. View preference persisted to `localStorage` (`funnl_contacts_view`). Directory view is default. |
 | Dashboard with real stats + follow-up list | ✅ |
 | Add contact drawer (slide-in, Escape closes, scroll locked) | ✅ |
 | Per-user data isolation (RLS, two-user verified) | ✅ |
