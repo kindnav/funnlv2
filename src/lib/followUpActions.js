@@ -39,13 +39,12 @@ const VALID_COMPLETE_METHODS = new Set(['mark_done', 'log_result'])
 export async function completeFollowUp(interaction, deps = {}) {
   const {
     method: rawMethod = 'mark_done',
-    now      = new Date().toISOString(),
     client,
     track,
     dispatch,
   } = deps
   const method = VALID_COMPLETE_METHODS.has(rawMethod) ? rawMethod : 'mark_done'
-  const payload = completionPayload(interaction.follow_up_date, method, now)
+  const payload = completionPayload()
   const { data, error } = await client
     .from('interactions')
     .update(payload)
