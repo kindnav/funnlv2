@@ -113,16 +113,31 @@ function failDeps(extraRow = {}) {
 
 console.log('\ncompleteFollowUp — Done\n')
 
-await atest('clears follow_up_date on completion', async () => {
+await atest('builds completionPayload with current follow_up_date', async () => {
   const { row, deps, getPayload } = successDeps({ follow_up_date: '2026-07-25' })
   await completeFollowUp(row, deps)
-  assert.strictEqual(getPayload().follow_up_date, null, 'active date must be cleared')
+  const p = getPayload()
+  assert.strictEqual(p.follow_up_previous_date, '2026-07-25', 'previous_date should be the current date')
+  assert.strictEqual(p.follow_up_date, null, 'active date must be cleared')
+  assert.ok(p.follow_up_completed_at, 'completed_at must be set')
 })
 
-await atest('completion payload only sends confirmed columns', async () => {
+await atest('method defaults to mark_done', async () => {
   const { row, deps, getPayload } = successDeps()
   await completeFollowUp(row, deps)
-  assert.deepStrictEqual(Object.keys(getPayload()), ['follow_up_date'])
+  assert.strictEqual(getPayload().follow_up_completion_method, 'mark_done')
+})
+
+await atest('method can be overridden to log_result', async () => {
+  const { row, deps, getPayload } = successDeps()
+  await completeFollowUp(row, { ...deps, method: 'log_result' })
+  assert.strictEqual(getPayload().follow_up_completion_method, 'log_result')
+})
+
+await atest('null follow_up_date is preserved as previous_date null', async () => {
+  const { row, deps, getPayload } = successDeps({ follow_up_date: null })
+  await completeFollowUp(row, deps)
+  assert.strictEqual(getPayload().follow_up_previous_date, null)
 })
 
 await atest('DB update targets correct interaction ID', async () => {
@@ -168,18 +183,20 @@ await atest('success fires followup_completed with log_result method when overri
 })
 
 await atest('invalid method value defaults to mark_done in analytics', async () => {
-  const { row, deps, tracked } = successDeps()
+  const { row, deps, tracked, getPayload } = successDeps()
   await completeFollowUp(row, { ...deps, method: 'some_invalid_value' })
   assert.strictEqual(tracked.length, 1)
   assert.deepStrictEqual(tracked[0].props, { method: 'mark_done' })
+  assert.strictEqual(getPayload().follow_up_completion_method, 'mark_done')
 })
 
 await atest('missing method key defaults to mark_done in analytics', async () => {
-  const { row, deps, tracked } = successDeps()
+  const { row, deps, tracked, getPayload } = successDeps()
   const { method: _omitted, ...depsWithoutMethod } = deps
   await completeFollowUp(row, depsWithoutMethod)
   assert.strictEqual(tracked.length, 1)
   assert.deepStrictEqual(tracked[0].props, { method: 'mark_done' })
+  assert.strictEqual(getPayload().follow_up_completion_method, 'mark_done')
 })
 
 await atest('success dispatches funnl:followups-changed', async () => {
@@ -214,11 +231,11 @@ await atest('DB failure returns ok: false with error message', async () => {
   assert.ok(result.errorMessage.length > 0)
 })
 
-await atest('now param in deps does not appear in DB payload', async () => {
+await atest('now param is forwarded to completionPayload', async () => {
   const { row, deps, getPayload } = successDeps()
   const fixedNow = '2026-07-29T12:00:00.000Z'
   await completeFollowUp(row, { ...deps, now: fixedNow })
-  assert.strictEqual(getPayload().follow_up_completed_at, undefined)
+  assert.strictEqual(getPayload().follow_up_completed_at, fixedNow)
 })
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -262,10 +279,13 @@ await atest('empty custom date returns ok: false without DB call', async () => {
   assert.ok(!getCalls().includes('single'), 'DB must not be called for empty custom date')
 })
 
-await atest('snoozePayload only sends confirmed columns', async () => {
+await atest('snoozePayload clears all completion metadata', async () => {
   const { row, deps, getPayload } = successDeps()
   await snoozeFollowUp(row, 'tomorrow', '', TODAY, deps)
-  assert.deepStrictEqual(Object.keys(getPayload()), ['follow_up_date'])
+  const p = getPayload()
+  assert.strictEqual(p.follow_up_completed_at, null)
+  assert.strictEqual(p.follow_up_previous_date, null)
+  assert.strictEqual(p.follow_up_completion_method, null)
 })
 
 await atest('DB update happens before analytics', async () => {
@@ -345,7 +365,7 @@ await atest('restores follow_up_previous_date as the new follow_up_date', async 
   assert.strictEqual(capturedPayload.follow_up_date, '2026-07-20')
 })
 
-await atest('undo payload only sends confirmed columns', async () => {
+await atest('clears all completion metadata', async () => {
   const row = makeRow({ follow_up_previous_date: '2026-07-20', follow_up_completed_at: '2026-07-29T10:00:00Z', follow_up_completion_method: 'mark_done' })
   let capturedPayload = null
   const c = {
@@ -353,7 +373,9 @@ await atest('undo payload only sends confirmed columns', async () => {
     eq: () => c, select: () => c, single: async () => ({ data: { id: 'r' }, error: null }),
   }
   await undoFollowUp(row, { client: c, dispatch: () => {} })
-  assert.deepStrictEqual(Object.keys(capturedPayload), ['follow_up_date'])
+  assert.strictEqual(capturedPayload.follow_up_completed_at, null)
+  assert.strictEqual(capturedPayload.follow_up_previous_date, null)
+  assert.strictEqual(capturedPayload.follow_up_completion_method, null)
 })
 
 await atest('success dispatches funnl:followups-changed', async () => {
@@ -513,12 +535,14 @@ await atest('sets a new follow_up_date', async () => {
   assert.strictEqual(capturedPayload.follow_up_date, '2026-07-30')
 })
 
-await atest('nudge payload only sends confirmed columns', async () => {
+await atest('clears completion metadata', async () => {
   const row = makeRow({ follow_up_date: null, follow_up_completed_at: '2026-07-29T10:00:00Z', follow_up_completion_method: 'mark_done' })
   let capturedPayload = null
   const c = { from: () => c, update: (p) => { capturedPayload = p; return c }, eq: () => c, select: () => c, single: async () => ({ data: { id: 'r' }, error: null }) }
   await nudgeFollowUp(row, 'tomorrow', '', TODAY, { client: c, track: () => {}, dispatch: () => {} })
-  assert.deepStrictEqual(Object.keys(capturedPayload), ['follow_up_date'])
+  assert.strictEqual(capturedPayload.follow_up_completed_at, null)
+  assert.strictEqual(capturedPayload.follow_up_previous_date, null)
+  assert.strictEqual(capturedPayload.follow_up_completion_method, null)
 })
 
 await atest('fires followup_set (NOT followup_snoozed)', async () => {

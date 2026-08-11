@@ -8,6 +8,8 @@
  * Key invariants:
  *   - INSERT happens before source UPDATE
  *   - INSERT failure prevents source UPDATE (no orphan completion)
+ *   - source follow_up_date is preserved as previous_date (NOT the new date)
+ *   - completion_method = 'log_result'
  *   - follow_up_date cleared on source (null)
  *   - success fires followup_completed and dispatches event
  *   - INSERT failure fires no analytics, keeps source open
@@ -68,7 +70,7 @@ function makeNewInteractionData(overrides = {}) {
 
 // Simulate the Log Result two-phase handler (matching the expected ContactDetailPage pattern)
 async function simulateLogResult(srcInteraction, newInteractionData, deps = {}) {
-  const { client, track, dispatch } = deps
+  const { client, track, dispatch, now = new Date().toISOString() } = deps
   const order = []
 
   // Phase 1: Insert new interaction
@@ -79,7 +81,7 @@ async function simulateLogResult(srcInteraction, newInteractionData, deps = {}) 
   }
 
   // Phase 2: Complete the source interaction
-  const completePayload = completionPayload()
+  const completePayload = completionPayload(srcInteraction.follow_up_date, 'log_result', now)
   const updateResult = await client.update(completePayload, srcInteraction.id)
   order.push('update')
   if (updateResult.error || !updateResult.data?.id) {
@@ -122,15 +124,35 @@ function makeTestClient({ insertData = { id: 'new-1' }, insertError = null, upda
 
 // ── completionPayload contract ─────────────────────────────────────────────────
 
-console.log('\ncompletionPayload contract\n')
+console.log('\ncompletionPayload contract for log_result\n')
+
+test('method is log_result', () => {
+  const p = completionPayload('2026-07-25', 'log_result', '2026-07-29T10:00:00Z')
+  assert.strictEqual(p.follow_up_completion_method, 'log_result')
+})
 
 test('clears active follow_up_date (sets to null)', () => {
-  const p = completionPayload()
+  const p = completionPayload('2026-07-25', 'log_result', '2026-07-29T10:00:00Z')
   assert.strictEqual(p.follow_up_date, null)
 })
 
-test('only sends follow_up_date (no unconfirmed columns)', () => {
-  assert.deepStrictEqual(Object.keys(completionPayload()), ['follow_up_date'])
+test('preserves SOURCE follow_up_date as previous_date', () => {
+  const sourceDateIsPreserved = '2026-07-25'
+  const newInteractionDate = '2026-08-05'
+  const p = completionPayload(sourceDateIsPreserved, 'log_result', '2026-07-29T10:00:00Z')
+  assert.strictEqual(p.follow_up_previous_date, sourceDateIsPreserved)
+  assert.notStrictEqual(p.follow_up_previous_date, newInteractionDate)
+})
+
+test('sets follow_up_completed_at to the provided now timestamp', () => {
+  const fixedNow = '2026-07-29T12:00:00.000Z'
+  const p = completionPayload('2026-07-25', 'log_result', fixedNow)
+  assert.strictEqual(p.follow_up_completed_at, fixedNow)
+})
+
+test('null source date produces null previous_date', () => {
+  const p = completionPayload(null, 'log_result', '2026-07-29T10:00:00Z')
+  assert.strictEqual(p.follow_up_previous_date, null)
 })
 
 // ── Two-phase ordering ────────────────────────────────────────────────────────
@@ -189,20 +211,21 @@ await atest('successful INSERT retained if source completion fails', async () =>
   assert.strictEqual(result.partialSuccess, true, 'partial success flag indicates new interaction was saved')
 })
 
-// ── Completion payload shape ──────────────────────────────────────────────────
+// ── Source date preservation ──────────────────────────────────────────────────
 
-console.log('\nCompletion payload only sends confirmed columns\n')
+console.log('\nSource date preserved as previous_date\n')
 
-await atest('completion payload only contains follow_up_date', async () => {
+await atest('source follow_up_date used as previous_date in completion payload', async () => {
   const { client, getUpdatePayloads } = makeTestClient()
+  const sourceDate = '2026-07-15'
   await simulateLogResult(
-    makeSourceInteraction({ follow_up_date: '2026-07-15' }),
+    makeSourceInteraction({ follow_up_date: sourceDate }),
     makeNewInteractionData({ follow_up_date: '2026-08-10' }),
     { client, track: () => {}, dispatch: () => {} }
   )
   const payload = getUpdatePayloads()[0]
-  assert.deepStrictEqual(Object.keys(payload), ['follow_up_date'])
-  assert.strictEqual(payload.follow_up_date, null)
+  assert.strictEqual(payload.follow_up_previous_date, sourceDate, 'must use SOURCE date not new date')
+  assert.notStrictEqual(payload.follow_up_previous_date, '2026-08-10')
 })
 
 await atest('completion payload targets source interaction ID', async () => {

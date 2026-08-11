@@ -217,9 +217,19 @@ supabase/
 | `notes` | text | Freeform — the heart of the app |
 | `follow_up_date` | date | Optional — drives dashboard and sidebar badge |
 | `outreach_status` | text | Optional — one of: awaiting_response \| responded \| meeting_booked \| no_response \| declined. Named CHECK constraint `interactions_outreach_status_check`. Migration applied to production 2026-07-24. |
+| `follow_up_completed_at` | timestamptz | Nullable — set to current UTC timestamp when a follow-up is marked Done or completed via Log Result. Cleared to NULL on Undo or Snooze. Used by `/followups` to classify rows into the "Recently Completed" section (within 7 local calendar days). Migration applied to production 2026-07-29. |
+| `follow_up_previous_date` | date | Nullable — stores the original `follow_up_date` value at the moment of completion, so Undo can restore it exactly. Cleared to NULL on Undo or Snooze. Migration applied to production 2026-07-29. |
+| `follow_up_completion_method` | text | Nullable — one of `mark_done` \| `log_result`. Named CHECK constraint `interactions_follow_up_completion_method_check`. Records how the follow-up was completed. Cleared to NULL on Undo or Snooze. Migration applied to production 2026-07-29. |
 | `created_at` | timestamptz | Auto-set |
 
 **Relationship:** one contact → many interactions. Deleting a contact cascades to delete all their interactions.
+
+**Follow-up completion lifecycle:**
+- **Mark Done / Log Result (complete):** `follow_up_date → null`, `follow_up_completed_at → now()`, `follow_up_previous_date → previous follow_up_date`, `follow_up_completion_method → 'mark_done' | 'log_result'`. All four fields updated atomically in one DB update. Row then appears in "Recently Completed" section on `/followups` for 7 local calendar days.
+- **Undo:** `follow_up_date → restored from follow_up_previous_date`, `follow_up_completed_at → null`, `follow_up_previous_date → null`, `follow_up_completion_method → null`. Row returns to its previous open state.
+- **Snooze / Nudge:** `follow_up_date → new date`, all three completion fields cleared to null. Snooze on a completed row removes it from Recently Completed and puts it back as an open upcoming follow-up.
+- **Analytics:** `track('followup_completed', { method: 'mark_done' | 'log_result' })` fires on success only, after DB update. No analytics for Undo.
+- **Method allowlist:** `completeFollowUp` accepts `mark_done` or `log_result`. Any invalid or missing method defaults safely to `mark_done` before the DB update and before analytics.
 
 ### `profiles`
 | Column | Type | Notes |
@@ -238,6 +248,7 @@ supabase/
 - `supabase/migrations/20260713075431_add_activation_milestones.sql` — adds the four activation timestamp columns above to `profiles`, with backfill SQL for existing users. Applied to production 2026-07-13.
 - `supabase/migrations/20260713185900_harden_handle_new_user.sql` — revokes EXECUTE on `public.handle_new_user()` from `PUBLIC`, `anon`, and `authenticated`. Applied to production 2026-07-13 via `supabase db push`. Post-migration verification: PUBLIC absent from explicit ACL; `anon` and `authenticated` effective execute = false; trigger `on_auth_user_created` still enabled; function owner, SECURITY DEFINER, and search_path unchanged. Requires a real signup/profile creation test to confirm trigger path is unaffected.
 - `supabase/migrations/20260721000000_add_outreach_status.sql` — adds nullable `outreach_status text` column to `public.interactions` with named CHECK constraint `interactions_outreach_status_check` (five allowed values). Applied to production 2026-07-24 via `supabase db push --linked`. Column verified: text, nullable YES, no default. Constraint verified: correct five-value check, NULL permitted. Existing 5 interaction rows unaffected (all `outreach_status = NULL`). RLS and all four ownership policies verified unchanged.
+- `supabase/migrations/20260729000000_add_followup_completion.sql` — adds nullable `follow_up_completed_at timestamptz`, `follow_up_previous_date date`, and `follow_up_completion_method text` columns to `public.interactions`, with named CHECK constraint `interactions_follow_up_completion_method_check` (allowed values: `mark_done`, `log_result`). Applied to production 2026-07-29. Powers the "Recently Completed" section, Undo, and completion-method tracking on `/followups`.
 - `supabase/migrations/20260727000000_add_pro_trials.sql` — creates `public.pro_trials` table with explicit REVOKE/GRANT hardening (no INSERT/UPDATE/DELETE for authenticated), updates `handle_new_user()` to also create a trial eligibility row on signup (auto-confirmed accounts start trial immediately; normal flow starts with NULL/NULL), adds `on_email_confirmed` DB trigger (`AFTER UPDATE OF email_confirmed_at ON auth.users`) that activates the trial on the NULL→non-NULL transition, and creates two RPCs: `start_my_pro_trial()` (SECURITY DEFINER, recovery mechanism only) and `get_my_pro_access_status()` (SECURITY INVOKER, server-authoritative entitlement using DB clock). All functions use `SET search_path = ''` with fully qualified object names. **NOT YET APPLIED to production** — branch `review/pro-trial-7-days`, Draft PR #23 pending. Do not apply without explicit approval.
 
 **Pro trial production rollout order (do not deviate):**

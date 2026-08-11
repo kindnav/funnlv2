@@ -298,48 +298,54 @@ export function waitingCopy(count) {
 /**
  * Payload for completing a follow-up (Done or Log Result).
  *
- * Clears the active follow_up_date. Additional completion metadata columns
- * (follow_up_completed_at, follow_up_previous_date, follow_up_completion_method)
- * will be included once migration 20260729000000_add_followup_completion.sql
- * is confirmed applied to production.
+ * Preserves the previous follow-up date for Undo, sets the completion
+ * timestamp, records the method, and clears the active date.
  *
+ * @param {string|null} currentFollowUpDate  Current follow_up_date (YYYY-MM-DD or null)
+ * @param {'mark_done'|'log_result'} method
+ * @param {string} nowISO  Current UTC timestamp as ISO string (new Date().toISOString())
  * @returns {object}
  */
-export function completionPayload() {
+export function completionPayload(currentFollowUpDate, method, nowISO) {
   return {
-    follow_up_date: null,
+    follow_up_previous_date:    currentFollowUpDate || null,
+    follow_up_completed_at:     nowISO,
+    follow_up_completion_method: method,
+    follow_up_date:             null,
   }
 }
 
 /**
  * Payload for undoing a completion.
  *
- * Restores the exact previous date. Additional completion metadata columns
- * will be cleared here once migration 20260729000000_add_followup_completion.sql
- * is confirmed applied to production.
+ * Restores the exact previous date; clears all completion metadata.
  *
  * @param {string|null} previousDate  follow_up_previous_date from the row
  * @returns {object}
  */
 export function undoPayload(previousDate) {
   return {
-    follow_up_date: previousDate || null,
+    follow_up_date:             previousDate || null,
+    follow_up_previous_date:    null,
+    follow_up_completed_at:     null,
+    follow_up_completion_method: null,
   }
 }
 
 /**
  * Payload fields that clear stale completion metadata.
  *
- * Returns empty until migration 20260729000000_add_followup_completion.sql
- * is confirmed applied to production. After that, restore:
- *   follow_up_completed_at:      null,
- *   follow_up_previous_date:     null,
- *   follow_up_completion_method: null,
+ * Merge these into any update that sets a new active follow_up_date
+ * (Snooze, Nudge, new interaction with date, interaction edit with date).
  *
  * @returns {object}
  */
 export function clearCompletionFields() {
-  return {}
+  return {
+    follow_up_completed_at:     null,
+    follow_up_previous_date:    null,
+    follow_up_completion_method: null,
+  }
 }
 
 /**

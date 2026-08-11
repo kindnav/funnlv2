@@ -472,13 +472,35 @@ test('ten → plural copy', () => {
 
 console.log('\ncompletionPayload\n')
 
-test('clears active follow_up_date', () => {
-  assert.strictEqual(completionPayload().follow_up_date, null)
+test('preserves current date as previous_date', () => {
+  const p = completionPayload('2026-07-28', 'mark_done', '2026-07-29T10:00:00Z')
+  assert.strictEqual(p.follow_up_previous_date, '2026-07-28')
 })
 
-test('only sends follow_up_date field (no unconfirmed columns)', () => {
-  const keys = Object.keys(completionPayload())
-  assert.deepStrictEqual(keys, ['follow_up_date'])
+test('clears active follow_up_date', () => {
+  const p = completionPayload('2026-07-28', 'mark_done', '2026-07-29T10:00:00Z')
+  assert.strictEqual(p.follow_up_date, null)
+})
+
+test('sets completion timestamp', () => {
+  const now = '2026-07-29T10:00:00Z'
+  const p = completionPayload('2026-07-28', 'mark_done', now)
+  assert.strictEqual(p.follow_up_completed_at, now)
+})
+
+test('method mark_done', () => {
+  const p = completionPayload('2026-07-28', 'mark_done', '2026-07-29T10:00:00Z')
+  assert.strictEqual(p.follow_up_completion_method, 'mark_done')
+})
+
+test('method log_result', () => {
+  const p = completionPayload('2026-07-28', 'log_result', '2026-07-29T10:00:00Z')
+  assert.strictEqual(p.follow_up_completion_method, 'log_result')
+})
+
+test('null currentFollowUpDate → previous_date is null', () => {
+  const p = completionPayload(null, 'mark_done', '2026-07-29T10:00:00Z')
+  assert.strictEqual(p.follow_up_previous_date, null)
 })
 
 // ── undoPayload ───────────────────────────────────────────────────────────────
@@ -490,14 +512,21 @@ test('restores exact previous date', () => {
   assert.strictEqual(p.follow_up_date, '2026-07-28')
 })
 
+test('clears completed_at', () => {
+  assert.strictEqual(undoPayload('2026-07-28').follow_up_completed_at, null)
+})
+
+test('clears previous_date', () => {
+  assert.strictEqual(undoPayload('2026-07-28').follow_up_previous_date, null)
+})
+
+test('clears completion method', () => {
+  assert.strictEqual(undoPayload('2026-07-28').follow_up_completion_method, null)
+})
+
 test('null previousDate → follow_up_date is null (safe guard)', () => {
   const p = undoPayload(null)
   assert.strictEqual(p.follow_up_date, null)
-})
-
-test('only sends follow_up_date field (no unconfirmed columns)', () => {
-  const keys = Object.keys(undoPayload('2026-07-28'))
-  assert.deepStrictEqual(keys, ['follow_up_date'])
 })
 
 // ── snoozePayload ─────────────────────────────────────────────────────────────
@@ -508,9 +537,11 @@ test('sets new date', () => {
   assert.strictEqual(snoozePayload('2026-08-01').follow_up_date, '2026-08-01')
 })
 
-test('only sends follow_up_date field (no unconfirmed columns)', () => {
-  const keys = Object.keys(snoozePayload('2026-08-01'))
-  assert.deepStrictEqual(keys, ['follow_up_date'])
+test('clears completion metadata', () => {
+  const p = snoozePayload('2026-08-01')
+  assert.strictEqual(p.follow_up_completed_at, null)
+  assert.strictEqual(p.follow_up_previous_date, null)
+  assert.strictEqual(p.follow_up_completion_method, null)
 })
 
 // ── isBadgeEligible ───────────────────────────────────────────────────────────
@@ -611,8 +642,11 @@ test('null → empty string', () => {
 
 console.log('\nclearCompletionFields\n')
 
-test('returns empty object (unconfirmed columns not sent)', () => {
-  assert.deepStrictEqual(clearCompletionFields(), {})
+test('returns all three null fields', () => {
+  const f = clearCompletionFields()
+  assert.strictEqual(f.follow_up_completed_at, null)
+  assert.strictEqual(f.follow_up_previous_date, null)
+  assert.strictEqual(f.follow_up_completion_method, null)
 })
 
 // ── Summary ───────────────────────────────────────────────────────────────────
