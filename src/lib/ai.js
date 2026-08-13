@@ -7,17 +7,17 @@ export { isTrialActive, computeTrialStatus }
 
 // ── Pro entitlement ────────────────────────────────────────────────────────────
 //
-// Effective Pro = permanent_pro (ai_enabled=true) OR an active trial.
-// ai_enabled is NEVER set to true for trial users — those paths are separate.
+// Effective Pro = permanent_pro (ai_enabled=true) OR active Stripe subscription
+// OR active 7-day trial. ai_enabled is NEVER set to true for trial/subscription
+// users — those paths are separate.
 //
-// canUseAI() is the frontend Stripe-ready seam: every UI gate calls this.
+// canUseAI() is the frontend seam: every UI gate calls this.
 // The authoritative check is always the server (Edge Functions call the shared
 // pro-entitlement.js helper). This frontend call is cosmetic — it gates UI display,
-// not API access. When Stripe is added (Layer D), update getProAccessStatus() to
-// incorporate subscription status; all UI gates update automatically.
+// not API access.
 
 /**
- * Returns true if the user currently has Pro access (permanent or active trial).
+ * Returns true if the user currently has Pro access (permanent, subscription, or trial).
  * Uses the server-authoritative RPC — never uses new Date() on the browser.
  * Returns false on RPC failure (network error, not authenticated) to fail closed.
  *

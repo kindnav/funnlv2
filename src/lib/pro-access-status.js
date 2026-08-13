@@ -21,13 +21,14 @@ export { _getProAccessStatusWith } from './pro-access-status-impl.js'
  *   days_remaining int           — calendar days left (0 when not active)
  *   ends_at        string|null   — ISO timestamp of trial end
  *   server_now     string        — database clock at call time
- *   can_use_pro    boolean       — permanent_pro OR trial_active
+ *   subscription_active   boolean       — active Stripe subscription
+ *   subscription_status   string|null   — Stripe subscription status
+ *   subscription_period_end timestamptz|null — next renewal or cancellation date
+ *   cancel_at_period_end  boolean       — true when user has cancelled, access continues until period end
+ *   can_use_pro    boolean       — permanent_pro OR subscription_active OR trial_active
  *
  * Callers check for null to distinguish "status unavailable" from "not Pro"
  * and must handle both cases in the UI.
- *
- * STRIPE SEAM: When Stripe billing lands (Layer D), the RPC body can be
- * updated to incorporate subscription status without changing this call site.
  *
  * @returns {Promise<object|null>}
  */

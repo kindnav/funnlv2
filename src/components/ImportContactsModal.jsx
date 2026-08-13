@@ -29,7 +29,7 @@ import {
 } from '../lib/importSuggestionReview.js'
 import { executeBatchImport, retryBatchImport } from '../lib/importBatchExecutor.js'
 import { useProStatus } from '../lib/useProStatus.js'
-import { classifyProStatus } from '../lib/pro-ui-status.js'
+import { hasProAccess } from '../lib/pro-ui-status.js'
 
 // Modal palette — uses CSS custom properties so the modal adapts to the active theme.
 const C = {
@@ -243,9 +243,8 @@ export default function ImportContactsModal({ onClose, onImported }) {
   const navigate = useNavigate()
 
   // Pro status via shared context — single RPC call shared across all modals/pages
-  const proStatus      = useProStatus()
-  const proStatusClass = classifyProStatus(proStatus)
-  const isProUser      = proStatusClass === 'permanent' || proStatusClass === 'trial'
+  const proStatus = useProStatus()
+  const isProUser = hasProAccess(proStatus)
 
   const [step, setStep]               = useState('upload')
   const [dragging, setDragging]       = useState(false)

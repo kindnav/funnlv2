@@ -3,7 +3,7 @@ import ReactMarkdown from 'react-markdown'
 import { Link, useNavigate, useLocation } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { useProStatus, useProRefresh } from '../lib/useProStatus'
-import { classifyProStatus } from '../lib/pro-ui-status'
+import { classifyProStatus, hasProAccess } from '../lib/pro-ui-status'
 import { track } from '../lib/analytics'
 import { extractInvokeError } from '../lib/ai-chat-error'
 import { buildProviderMessages, isRetryEligible } from '../lib/ai-chat-conversation'
@@ -260,7 +260,7 @@ function FunnlAIPage() {
   const proStatus     = useProStatus()
   const proRefresh    = useProRefresh()
   const displayStatus = classifyProStatus(proStatus)
-  const isProUser     = displayStatus === 'permanent' || displayStatus === 'trial' || displayStatus === 'subscribed'
+  const isProUser     = hasProAccess(proStatus)
   const isCheckingPro = proStatus === null
 
   const [userId,      setUserId]      = useState(null)

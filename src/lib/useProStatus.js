@@ -13,13 +13,13 @@
  *
  * Classification (via classifyProStatus from pro-ui-status.js):
  *   null / 'error' → 'unavailable' → canUsePro = false  (fail closed, no flash)
- *   object         → 'permanent' | 'trial' | 'expired' | 'non_pro'
+ *   object         → 'permanent' | 'subscribed' | 'trial' | 'expired' | 'non_pro'
  *
  * Usage:
  *   Wrap the authenticated shell in <ProStatusProvider>.
  *   Consume with:  const proStatus = useProStatus()
- *   Classify with: const displayStatus = classifyProStatus(proStatus)
- *   Gate AI with:  const canUsePro = displayStatus === 'permanent' || displayStatus === 'trial'
+ *   Gate AI with:  const canUsePro = hasProAccess(proStatus)   // from pro-ui-status.js
+ *   Badge display: const displayStatus = classifyProStatus(proStatus)
  */
 import { createContext, createElement, useCallback, useContext, useEffect, useState } from 'react'
 import { getProAccessStatus } from './pro-access-status'

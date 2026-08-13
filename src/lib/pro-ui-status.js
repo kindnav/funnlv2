@@ -18,6 +18,27 @@
  *   'expired'     — trial has ended and user has no permanent or subscription access
  *   'non_pro'     — confirmed not Pro: no trial, no subscription, no permanent access
  */
+/**
+ * Returns true when the user currently has Pro access according to the
+ * server-authoritative RPC result.
+ *
+ * Reads can_use_pro directly — the canonical entitlement boolean — so this
+ * function never needs to enumerate individual access states ('permanent',
+ * 'trial', 'subscribed'). Any new access path added to the RPC (e.g. a
+ * gift code) is automatically covered here without code changes.
+ *
+ * @param {null | 'error' | object} proStatus
+ * @returns {boolean}
+ */
+export function hasProAccess(proStatus) {
+  return (
+    proStatus !== null &&
+    proStatus !== 'error' &&
+    typeof proStatus === 'object' &&
+    proStatus.can_use_pro === true
+  )
+}
+
 export function classifyProStatus(proStatus) {
   // null (loading) and 'error' (RPC failed) are both "status unavailable".
   // Treat them identically so the UI can show a neutral fallback in both cases.

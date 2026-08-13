@@ -28,7 +28,7 @@ export function isFirstContactNavigation(contactCountBefore, newId) {
  */
 export function shouldShowAIFill(proClass, isEditMode) {
   if (isEditMode) return false
-  return proClass === 'permanent' || proClass === 'trial'
+  return proClass === 'permanent' || proClass === 'trial' || proClass === 'subscribed'
 }
 
 /**
