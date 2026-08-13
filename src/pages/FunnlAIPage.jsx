@@ -260,7 +260,7 @@ function FunnlAIPage() {
   const proStatus     = useProStatus()
   const proRefresh    = useProRefresh()
   const displayStatus = classifyProStatus(proStatus)
-  const isProUser     = displayStatus === 'permanent' || displayStatus === 'trial'
+  const isProUser     = displayStatus === 'permanent' || displayStatus === 'trial' || displayStatus === 'subscribed'
   const isCheckingPro = proStatus === null
 
   const [userId,      setUserId]      = useState(null)
@@ -271,6 +271,7 @@ function FunnlAIPage() {
   const [loading,     setLoading]     = useState(false)
   const [isRetrying,  setIsRetrying]  = useState(false)
   const [historyOpen, setHistoryOpen] = useState(false)
+  const [subscribing, setSubscribing] = useState(false)
 
   const isRetryingRef       = useRef(false)
   const bottomRef           = useRef(null)
@@ -506,6 +507,15 @@ function FunnlAIPage() {
     if (userId) try { localStorage.setItem(currentKey(userId), JSON.stringify(session.messages)) } catch { /* ignore */ }
   }
 
+  async function handleSubscribe() {
+    if (subscribing) return
+    setSubscribing(true)
+    const { data, error } = await supabase.functions.invoke('create-checkout-session')
+    setSubscribing(false)
+    if (error || !data?.url) return  // Silent on error — user can retry
+    window.location.href = data.url
+  }
+
   async function retryProStatus() {
     if (isRetryingRef.current) return
     isRetryingRef.current = true
@@ -570,22 +580,28 @@ function FunnlAIPage() {
         <div className="w-14 h-14 rounded-2xl flex items-center justify-center opacity-60 text-white" style={{ background: 'var(--color-ember)' }}>
           <SparkleIcon size={22}/>
         </div>
-        <div className="max-w-[260px]">
+        <div className="max-w-[280px]">
           {proStatus?.trial_expired ? (
             <>
               <h3 className="font-display text-[18px] font-bold text-hi mb-2">Your trial has ended</h3>
-              <p className="text-[13px] leading-relaxed text-muted">
-                Your 7-day free trial ended on{' '}
-                {new Date(proStatus.ends_at).toLocaleDateString('en-US', { month: 'long', day: 'numeric' })}.
-                Contact us to continue with Funnl Pro.
+              <p className="text-[13px] leading-relaxed text-muted mb-5">
+                Subscribe to continue asking questions about your network — who to follow up with, who's gone cold, who you know at a specific company.
               </p>
             </>
           ) : (
             <>
               <h3 className="font-display text-[18px] font-bold text-hi mb-2">AI only available for Pro</h3>
-              <p className="text-[13px] leading-relaxed text-muted">Ask anything about your network — who's gone cold, who you know at a specific company, what to follow up on next.</p>
+              <p className="text-[13px] leading-relaxed text-muted mb-5">Ask anything about your network — who's gone cold, who you know at a specific company, what to follow up on next.</p>
             </>
           )}
+          <button
+            onClick={handleSubscribe}
+            disabled={subscribing}
+            className="text-[13px] font-bold text-white px-5 py-[10px] rounded-[10px] disabled:opacity-40 hover:opacity-90 transition-opacity motion-reduce:transition-none"
+            style={{ background: 'linear-gradient(135deg,#8B7CFF,#5B45F0)' }}
+          >
+            {subscribing ? 'Loading…' : 'Subscribe — $7.99/month'}
+          </button>
         </div>
       </div>
     )
@@ -627,7 +643,7 @@ function FunnlAIPage() {
 
   // ── Pro badge for TopBar actions slot ──────────────────────────────────────
 
-  const proBadge = displayStatus === 'permanent' ? (
+  const proBadge = (displayStatus === 'permanent' || displayStatus === 'subscribed') ? (
     <span className="font-mono text-[9.5px] font-bold tracking-[0.5px] px-1.5 py-0.5 rounded-[5px]"
       style={{ color: 'var(--color-ember)', background: 'rgba(255,68,35,0.1)', border: '1px solid rgba(255,68,35,0.22)' }}>
       PRO

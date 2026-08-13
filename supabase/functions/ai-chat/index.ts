@@ -135,8 +135,11 @@ Deno.serve(async (req) => {
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
     )
 
-    const { profile, trial, profileError, trialError, _profileErrorCode, _trialErrorCode } =
-      await loadProEntitlement(supabaseAdmin, user.id)
+    const {
+      profile, trial, subscription,
+      profileError, trialError, subscriptionError,
+      _profileErrorCode, _trialErrorCode, _subscriptionErrorCode,
+    } = await loadProEntitlement(supabaseAdmin, user.id)
 
     if (profileError || trialError) {
       console.error('ai-chat entitlement-query-failed', {
@@ -152,8 +155,11 @@ Deno.serve(async (req) => {
         500
       )
     }
+    if (subscriptionError) {
+      console.warn('ai-chat subscription-query-failed', { requestId, code: _subscriptionErrorCode })
+    }
 
-    const entitlement = evaluateProEntitlement(profile, trial, new Date())
+    const entitlement = evaluateProEntitlement(profile, trial, subscription, new Date())
 
     if (!entitlement.canUse) {
       return errorResponse(

@@ -32,7 +32,7 @@ Funnl is a **networking CRM for students** recruiting for internships and jobs. 
 |---|---|---|
 | **Layer 1** | ✅ Built | Core CRM: add/edit/delete contacts, log interactions, write notes, search, dashboard |
 | **Layer 2** | 🔵 Next | Rule-based follow-up reminders, "going cold" flags based on days since last interaction |
-| **Layer 3** | ✅ Built (A/B/C) | AI Pro feature (paid tier). Layers A (gate), B (contact from text), C (AI assistant chat) all done. Layer D (Stripe billing) is next when user count warrants it. See "AI Pro feature — build plan" section. |
+| **Layer 3** | ✅ Built (A/B/C/D) | AI Pro feature (paid tier). Layers A (gate), B (contact from text), C (AI assistant chat) all done. Layer D (Stripe billing) built on branch `review/stripe-checkout` — awaiting deployment. See "AI Pro feature — build plan" section. |
 
 The data schema (notes as freeform text, tags/skills as text arrays) was deliberately designed to feed Layer 3.
 
@@ -1309,6 +1309,71 @@ Note: `total_duration_ms` meaning changed from the prior version (where it measu
 
 ---
 
-### Layer D spec — Stripe billing (later)
+### Layer D spec — Stripe billing (branch review/stripe-checkout)
 
-When billing is ready: update `canUseAI()` to read Stripe subscription status instead of (or in addition to) `ai_enabled`. Because every AI feature calls `canUseAI()`, this is a one-place change. The `ai_enabled` column either becomes the fallback for manually-granted access or is retired. See Monetization section for timing.
+**Status: built, not yet deployed.** All code is on branch `review/stripe-checkout`. Migration, Edge Functions, and frontend NOT yet deployed — awaiting manual steps and explicit rollout approval.
+
+**Design decisions (permanent — do not change without approval):**
+- Stripe TEST mode only. Going live is a separate later step.
+- Publishable key + price ID are frontend-safe (`VITE_` prefix), stored in Vercel env vars and local `.env`. Stripe secret key (`STRIPE_SECRET_KEY`) and webhook secret (`STRIPE_WEBHOOK_SECRET`) are Supabase secrets — never in any file or repo.
+- Users subscribe from the locked surface directly (FunnlAIPage or SettingsPage) — shared `handleSubscribe()` calls `create-checkout-session` Edge Function → redirects to Stripe hosted Checkout.
+- `past_due` counts as Pro (access preserved during Stripe's dunning window; only revoked on `subscription.deleted`).
+- Cancel-at-period-end: Pro continues until `current_period_end`, then `subscription.deleted` fires and Pro is revoked.
+- `subscriptions` table: authenticated users SELECT-only on their own row. All writes go through the webhook (service-role only). Users cannot self-grant Pro.
+- Unified Pro access: `can_use_pro = permanent_pro OR trial_active OR subscription_active` — enforced in one RPC + `shared/pro-entitlement.js`. All four AI Edge Functions inherit it automatically.
+
+**Stripe credentials (TEST mode):**
+- Publishable key: `pk_test_51TQekQJU7lKQodyVGWyhlWNdsKI9c4w2GKWUCNyDUPvM48lS2Ox8vzNwhqA7F4o2pSU9JMAkvR2SoYxdeOuoDRwq00exY9wbb9` (frontend-safe)
+- Price ID: `price_1U3louJU7lKQodyVjgclua04` (frontend-safe)
+- Secret key: stored in Supabase secret `STRIPE_SECRET_KEY` — server-side only, never in repo
+- Webhook secret: stored in Supabase secret `STRIPE_WEBHOOK_SECRET` — added after webhook is registered in Stripe
+- Webhook URL: `https://jzybxhvgnksrwxfivdwt.supabase.co/functions/v1/stripe-webhook`
+
+**New files:**
+- `supabase/migrations/20260812000000_add_subscriptions.sql` — creates `public.subscriptions` table, updates `get_my_pro_access_status()` RPC with subscription fields. **PREREQUISITE:** `20260727000000_add_pro_trials.sql` must be applied first.
+- `supabase/functions/create-checkout-session/index.ts` — verifies JWT, checks for existing active subscription (409 if already subscribed), builds Stripe Checkout Session via `application/x-www-form-urlencoded`, returns `{ url }`. Sets `metadata[user_id]` for webhook mapping. Reuses existing `stripe_customer_id` if available.
+- `supabase/functions/stripe-webhook/index.ts` — manual HMAC-SHA256 signature verification via `crypto.subtle` (no external Stripe SDK). 5-minute replay protection. Handles: `checkout.session.completed`, `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.payment_succeeded`, `invoice.payment_failed`. All DB writes via service-role client.
+
+**Updated shared files:**
+- `supabase/functions/shared/pro-entitlement.js` — `evaluateProEntitlement` signature changed from `(profile, trial, now)` to `(profile, trial, subscription, now)`. Priority 2 added: `subscription.status 'active'|'past_due'` → `reason: 'subscription'`. `loadProEntitlement` now runs 3 concurrent queries (profiles + pro_trials + subscriptions). Returns `subscriptionError` + `_subscriptionErrorCode`.
+- All four AI Edge Functions (`ai-parse-contact`, `ai-map-csv`, `ai-categorize-contacts`, `ai-chat`) — updated to destructure `subscription` from `loadProEntitlement` and pass it as 3rd arg to `evaluateProEntitlement`.
+- `src/lib/pro-ui-status.js` — `classifyProStatus()` now returns 6 states: `'unavailable' | 'permanent' | 'subscribed' | 'trial' | 'expired' | 'non_pro'`. Checks `subscription_active === true` after permanent and before trial.
+- `src/pages/SettingsPage.jsx` — reads `?checkout=success/cancelled` from URL on mount (URL cleaned immediately via `navigate`), calls `proRefresh()` immediately + after 3s delay. Subscribe button in Pro Access card for expired/non_pro states. Subscribed state shows "Renews DATE" or "Cancels DATE" depending on `cancel_at_period_end`. `handleSubscribe()` calls `create-checkout-session` Edge Function.
+- `src/pages/FunnlAIPage.jsx` — `isProUser` includes `subscribed`. Subscribe button in locked state. `proBadge` shows `PRO` for subscribed users.
+
+**`subscriptions` table schema:**
+| Column | Type | Notes |
+|---|---|---|
+| `user_id` | uuid | PK, FK → auth.users ON DELETE CASCADE |
+| `stripe_customer_id` | text | Unique index — used by webhook to look up user from customer events |
+| `stripe_subscription_id` | text | Nullable — set after checkout.session.completed |
+| `status` | text | One of: active, past_due, canceled, incomplete, trialing |
+| `current_period_end` | timestamptz | Nullable — next renewal date |
+| `cancel_at_period_end` | boolean | Default false — set true when user cancels, Pro continues until period end |
+| `price_id` | text | Nullable — Stripe price ID for the active subscription |
+| `created_at` | timestamptz | Auto-set |
+| `updated_at` | timestamptz | Updated by webhook on every event |
+
+**RLS:** SELECT only for authenticated using `(SELECT auth.uid()) = user_id`. `REVOKE ALL FROM PUBLIC, anon`; `REVOKE INSERT/UPDATE/DELETE FROM authenticated`. All writes go through service-role webhook only.
+
+**Updated `get_my_pro_access_status()` RPC:** now queries `subscriptions` and returns 4 new fields: `subscription_active boolean`, `subscription_status text`, `subscription_period_end timestamptz`, `cancel_at_period_end boolean`. `can_use_pro = permanent_pro OR trial_active OR subscription_active`.
+
+**Manual steps required before deployment (in order):**
+1. Run `supabase/migrations/20260812000000_add_subscriptions.sql` in Supabase SQL Editor. Verify 4 ACL checks: authenticated SELECT=true, INSERT/UPDATE/DELETE=false; service_role INSERT=true. Confirm `subscription_active` appears in `get_my_pro_access_status()` output.
+2. Add `STRIPE_SECRET_KEY` to Supabase Edge Function secrets.
+3. Add `VITE_STRIPE_PUBLISHABLE_KEY` and `VITE_STRIPE_PRICE_ID` to Vercel env vars AND local `.env`.
+4. Deploy Edge Functions: `npx supabase functions deploy create-checkout-session --linked` and `npx supabase functions deploy stripe-webhook --linked`. Also redeploy all four AI Edge Functions (they now call 3-query `loadProEntitlement`).
+5. Register webhook endpoint `https://jzybxhvgnksrwxfivdwt.supabase.co/functions/v1/stripe-webhook` in Stripe dashboard → Developers → Webhooks. Select events: `checkout.session.completed`, `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.payment_succeeded`, `invoice.payment_failed`. Copy the `whsec_...` signing secret.
+6. Add `STRIPE_WEBHOOK_SECRET` (the `whsec_...` value) to Supabase Edge Function secrets.
+7. Merge frontend PR into `main`; wait for Vercel READY.
+
+**Test plan (Stripe TEST mode, do before merging to main):**
+- New signup → trial active, AI access works
+- Trial expiry simulation → locked state shows Subscribe button
+- Click Subscribe → redirects to Stripe Checkout
+- Complete with test card `4242 4242 4242 4242` → `?checkout=success` return → Pro badge appears after webhook
+- Subscription active → AI access works
+- Cancel subscription in Stripe → `cancel_at_period_end=true` → "Cancels DATE" shown, Pro continues until period end
+- `subscription.deleted` fires at period end → access revoked, locked state shown
+- Permanent Pro user (`ai_enabled=true`) unaffected by any subscription state
+- Webhook signature failure (tampered body) → 400 rejected

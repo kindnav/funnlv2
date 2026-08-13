@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate, useLocation } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { getTheme, setTheme } from '../lib/theme'
 import { useProStatus, useProRefresh } from '../lib/useProStatus'
@@ -47,6 +47,7 @@ function trapFocus(e, onEscape, disabled) {
 
 function SettingsPage() {
   const navigate     = useNavigate()
+  const location     = useLocation()
   // Shared Pro status - a single RPC shared across all authenticated surfaces.
   const rawProStatus = useProStatus()
   // Shared refresh - re-runs the RPC and updates rawProStatus for all consumers.
@@ -84,6 +85,16 @@ function SettingsPage() {
   // Retry calls proRefresh() which updates the provider state for all consumers.
   const proStatus  = rawProStatus
   const [retrying, setRetrying] = useState(false)
+
+  // ── Stripe Checkout ────────────────────────────────────────────────────────
+  // checkoutBanner: computed once from URL on mount ('success', 'cancelled', null).
+  // subscribing: true while the create-checkout-session call is in flight.
+  const [checkoutBanner, setCheckoutBanner] = useState(() => {
+    const p = new URLSearchParams(location.search)
+    return p.get('checkout')  // 'success' | 'cancelled' | null
+  })
+  const [subscribing,    setSubscribing]    = useState(false)
+  const [subscribeError, setSubscribeError] = useState('')
 
   // ── Theme ─────────────────────────────────────────────────────────────────
   const [currentTheme, setCurrentTheme] = useState(() => getTheme())
@@ -175,6 +186,9 @@ function SettingsPage() {
         setSignOutError('')
         setSigningOut(false)
         setRetrying(false)
+        setSubscribing(false)
+        setSubscribeError('')
+        setCheckoutBanner(null)
         setShowDeleteAllModal(false)
         setDeleteAllInput('')
         setDeleteAllError('')
@@ -355,6 +369,37 @@ function SettingsPage() {
     })
   }
 
+  // ── Checkout return: clean up URL and refresh Pro status ─────────────────
+  // checkoutBanner is set from the URL on mount. Navigate immediately to /settings
+  // to remove the ?checkout= param from the address bar, then refresh Pro status
+  // so the card reflects the new subscription (the webhook may have already fired).
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (!checkoutBanner) return
+    navigate('/settings', { replace: true })
+    if (checkoutBanner === 'success') {
+      proRefresh()
+      const t = setTimeout(() => proRefresh(), 3000)
+      return () => clearTimeout(t)
+    }
+  }, []) // intentionally runs only on mount
+
+  // ── Stripe Checkout: create session and redirect ──────────────────────────
+  async function handleSubscribe() {
+    if (subscribing) return
+    const capturedGen = accountGenRef.current
+    setSubscribing(true)
+    setSubscribeError('')
+    const { data, error } = await supabase.functions.invoke('create-checkout-session')
+    if (!mountedRef.current || accountGenRef.current !== capturedGen) return
+    setSubscribing(false)
+    if (error || !data?.url) {
+      setSubscribeError('Could not start checkout. Please try again.')
+      return
+    }
+    window.location.href = data.url
+  }
+
   // ── Pro-status classification ─────────────────────────────────────────────
   const proLoading = proStatus === null
   const proFailed  = !proLoading && proStatus === 'error'
@@ -422,6 +467,16 @@ function SettingsPage() {
         <div className={`${CARD} mb-[14px]`}>
           <span className={SECTION_LABEL}>Pro Access</span>
 
+          {/* Checkout return banners */}
+          {checkoutBanner === 'success' && (
+            <p role="status" aria-live="polite" className="text-[11.5px] font-semibold text-success mb-2">
+              &#x2713; You're on Funnl Pro — welcome!
+            </p>
+          )}
+          {checkoutBanner === 'cancelled' && (
+            <p className="text-[11.5px] text-muted mb-2">Checkout cancelled — you weren't charged.</p>
+          )}
+
           {proLoading ? (
             <p className="text-[12px] text-low animate-pulse motion-reduce:animate-none">Loading…</p>
           ) : proFailed ? (
@@ -443,6 +498,25 @@ function SettingsPage() {
               </svg>
               <span className="text-[12px] font-semibold text-hi">Funnl Pro · permanent access</span>
             </div>
+          ) : proClass === 'subscribed' ? (
+            <div>
+              <div className="flex items-center gap-[8px]">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                  <path d="M3 4H21L15 12.5V20H9V12.5Z" fill="#FF4423"/>
+                </svg>
+                <span className="text-[12px] font-semibold text-hi">Funnl Pro · subscribed</span>
+              </div>
+              {proStatus.cancel_at_period_end && proStatus.subscription_period_end && (
+                <p className="text-[10.5px] text-warning mt-[3px] ml-[21px]">
+                  Cancels {formatTrialEnd(proStatus.subscription_period_end)}
+                </p>
+              )}
+              {!proStatus.cancel_at_period_end && proStatus.subscription_period_end && (
+                <p className="text-[10.5px] text-low mt-[3px] ml-[21px]">
+                  Renews {formatTrialEnd(proStatus.subscription_period_end)}
+                </p>
+              )}
+            </div>
           ) : proClass === 'trial' ? (
             <div>
               <div className="flex items-center gap-[8px]">
@@ -462,12 +536,39 @@ function SettingsPage() {
               )}
             </div>
           ) : proClass === 'expired' ? (
-            <p className="text-[12px] text-low">
-              Trial ended{proStatus.ends_at ? ' ' + formatTrialEnd(proStatus.ends_at) : ''}
-            </p>
+            <div>
+              <p className="text-[12px] text-low mb-2">
+                Trial ended{proStatus.ends_at ? ' ' + formatTrialEnd(proStatus.ends_at) : ''}.
+                {' '}Subscribe to continue with Funnl Pro.
+              </p>
+              {subscribeError && (
+                <p className="text-[10.5px] text-danger mb-2">{subscribeError}</p>
+              )}
+              <button
+                onClick={handleSubscribe}
+                disabled={subscribing}
+                className="text-[12px] font-bold text-white px-4 py-[9px] rounded-[9px] disabled:opacity-40 hover:opacity-90 transition-opacity motion-reduce:transition-none"
+                style={{ background: 'linear-gradient(135deg,#8B7CFF,#5B45F0)' }}
+              >
+                {subscribing ? 'Loading…' : 'Subscribe — $7.99/month'}
+              </button>
+            </div>
           ) : (
-            // non_pro
-            <p className="text-[12px] text-low">No active Pro access.</p>
+            // non_pro: no trial, no subscription
+            <div>
+              <p className="text-[12px] text-low mb-2">No active Pro access.</p>
+              {subscribeError && (
+                <p className="text-[10.5px] text-danger mb-2">{subscribeError}</p>
+              )}
+              <button
+                onClick={handleSubscribe}
+                disabled={subscribing}
+                className="text-[12px] font-bold text-white px-4 py-[9px] rounded-[9px] disabled:opacity-40 hover:opacity-90 transition-opacity motion-reduce:transition-none"
+                style={{ background: 'linear-gradient(135deg,#8B7CFF,#5B45F0)' }}
+              >
+                {subscribing ? 'Loading…' : 'Subscribe — $7.99/month'}
+              </button>
+            </div>
           )}
         </div>
 

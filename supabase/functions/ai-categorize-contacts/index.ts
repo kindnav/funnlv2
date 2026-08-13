@@ -45,8 +45,11 @@ Deno.serve(async (req) => {
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
     )
 
-    const { profile, trial, profileError, trialError, _profileErrorCode, _trialErrorCode } =
-      await loadProEntitlement(supabaseAdmin, user.id)
+    const {
+      profile, trial, subscription,
+      profileError, trialError, subscriptionError,
+      _profileErrorCode, _trialErrorCode, _subscriptionErrorCode,
+    } = await loadProEntitlement(supabaseAdmin, user.id)
 
     if (profileError || trialError) {
       console.error('[ai-categorize-contacts] entitlement-query-failed', {
@@ -58,8 +61,11 @@ Deno.serve(async (req) => {
         { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       )
     }
+    if (subscriptionError) {
+      console.warn('[ai-categorize-contacts] subscription-query-failed', { code: _subscriptionErrorCode })
+    }
 
-    const entitlement = evaluateProEntitlement(profile, trial, new Date())
+    const entitlement = evaluateProEntitlement(profile, trial, subscription, new Date())
 
     if (!entitlement.canUse) {
       return new Response(
