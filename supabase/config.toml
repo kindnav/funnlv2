@@ -382,6 +382,14 @@ inspector_port = 8083
 # The Deno major version to use.
 deno_version = 2
 
+# ── Per-function JWT verification settings ────────────────────────────────────
+# stripe-webhook receives unauthenticated POSTs from Stripe — no Supabase JWT.
+# JWT verification is disabled here; security comes from Stripe HMAC-SHA256
+# signature verification (STRIPE_WEBHOOK_SECRET) inside the handler itself.
+# All other Edge Functions retain the default verify_jwt = true.
+[functions.stripe-webhook]
+verify_jwt = false
+
 # [edge_runtime.secrets]
 # secret_key = "env(SECRET_VALUE)"
 
