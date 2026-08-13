@@ -3,7 +3,9 @@ import { Link, useNavigate, useLocation } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { getTheme, setTheme } from '../lib/theme'
 import { useProStatus, useProRefresh } from '../lib/useProStatus'
-import { classifyProStatus } from '../lib/pro-ui-status'
+import { classifyProStatus, hasProAccess } from '../lib/pro-ui-status'
+import { runCheckoutPolling } from '../lib/checkoutPolling'
+import { track } from '../lib/analytics'
 import {
   validateDisplayName,
   normalizeDisplayName,
@@ -86,15 +88,23 @@ function SettingsPage() {
   const proStatus  = rawProStatus
   const [retrying, setRetrying] = useState(false)
 
+  // Always-current ref: updated on every render so polling closures read fresh state
+  // without needing proStatus in their dependency arrays.
+  const proStatusRef = useRef(null)
+  proStatusRef.current = proStatus
+
   // ── Stripe Checkout ────────────────────────────────────────────────────────
   // checkoutBanner: computed once from URL on mount ('success', 'cancelled', null).
   // subscribing: true while the create-checkout-session call is in flight.
+  // pollingState: 'polling' | 'confirmed' | 'timed_out' | null
   const [checkoutBanner, setCheckoutBanner] = useState(() => {
     const p = new URLSearchParams(location.search)
     return p.get('checkout')  // 'success' | 'cancelled' | null
   })
-  const [subscribing,    setSubscribing]    = useState(false)
-  const [subscribeError, setSubscribeError] = useState('')
+  const [subscribing,       setSubscribing]       = useState(false)
+  const [subscribeError,    setSubscribeError]    = useState('')
+  const [pollingState,      setPollingState]      = useState(null)
+  const [billingPortalOpening, setBillingPortalOpening] = useState(false)
 
   // ── Theme ─────────────────────────────────────────────────────────────────
   const [currentTheme, setCurrentTheme] = useState(() => getTheme())
@@ -189,6 +199,8 @@ function SettingsPage() {
         setSubscribing(false)
         setSubscribeError('')
         setCheckoutBanner(null)
+        setPollingState(null)
+        setBillingPortalOpening(false)
         setShowDeleteAllModal(false)
         setDeleteAllInput('')
         setDeleteAllError('')
@@ -258,6 +270,7 @@ function SettingsPage() {
 
   // ── Pro-status retry ──────────────────────────────────────────────────────
   // Delegates to the shared provider - updates proStatus for ALL consumers.
+  // Also used as the "Check again" handler after a checkout confirmation timeout.
   async function handleProRetry() {
     if (retrying) return
     const capturedGen = accountGenRef.current
@@ -265,6 +278,11 @@ function SettingsPage() {
     await proRefresh()
     if (!mountedRef.current || accountGenRef.current !== capturedGen) return
     setRetrying(false)
+    // If we were waiting for checkout confirmation and access is now granted, confirm it.
+    if (pollingState === 'timed_out' && hasProAccess(proStatusRef.current)) {
+      setPollingState('confirmed')
+      track('subscription_access_confirmed')
+    }
   }
 
   // ── Sign out ──────────────────────────────────────────────────────────────
@@ -369,34 +387,79 @@ function SettingsPage() {
     })
   }
 
-  // ── Checkout return: clean up URL and refresh Pro status ─────────────────
-  // checkoutBanner is set from the URL on mount. Navigate immediately to /settings
-  // to remove the ?checkout= param from the address bar, then refresh Pro status
-  // so the card reflects the new subscription (the webhook may have already fired).
+  // ── Checkout return: bounded polling for Pro access confirmation ──────────
+  // On mount with ?checkout=success, immediately clean the URL, fire analytics,
+  // then start a bounded polling loop (staged delays: 1.5s→3s→6s→12s, ~22.5s total)
+  // that refreshes Pro status until access is confirmed or the loop times out.
+  // AbortController cleans up on unmount — no state mutations after unmount.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!checkoutBanner) return
+    // Clean URL immediately regardless of result.
     navigate('/settings', { replace: true })
-    if (checkoutBanner === 'success') {
-      proRefresh()
-      const t = setTimeout(() => proRefresh(), 3000)
-      return () => clearTimeout(t)
+    if (checkoutBanner === 'cancelled') {
+      track('checkout_returned', { result: 'cancelled' })
+      return
     }
+    if (checkoutBanner !== 'success') return
+    track('checkout_returned', { result: 'success' })
+    // If the webhook already fired before the page loaded, confirm immediately.
+    if (hasProAccess(proStatusRef.current)) {
+      setPollingState('confirmed')
+      track('subscription_access_confirmed')
+      return
+    }
+    setPollingState('polling')
+    const controller = new AbortController()
+    runCheckoutPolling({
+      refreshFn:   () => proRefresh(),
+      hasAccessFn: () => hasProAccess(proStatusRef.current),
+      signal:      controller.signal,
+    }).then(result => {
+      if (!mountedRef.current) return
+      if (result === 'confirmed') {
+        setPollingState('confirmed')
+        track('subscription_access_confirmed')
+      } else if (result === 'timeout') {
+        setPollingState('timed_out')
+        track('subscription_confirmation_timed_out')
+      }
+      // 'aborted' means unmount — safe to ignore.
+    })
+    return () => controller.abort()
   }, []) // intentionally runs only on mount
 
   // ── Stripe Checkout: create session and redirect ──────────────────────────
   async function handleSubscribe() {
     if (subscribing) return
     const capturedGen = accountGenRef.current
+    const attemptId = crypto.randomUUID()
     setSubscribing(true)
     setSubscribeError('')
-    const { data, error } = await supabase.functions.invoke('create-checkout-session')
+    track('checkout_started', { source: 'settings' })
+    const { data, error } = await supabase.functions.invoke('create-checkout-session', {
+      body: { attemptId },
+    })
     if (!mountedRef.current || accountGenRef.current !== capturedGen) return
     setSubscribing(false)
     if (error || !data?.url) {
       setSubscribeError('Could not start checkout. Please try again.')
+      track('checkout_creation_failed', { source: 'settings' })
       return
     }
+    window.location.href = data.url
+  }
+
+  // ── Billing portal: open Stripe Customer Portal ───────────────────────────
+  async function handleBillingPortal() {
+    if (billingPortalOpening) return
+    const capturedGen = accountGenRef.current
+    setBillingPortalOpening(true)
+    const { data, error } = await supabase.functions.invoke('create-billing-portal-session')
+    if (!mountedRef.current || accountGenRef.current !== capturedGen) return
+    setBillingPortalOpening(false)
+    if (error || !data?.url) return  // silent — billing portal is a convenience, not blocking
+    track('billing_portal_opened', { source: 'settings' })
     window.location.href = data.url
   }
 
@@ -468,13 +531,32 @@ function SettingsPage() {
           <span className={SECTION_LABEL}>Pro Access</span>
 
           {/* Checkout return banners */}
-          {checkoutBanner === 'success' && (
-            <p role="status" aria-live="polite" className="text-[11.5px] font-semibold text-success mb-2">
-              &#x2713; You're on Funnl Pro — welcome!
+          {pollingState === 'polling' && (
+            <p role="status" aria-live="polite" className="text-[11.5px] text-muted animate-pulse motion-reduce:animate-none mb-2">
+              Confirming subscription…
             </p>
           )}
-          {checkoutBanner === 'cancelled' && (
-            <p className="text-[11.5px] text-muted mb-2">Checkout cancelled — you weren't charged.</p>
+          {pollingState === 'confirmed' && (
+            <p role="status" aria-live="polite" className="text-[11.5px] font-semibold text-success mb-2">
+              &#x2713; You&apos;re on Funnl Pro — welcome!
+            </p>
+          )}
+          {pollingState === 'timed_out' && (
+            <div className="mb-2">
+              <p className="text-[11.5px] text-muted mb-1">
+                Payment is processing — your Pro access will appear shortly.
+              </p>
+              <button
+                onClick={handleProRetry}
+                disabled={retrying}
+                className="text-[11px] font-semibold text-accent hover:opacity-80 transition-opacity motion-reduce:transition-none disabled:opacity-40"
+              >
+                {retrying ? 'Checking…' : 'Check again'}
+              </button>
+            </div>
+          )}
+          {checkoutBanner === 'cancelled' && pollingState === null && (
+            <p className="text-[11.5px] text-muted mb-2">Checkout cancelled — you weren&apos;t charged.</p>
           )}
 
           {proLoading ? (
@@ -516,6 +598,13 @@ function SettingsPage() {
                   Renews {formatTrialEnd(proStatus.subscription_period_end)}
                 </p>
               )}
+              <button
+                onClick={handleBillingPortal}
+                disabled={billingPortalOpening}
+                className="mt-[10px] text-[11px] font-semibold text-accent hover:opacity-80 transition-opacity motion-reduce:transition-none disabled:opacity-40"
+              >
+                {billingPortalOpening ? 'Opening…' : 'Manage billing →'}
+              </button>
             </div>
           ) : proClass === 'trial' ? (
             <div>

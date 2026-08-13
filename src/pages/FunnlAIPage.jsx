@@ -509,10 +509,17 @@ function FunnlAIPage() {
 
   async function handleSubscribe() {
     if (subscribing) return
+    const attemptId = crypto.randomUUID()
     setSubscribing(true)
-    const { data, error } = await supabase.functions.invoke('create-checkout-session')
+    track('checkout_started', { source: 'ai_page' })
+    const { data, error } = await supabase.functions.invoke('create-checkout-session', {
+      body: { attemptId },
+    })
     setSubscribing(false)
-    if (error || !data?.url) return  // Silent on error — user can retry
+    if (error || !data?.url) {
+      track('checkout_creation_failed', { source: 'ai_page' })
+      return  // Silent on error — user can retry
+    }
     window.location.href = data.url
   }
 

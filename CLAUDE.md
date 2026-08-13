@@ -164,6 +164,12 @@ supabase/
 | `outreach_status_changed` | ContactDetailPage handleLogInteraction (new) and handleSaveInteraction (edit) when outreach status is set or cleared | `{ status: 'awaiting_response'\|'responded'\|'meeting_booked'\|'no_response'\|'declined'\|'cleared', context: 'new_interaction'\|'edit_interaction' }` — controlled enum | Outreach response tracking |
 | `pro_trial_started` | WelcomePage.jsx — fires after `get_my_pro_access_status()` confirms `trial_active=true`, with localStorage deduplication keyed by user ID | none | Trial activation (best-effort, once per browser per user ID; another browser/device may fire it again — PostHog deduplicates by distinct_id in funnel views) |
 | `ai_chat_reset` | FunnlAIPage.jsx — when user clicks "Start new chat" or when `invalid_request` error auto-suggests a reset | `{ source: 'user_action'\|'ai_error_recovery' }` — controlled enum | AI chat session management; measures how often users need to reset due to error vs voluntary |
+| `checkout_started` | SettingsPage.jsx + FunnlAIPage.jsx — before invoking `create-checkout-session` | `{ source: 'settings'\|'ai_page' }` — controlled enum | Checkout funnel — initiated |
+| `checkout_creation_failed` | SettingsPage.jsx + FunnlAIPage.jsx — when `create-checkout-session` returns an error | `{ source: 'settings'\|'ai_page' }` — controlled enum | Checkout funnel — failed before redirect |
+| `checkout_returned` | SettingsPage.jsx — on mount when `?checkout=` param is present | `{ result: 'success'\|'cancelled' }` — controlled enum | Checkout funnel — user returned from Stripe |
+| `subscription_access_confirmed` | SettingsPage.jsx — after polling loop confirms `can_use_pro` | none | Checkout funnel — Pro access verified after return |
+| `subscription_confirmation_timed_out` | SettingsPage.jsx — after polling loop exhausts all attempts (~22.5s) without confirmation | none | Checkout funnel — webhook delayed; user shown retry |
+| `billing_portal_opened` | SettingsPage.jsx — after `create-billing-portal-session` returns a URL | `{ source: 'settings' }` — controlled enum | Subscription management — billing portal session started |
 
 **Deduplication note — `email_confirmed`:** Uses a `localStorage` flag keyed by user ID (`funnl_confirmed_<userId>`) to prevent re-fires on refresh or repeat visits to `/welcome`. This flag is per-browser: if the user confirms on one device and later visits `/welcome` on a different device or browser, the event may fire a second time on that device. PostHog deduplicates by distinct_id (user ID) across browsers for funnel purposes, so this cross-browser re-fire does not inflate unique-user counts in funnel reports. Raw event counts may appear slightly elevated.
 
@@ -1311,7 +1317,13 @@ Note: `total_duration_ms` meaning changed from the prior version (where it measu
 
 ### Layer D spec — Stripe billing (branch review/stripe-checkout)
 
-**Status: built, not yet deployed.** All code is on branch `review/stripe-checkout`. Migration, Edge Functions, and frontend NOT yet deployed — awaiting manual steps and explicit rollout approval.
+**Status: reliability pass complete, not yet deployed.** All code is on branch `review/stripe-checkout` (Draft PR #24). Migration `20260812000000_add_subscriptions.sql` IS applied to production (subscriptions table exists, RPC works, data live) — only the migration-history ledger has a gap (migration shows as local-only in `supabase migration list --linked`; repair command: `supabase migration repair --status applied 20260812000000 --linked` — DO NOT run without explicit approval). Edge Functions, updated shared files, and frontend NOT yet deployed — awaiting manual steps and explicit rollout approval.
+
+**Migration-history repair command (documented, do not run without approval):**
+```
+npx supabase migration repair --status applied 20260812000000 --linked
+```
+Run only after verifying `supabase migration list --linked` still shows `20260812000000` as local-only.
 
 **Design decisions (permanent — do not change without approval):**
 - Stripe TEST mode only. Going live is a separate later step.
@@ -1331,14 +1343,19 @@ Note: `total_duration_ms` meaning changed from the prior version (where it measu
 
 **New files:**
 - `supabase/migrations/20260812000000_add_subscriptions.sql` — creates `public.subscriptions` table, updates `get_my_pro_access_status()` RPC with subscription fields. **PREREQUISITE:** `20260727000000_add_pro_trials.sql` must be applied first.
-- `supabase/functions/create-checkout-session/index.ts` — verifies JWT, checks for existing active subscription (409 if already subscribed), builds Stripe Checkout Session via `application/x-www-form-urlencoded`, returns `{ url }`. Sets `metadata[user_id]` for webhook mapping. Reuses existing `stripe_customer_id` if available.
-- `supabase/functions/stripe-webhook/index.ts` — manual HMAC-SHA256 signature verification via `crypto.subtle` (no external Stripe SDK). 5-minute replay protection. Handles: `checkout.session.completed`, `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.payment_succeeded`, `invoice.payment_failed`. All DB writes via service-role client. **Deployed with `verify_jwt = false`** (set in `supabase/config.toml` `[functions.stripe-webhook]`) — Stripe POSTs carry no Supabase JWT. Security is provided by Stripe HMAC-SHA256 signature verification: missing `stripe-signature` → 400, bad signature → 400, event older than 5 minutes → 400. Not open — authenticated via Stripe signature instead of Supabase JWT.
+- `supabase/functions/create-checkout-session/index.ts` — POST-only (405 for other methods). Verifies JWT, validates `attemptId` UUID from request body, checks for existing active/past_due subscription (409 if blocked), reads price from `STRIPE_PRO_PRICE_ID` env var only (never from browser), builds Stripe Checkout Session, sets `client_reference_id = user.id` and `subscription_data[metadata][user_id] = user.id` for ownership in lifecycle events, idempotency key = `checkout-{userId}-{attemptId}`, returns `{ url }` only. DB lookup failure → 503 (prevents duplicate session for subscribed user).
+- `supabase/functions/create-checkout-session/checkoutHelpers.js` — NEW. Pure helpers: `isValidUUID`, `buildIdempotencyKey`, `isBlockedByExistingSubscription`. Zero deps, unit-tested in `tests/checkout-helpers.test.js`.
+- `supabase/functions/stripe-webhook/index.ts` — manual HMAC-SHA256 signature verification via `crypto.subtle` (no external Stripe SDK). 5-minute replay protection. Handles: `checkout.session.completed`, `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.payment_succeeded`, `invoice.payment_failed`. All DB writes via service-role client. **Deployed with `verify_jwt = false`** (set in `supabase/config.toml` `[functions.stripe-webhook]`) — Stripe POSTs carry no Supabase JWT. Security is provided by Stripe HMAC-SHA256 signature verification: missing `stripe-signature` → 400, bad signature → 400, event older than 5 minutes → 400. Not open — authenticated via Stripe signature instead of Supabase JWT. All DB write failures return 500 (forces Stripe retry). `resolveUserId` 3-step chain: metadata.user_id → subscription row by subscription_id → subscription row by customer_id. Unknown ownership on entitlement-changing events → 500 (retry). Price validated against `STRIPE_PRO_PRICE_ID` env var; mismatch → 200 (ignored, not our product).
+- `supabase/functions/stripe-webhook/webhookHelpers.js` — NEW. `isValidUUID`, `extractPriceId`, `SUBSCRIPTION_STATUS_SEMANTICS` (all 8 Stripe statuses with grantsAccess/isTerminal/description), `statusGrantsAccess`, `unixToIso`, `shouldRetryOnMissingOwnership`. Zero deps, unit-tested in `tests/webhook-helpers.test.js`.
+- `supabase/migrations/20260813000000_add_webhook_idempotency.sql` — NEW design (NOT applied). Creates `stripe_webhook_events` deduplication table (INSERT ON CONFLICT DO NOTHING on event_id PK) + adds `last_stripe_event_at` to subscriptions for out-of-order protection. Strategy: persist latest applied event timestamp (avoids extra Stripe API call). Apply before deploying idempotency-aware webhook version.
+- `supabase/functions/create-billing-portal-session/index.ts` — NEW (NOT deployed). POST-only. Resolves `stripe_customer_id` server-side from subscriptions table — never from browser. Returns `{ url }` only. SETUP REQUIRED IN STRIPE DASHBOARD before use (Billing Portal must be configured at dashboard.stripe.com/settings/billing/portal).
+- `src/lib/checkoutPolling.js` — NEW. Pure polling helper for checkout-return Pro-status confirmation. `POLL_DELAYS_MS = [1500, 3000, 6000, 12000]` (22.5s total). `getNextPollDelay(attempt)`. `runCheckoutPolling({ refreshFn, hasAccessFn, signal, delayFn })` returns `'confirmed' | 'timeout' | 'aborted'`. Zero deps, unit-tested in `tests/checkout-polling.test.js`.
 
 **Updated shared files:**
 - `supabase/functions/shared/pro-entitlement.js` — `evaluateProEntitlement` signature changed from `(profile, trial, now)` to `(profile, trial, subscription, now)`. Priority 2 added: `subscription.status 'active'|'past_due'` → `reason: 'subscription'`. `loadProEntitlement` now runs 3 concurrent queries (profiles + pro_trials + subscriptions). Returns `subscriptionError` + `_subscriptionErrorCode`.
 - All four AI Edge Functions (`ai-parse-contact`, `ai-map-csv`, `ai-categorize-contacts`, `ai-chat`) — updated to destructure `subscription` from `loadProEntitlement` and pass it as 3rd arg to `evaluateProEntitlement`.
 - `src/lib/pro-ui-status.js` — `classifyProStatus()` now returns 6 states: `'unavailable' | 'permanent' | 'subscribed' | 'trial' | 'expired' | 'non_pro'`. Checks `subscription_active === true` after permanent and before trial.
-- `src/pages/SettingsPage.jsx` — reads `?checkout=success/cancelled` from URL on mount (URL cleaned immediately via `navigate`), calls `proRefresh()` immediately + after 3s delay. Subscribe button in Pro Access card for expired/non_pro states. Subscribed state shows "Renews DATE" or "Cancels DATE" depending on `cancel_at_period_end`. `handleSubscribe()` calls `create-checkout-session` Edge Function.
+- `src/pages/SettingsPage.jsx` — reads `?checkout=success/cancelled` from URL on mount (URL cleaned immediately via `navigate`). Checkout return: bounded polling via `runCheckoutPolling` — shows "Confirming subscription…" during poll, "✓ You're on Funnl Pro — welcome!" on confirmed, "Payment processing — check again" with Retry button on timeout (22.5s total). Subscribe button in Pro Access card for expired/non_pro states, fires `checkout_started` + `checkout_creation_failed` analytics, sends `{ attemptId: crypto.randomUUID() }` to create-checkout-session for idempotency. Subscribed state shows "Renews DATE" or "Cancels DATE" depending on `cancel_at_period_end`, plus "Manage billing →" button that opens Stripe Customer Portal via `create-billing-portal-session` Edge Function and fires `billing_portal_opened` analytics. `handleSubscribe()` calls `create-checkout-session` Edge Function.
 - `src/pages/FunnlAIPage.jsx` — `isProUser` includes `subscribed`. Subscribe button in locked state. `proBadge` shows `PRO` for subscribed users.
 
 **`subscriptions` table schema:**
@@ -1359,21 +1376,26 @@ Note: `total_duration_ms` meaning changed from the prior version (where it measu
 **Updated `get_my_pro_access_status()` RPC:** now queries `subscriptions` and returns 4 new fields: `subscription_active boolean`, `subscription_status text`, `subscription_period_end timestamptz`, `cancel_at_period_end boolean`. `can_use_pro = permanent_pro OR trial_active OR subscription_active`.
 
 **Manual steps required before deployment (in order):**
-1. Run `supabase/migrations/20260812000000_add_subscriptions.sql` in Supabase SQL Editor. Verify 4 ACL checks: authenticated SELECT=true, INSERT/UPDATE/DELETE=false; service_role INSERT=true. Confirm `subscription_active` appears in `get_my_pro_access_status()` output.
-2. Add `STRIPE_SECRET_KEY` to Supabase Edge Function secrets.
+1. Migration `20260812000000_add_subscriptions.sql` IS already applied to production — skip the SQL run. Optionally repair the ledger: `npx supabase migration repair --status applied 20260812000000 --linked`. Verify: `subscription_active` appears in `get_my_pro_access_status()` output.
+2. Add `STRIPE_SECRET_KEY` to Supabase Edge Function secrets. Also add `STRIPE_PRO_PRICE_ID` (= `price_1U3louJU7lKQodyVjgclua04`).
 3. Add `VITE_STRIPE_PUBLISHABLE_KEY` and `VITE_STRIPE_PRICE_ID` to Vercel env vars AND local `.env`.
-4. Deploy Edge Functions: `npx supabase functions deploy create-checkout-session --linked` and `npx supabase functions deploy stripe-webhook --linked`. Also redeploy all four AI Edge Functions (they now call 3-query `loadProEntitlement`).
+4. Deploy Edge Functions: `npx supabase functions deploy create-checkout-session --linked`, `npx supabase functions deploy stripe-webhook --linked`, `npx supabase functions deploy create-billing-portal-session --linked`. Also redeploy all four AI Edge Functions (they now call 3-query `loadProEntitlement`).
 5. Register webhook endpoint `https://jzybxhvgnksrwxfivdwt.supabase.co/functions/v1/stripe-webhook` in Stripe dashboard → Developers → Webhooks. Select events: `checkout.session.completed`, `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.payment_succeeded`, `invoice.payment_failed`. Copy the `whsec_...` signing secret.
 6. Add `STRIPE_WEBHOOK_SECRET` (the `whsec_...` value) to Supabase Edge Function secrets.
-7. Merge frontend PR into `main`; wait for Vercel READY.
+7. Configure the Stripe Customer Portal at dashboard.stripe.com/settings/billing/portal. Enable it, set return URL to `https://www.getfunnl.com/settings`, configure cancellation/payment-method options.
+8. Merge frontend PR into `main`; wait for Vercel READY.
 
 **Test plan (Stripe TEST mode, do before merging to main):**
 - New signup → trial active, AI access works
 - Trial expiry simulation → locked state shows Subscribe button
-- Click Subscribe → redirects to Stripe Checkout
-- Complete with test card `4242 4242 4242 4242` → `?checkout=success` return → Pro badge appears after webhook
-- Subscription active → AI access works
-- Cancel subscription in Stripe → `cancel_at_period_end=true` → "Cancels DATE" shown, Pro continues until period end
+- Click Subscribe from SettingsPage and FunnlAIPage → `checkout_started` event fires → redirects to Stripe Checkout
+- Complete with test card `4242 4242 4242 4242` → returns to `?checkout=success` → "Confirming subscription…" shown during poll → "✓ You're on Funnl Pro" on confirmation
+- Slow webhook scenario: use Stripe test-clock to delay webhook → timeout state shows "Payment processing — check again" + Retry button
+- Subscription active → AI access works; Settings shows "Manage billing →" button
+- Click "Manage billing →" → `billing_portal_opened` fires → Stripe Customer Portal opens
+- Cancel subscription in portal → `cancel_at_period_end=true` → "Cancels DATE" shown, Pro continues until period end
 - `subscription.deleted` fires at period end → access revoked, locked state shown
+- Already-subscribed user clicks Subscribe again → 409 returned (no double session)
+- Invalid `attemptId` (missing or not UUID) → 400 from Edge Function
 - Permanent Pro user (`ai_enabled=true`) unaffected by any subscription state
 - Webhook signature failure (tampered body) → 400 rejected
