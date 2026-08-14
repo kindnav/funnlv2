@@ -22,14 +22,17 @@ export function getNextPollDelay(attempt) {
  * Runs the bounded checkout-return polling loop.
  *
  * Calls refreshFn() repeatedly with staged delays, stopping when:
- *   (a) hasAccessFn() returns true after a refresh  → resolved with 'confirmed'
- *   (b) all POLL_DELAYS_MS attempts have been exhausted → resolved with 'timeout'
- *   (c) signal.aborted (component unmounted)         → resolved with 'aborted'
+ *   (a) hasAccessFn(returnedStatus) returns true after a refresh → resolved with 'confirmed'
+ *   (b) all POLL_DELAYS_MS attempts have been exhausted             → resolved with 'timeout'
+ *   (c) signal.aborted (component unmounted)                        → resolved with 'aborted'
+ *
+ * refreshFn must return the newly fetched status object (e.g. from ProStatusProvider.refresh()).
+ * hasAccessFn receives that returned status as its argument — do not read React refs inside it.
  *
  * @param {Object} opts
- * @param {() => Promise<void>} opts.refreshFn   — calls proRefresh() and awaits it
- * @param {() => boolean}       opts.hasAccessFn — returns hasProAccess(proStatus)
- * @param {AbortSignal}         opts.signal       — abort when component unmounts
+ * @param {() => Promise<unknown>} opts.refreshFn   — calls proRefresh() and returns the new status
+ * @param {(status: unknown) => boolean} opts.hasAccessFn — receives the returned status; returns true when access is confirmed
+ * @param {AbortSignal}         opts.signal          — abort when component unmounts
  * @param {(ms: number) => Promise<void>} [opts.delayFn] — injectable sleep (default: real setTimeout)
  * @returns {Promise<'confirmed' | 'timeout' | 'aborted'>}
  */
@@ -44,13 +47,13 @@ export async function runCheckoutPolling({ refreshFn, hasAccessFn, signal, delay
 
     if (signal.aborted) return 'aborted'
 
-    // Refresh the pro status.
-    await refreshFn()
+    // Refresh pro status — refreshFn returns the newly fetched status.
+    const newStatus = await refreshFn()
 
     if (signal.aborted) return 'aborted'
 
-    // Check whether access is now confirmed.
-    if (hasAccessFn()) return 'confirmed'
+    // Pass the returned status directly — no React ref needed.
+    if (hasAccessFn(newStatus)) return 'confirmed'
   }
 
   // All attempts exhausted without confirmation.

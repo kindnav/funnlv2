@@ -213,17 +213,45 @@ Deno.serve(async (req) => {
       )
     }
 
-    const session = await stripeRes.json() as { url: string }
+    // Parse Stripe response — handle invalid JSON defensively.
+    let session: { url?: string }
+    try {
+      session = await stripeRes.json()
+    } catch {
+      console.error('create-checkout-session: invalid JSON in Stripe response', {
+        requestId,
+        code: 'stripe_api_error' satisfies ErrorCode,
+        providerStatus: stripeRes.status,
+      })
+      return jsonResponse({ error: 'Could not start checkout — please try again' }, 502)
+    }
+
+    // Validate the returned URL — must be HTTPS on checkout.stripe.com.
+    const checkoutUrl = session?.url
+    let validUrl = false
+    if (typeof checkoutUrl === 'string' && checkoutUrl) {
+      try {
+        const parsed = new URL(checkoutUrl)
+        validUrl = parsed.protocol === 'https:' && parsed.hostname === 'checkout.stripe.com'
+      } catch { /* invalid URL — validUrl stays false */ }
+    }
+    if (!validUrl) {
+      console.error('create-checkout-session: Stripe returned invalid or missing checkout URL', {
+        requestId,
+        code: 'stripe_api_error' satisfies ErrorCode,
+        providerStatus: stripeRes.status,
+      })
+      return jsonResponse({ error: 'Could not start checkout — please try again' }, 502)
+    }
 
     // Return only the checkout URL — never expose session IDs, customer IDs,
     // or other Stripe metadata to the browser.
-    return jsonResponse({ url: session.url }, 200)
+    return jsonResponse({ url: checkoutUrl }, 200)
 
-  } catch (err) {
+  } catch {
     console.error('create-checkout-session: unexpected error', {
       requestId,
       code: 'internal_error' satisfies ErrorCode,
-      error: String(err),
     })
     return jsonResponse({ error: 'Something went wrong — please try again' }, 500)
   }

@@ -44,12 +44,14 @@ export function ProStatusProvider({ children }) {
   }, [])
 
   // Stable refresh function — stable reference across renders so consumers do not
-  // re-render from a changing callback reference. Calls the RPC and updates the
-  // shared provider state so every consumer (Sidebar, FunnlAIPage, Settings…) sees
-  // the fresh result without a per-component RPC call.
+  // re-render from a changing callback reference. Calls the RPC, updates the
+  // shared provider state so every consumer sees the fresh result, and returns
+  // the newly fetched status for callers that need it (e.g. checkout polling).
   const refresh = useCallback(async () => {
     const status = await getProAccessStatus()
-    setProStatus(status ?? 'error')
+    const normalized = status ?? 'error'
+    setProStatus(normalized)
+    return normalized
   }, [])
 
   // No JSX in .js files — use createElement directly.

@@ -105,6 +105,7 @@ function SettingsPage() {
   const [subscribeError,    setSubscribeError]    = useState('')
   const [pollingState,      setPollingState]      = useState(null)
   const [billingPortalOpening, setBillingPortalOpening] = useState(false)
+  const [billingPortalError,   setBillingPortalError]   = useState('')
 
   // ── Theme ─────────────────────────────────────────────────────────────────
   const [currentTheme, setCurrentTheme] = useState(() => getTheme())
@@ -181,10 +182,10 @@ function SettingsPage() {
         const newUid = session?.user?.id ?? null
         // Only act if we have a loaded user and the UID has changed.
         if (!user?.id || newUid === user.id) return
-        // New generation: all in-flight requests for the previous user will bail.
+        // New generation: in-flight requests for the previous user will bail.
         accountGenRef.current++
         currentUidRef.current = null
-        // Clear all user-scoped state, including flags that could block the new user's UI.
+        // Clear all user-scoped state and flags.
         setLoading(true)
         setUser(null)
         setDisplayName('')
@@ -201,6 +202,7 @@ function SettingsPage() {
         setCheckoutBanner(null)
         setPollingState(null)
         setBillingPortalOpening(false)
+        setBillingPortalError('')
         setShowDeleteAllModal(false)
         setDeleteAllInput('')
         setDeleteAllError('')
@@ -275,11 +277,11 @@ function SettingsPage() {
     if (retrying) return
     const capturedGen = accountGenRef.current
     setRetrying(true)
-    await proRefresh()
+    const newStatus = await proRefresh()
     if (!mountedRef.current || accountGenRef.current !== capturedGen) return
     setRetrying(false)
-    // If we were waiting for checkout confirmation and access is now granted, confirm it.
-    if (pollingState === 'timed_out' && hasProAccess(proStatusRef.current)) {
+    // Use the returned status directly (React state may not have committed yet).
+    if (pollingState === 'timed_out' && hasProAccess(newStatus)) {
       setPollingState('confirmed')
       track('subscription_access_confirmed')
     }
@@ -412,8 +414,8 @@ function SettingsPage() {
     setPollingState('polling')
     const controller = new AbortController()
     runCheckoutPolling({
-      refreshFn:   () => proRefresh(),
-      hasAccessFn: () => hasProAccess(proStatusRef.current),
+      refreshFn:   () => proRefresh(),           // proRefresh() now returns the new status
+      hasAccessFn: (s) => hasProAccess(s),       // receives returned status; no stale ref
       signal:      controller.signal,
     }).then(result => {
       if (!mountedRef.current) return
@@ -455,10 +457,14 @@ function SettingsPage() {
     if (billingPortalOpening) return
     const capturedGen = accountGenRef.current
     setBillingPortalOpening(true)
+    setBillingPortalError('')
     const { data, error } = await supabase.functions.invoke('create-billing-portal-session')
     if (!mountedRef.current || accountGenRef.current !== capturedGen) return
     setBillingPortalOpening(false)
-    if (error || !data?.url) return  // silent — billing portal is a convenience, not blocking
+    if (error || !data?.url) {
+      setBillingPortalError('Could not open billing management. Please try again.')
+      return
+    }
     track('billing_portal_opened', { source: 'settings' })
     window.location.href = data.url
   }
@@ -605,6 +611,11 @@ function SettingsPage() {
               >
                 {billingPortalOpening ? 'Opening…' : 'Manage billing →'}
               </button>
+              {billingPortalError && (
+                <p role="alert" aria-live="assertive" className="text-[10.5px] text-danger mt-[6px]">
+                  {billingPortalError}
+                </p>
+              )}
             </div>
           ) : proClass === 'trial' ? (
             <div>

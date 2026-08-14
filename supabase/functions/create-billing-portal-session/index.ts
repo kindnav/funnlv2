@@ -136,18 +136,50 @@ Deno.serve(async (req) => {
       )
     }
 
-    const portalSession = await stripeRes.json() as { url: string }
+    // Parse Stripe response — handle invalid JSON defensively.
+    let portalSession: { url?: string }
+    try {
+      portalSession = await stripeRes.json()
+    } catch {
+      console.error('create-billing-portal-session: invalid JSON in Stripe response', {
+        requestId,
+        providerStatus: stripeRes.status,
+      })
+      return new Response(
+        JSON.stringify({ error: 'Could not open billing portal — please try again' }),
+        { status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      )
+    }
+
+    // Validate the returned URL — must be HTTPS on billing.stripe.com.
+    const portalUrl = portalSession?.url
+    let validUrl = false
+    if (typeof portalUrl === 'string' && portalUrl) {
+      try {
+        const parsed = new URL(portalUrl)
+        validUrl = parsed.protocol === 'https:' && parsed.hostname === 'billing.stripe.com'
+      } catch { /* invalid URL — validUrl stays false */ }
+    }
+    if (!validUrl) {
+      console.error('create-billing-portal-session: Stripe returned invalid or missing portal URL', {
+        requestId,
+        providerStatus: stripeRes.status,
+      })
+      return new Response(
+        JSON.stringify({ error: 'Could not open billing portal — please try again' }),
+        { status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      )
+    }
 
     // Return only the portal URL — never expose customer IDs or session IDs.
     return new Response(
-      JSON.stringify({ url: portalSession.url }),
+      JSON.stringify({ url: portalUrl }),
       { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     )
 
-  } catch (err) {
+  } catch {
     console.error('create-billing-portal-session: unexpected error', {
       requestId,
-      error: String(err),
     })
     return new Response(
       JSON.stringify({ error: 'Something went wrong — please try again' }),

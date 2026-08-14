@@ -97,17 +97,17 @@ test('returns null for attempt well beyond length', () => {
 })
 
 // ── runCheckoutPolling — confirmed ────────────────────────────────────────────
+//
+// refreshFn returns the "status" — a truthy value means access is confirmed.
+// hasAccessFn(status) receives the returned value from refreshFn.
 
 console.log('\nrunCheckoutPolling — confirmed')
 
-const polls = []
-
-test('returns confirmed when hasAccessFn returns true after first refresh', async () => {
+test('returns confirmed when hasAccessFn(status) returns true after first refresh', async () => {
   const delay = makeDelayFn()
-  let refreshCount = 0
   const result = await runCheckoutPolling({
-    refreshFn:   async () => { refreshCount++ },
-    hasAccessFn: () => refreshCount >= 1,  // true after first refresh
+    refreshFn:   async () => ({ can_use_pro: true }),
+    hasAccessFn: (s) => s?.can_use_pro === true,
     signal:      new AbortController().signal,
     delayFn:     delay,
   })
@@ -118,8 +118,8 @@ test('calls refreshFn once when confirmed on first attempt', async () => {
   const delay = makeDelayFn()
   let refreshCount = 0
   await runCheckoutPolling({
-    refreshFn:   async () => { refreshCount++ },
-    hasAccessFn: () => refreshCount >= 1,
+    refreshFn:   async () => { refreshCount++; return true },
+    hasAccessFn: (s) => s === true,
     signal:      new AbortController().signal,
     delayFn:     delay,
   })
@@ -128,10 +128,9 @@ test('calls refreshFn once when confirmed on first attempt', async () => {
 
 test('uses the first staged delay on the first wait', async () => {
   const delay = makeDelayFn()
-  let refreshCount = 0
   await runCheckoutPolling({
-    refreshFn:   async () => { refreshCount++ },
-    hasAccessFn: () => refreshCount >= 1,
+    refreshFn:   async () => true,
+    hasAccessFn: (s) => s === true,
     signal:      new AbortController().signal,
     delayFn:     delay,
   })
@@ -142,8 +141,8 @@ test('returns confirmed on the third refresh attempt', async () => {
   const delay = makeDelayFn()
   let refreshCount = 0
   const result = await runCheckoutPolling({
-    refreshFn:   async () => { refreshCount++ },
-    hasAccessFn: () => refreshCount >= 3,  // takes 3 tries
+    refreshFn:   async () => { refreshCount++; return refreshCount >= 3 },
+    hasAccessFn: (s) => s === true,
     signal:      new AbortController().signal,
     delayFn:     delay,
   })
@@ -155,14 +154,41 @@ test('uses staged delays in order when confirming on third attempt', async () =>
   const delay = makeDelayFn()
   let refreshCount = 0
   await runCheckoutPolling({
-    refreshFn:   async () => { refreshCount++ },
-    hasAccessFn: () => refreshCount >= 3,
+    refreshFn:   async () => { refreshCount++; return refreshCount >= 3 },
+    hasAccessFn: (s) => s === true,
     signal:      new AbortController().signal,
     delayFn:     delay,
   })
   assertEqual(delay.calls[0], POLL_DELAYS_MS[0])
   assertEqual(delay.calls[1], POLL_DELAYS_MS[1])
   assertEqual(delay.calls[2], POLL_DELAYS_MS[2])
+})
+
+test('hasAccessFn receives the value returned by refreshFn', async () => {
+  const delay = makeDelayFn()
+  const sentinel = { is_sentinel: true }
+  let received = undefined
+  await runCheckoutPolling({
+    refreshFn:   async () => sentinel,
+    hasAccessFn: (s) => { received = s; return true },
+    signal:      new AbortController().signal,
+    delayFn:     delay,
+  })
+  assert(received === sentinel, 'hasAccessFn did not receive the exact object returned by refreshFn')
+})
+
+test('hasAccessFn receives null from refreshFn when refreshFn returns null', async () => {
+  const delay = makeDelayFn()
+  let callCount = 0
+  let receivedNull = false
+  const result = await runCheckoutPolling({
+    refreshFn:   async () => { callCount++; return callCount < POLL_DELAYS_MS.length ? null : false },
+    hasAccessFn: (s) => { if (s === null) receivedNull = true; return false },
+    signal:      new AbortController().signal,
+    delayFn:     delay,
+  })
+  assertEqual(result, 'timeout')
+  assert(receivedNull, 'hasAccessFn was never called with null — it does not receive the returned value')
 })
 
 // ── runCheckoutPolling — timeout ──────────────────────────────────────────────
@@ -173,8 +199,8 @@ test('returns timeout when hasAccessFn never returns true', async () => {
   const delay = makeDelayFn()
   let refreshCount = 0
   const result = await runCheckoutPolling({
-    refreshFn:   async () => { refreshCount++ },
-    hasAccessFn: () => false,
+    refreshFn:   async () => { refreshCount++; return false },
+    hasAccessFn: (s) => s === true,
     signal:      new AbortController().signal,
     delayFn:     delay,
   })
@@ -185,7 +211,7 @@ test('calls refreshFn exactly POLL_DELAYS_MS.length times on timeout', async () 
   const delay = makeDelayFn()
   let refreshCount = 0
   await runCheckoutPolling({
-    refreshFn:   async () => { refreshCount++ },
+    refreshFn:   async () => { refreshCount++; return false },
     hasAccessFn: () => false,
     signal:      new AbortController().signal,
     delayFn:     delay,
@@ -196,7 +222,7 @@ test('calls refreshFn exactly POLL_DELAYS_MS.length times on timeout', async () 
 test('uses all staged delays on timeout', async () => {
   const delay = makeDelayFn()
   await runCheckoutPolling({
-    refreshFn:   async () => {},
+    refreshFn:   async () => false,
     hasAccessFn: () => false,
     signal:      new AbortController().signal,
     delayFn:     delay,
@@ -217,7 +243,7 @@ test('returns aborted immediately when signal is already aborted', async () => {
   const delay = makeDelayFn()
   let refreshCount = 0
   const result = await runCheckoutPolling({
-    refreshFn:   async () => { refreshCount++ },
+    refreshFn:   async () => { refreshCount++; return false },
     hasAccessFn: () => false,
     signal:      controller.signal,
     delayFn:     delay,
@@ -237,7 +263,7 @@ test('returns aborted (signal aborted mid-loop in delay)', async () => {
   }
   let refreshCount = 0
   const result = await runCheckoutPolling({
-    refreshFn:   async () => { refreshCount++ },
+    refreshFn:   async () => { refreshCount++; return false },
     hasAccessFn: () => false,
     signal:      controller.signal,
     delayFn,

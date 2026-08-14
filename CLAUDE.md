@@ -1327,7 +1327,7 @@ Run only after verifying `supabase migration list --linked` still shows `2026081
 
 **Design decisions (permanent — do not change without approval):**
 - Stripe TEST mode only. Going live is a separate later step.
-- Publishable key + price ID are frontend-safe (`VITE_` prefix), stored in Vercel env vars and local `.env`. Stripe secret key (`STRIPE_SECRET_KEY`) and webhook secret (`STRIPE_WEBHOOK_SECRET`) are Supabase secrets — never in any file or repo.
+- The frontend uses NO Stripe credentials. All Stripe credentials (publishable key, price ID, secret key, webhook secret) live in Supabase Edge Function secrets only — never in `VITE_` env vars, Vercel env vars, or `.env`. The price ID is read from `STRIPE_PRO_PRICE_ID` by the Edge Function server-side. Stripe secret key (`STRIPE_SECRET_KEY`) and webhook secret (`STRIPE_WEBHOOK_SECRET`) are Supabase secrets — never in any file or repo.
 - Users subscribe from the locked surface directly (FunnlAIPage or SettingsPage) — shared `handleSubscribe()` calls `create-checkout-session` Edge Function → redirects to Stripe hosted Checkout.
 - `past_due` counts as Pro (access preserved during Stripe's dunning window; only revoked on `subscription.deleted`).
 - Cancel-at-period-end: Pro continues until `current_period_end`, then `subscription.deleted` fires and Pro is revoked.
@@ -1335,8 +1335,8 @@ Run only after verifying `supabase migration list --linked` still shows `2026081
 - Unified Pro access: `can_use_pro = permanent_pro OR trial_active OR subscription_active` — enforced in one RPC + `shared/pro-entitlement.js`. All four AI Edge Functions inherit it automatically.
 
 **Stripe credentials (TEST mode):**
-- Publishable key: `pk_test_51TQekQJU7lKQodyVGWyhlWNdsKI9c4w2GKWUCNyDUPvM48lS2Ox8vzNwhqA7F4o2pSU9JMAkvR2SoYxdeOuoDRwq00exY9wbb9` (frontend-safe)
-- Price ID: `price_1U3louJU7lKQodyVjgclua04` (frontend-safe)
+- Publishable key: `pk_test_51TQekQJU7lKQodyVGWyhlWNdsKI9c4w2GKWUCNyDUPvM48lS2Ox8vzNwhqA7F4o2pSU9JMAkvR2SoYxdeOuoDRwq00exY9wbb9` (Supabase secret `STRIPE_PUBLISHABLE_KEY` — not needed by frontend)
+- Price ID: `price_1U3louJU7lKQodyVjgclua04` (Supabase secret `STRIPE_PRO_PRICE_ID` — read server-side only)
 - Secret key: stored in Supabase secret `STRIPE_SECRET_KEY` — server-side only, never in repo
 - Webhook secret: stored in Supabase secret `STRIPE_WEBHOOK_SECRET` — added after webhook is registered in Stripe
 - Webhook URL: `https://jzybxhvgnksrwxfivdwt.supabase.co/functions/v1/stripe-webhook`
@@ -1378,7 +1378,7 @@ Run only after verifying `supabase migration list --linked` still shows `2026081
 **Manual steps required before deployment (in order):**
 1. Migration `20260812000000_add_subscriptions.sql` IS already applied to production — skip the SQL run. Optionally repair the ledger: `npx supabase migration repair --status applied 20260812000000 --linked`. Verify: `subscription_active` appears in `get_my_pro_access_status()` output.
 2. Add `STRIPE_SECRET_KEY` to Supabase Edge Function secrets. Also add `STRIPE_PRO_PRICE_ID` (= `price_1U3louJU7lKQodyVjgclua04`).
-3. Add `VITE_STRIPE_PUBLISHABLE_KEY` and `VITE_STRIPE_PRICE_ID` to Vercel env vars AND local `.env`.
+3. No frontend env vars are needed for Stripe — all Stripe credentials live in Supabase Edge Function secrets only. (`VITE_STRIPE_PUBLISHABLE_KEY` and `VITE_STRIPE_PRICE_ID` are NOT used by the frontend.)
 4. Deploy Edge Functions: `npx supabase functions deploy create-checkout-session --linked`, `npx supabase functions deploy stripe-webhook --linked`, `npx supabase functions deploy create-billing-portal-session --linked`. Also redeploy all four AI Edge Functions (they now call 3-query `loadProEntitlement`).
 5. Register webhook endpoint `https://jzybxhvgnksrwxfivdwt.supabase.co/functions/v1/stripe-webhook` in Stripe dashboard → Developers → Webhooks. Select events: `checkout.session.completed`, `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.payment_succeeded`, `invoice.payment_failed`. Copy the `whsec_...` signing secret.
 6. Add `STRIPE_WEBHOOK_SECRET` (the `whsec_...` value) to Supabase Edge Function secrets.

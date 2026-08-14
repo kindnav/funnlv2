@@ -271,7 +271,8 @@ function FunnlAIPage() {
   const [loading,     setLoading]     = useState(false)
   const [isRetrying,  setIsRetrying]  = useState(false)
   const [historyOpen, setHistoryOpen] = useState(false)
-  const [subscribing, setSubscribing] = useState(false)
+  const [subscribing,    setSubscribing]    = useState(false)
+  const [subscribeError, setSubscribeError] = useState('')
 
   const isRetryingRef       = useRef(false)
   const bottomRef           = useRef(null)
@@ -511,6 +512,7 @@ function FunnlAIPage() {
     if (subscribing) return
     const attemptId = crypto.randomUUID()
     setSubscribing(true)
+    setSubscribeError('')
     track('checkout_started', { source: 'ai_page' })
     const { data, error } = await supabase.functions.invoke('create-checkout-session', {
       body: { attemptId },
@@ -518,7 +520,8 @@ function FunnlAIPage() {
     setSubscribing(false)
     if (error || !data?.url) {
       track('checkout_creation_failed', { source: 'ai_page' })
-      return  // Silent on error — user can retry
+      setSubscribeError('Could not start checkout. Please try again.')
+      return
     }
     window.location.href = data.url
   }
@@ -600,6 +603,11 @@ function FunnlAIPage() {
               <h3 className="font-display text-[18px] font-bold text-hi mb-2">AI only available for Pro</h3>
               <p className="text-[13px] leading-relaxed text-muted mb-5">Ask anything about your network — who's gone cold, who you know at a specific company, what to follow up on next.</p>
             </>
+          )}
+          {subscribeError && (
+            <p role="alert" aria-live="assertive" className="text-[11.5px] text-danger mb-2">
+              {subscribeError}
+            </p>
           )}
           <button
             onClick={handleSubscribe}
