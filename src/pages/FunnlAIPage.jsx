@@ -3,7 +3,7 @@ import ReactMarkdown from 'react-markdown'
 import { Link, useNavigate, useLocation } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { useProStatus, useProRefresh } from '../lib/useProStatus'
-import { classifyProStatus, hasProAccess } from '../lib/pro-ui-status'
+import { classifyProStatus } from '../lib/pro-ui-status'
 import { track } from '../lib/analytics'
 import { extractInvokeError } from '../lib/ai-chat-error'
 import { buildProviderMessages, isRetryEligible } from '../lib/ai-chat-conversation'
@@ -260,7 +260,7 @@ function FunnlAIPage() {
   const proStatus     = useProStatus()
   const proRefresh    = useProRefresh()
   const displayStatus = classifyProStatus(proStatus)
-  const isProUser     = hasProAccess(proStatus)
+  const isProUser     = displayStatus === 'permanent' || displayStatus === 'trial' || displayStatus === 'subscribed'
   const isCheckingPro = proStatus === null
 
   const [userId,      setUserId]      = useState(null)
@@ -613,9 +613,9 @@ function FunnlAIPage() {
             onClick={handleSubscribe}
             disabled={subscribing}
             className="text-[13px] font-bold text-white px-5 py-[10px] rounded-[10px] disabled:opacity-40 hover:opacity-90 transition-opacity motion-reduce:transition-none"
-            style={{ background: 'linear-gradient(135deg,#8B7CFF,#5B45F0)' }}
+            style={{ background: 'var(--color-ember)' }}
           >
-            {subscribing ? 'Loading…' : 'Subscribe — $7.99/month'}
+            {subscribing ? 'Loading…' : 'Subscribe - $7.99/month'}
           </button>
         </div>
       </div>

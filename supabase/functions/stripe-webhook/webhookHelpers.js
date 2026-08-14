@@ -116,6 +116,65 @@ export function unixToIso(unixSeconds) {
   return new Date(unixSeconds * 1000).toISOString()
 }
 
+// ── C4: Event ID validation ────────────────────────────────────────────────────
+
+/**
+ * Regex for valid Stripe event IDs. Format: evt_ followed by 2+ alphanumeric chars.
+ * Stripe consistently issues IDs in this format (evt_xxx). Non-matching IDs indicate
+ * a malformed or non-Stripe payload that slipped past signature verification.
+ */
+export const VALID_EVENT_ID_RE = /^evt_[A-Za-z0-9]{2,}$/
+
+/**
+ * Returns true when id is a valid Stripe event ID string.
+ *
+ * @param {unknown} id
+ * @returns {boolean}
+ */
+export function isValidEventId(id) {
+  return typeof id === 'string' && VALID_EVENT_ID_RE.test(id)
+}
+
+// ── C8: Subscription status validation ────────────────────────────────────────
+
+/**
+ * Set of all valid Stripe subscription status strings, derived from
+ * SUBSCRIPTION_STATUS_SEMANTICS. Used to validate incoming status values before
+ * writing to the subscriptions table.
+ */
+export const VALID_STATUSES = new Set(Object.keys(SUBSCRIPTION_STATUS_SEMANTICS))
+
+/**
+ * Returns true when status is a known Stripe subscription status string.
+ * Unknown statuses must be rejected before writing to the DB (C8).
+ *
+ * @param {unknown} status
+ * @returns {boolean}
+ */
+export function isValidStatus(status) {
+  return typeof status === 'string' && VALID_STATUSES.has(status)
+}
+
+// ── C9: Controlled failure codes ──────────────────────────────────────────────
+
+/**
+ * Set of all allowed failure_code values for the stripe_webhook_events table.
+ * Must stay in sync with the CHECK constraint in the migration SQL.
+ * Used in the Edge Function when marking events as 'failed'.
+ */
+export const VALID_FAILURE_CODES = new Set([
+  'missing_user_id',
+  'missing_ids',
+  'config_missing',
+  'stripe_fetch_failed',
+  'ownership_lookup_failed',
+  'owner_not_found',
+  'db_write_failed',
+  'handler_exception',
+  'invalid_event',
+  'invalid_status',
+])
+
 /**
  * Determines whether a webhook event should return HTTP 500 when its user cannot
  * be identified. A 500 causes Stripe to retry delivery, which may succeed once

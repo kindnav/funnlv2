@@ -182,7 +182,6 @@ function SettingsPage() {
         const newUid = session?.user?.id ?? null
         // Only act if we have a loaded user and the UID has changed.
         if (!user?.id || newUid === user.id) return
-        // New generation: in-flight requests for the previous user will bail.
         accountGenRef.current++
         currentUidRef.current = null
         // Clear all user-scoped state and flags.
@@ -393,7 +392,7 @@ function SettingsPage() {
   // On mount with ?checkout=success, immediately clean the URL, fire analytics,
   // then start a bounded polling loop (staged delays: 1.5s→3s→6s→12s, ~22.5s total)
   // that refreshes Pro status until access is confirmed or the loop times out.
-  // AbortController cleans up on unmount — no state mutations after unmount.
+  // AbortController cleans up on unmount - no state mutations after unmount.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!checkoutBanner) return
@@ -426,7 +425,7 @@ function SettingsPage() {
         setPollingState('timed_out')
         track('subscription_confirmation_timed_out')
       }
-      // 'aborted' means unmount — safe to ignore.
+      // 'aborted' means unmount - safe to ignore.
     })
     return () => controller.abort()
   }, []) // intentionally runs only on mount
@@ -544,13 +543,13 @@ function SettingsPage() {
           )}
           {pollingState === 'confirmed' && (
             <p role="status" aria-live="polite" className="text-[11.5px] font-semibold text-success mb-2">
-              &#x2713; You&apos;re on Funnl Pro — welcome!
+              &#x2713; You&apos;re on Funnl Pro - welcome!
             </p>
           )}
           {pollingState === 'timed_out' && (
             <div className="mb-2">
               <p className="text-[11.5px] text-muted mb-1">
-                Payment is processing — your Pro access will appear shortly.
+                Payment is processing. Your Pro access will appear shortly.
               </p>
               <button
                 onClick={handleProRetry}
@@ -562,7 +561,7 @@ function SettingsPage() {
             </div>
           )}
           {checkoutBanner === 'cancelled' && pollingState === null && (
-            <p className="text-[11.5px] text-muted mb-2">Checkout cancelled — you weren&apos;t charged.</p>
+            <p className="text-[11.5px] text-muted mb-2">Checkout cancelled. You weren&apos;t charged.</p>
           )}
 
           {proLoading ? (
@@ -648,9 +647,9 @@ function SettingsPage() {
                 onClick={handleSubscribe}
                 disabled={subscribing}
                 className="text-[12px] font-bold text-white px-4 py-[9px] rounded-[9px] disabled:opacity-40 hover:opacity-90 transition-opacity motion-reduce:transition-none"
-                style={{ background: 'linear-gradient(135deg,#8B7CFF,#5B45F0)' }}
+                style={{ background: 'var(--color-ember)' }}
               >
-                {subscribing ? 'Loading…' : 'Subscribe — $7.99/month'}
+                {subscribing ? 'Loading…' : 'Subscribe - $7.99/month'}
               </button>
             </div>
           ) : (
@@ -664,9 +663,9 @@ function SettingsPage() {
                 onClick={handleSubscribe}
                 disabled={subscribing}
                 className="text-[12px] font-bold text-white px-4 py-[9px] rounded-[9px] disabled:opacity-40 hover:opacity-90 transition-opacity motion-reduce:transition-none"
-                style={{ background: 'linear-gradient(135deg,#8B7CFF,#5B45F0)' }}
+                style={{ background: 'var(--color-ember)' }}
               >
-                {subscribing ? 'Loading…' : 'Subscribe — $7.99/month'}
+                {subscribing ? 'Loading…' : 'Subscribe - $7.99/month'}
               </button>
             </div>
           )}

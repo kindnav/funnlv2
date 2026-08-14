@@ -5,6 +5,12 @@ import {
   unixToIso,
   shouldRetryOnMissingOwnership,
 } from './webhookHelpers.js'
+import {
+  validateEventShape,
+  validateAuthoritativeSub,
+  isAllowedSubscriptionStatus,
+  classifyClaim,
+} from './webhookOrchestrator.js'
 
 // ── Stripe HMAC-SHA256 signature verification ──────────────────────────────────
 // Done manually via Deno's crypto.subtle — no external Stripe SDK required.
@@ -95,7 +101,7 @@ async function fetchStripeSubscription(
 //
 // HTTP response semantics:
 //   200 — Event received and processed (or safely ignored for a documented reason)
-//   400 — Event rejected (bad signature, invalid JSON, replay attack)
+//   400 — Event rejected (bad signature, invalid JSON, replay attack, invalid event shape)
 //   500 — Processing failed; Stripe WILL retry delivery
 //   503 — Event already in progress on another handler; Stripe WILL retry
 //
@@ -106,7 +112,8 @@ async function fetchStripeSubscription(
 // Idempotency: every event is claimed via claim_webhook_event() before processing.
 // Duplicate deliveries return 200 immediately. Failed events are reclaimed on the
 // next Stripe delivery and retried. Stale 'processing' rows (crashed handlers)
-// are reclaimed after 5 minutes.
+// are reclaimed after 5 minutes. Finalization uses mark_webhook_event() with the
+// claim_token so a stale handler cannot overwrite a newer claimant's row.
 
 Deno.serve(async (req) => {
   // Webhooks are always POST from Stripe — reject other methods without logging.
@@ -146,15 +153,23 @@ Deno.serve(async (req) => {
     return new Response('Invalid JSON', { status: 400 })
   }
 
-  const eventId        = event.id as string | undefined
+  // ── C4: Validate event shape ────────────────────────────────────────────────
+  // A validly-signed request with a malformed shape indicates a Stripe API change
+  // or a bug — reject with 400 rather than silently ignoring. This runs BEFORE the
+  // idempotency claim so we never persist a row for a structurally invalid event.
+  const shape = validateEventShape(event)
+  if (!shape.valid) {
+    console.error('stripe-webhook: invalid event shape', {
+      requestId,
+      eventType: typeof event?.type === 'string' ? event.type : null,
+    })
+    return new Response('Invalid event', { status: shape.httpStatus })
+  }
+
+  const eventId        = event.id as string
   const eventType      = event.type as string
   const eventCreatedAt = unixToIso(event.created as number)
-  const eventData      = (event.data as Record<string, unknown>)?.object as Record<string, unknown>
-
-  if (!eventData) {
-    // Unknown event shape — acknowledge and ignore.
-    return new Response('ok', { status: 200 })
-  }
+  const eventData      = (event.data as Record<string, unknown>).object as Record<string, unknown>
 
   // ── Service-role client — bypasses RLS for all writes ─────────────────────
   const supabaseAdmin = createClient(
@@ -163,61 +178,88 @@ Deno.serve(async (req) => {
   )
 
   // ── Idempotency claim ──────────────────────────────────────────────────────
-  // Every event with an ID is claimed before any processing begins.
-  // claim_webhook_event() atomically:
-  //   - Inserts a 'processing' row for new events           → returns 'claimed'
-  //   - Finds a 'processed'/'ignored' row for duplicates    → returns 'duplicate'
-  //   - Reclaims 'failed' rows for retry                    → returns 'claimed'
-  //   - Reclaims stale 'processing' rows (crashed handlers) → returns 'claimed'
-  //   - Returns 'in_progress' for a recent active handler   → caller returns 503
+  // Every event is claimed before any processing begins. claim_webhook_event()
+  // returns JSONB atomically:
+  //   {result:'claimed', claim_token:<uuid>} → this handler owns processing
+  //   {result:'duplicate'}                   → already processed/ignored; 200
+  //   {result:'in_progress'}                 → active handler elsewhere; 503
   //
-  // Events without an eventId (non-standard shape) skip idempotency and are
-  // handled once. Stripe always sends an event ID so this is a defensive guard.
-  let eventClaimed = false
+  // The claim_token is required by mark_webhook_event() to finalize the row —
+  // this prevents a stale (reclaimed) handler from overwriting a newer claim.
+  const { data: claimRaw, error: claimError } = await supabaseAdmin
+    .rpc('claim_webhook_event', {
+      p_event_id:   eventId,
+      p_event_type: eventType,
+      p_created_at: eventCreatedAt ?? new Date().toISOString(),
+    })
 
-  if (eventId) {
-    const { data: claim, error: claimError } = await supabaseAdmin
-      .rpc('claim_webhook_event', {
-        p_event_id:   eventId,
-        p_event_type: eventType,
-        p_created_at: eventCreatedAt ?? new Date().toISOString(),
-      })
-
-    if (claimError) {
-      console.error('stripe-webhook: idempotency claim failed', {
-        requestId, eventType, dbCode: claimError.code,
-      })
-      return new Response('Claim failed', { status: 500 })
-    }
-
-    if (claim === 'duplicate') {
-      // Already processed — safe to acknowledge.
-      return new Response('ok', { status: 200 })
-    }
-
-    if (claim === 'in_progress') {
-      // Another handler is actively processing this event — ask Stripe to retry later.
-      return new Response('In progress', { status: 503 })
-    }
-
-    // claim === 'claimed' — proceed with processing.
-    eventClaimed = true
+  if (claimError) {
+    console.error('stripe-webhook: idempotency claim failed', {
+      requestId, eventType, dbCode: claimError.code,
+    })
+    return new Response('Claim failed', { status: 500 })
   }
 
-  // Helper: mark the event's final status in the idempotency table.
-  // Best-effort: if this call fails, the row stays in 'processing' and will
-  // be reclaimed as stale after 5 minutes by the next Stripe delivery.
-  async function markEvent(status: 'processed' | 'ignored' | 'failed', failureCode?: string): Promise<void> {
-    if (!eventClaimed || !eventId) return
-    await supabaseAdmin
-      .from('stripe_webhook_events')
-      .update({
-        status,
-        processed_at: new Date().toISOString(),
-        ...(failureCode ? { failure_code: failureCode } : {}),
+  const claim = classifyClaim(claimRaw)
+
+  if (claim.action === 'duplicate') {
+    // Already processed — safe to acknowledge.
+    return new Response('ok', { status: 200 })
+  }
+  if (claim.action === 'in_progress') {
+    // Another handler is actively processing this event — ask Stripe to retry later.
+    return new Response('In progress', { status: 503 })
+  }
+  if (claim.action === 'error') {
+    // Unexpected claim payload — treat as a transient failure so Stripe retries.
+    console.error('stripe-webhook: unexpected claim result', { requestId, eventType })
+    return new Response('Claim failed', { status: 500 })
+  }
+
+  // claim.action === 'process' — this handler owns the claim.
+  const claimToken = claim.claimToken
+
+  // ── C3: Finalize the event via mark_webhook_event() with the claim_token ──────
+  // Returns { ok, tokenValid }:
+  //   ok=false        → the RPC itself failed (DB error) → caller returns 500
+  //   tokenValid=false → the row was reclaimed by a newer handler → non-fatal;
+  //                      the newer handler owns finalization, so we do NOT 500
+  // A 500 is returned only when the RPC errors, never on a benign token mismatch.
+  async function markEvent(
+    status: 'processed' | 'ignored' | 'failed',
+    failureCode?: string,
+  ): Promise<{ ok: boolean; tokenValid: boolean }> {
+    const { data, error } = await supabaseAdmin
+      .rpc('mark_webhook_event', {
+        p_event_id:     eventId,
+        p_claim_token:  claimToken,
+        p_status:       status,
+        p_failure_code: failureCode ?? null,
       })
-      .eq('event_id', eventId)
-      .catch(() => { /* stale processing row — reclaimable after 5 min */ })
+    if (error) {
+      console.error('stripe-webhook: mark_webhook_event failed', {
+        requestId, eventType, status, dbCode: error.code,
+      })
+      return { ok: false, tokenValid: false }
+    }
+    // data is the boolean returned by the RPC: true = row updated (token matched).
+    return { ok: true, tokenValid: data === true }
+  }
+
+  // Finalizes with markEvent, then maps the result to an HTTP Response.
+  // If the mark RPC errors, we surface 500 so Stripe retries (the row stays
+  // in 'processing' and is reclaimable). A benign token mismatch keeps the
+  // originally-intended response.
+  async function finalize(
+    status: 'processed' | 'ignored' | 'failed',
+    failureCode: string | undefined,
+    intended: Response,
+  ): Promise<Response> {
+    const mark = await markEvent(status, failureCode)
+    if (!mark.ok) {
+      return new Response('Finalize failed', { status: 500 })
+    }
+    return intended
   }
 
   // ── Ownership resolution ─────────────────────────────────────────────────
@@ -280,8 +322,6 @@ Deno.serve(async (req) => {
       // ── checkout.session.completed ─────────────────────────────────────────
       // First event when a user completes Checkout. Fetches authoritative
       // subscription state from Stripe rather than trusting the event payload.
-      // Missing userId, customerId, or subscriptionId → 500 (not retryable data
-      // issue in our session creation → log as error so we can investigate).
       case 'checkout.session.completed': {
         const session = eventData
         const meta    = session.metadata as Record<string, string> | null
@@ -291,8 +331,8 @@ Deno.serve(async (req) => {
           console.error('stripe-webhook: checkout.session.completed missing valid user_id', {
             requestId, eventType,
           })
-          await markEvent('failed', 'missing_user_id')
-          return new Response('Missing user_id', { status: 500 })
+          return await finalize('failed', 'missing_user_id',
+            new Response('Missing user_id', { status: 500 }))
         }
 
         const customerId     = session.customer as string | null
@@ -302,20 +342,20 @@ Deno.serve(async (req) => {
           console.error('stripe-webhook: checkout.session.completed missing customer or subscription ID', {
             requestId, eventType,
           })
-          await markEvent('failed', 'missing_ids')
-          return new Response('Missing required IDs', { status: 500 })
+          return await finalize('failed', 'missing_ids',
+            new Response('Missing required IDs', { status: 500 }))
         }
 
         // Config guard — must have both keys before any Stripe call.
         if (!stripeKey) {
           console.error('stripe-webhook: STRIPE_SECRET_KEY not set', { requestId, eventType })
-          await markEvent('failed', 'config_missing')
-          return new Response('Configuration error', { status: 500 })
+          return await finalize('failed', 'config_missing',
+            new Response('Configuration error', { status: 500 }))
         }
         if (!priceId) {
           console.error('stripe-webhook: STRIPE_PRO_PRICE_ID not set', { requestId, eventType })
-          await markEvent('failed', 'config_missing')
-          return new Response('Configuration error', { status: 500 })
+          return await finalize('failed', 'config_missing',
+            new Response('Configuration error', { status: 500 }))
         }
 
         // Fetch authoritative subscription state from Stripe.
@@ -324,19 +364,41 @@ Deno.serve(async (req) => {
           console.error('stripe-webhook: failed to fetch subscription from Stripe', {
             requestId, eventType,
           })
-          await markEvent('failed', 'stripe_fetch_failed')
-          return new Response('Stripe fetch failed', { status: 500 })
+          return await finalize('failed', 'stripe_fetch_failed',
+            new Response('Stripe fetch failed', { status: 500 }))
+        }
+
+        // C6: Validate the fetched subscription matches the event's IDs. A mismatch
+        // means Stripe returned an inconsistent object — refuse to write it.
+        const authCheck = validateAuthoritativeSub(sub, subscriptionId, customerId)
+        if (!authCheck.valid) {
+          console.error('stripe-webhook: authoritative subscription mismatch', {
+            requestId, eventType, reason: authCheck.reason,
+          })
+          return await finalize('failed', 'stripe_fetch_failed',
+            new Response('Subscription mismatch', { status: 500 }))
         }
 
         // Price validation (fail-closed): only write for our Pro price.
+        // Uses ONLY the authoritative fetched subscription's fields (C6).
         const subPrice = extractPriceId(sub)
         if (!subPrice || subPrice !== priceId) {
           // Wrong or missing price — this checkout is not for our Pro product.
           console.warn('stripe-webhook: checkout subscription price mismatch — ignoring', {
             requestId, eventType,
           })
-          await markEvent('ignored')
-          return new Response('ok', { status: 200 })
+          return await finalize('ignored', undefined,
+            new Response('ok', { status: 200 }))
+        }
+
+        // C8: Validate status against the allowlist before writing.
+        const subStatus = sub.status as string
+        if (!isAllowedSubscriptionStatus(subStatus)) {
+          console.error('stripe-webhook: unknown subscription status — ignoring', {
+            requestId, eventType,
+          })
+          return await finalize('failed', 'invalid_status',
+            new Response('Invalid status', { status: 500 }))
         }
 
         const periodEnd = unixToIso(sub.current_period_end as number | null)
@@ -345,9 +407,9 @@ Deno.serve(async (req) => {
           .from('subscriptions')
           .upsert({
             user_id:                userId,
-            stripe_customer_id:     customerId,
-            stripe_subscription_id: subscriptionId,
-            status:                 sub.status as string,
+            stripe_customer_id:     sub.customer as string,
+            stripe_subscription_id: sub.id as string,
+            status:                 subStatus,
             current_period_end:     periodEnd,
             cancel_at_period_end:   Boolean(sub.cancel_at_period_end),
             price_id:               subPrice,
@@ -358,8 +420,8 @@ Deno.serve(async (req) => {
           console.error('stripe-webhook: checkout upsert failed', {
             requestId, eventType, dbCode: error.code,
           })
-          await markEvent('failed', 'db_write_failed')
-          return new Response('Database write failed', { status: 500 })
+          return await finalize('failed', 'db_write_failed',
+            new Response('Database write failed', { status: 500 }))
         }
         break
       }
@@ -381,13 +443,13 @@ Deno.serve(async (req) => {
         // Config guards (fail-closed).
         if (!stripeKey) {
           console.error('stripe-webhook: STRIPE_SECRET_KEY not set', { requestId, eventType })
-          await markEvent('failed', 'config_missing')
-          return new Response('Configuration error', { status: 500 })
+          return await finalize('failed', 'config_missing',
+            new Response('Configuration error', { status: 500 }))
         }
         if (!priceId) {
           console.error('stripe-webhook: STRIPE_PRO_PRICE_ID not set', { requestId, eventType })
-          await markEvent('failed', 'config_missing')
-          return new Response('Configuration error', { status: 500 })
+          return await finalize('failed', 'config_missing',
+            new Response('Configuration error', { status: 500 }))
         }
 
         // Fetch authoritative subscription state — ignores event payload ordering.
@@ -396,24 +458,34 @@ Deno.serve(async (req) => {
           console.error('stripe-webhook: failed to fetch subscription from Stripe', {
             requestId, eventType,
           })
-          await markEvent('failed', 'stripe_fetch_failed')
-          return new Response('Stripe fetch failed', { status: 500 })
+          return await finalize('failed', 'stripe_fetch_failed',
+            new Response('Stripe fetch failed', { status: 500 }))
         }
 
-        // Price validation (fail-closed).
+        // C6: Validate the fetched subscription matches the event's IDs.
+        const authCheck = validateAuthoritativeSub(sub, subId, customerId)
+        if (!authCheck.valid) {
+          console.error('stripe-webhook: authoritative subscription mismatch', {
+            requestId, eventType, reason: authCheck.reason,
+          })
+          return await finalize('failed', 'stripe_fetch_failed',
+            new Response('Subscription mismatch', { status: 500 }))
+        }
+
+        // Price validation (fail-closed) — uses only the fetched subscription (C6).
         const incomingPrice = extractPriceId(sub)
         if (!incomingPrice) {
           // Subscription has no extractable price — not our product.
-          await markEvent('ignored')
-          return new Response('ok', { status: 200 })
+          return await finalize('ignored', undefined,
+            new Response('ok', { status: 200 }))
         }
         if (incomingPrice !== priceId) {
           // Wrong price — not our Pro subscription.
           console.warn('stripe-webhook: subscription price mismatch — ignoring', {
             requestId, eventType,
           })
-          await markEvent('ignored')
-          return new Response('ok', { status: 200 })
+          return await finalize('ignored', undefined,
+            new Response('ok', { status: 200 }))
         }
 
         // Resolve user ownership.
@@ -424,19 +496,29 @@ Deno.serve(async (req) => {
         })
 
         if (lookupError) {
-          await markEvent('failed', 'ownership_lookup_failed')
-          return new Response('Ownership lookup failed', { status: 500 })
+          return await finalize('failed', 'ownership_lookup_failed',
+            new Response('Ownership lookup failed', { status: 500 }))
         }
         if (!userId) {
           if (shouldRetryOnMissingOwnership(eventType)) {
             console.warn('stripe-webhook: unknown owner for entitlement event', {
               requestId, eventType,
             })
-            await markEvent('failed', 'owner_not_found')
-            return new Response('User not found — retry pending', { status: 500 })
+            return await finalize('failed', 'owner_not_found',
+              new Response('User not found — retry pending', { status: 500 }))
           }
-          await markEvent('ignored')
-          return new Response('ok', { status: 200 })
+          return await finalize('ignored', undefined,
+            new Response('ok', { status: 200 }))
+        }
+
+        // C8: Validate status against the allowlist before writing.
+        const subStatus = sub.status as string
+        if (!isAllowedSubscriptionStatus(subStatus)) {
+          console.error('stripe-webhook: unknown subscription status — ignoring', {
+            requestId, eventType,
+          })
+          return await finalize('failed', 'invalid_status',
+            new Response('Invalid status', { status: 500 }))
         }
 
         const periodEnd = unixToIso(sub.current_period_end as number | null)
@@ -445,9 +527,9 @@ Deno.serve(async (req) => {
           .from('subscriptions')
           .upsert({
             user_id:                userId,
-            stripe_customer_id:     customerId,
-            stripe_subscription_id: subId,
-            status:                 sub.status as string,
+            stripe_customer_id:     sub.customer as string,
+            stripe_subscription_id: sub.id as string,
+            status:                 subStatus,
             current_period_end:     periodEnd,
             cancel_at_period_end:   Boolean(sub.cancel_at_period_end),
             price_id:               incomingPrice,
@@ -458,15 +540,16 @@ Deno.serve(async (req) => {
           console.error('stripe-webhook: subscription upsert failed', {
             requestId, eventType, dbCode: error.code,
           })
-          await markEvent('failed', 'db_write_failed')
-          return new Response('Database write failed', { status: 500 })
+          return await finalize('failed', 'db_write_failed',
+            new Response('Database write failed', { status: 500 }))
         }
         break
       }
 
       // ── customer.subscription.deleted ─────────────────────────────────────
-      // Fetches authoritative state from Stripe to confirm final canceled status.
-      // Updates to 'canceled' rather than deleting — preserves billing history.
+      // Marks the subscription 'canceled' rather than deleting — preserves history.
+      // C5: The UPDATE matches BOTH user_id AND stripe_subscription_id so a late
+      // 'deleted' event cannot cancel a newer subscription that replaced this one.
       case 'customer.subscription.deleted': {
         const eventSub   = eventData
         const subId      = eventSub.id as string
@@ -480,108 +563,81 @@ Deno.serve(async (req) => {
         })
 
         if (lookupError) {
-          await markEvent('failed', 'ownership_lookup_failed')
-          return new Response('Ownership lookup failed', { status: 500 })
+          return await finalize('failed', 'ownership_lookup_failed',
+            new Response('Ownership lookup failed', { status: 500 }))
         }
         if (!userId) {
           if (shouldRetryOnMissingOwnership(eventType)) {
             console.warn('stripe-webhook: unknown owner for subscription.deleted', {
               requestId, eventType,
             })
-            await markEvent('failed', 'owner_not_found')
-            return new Response('User not found — retry pending', { status: 500 })
+            return await finalize('failed', 'owner_not_found',
+              new Response('User not found — retry pending', { status: 500 }))
           }
-          await markEvent('ignored')
-          return new Response('ok', { status: 200 })
+          return await finalize('ignored', undefined,
+            new Response('ok', { status: 200 }))
         }
 
-        const { error } = await supabaseAdmin
+        // C5: match both user_id AND stripe_subscription_id.
+        const { data: updated, error } = await supabaseAdmin
           .from('subscriptions')
           .update({
             status:     'canceled',
             updated_at: new Date().toISOString(),
           })
           .eq('user_id', userId)
+          .eq('stripe_subscription_id', subId)
+          .select('user_id')
 
         if (error) {
           console.error('stripe-webhook: subscription.deleted update failed', {
             requestId, eventType, dbCode: error.code,
           })
-          await markEvent('failed', 'db_write_failed')
-          return new Response('Database write failed', { status: 500 })
-        }
-        break
-      }
-
-      // ── invoice.payment_succeeded ──────────────────────────────────────────
-      // Updates current_period_end on successful charge / renewal.
-      // Belt-and-suspenders: subscription.updated fires on renewal too.
-      case 'invoice.payment_succeeded': {
-        const invoice    = eventData
-        const customerId = invoice.customer as string
-
-        const { userId, error: lookupError } = await resolveUserId({ customerId })
-        if (lookupError) {
-          await markEvent('failed', 'ownership_lookup_failed')
-          return new Response('Ownership lookup failed', { status: 500 })
-        }
-        if (!userId) {
-          if (shouldRetryOnMissingOwnership(eventType)) {
-            await markEvent('failed', 'owner_not_found')
-            return new Response('User not found — retry pending', { status: 500 })
-          }
-          await markEvent('ignored')
-          return new Response('ok', { status: 200 })
+          return await finalize('failed', 'db_write_failed',
+            new Response('Database write failed', { status: 500 }))
         }
 
-        const lines     = (invoice.lines as { data: Array<{ period: { end: number } }> } | null)?.data
-        const periodEnd = unixToIso(lines?.[0]?.period?.end ?? null)
-        if (!periodEnd) {
-          await markEvent('ignored')
-          break
-        }
-
-        const { error } = await supabaseAdmin
-          .from('subscriptions')
-          .update({ current_period_end: periodEnd, updated_at: new Date().toISOString() })
-          .eq('user_id', userId)
-
-        if (error) {
-          console.error('stripe-webhook: invoice.payment_succeeded update failed', {
-            requestId, eventType, dbCode: error.code,
+        // Zero rows updated → this subscription is not the current row (it was
+        // superseded by a newer subscription). This is a benign no-op, not an error.
+        if (!updated || updated.length === 0) {
+          console.log('stripe-webhook: subscription.deleted matched no current row — superseded, ignoring', {
+            requestId, eventType,
           })
-          await markEvent('failed', 'db_write_failed')
-          return new Response('Database write failed', { status: 500 })
+          return await finalize('ignored', undefined,
+            new Response('ok', { status: 200 }))
         }
         break
       }
 
-      // ── invoice.payment_failed ─────────────────────────────────────────────
-      // Stripe moves the subscription to 'past_due' — handled by
-      // customer.subscription.updated. Acknowledged here for observability only.
+      // ── invoice.payment_succeeded / invoice.payment_failed ─────────────────
+      // C7: Invoice events are informational only — no DB writes. The authoritative
+      // subscription state (current_period_end, past_due, etc.) is applied by
+      // customer.subscription.updated, which fetches the live subscription from
+      // Stripe. Writing here would duplicate that path and risk out-of-order data.
+      case 'invoice.payment_succeeded':
       case 'invoice.payment_failed': {
-        console.log('stripe-webhook: invoice.payment_failed received', {
+        console.log('stripe-webhook: invoice event received (informational only)', {
           requestId, eventType,
         })
-        await markEvent('ignored')
-        return new Response('ok', { status: 200 })
+        return await finalize('ignored', undefined,
+          new Response('ok', { status: 200 }))
       }
 
       default:
         // Unhandled event type — acknowledge and ignore.
-        await markEvent('ignored')
-        return new Response('ok', { status: 200 })
+        return await finalize('ignored', undefined,
+          new Response('ok', { status: 200 }))
     }
   } catch {
     // Unexpected exception during event processing — return 500 so Stripe retries.
     console.error('stripe-webhook: unexpected handler error', {
       requestId, eventType,
     })
-    await markEvent('failed', 'handler_exception')
-    return new Response('Internal error', { status: 500 })
+    return await finalize('failed', 'handler_exception',
+      new Response('Internal error', { status: 500 }))
   }
 
-  // Reaching here means the switch case completed successfully (no early return).
-  await markEvent('processed')
-  return new Response('ok', { status: 200 })
+  // Reaching here means a switch case completed successfully (no early return).
+  return await finalize('processed', undefined,
+    new Response('ok', { status: 200 }))
 })

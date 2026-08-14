@@ -1317,7 +1317,12 @@ Note: `total_duration_ms` meaning changed from the prior version (where it measu
 
 ### Layer D spec — Stripe billing (branch review/stripe-checkout)
 
-**Status: reliability pass complete, not yet deployed.** All code is on branch `review/stripe-checkout` (Draft PR #24). Migration `20260812000000_add_subscriptions.sql` IS applied to production (subscriptions table exists, RPC works, data live) — only the migration-history ledger has a gap (migration shows as local-only in `supabase migration list --linked`; repair command: `supabase migration repair --status applied 20260812000000 --linked` — DO NOT run without explicit approval). Edge Functions, updated shared files, and frontend NOT yet deployed — awaiting manual steps and explicit rollout approval.
+**Status: reliability pass complete; partially deployed at older versions.** All code is on branch `review/stripe-checkout` (Draft PR #24). Deployment state is a **mix** — see the per-component table in `docs/pr24-body.md` (verified via read-only `supabase functions list` on 2026-08-14). Summary:
+- Migration `20260812000000_add_subscriptions.sql` IS applied to production (subscriptions table exists, RPC works, data live). The migration-history ledger has a gap (shows as local-only in `supabase migration list --linked`); **required repair** before the next `db push`: `supabase migration repair --status applied 20260812000000 --linked` — DO NOT run without explicit approval.
+- Migration `20260813000000_add_webhook_idempotency.sql` is NOT applied.
+- `create-checkout-session` (v2) and `stripe-webhook` (v4, `verify_jwt=false`) ARE deployed but at **older versions** predating this branch's reliability/idempotency rewrite — redeploy from this branch to update (webhook only after `20260813000000` is applied).
+- `ai-chat` (v17), `ai-parse-contact` (v6), `ai-map-csv` (v6), `ai-categorize-contacts` (v5) ARE deployed with subscription-aware entitlement checks.
+- `create-billing-portal-session` is NOT deployed; frontend Stripe UI is NOT merged/deployed. Awaiting rollout approval.
 
 **Migration-history repair command (documented, do not run without approval):**
 ```
@@ -1334,12 +1339,14 @@ Run only after verifying `supabase migration list --linked` still shows `2026081
 - `subscriptions` table: authenticated users SELECT-only on their own row. All writes go through the webhook (service-role only). Users cannot self-grant Pro.
 - Unified Pro access: `can_use_pro = permanent_pro OR trial_active OR subscription_active` — enforced in one RPC + `shared/pro-entitlement.js`. All four AI Edge Functions inherit it automatically.
 
-**Stripe credentials (TEST mode):**
-- Publishable key: `pk_test_51TQekQJU7lKQodyVGWyhlWNdsKI9c4w2GKWUCNyDUPvM48lS2Ox8vzNwhqA7F4o2pSU9JMAkvR2SoYxdeOuoDRwq00exY9wbb9` (Supabase secret `STRIPE_PUBLISHABLE_KEY` — not needed by frontend)
-- Price ID: `price_1U3louJU7lKQodyVjgclua04` (Supabase secret `STRIPE_PRO_PRICE_ID` — read server-side only)
-- Secret key: stored in Supabase secret `STRIPE_SECRET_KEY` — server-side only, never in repo
-- Webhook secret: stored in Supabase secret `STRIPE_WEBHOOK_SECRET` — added after webhook is registered in Stripe
+**Stripe credentials (TEST mode) — all live in Supabase Edge Function secrets, never in the repo:**
+- `STRIPE_PUBLISHABLE_KEY` — publishable key (not needed by frontend). Read the value from the Supabase dashboard, not from this file.
+- `STRIPE_PRO_PRICE_ID` — the Pro price ID (read server-side only). Read the value from the Supabase dashboard.
+- `STRIPE_SECRET_KEY` — secret key, server-side only, never in repo.
+- `STRIPE_WEBHOOK_SECRET` — added after the webhook is registered in Stripe.
 - Webhook URL: `https://jzybxhvgnksrwxfivdwt.supabase.co/functions/v1/stripe-webhook`
+
+  Note: exact key and price-ID values are intentionally NOT stored in this repo. They live only in Supabase Edge Function secrets (and the Stripe dashboard). Do not paste them back into any committed file.
 
 **New files:**
 - `supabase/migrations/20260812000000_add_subscriptions.sql` — creates `public.subscriptions` table, updates `get_my_pro_access_status()` RPC with subscription fields. **PREREQUISITE:** `20260727000000_add_pro_trials.sql` must be applied first.
@@ -1376,8 +1383,8 @@ Run only after verifying `supabase migration list --linked` still shows `2026081
 **Updated `get_my_pro_access_status()` RPC:** now queries `subscriptions` and returns 4 new fields: `subscription_active boolean`, `subscription_status text`, `subscription_period_end timestamptz`, `cancel_at_period_end boolean`. `can_use_pro = permanent_pro OR trial_active OR subscription_active`.
 
 **Manual steps required before deployment (in order):**
-1. Migration `20260812000000_add_subscriptions.sql` IS already applied to production — skip the SQL run. Optionally repair the ledger: `npx supabase migration repair --status applied 20260812000000 --linked`. Verify: `subscription_active` appears in `get_my_pro_access_status()` output.
-2. Add `STRIPE_SECRET_KEY` to Supabase Edge Function secrets. Also add `STRIPE_PRO_PRICE_ID` (= `price_1U3louJU7lKQodyVjgclua04`).
+1. Migration `20260812000000_add_subscriptions.sql` IS already applied to production — skip the SQL run. **Required: repair the migration ledger** so future `supabase db push` runs do not re-attempt it: `npx supabase migration repair --status applied 20260812000000 --linked` (verify it still shows as local-only in `supabase migration list --linked` first). Verify: `subscription_active` appears in `get_my_pro_access_status()` output.
+2. Add `STRIPE_SECRET_KEY` and `STRIPE_PRO_PRICE_ID` to Supabase Edge Function secrets. Read the exact price-ID value from the Stripe dashboard — it is intentionally not stored in this repo.
 3. No frontend env vars are needed for Stripe — all Stripe credentials live in Supabase Edge Function secrets only. (`VITE_STRIPE_PUBLISHABLE_KEY` and `VITE_STRIPE_PRICE_ID` are NOT used by the frontend.)
 4. Deploy Edge Functions: `npx supabase functions deploy create-checkout-session --linked`, `npx supabase functions deploy stripe-webhook --linked`, `npx supabase functions deploy create-billing-portal-session --linked`. Also redeploy all four AI Edge Functions (they now call 3-query `loadProEntitlement`).
 5. Register webhook endpoint `https://jzybxhvgnksrwxfivdwt.supabase.co/functions/v1/stripe-webhook` in Stripe dashboard → Developers → Webhooks. Select events: `checkout.session.completed`, `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.payment_succeeded`, `invoice.payment_failed`. Copy the `whsec_...` signing secret.
