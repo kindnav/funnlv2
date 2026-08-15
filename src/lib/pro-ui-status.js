@@ -53,15 +53,30 @@ export function classifyProStatus(proStatus) {
   ) {
     return 'unavailable'
   }
-  // Permanent access always takes display priority, regardless of trial or subscription.
-  if (proStatus.permanent_pro === true) return 'permanent'
-  // Active Stripe subscription (subscription_active may be absent on older RPC shapes
-  // — safe default false via truthy check).
-  if (proStatus.subscription_active === true) return 'subscribed'
-  // Active trial (non-permanent, non-subscribed user with a running trial)
-  if (proStatus.can_use_pro === true && proStatus.trial_active === true) return 'trial'
-  // Expired trial (non-permanent, no subscription, no active access)
+
+  const canUse     = proStatus.can_use_pro === true
+  const permanent  = proStatus.permanent_pro === true
+  const subscribed = proStatus.subscription_active === true
+  const trialing   = proStatus.trial_active === true
+
+  // Contradiction guard: any access-granting flag that disagrees with
+  // can_use_pro === false is a malformed / internally inconsistent RPC result.
+  // Never render a Pro label (permanent / subscribed / trial) in that case — the
+  // canonical entitlement boolean (can_use_pro, enforced by hasProAccess) wins,
+  // and the display falls back to a neutral 'unavailable'.
+  if (!canUse && (permanent || subscribed || trialing)) return 'unavailable'
+
+  // classifyProStatus is DISPLAY-ONLY. It never gates access — hasProAccess() is the
+  // sole access gate. It maps a consistent status to the label/copy the UI shows.
+
+  // Permanent access takes display priority, regardless of trial or subscription.
+  if (permanent) return 'permanent'
+  // Active Stripe subscription.
+  if (subscribed) return 'subscribed'
+  // Active trial (non-permanent, non-subscribed user with a running trial).
+  if (canUse && trialing) return 'trial'
+  // Expired trial (non-permanent, no subscription, no active access).
   if (proStatus.trial_expired === true) return 'expired'
-  // Confirmed non-Pro: no trial of any kind, no subscription, no permanent access
+  // Confirmed non-Pro: no trial of any kind, no subscription, no permanent access.
   return 'non_pro'
 }

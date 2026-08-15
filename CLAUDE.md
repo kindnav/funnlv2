@@ -1332,18 +1332,20 @@ Run only after verifying `supabase migration list --linked` still shows `2026081
 
 **Design decisions (permanent — do not change without approval):**
 - Stripe TEST mode only. Going live is a separate later step.
-- The frontend uses NO Stripe credentials. All Stripe credentials (publishable key, price ID, secret key, webhook secret) live in Supabase Edge Function secrets only — never in `VITE_` env vars, Vercel env vars, or `.env`. The price ID is read from `STRIPE_PRO_PRICE_ID` by the Edge Function server-side. Stripe secret key (`STRIPE_SECRET_KEY`) and webhook secret (`STRIPE_WEBHOOK_SECRET`) are Supabase secrets — never in any file or repo.
+- The frontend uses NO Stripe credentials, and this implementation uses NO publishable key at all (no Stripe.js in the browser). The required Stripe secrets (secret key, price ID, webhook secret) live in Supabase Edge Function secrets only — never in `VITE_` env vars, Vercel env vars, or `.env`. The price ID is read from `STRIPE_PRO_PRICE_ID` by the Edge Function server-side. Stripe secret key (`STRIPE_SECRET_KEY`) and webhook secret (`STRIPE_WEBHOOK_SECRET`) are Supabase secrets — never in any file or repo.
 - Users subscribe from the locked surface directly (FunnlAIPage or SettingsPage) — shared `handleSubscribe()` calls `create-checkout-session` Edge Function → redirects to Stripe hosted Checkout.
 - `past_due` counts as Pro (access preserved during Stripe's dunning window; only revoked on `subscription.deleted`).
 - Cancel-at-period-end: Pro continues until `current_period_end`, then `subscription.deleted` fires and Pro is revoked.
 - `subscriptions` table: authenticated users SELECT-only on their own row. All writes go through the webhook (service-role only). Users cannot self-grant Pro.
 - Unified Pro access: `can_use_pro = permanent_pro OR trial_active OR subscription_active` — enforced in one RPC + `shared/pro-entitlement.js`. All four AI Edge Functions inherit it automatically.
 
-**Stripe credentials (TEST mode) — all live in Supabase Edge Function secrets, never in the repo:**
-- `STRIPE_PUBLISHABLE_KEY` — publishable key (not needed by frontend). Read the value from the Supabase dashboard, not from this file.
-- `STRIPE_PRO_PRICE_ID` — the Pro price ID (read server-side only). Read the value from the Supabase dashboard.
+**Stripe credentials (TEST mode) — the required secrets live in Supabase Edge Function secrets, never in the repo. Read exact values from the Stripe dashboard.**
+
+This implementation uses NO Stripe publishable key — it never runs Stripe.js in the browser; it only redirects to Stripe-hosted Checkout/Portal URLs returned by the Edge Functions. The publishable key is not a secret and is not required. Required secrets:
 - `STRIPE_SECRET_KEY` — secret key, server-side only, never in repo.
+- `STRIPE_PRO_PRICE_ID` — the Pro price ID (read server-side only).
 - `STRIPE_WEBHOOK_SECRET` — added after the webhook is registered in Stripe.
+- No frontend `VITE_STRIPE_*` variables are needed.
 - Webhook URL: `https://jzybxhvgnksrwxfivdwt.supabase.co/functions/v1/stripe-webhook`
 
   Note: exact key and price-ID values are intentionally NOT stored in this repo. They live only in Supabase Edge Function secrets (and the Stripe dashboard). Do not paste them back into any committed file.

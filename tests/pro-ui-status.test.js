@@ -161,6 +161,42 @@ await test('classifyProStatus: permanent wins over active trial fields', () => {
   )
 })
 
+// ── classifyProStatus: contradictory shapes → unavailable ─────────────────────
+// An access-granting flag that disagrees with can_use_pro=false is internally
+// inconsistent. classifyProStatus must NOT render a Pro label — it falls back to
+// 'unavailable' so the canonical gate (hasProAccess/can_use_pro) is never overridden
+// by a stale or malformed display flag.
+
+await test('classifyProStatus: subscription_active=true but can_use_pro=false → unavailable', () => {
+  assert.strictEqual(
+    classifyProStatus({ ...SUBSCRIBED_STATUS, can_use_pro: false }),
+    'unavailable',
+  )
+})
+
+await test('classifyProStatus: permanent_pro=true but can_use_pro=false → unavailable', () => {
+  assert.strictEqual(
+    classifyProStatus({ ...PERMANENT_STATUS, can_use_pro: false }),
+    'unavailable',
+  )
+})
+
+await test('classifyProStatus: trial_active=true but can_use_pro=false → unavailable', () => {
+  assert.strictEqual(
+    classifyProStatus({ ...TRIAL_ACTIVE_STATUS, can_use_pro: false }),
+    'unavailable',
+  )
+})
+
+await test('classifyProStatus: multiple grant flags but can_use_pro=false → unavailable', () => {
+  assert.strictEqual(
+    classifyProStatus({
+      permanent_pro: true, subscription_active: true, trial_active: true, can_use_pro: false,
+    }),
+    'unavailable',
+  )
+})
+
 // ── hasProAccess: true cases ──────────────────────────────────────────────────
 
 await test('hasProAccess: permanent Pro → true', () => {
@@ -227,52 +263,51 @@ await test('hasProAccess: empty object → false', () => {
 })
 
 // ── shouldShowAIFill ──────────────────────────────────────────────────────────
+// New signature: shouldShowAIFill(proStatus, isEditMode) → hasProAccess(proStatus).
 
 await test('shouldShowAIFill: permanent + add mode → true', () => {
-  assert.strictEqual(shouldShowAIFill('permanent', false), true)
+  assert.strictEqual(shouldShowAIFill(PERMANENT_STATUS, false), true)
 })
 
 await test('shouldShowAIFill: trial + add mode → true', () => {
-  assert.strictEqual(shouldShowAIFill('trial', false), true)
+  assert.strictEqual(shouldShowAIFill(TRIAL_ACTIVE_STATUS, false), true)
 })
 
-await test('shouldShowAIFill: subscribed + add mode → true (the bug fix)', () => {
-  assert.strictEqual(shouldShowAIFill('subscribed', false), true)
+await test('shouldShowAIFill: subscribed + add mode → true', () => {
+  assert.strictEqual(shouldShowAIFill(SUBSCRIBED_STATUS, false), true)
 })
 
 await test('shouldShowAIFill: permanent + edit mode → false', () => {
-  assert.strictEqual(shouldShowAIFill('permanent', true), false)
+  assert.strictEqual(shouldShowAIFill(PERMANENT_STATUS, true), false)
 })
 
 await test('shouldShowAIFill: trial + edit mode → false', () => {
-  assert.strictEqual(shouldShowAIFill('trial', true), false)
+  assert.strictEqual(shouldShowAIFill(TRIAL_ACTIVE_STATUS, true), false)
 })
 
 await test('shouldShowAIFill: subscribed + edit mode → false', () => {
-  assert.strictEqual(shouldShowAIFill('subscribed', true), false)
+  assert.strictEqual(shouldShowAIFill(SUBSCRIBED_STATUS, true), false)
 })
 
 await test('shouldShowAIFill: expired → false', () => {
-  assert.strictEqual(shouldShowAIFill('expired', false), false)
+  assert.strictEqual(shouldShowAIFill(TRIAL_EXPIRED_STATUS, false), false)
 })
 
 await test('shouldShowAIFill: non_pro → false', () => {
-  assert.strictEqual(shouldShowAIFill('non_pro', false), false)
+  assert.strictEqual(shouldShowAIFill(NON_PRO_STATUS, false), false)
 })
 
-await test('shouldShowAIFill: unavailable (loading/error) → false', () => {
-  assert.strictEqual(shouldShowAIFill('unavailable', false), false)
+await test('shouldShowAIFill: null (loading) / error → false', () => {
+  assert.strictEqual(shouldShowAIFill(null, false), false)
+  assert.strictEqual(shouldShowAIFill('error', false), false)
 })
 
-// ── Source-contract regression ────────────────────────────────────────────────
-// Fails if any src file still uses the old combined access-gate pattern.
-// The pattern is: === 'permanent' || someVar === 'trial'
-// (indicates a hand-rolled allowlist rather than hasProAccess).
-// Display-only comparisons — badge labels, ternary text — are isolated
-// single checks (e.g. proClass === 'trial' ? 'TRIAL' : 'PRO') that
-// do NOT combine with a paired === 'trial' term, so they are not matched.
-
-const OLD_GATE_RE = /===\s*['"]permanent['"]\s*\|\|\s*\w+\s*===\s*['"]trial['"]/
+// ── Canonical Pro-access source contract ──────────────────────────────────────
+// The architectural rule: every ACCESS GATE must be computed via hasProAccess().
+// classifyProStatus() is display-only. A hand-written entitlement-state allowlist
+// assigned to an access-gate variable (canUsePro / isProUser / canUseAI / isPro /
+// showAIFill) is the exact regression that caused the paid-user lockout — it must
+// fail this test even when 'subscribed' is included.
 
 function collectFiles(dir, exts, results = []) {
   for (const entry of readdirSync(dir)) {
@@ -286,31 +321,47 @@ function collectFiles(dir, exts, results = []) {
   return results
 }
 
-await test('no src file uses the old permanent-or-trial gate pattern', () => {
-  const srcDir = join(ROOT, 'src')
-  const srcFiles = collectFiles(srcDir, ['.jsx', '.js'])
-  const violations = []
+// Access-gate identifiers. An assignment to any of these whose right-hand side
+// compares against an entitlement-state string literal is a hand-written allowlist.
+const ACCESS_VARS = ['canUsePro', 'isProUser', 'canUseAI', 'isPro', 'showAIFill']
+const STATE_LITERALS = ['permanent', 'trial', 'subscribed', 'expired', 'non_pro']
+// Matches:  <accessVar> = ... === 'state' ...   (any number of states, any order)
+const ALLOWLIST_ASSIGN_RE = new RegExp(
+  `\\b(?:${ACCESS_VARS.join('|')})\\b\\s*=\\s*(?!=)[^\\n]*===\\s*['"](?:${STATE_LITERALS.join('|')})['"]`,
+)
 
+await test('C5: no src file assigns an access-gate variable from an entitlement-state allowlist', () => {
+  const srcFiles = collectFiles(join(ROOT, 'src'), ['.jsx', '.js'])
+  const violations = []
   for (const file of srcFiles) {
-    const lines = readFileSync(file, 'utf8').split('\n')
-    lines.forEach((line, i) => {
-      // A line is a violation only if it matches the old combined gate pattern
-      // AND does not also include 'subscribed' — the incomplete two-state form.
-      // (interactionFormUtils.js legitimately lists all three states explicitly.)
-      if (OLD_GATE_RE.test(line) && !line.includes("'subscribed'") && !line.includes('"subscribed"')) {
+    readFileSync(file, 'utf8').split('\n').forEach((line, i) => {
+      if (ALLOWLIST_ASSIGN_RE.test(line)) {
         const rel = file.startsWith(ROOT) ? file.slice(ROOT.length + 1) : file
         violations.push(`${rel}:${i + 1}: ${line.trim()}`)
       }
     })
   }
-
   assert.strictEqual(
-    violations.length,
-    0,
-    `Found ${violations.length} file(s) still using the old permanent||trial gate pattern.\n` +
-    `Replace with hasProAccess(proStatus) from src/lib/pro-ui-status.js:\n\n` +
+    violations.length, 0,
+    `Found ${violations.length} hand-written access-gate allowlist(s). ` +
+    `Access gates must use hasProAccess(proStatus):\n\n` +
     violations.map(v => `  ${v}`).join('\n'),
   )
+})
+
+await test('C5: the three shell/AI access gates are computed via hasProAccess', () => {
+  const files = {
+    'src/pages/FunnlAIPage.jsx':      /isProUser\s*=\s*hasProAccess\(/,
+    'src/components/BottomNav.jsx':    /canUsePro\s*=\s*hasProAccess\(/,
+    'src/components/CommandPalette.jsx': /canUsePro\s*=\s*hasProAccess\(/,
+  }
+  const missing = []
+  for (const [rel, re] of Object.entries(files)) {
+    const src = readFileSync(join(ROOT, rel), 'utf8')
+    if (!re.test(src)) missing.push(rel)
+  }
+  assert.strictEqual(missing.length, 0,
+    `These access gates must be computed via hasProAccess(): ${missing.join(', ')}`)
 })
 
 console.log('pro-ui-status.test.js: all tests passed.')

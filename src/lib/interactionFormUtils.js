@@ -1,6 +1,8 @@
 // Pure functions for interaction form logic.
 // No React / Supabase imports — safe to unit-test in plain Node.js.
 
+import { hasProAccess } from './pro-ui-status.js'
+
 /**
  * Returns true when the first-contact navigation flow should trigger.
  *
@@ -18,17 +20,17 @@ export function isFirstContactNavigation(contactCountBefore, newId) {
 /**
  * Returns true when the AI Fill section should be rendered.
  *
- * proClass: string returned by classifyProStatus() — one of:
- *   'permanent' | 'trial' | 'expired' | 'non_pro' | 'unavailable'
+ * proStatus: the raw server-authoritative status object (or null / 'error').
  * isEditMode: true when editing an existing contact.
  *
- * Fails closed: loading (null proStatus) maps to 'unavailable' in
- * classifyProStatus, which returns false here. Any unrecognised value
- * also returns false.
+ * Delegates the entitlement decision to hasProAccess() — the single canonical
+ * access gate — rather than enumerating individual states. Any future access
+ * path (e.g. a gift code) is covered automatically. Fails closed: null / 'error'
+ * / malformed status → hasProAccess returns false → no AI Fill.
  */
-export function shouldShowAIFill(proClass, isEditMode) {
+export function shouldShowAIFill(proStatus, isEditMode) {
   if (isEditMode) return false
-  return proClass === 'permanent' || proClass === 'trial' || proClass === 'subscribed'
+  return hasProAccess(proStatus)
 }
 
 /**

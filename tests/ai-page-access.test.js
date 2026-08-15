@@ -176,10 +176,17 @@ test('trial state: shows DAYS LEFT countdown', () => {
     'must render DAYS LEFT for trial users')
 })
 
-test('isProUser gating combines permanent and trial', () => {
+test('isProUser is the canonical hasProAccess gate (not a state allowlist)', () => {
+  // Access must be gated by the server-authoritative can_use_pro boolean via
+  // hasProAccess(proStatus) — never a hand-written permanent/trial/subscribed
+  // allowlist (that pattern caused the paid-user lockout regression).
   assert.ok(
-    aiSrc.includes("displayStatus === 'permanent' || displayStatus === 'trial'"),
-    "isProUser must accept both 'permanent' and 'trial'"
+    /isProUser\s*=\s*hasProAccess\(/.test(aiSrc),
+    'isProUser must be computed via hasProAccess(proStatus)'
+  )
+  assert.ok(
+    !/isProUser\s*=\s*[^\n]*===\s*['"](permanent|trial|subscribed)['"]/.test(aiSrc),
+    'isProUser must not be a hand-written entitlement-state allowlist'
   )
 })
 

@@ -84,9 +84,13 @@ test('missing required boolean fields → unavailable', () => {
   assert.strictEqual(classifyProStatus({ can_use_pro: true }), 'unavailable')
   assert.strictEqual(classifyProStatus({ permanent_pro: false }), 'unavailable')
 })
-test('permanent_pro=true → permanent (regardless of trial fields)', () => {
+test('permanent_pro=true with can_use_pro=true → permanent', () => {
   assert.strictEqual(classifyProStatus({ permanent_pro: true, can_use_pro: true }), 'permanent')
-  assert.strictEqual(classifyProStatus({ permanent_pro: true, can_use_pro: false, trial_active: false }), 'permanent')
+})
+test('permanent_pro=true but can_use_pro=false → unavailable (contradiction guard)', () => {
+  // A grant flag that disagrees with can_use_pro=false is internally inconsistent;
+  // classifyProStatus must not render a Pro label. can_use_pro is authoritative.
+  assert.strictEqual(classifyProStatus({ permanent_pro: true, can_use_pro: false, trial_active: false }), 'unavailable')
 })
 test('permanent_pro=false, can_use_pro=true, trial_active=true → trial', () => {
   assert.strictEqual(

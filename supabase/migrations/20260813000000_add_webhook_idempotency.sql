@@ -265,8 +265,19 @@ GRANT  EXECUTE ON FUNCTION public.claim_webhook_event(text, text, timestamptz) T
 -- The new claimant's row is unaffected.
 --
 -- C3 — DB error surfacing: the Edge Function inspects the returned boolean.
--- FALSE means the row was concurrently reclaimed (acceptable; Stripe will retry).
--- A Supabase RPC error means the DB call itself failed and the caller returns 500.
+-- FALSE means the row was NOT finalized by this call (see below). The handler
+-- must treat FALSE as "claim ownership lost" and return a retryable non-2xx
+-- (503) so Stripe retries; a later retry hits `duplicate` once the true owner
+-- finalizes. A Supabase RPC error (not FALSE) means the DB call itself failed
+-- and the caller returns 500.
+--
+-- HARDENING — the UPDATE additionally requires status = 'processing':
+--   1. A stale handler that was reclaimed by a newer claimant holds a token that
+--      no longer matches → 0 rows → FALSE. (token-ownership validation)
+--   2. A row already in a terminal state ('processed'/'ignored'/'failed') can
+--      NEVER be finalized a second time — even with the original matching token —
+--      because status is no longer 'processing' → 0 rows → FALSE. This makes
+--      finalization strictly a single processing → terminal transition.
 --
 -- Parameters:
 --   p_event_id    — Stripe event ID to finalize
@@ -275,8 +286,10 @@ GRANT  EXECUTE ON FUNCTION public.claim_webhook_event(text, text, timestamptz) T
 --   p_failure_code — required when p_status = 'failed'; NULL otherwise
 --
 -- Returns:
---   TRUE  — row updated (this handler still owns the claim)
---   FALSE — token mismatch (row was reclaimed by another handler; this is non-fatal)
+--   TRUE  — row transitioned processing → terminal (this handler still owns the claim)
+--   FALSE — token mismatch OR row was not in 'processing' (reclaimed, or already
+--           terminal). Non-fatal at the DB layer, but the handler treats it as a
+--           retryable ownership-loss condition.
 --
 -- SECURITY: callable by service_role only. Not callable by anon or authenticated.
 -- SECURITY DEFINER to bypass RLS. SET search_path = '' prevents injection.
@@ -300,7 +313,8 @@ BEGIN
          failure_code = p_failure_code,
          processed_at = now()
   WHERE  event_id    = p_event_id
-    AND  claim_token = p_claim_token;   -- C2: token ownership validation
+    AND  claim_token = p_claim_token   -- token ownership validation
+    AND  status      = 'processing';   -- only a live claim may transition to terminal
 
   GET DIAGNOSTICS v_rows = ROW_COUNT;
   RETURN v_rows > 0;

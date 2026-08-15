@@ -5,6 +5,8 @@ import { getTheme, setTheme } from '../lib/theme'
 import { useProStatus, useProRefresh } from '../lib/useProStatus'
 import { classifyProStatus, hasProAccess } from '../lib/pro-ui-status'
 import { runCheckoutPolling } from '../lib/checkoutPolling'
+import { resolveStripeRedirect } from '../lib/stripeRedirect'
+import { createActionGuard } from '../lib/actionGuard'
 import { track } from '../lib/analytics'
 import {
   validateDisplayName,
@@ -106,6 +108,12 @@ function SettingsPage() {
   const [pollingState,      setPollingState]      = useState(null)
   const [billingPortalOpening, setBillingPortalOpening] = useState(false)
   const [billingPortalError,   setBillingPortalError]   = useState('')
+  // Synchronous duplicate-action guards - engaged before generating an attemptId or
+  // invoking, so two rapid clicks cannot create two sessions before React re-renders.
+  const subscribeGuardRef   = useRef(null)
+  if (!subscribeGuardRef.current) subscribeGuardRef.current = createActionGuard()
+  const billingPortalGuardRef = useRef(null)
+  if (!billingPortalGuardRef.current) billingPortalGuardRef.current = createActionGuard()
 
   // ── Theme ─────────────────────────────────────────────────────────────────
   const [currentTheme, setCurrentTheme] = useState(() => getTheme())
@@ -432,7 +440,9 @@ function SettingsPage() {
 
   // ── Stripe Checkout: create session and redirect ──────────────────────────
   async function handleSubscribe() {
-    if (subscribing) return
+    // Synchronous guard engaged before generating the attempt ID or invoking, so two
+    // rapid clicks produce exactly one attemptId and one Edge Function call.
+    if (!subscribeGuardRef.current.begin()) return
     const capturedGen = accountGenRef.current
     const attemptId = crypto.randomUUID()
     setSubscribing(true)
@@ -441,31 +451,46 @@ function SettingsPage() {
     const { data, error } = await supabase.functions.invoke('create-checkout-session', {
       body: { attemptId },
     })
-    if (!mountedRef.current || accountGenRef.current !== capturedGen) return
-    setSubscribing(false)
-    if (error || !data?.url) {
-      setSubscribeError('Could not start checkout. Please try again.')
-      track('checkout_creation_failed', { source: 'settings' })
+    if (!mountedRef.current || accountGenRef.current !== capturedGen) {
+      // Unmounted or account switched - release the guard for a possible future mount.
+      subscribeGuardRef.current.release()
       return
     }
-    window.location.href = data.url
+    // Validate the returned URL before navigating (must be checkout.stripe.com HTTPS).
+    const redirect = resolveStripeRedirect(data, error, 'checkout')
+    if (!redirect.ok) {
+      setSubscribeError('Could not start checkout. Please try again.')
+      track('checkout_creation_failed', { source: 'settings' })
+      subscribeGuardRef.current.release()   // clear guard on controlled failure
+      setSubscribing(false)
+      return
+    }
+    // Navigating away - leave the guard set so a late click cannot open a 2nd session.
+    window.location.href = redirect.url
   }
 
   // ── Billing portal: open Stripe Customer Portal ───────────────────────────
   async function handleBillingPortal() {
-    if (billingPortalOpening) return
+    if (!billingPortalGuardRef.current.begin()) return
     const capturedGen = accountGenRef.current
     setBillingPortalOpening(true)
     setBillingPortalError('')
     const { data, error } = await supabase.functions.invoke('create-billing-portal-session')
-    if (!mountedRef.current || accountGenRef.current !== capturedGen) return
-    setBillingPortalOpening(false)
-    if (error || !data?.url) {
-      setBillingPortalError('Could not open billing management. Please try again.')
+    if (!mountedRef.current || accountGenRef.current !== capturedGen) {
+      billingPortalGuardRef.current.release()
       return
     }
+    // Validate the returned URL before navigating (must be billing.stripe.com HTTPS).
+    const redirect = resolveStripeRedirect(data, error, 'portal')
+    if (!redirect.ok) {
+      setBillingPortalError('Could not open billing management. Please try again.')
+      billingPortalGuardRef.current.release()   // clear guard on controlled failure
+      setBillingPortalOpening(false)
+      return
+    }
+    // Analytics fire ONLY after a valid portal URL is confirmed, just before navigation.
     track('billing_portal_opened', { source: 'settings' })
-    window.location.href = data.url
+    window.location.href = redirect.url
   }
 
   // ── Pro-status classification ─────────────────────────────────────────────

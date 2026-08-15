@@ -56,8 +56,9 @@ console.log('\nImports & dependencies')
 test('imports useProStatus from lib/useProStatus', () => {
   assert.ok(src.includes("from '../lib/useProStatus'"), 'must import useProStatus')
 })
-test('imports classifyProStatus from lib/pro-ui-status', () => {
-  assert.ok(src.includes("from '../lib/pro-ui-status'"), 'must import classifyProStatus')
+test('imports hasProAccess from lib/pro-ui-status', () => {
+  assert.ok(src.includes("from '../lib/pro-ui-status'"), 'must import from pro-ui-status')
+  assert.ok(src.includes('hasProAccess'), 'must import hasProAccess for the canonical access gate')
 })
 test('imports escapeIlike from searchUtils', () => {
   assert.ok(src.includes('escapeIlike') && src.includes('searchUtils'), 'must import escapeIlike from searchUtils')
@@ -411,10 +412,10 @@ console.log('\nProStatus usage (shared RPC, no independent call)')
 test('useProStatus() used (not getProAccessStatus directly)', () => {
   assert.ok(src.includes('useProStatus()'), 'must call useProStatus() from shared context')
 })
-test('classifyProStatus applied to proStatus', () => {
-  assert.ok(src.includes('classifyProStatus(proStatus)'), 'must call classifyProStatus(proStatus)')
+test('hasProAccess applied to proStatus (canonical gate)', () => {
+  assert.ok(src.includes('hasProAccess(proStatus)'), 'must call hasProAccess(proStatus)')
 })
-test('canUsePro derived from displayStatus', () => {
+test('canUsePro derived from hasProAccess', () => {
   assert.ok(src.includes('canUsePro'), 'must derive canUsePro for Pro-gated features')
 })
 test('AI section only rendered when canUsePro=true', () => {

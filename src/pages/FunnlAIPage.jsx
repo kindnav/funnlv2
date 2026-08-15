@@ -3,13 +3,15 @@ import ReactMarkdown from 'react-markdown'
 import { Link, useNavigate, useLocation } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { useProStatus, useProRefresh } from '../lib/useProStatus'
-import { classifyProStatus } from '../lib/pro-ui-status'
+import { classifyProStatus, hasProAccess } from '../lib/pro-ui-status'
 import { track } from '../lib/analytics'
 import { extractInvokeError } from '../lib/ai-chat-error'
 import { buildProviderMessages, isRetryEligible } from '../lib/ai-chat-conversation'
 import { isValidContactLink } from '../lib/contactLinkValidator'
 import { extractChildrenText } from '../lib/extractChildrenText'
 import { createRequestGate } from '../lib/ai-chat-request-gate'
+import { resolveStripeRedirect } from '../lib/stripeRedirect'
+import { createActionGuard } from '../lib/actionGuard'
 import { getAvatarColor, getInitials } from '../lib/avatarUtils'
 import TopBar from '../components/TopBar'
 import {
@@ -259,8 +261,8 @@ function FunnlAIPage() {
   // useProRefresh() updates all consumers (Sidebar, Settings, FunnlAIPage).
   const proStatus     = useProStatus()
   const proRefresh    = useProRefresh()
-  const displayStatus = classifyProStatus(proStatus)
-  const isProUser     = displayStatus === 'permanent' || displayStatus === 'trial' || displayStatus === 'subscribed'
+  const displayStatus = classifyProStatus(proStatus)  // DISPLAY ONLY (badge/copy)
+  const isProUser     = hasProAccess(proStatus)        // canonical access gate
   const isCheckingPro = proStatus === null
 
   const [userId,      setUserId]      = useState(null)
@@ -275,6 +277,8 @@ function FunnlAIPage() {
   const [subscribeError, setSubscribeError] = useState('')
 
   const isRetryingRef       = useRef(false)
+  const subscribeGuardRef   = useRef(null)   // synchronous duplicate-action guard for checkout
+  if (!subscribeGuardRef.current) subscribeGuardRef.current = createActionGuard()
   const bottomRef           = useRef(null)
   const inputRef            = useRef(null)
   const historyTriggerRef   = useRef(null) // for focus restoration after mobile modal closes
@@ -509,7 +513,10 @@ function FunnlAIPage() {
   }
 
   async function handleSubscribe() {
-    if (subscribing) return
+    // Synchronous guard: set the ref BEFORE generating the attempt ID or invoking,
+    // so two rapid clicks (before React commits setSubscribing) create exactly one
+    // attemptId and one Edge Function call.
+    if (!subscribeGuardRef.current.begin()) return
     const attemptId = crypto.randomUUID()
     setSubscribing(true)
     setSubscribeError('')
@@ -517,13 +524,18 @@ function FunnlAIPage() {
     const { data, error } = await supabase.functions.invoke('create-checkout-session', {
       body: { attemptId },
     })
-    setSubscribing(false)
-    if (error || !data?.url) {
+    // Validate the returned URL before navigating (must be checkout.stripe.com HTTPS).
+    const redirect = resolveStripeRedirect(data, error, 'checkout')
+    if (!redirect.ok) {
       track('checkout_creation_failed', { source: 'ai_page' })
       setSubscribeError('Could not start checkout. Please try again.')
+      subscribeGuardRef.current.release()   // clear guard on controlled failure
+      setSubscribing(false)
       return
     }
-    window.location.href = data.url
+    // Navigating away — intentionally leave the guard set so a late second
+    // invocation cannot start another checkout session.
+    window.location.href = redirect.url
   }
 
   async function retryProStatus() {
@@ -595,7 +607,7 @@ function FunnlAIPage() {
             <>
               <h3 className="font-display text-[18px] font-bold text-hi mb-2">Your trial has ended</h3>
               <p className="text-[13px] leading-relaxed text-muted mb-5">
-                Subscribe to continue asking questions about your network — who to follow up with, who's gone cold, who you know at a specific company.
+                Subscribe to continue asking questions about your network: who to follow up with, who's gone cold, who you know at a specific company.
               </p>
             </>
           ) : (

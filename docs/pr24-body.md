@@ -20,6 +20,18 @@ Each component is documented separately — the Stripe surface is a **mix** of d
 
 **Net effect:** checkout and the webhook are live at older versions, so the billing path partially functions today, but the idempotency table, the token-validated finalize, the authoritative-field/status hardening, the billing-portal function, and all frontend Stripe UI are **not** in production. Redeploying `create-checkout-session` and `stripe-webhook` from this branch (after applying migration `20260813000000`) is required to pick up the reliability corrections.
 
+## Reliability corrections (second review round)
+
+1. **Lost claim token never acknowledges 200** — `mark_webhook_event()` returning false (row reclaimed or already terminal) now returns retryable **503**, never the intended 200. The SQL UPDATE additionally requires `status = 'processing'`, so a terminal row cannot be finalized twice.
+2. **Authoritative fetched metadata** — `customer.subscription.created/updated` resolves ownership from the *fetched* subscription's `metadata.user_id` / IDs; the event snapshot is used only as expected values for validation.
+3. **Real orchestration is tested** — the handler control flow is extracted to an injectable `runWebhookOrchestration()`; 32 Node tests drive the actual production function.
+4. **Signature verification is tested** — `verifyStripeSignature()` extracted and covered by 20 real-HMAC tests (keeps `crypto.subtle.verify`).
+5. **Canonical Pro gate** — all access gates use `hasProAccess(can_use_pro)`; no hand-written entitlement-state allowlists remain in `src`; `classifyProStatus()` (display-only) rejects contradictory shapes as `unavailable`.
+6. **Validated redirects** — the 3 redirect sites route through `resolveStripeRedirect` → `isValidStripeUrl` before navigating.
+7. **Synchronous duplicate-action guards** — `createActionGuard()` prevents two rapid clicks from creating two sessions.
+8. **Em dash removed** from the expired-trial subscribe copy.
+9. **Credential docs corrected** — no publishable key (unused; not a secret); required secrets are `STRIPE_SECRET_KEY`, `STRIPE_PRO_PRICE_ID`, `STRIPE_WEBHOOK_SECRET`.
+
 ## What this PR includes
 
 ### Schema
@@ -29,23 +41,31 @@ Each component is documented separately — the Stripe surface is a **mix** of d
 
 ### Edge Functions
 - `create-checkout-session` — verifies JWT, validates `attemptId` UUID, checks for existing active/past_due subscription (409 if blocked), reads price from `STRIPE_PRO_PRICE_ID` env only, builds Stripe Checkout Session, returns `{ url }` after validating `checkout.stripe.com` HTTPS
-- `stripe-webhook` — manual HMAC-SHA256 via `crypto.subtle.verify` (constant-time; key imported for `['verify']`); 5-minute replay protection; **event-shape validation** (rejects malformed `id`/`type`/`created`/`data.object` with 400 even when validly signed); authoritative Stripe subscription retrieval on every subscription event (`GET /v1/subscriptions/{id}`) with **fetched-field validation** (`sub.id`/`sub.customer` must match the event, and only the fetched object's fields are written); fail-closed price validation; **subscription-status allowlist check** before any DB write; **invoice events are informational only** (no DB writes — `subscription.updated` carries the authoritative period/status); `subscription.deleted` UPDATE matches **both** `user_id` AND `stripe_subscription_id` so a late delete cannot cancel a newer subscription; atomic idempotency via `claim_webhook_event()` RPC returning a `claim_token`, finalized via `mark_webhook_event()` (token-validated so a stale/reclaimed handler cannot overwrite a newer claim); a failed `mark_webhook_event()` RPC returns 500 (never silently ignored); structured error responses; 5xx on required DB write failures (forces Stripe retry). Pure decision logic lives in `webhookOrchestrator.js` (unit-tested).
+- `stripe-webhook` — thin transport wrapper (`index.ts`) over an **injectable orchestration function** (`webhookHandler.js` → `runWebhookOrchestration`), so Node tests exercise the real control flow. Signature verification is extracted to `verifyStripeSignature.js` (manual HMAC-SHA256 via `crypto.subtle.verify`, constant-time; key imported for `['verify']`; 5-minute replay window; injectable clock). The orchestration: **event-shape validation** (rejects malformed `id`/`type`/`created`/`data.object` with 400 even when validly signed); authoritative Stripe subscription retrieval on every subscription event (`GET /v1/subscriptions/{id}`) with **fetched-field validation** (`sub.id`/`sub.customer` must match the event) and uses **only the fetched object's fields, including `metadata.user_id`, for ownership** (the event snapshot is used solely as expected values for validation); fail-closed price validation; **subscription-status allowlist check** before any DB write; **invoice events are informational only** (no DB writes); `subscription.deleted` UPDATE matches **both** `user_id` AND `stripe_subscription_id`; atomic idempotency via `claim_webhook_event()` returning a `claim_token`, finalized via `mark_webhook_event()` — whose UPDATE now also requires `status = 'processing'`, so a terminal row can never be re-finalized. **A lost claim token (mark returns false) returns retryable 503 — never HTTP 200** (a stale handler that lost ownership must not let Stripe stop retrying before the true owner durably finalizes); a failed mark RPC returns 500. Pure validators live in `webhookOrchestrator.js`.
 - `create-billing-portal-session` — resolves `stripe_customer_id` server-side from subscriptions table; returns `{ url }` after validating `billing.stripe.com` HTTPS
 - `shared/pro-entitlement.js` — updated `evaluateProEntitlement(profile, trial, subscription, now)` with 3-source priority: permanent → subscription → trial
 
 ### Frontend
-- `SettingsPage.jsx` — Pro Access card: subscribe button, checkout return polling (`runCheckoutPolling` via `useProStatus.refresh()` which now returns status), "Manage billing →" portal button, `billingPortalError` visible error, visible `subscribeError`, analytics
-- `FunnlAIPage.jsx` — subscribe button in locked state, visible `subscribeError` on failure
-- `src/lib/pro-ui-status.js` — `classifyProStatus()` returns 6 states including `'subscribed'`; `hasProAccess()` checks `can_use_pro === true` from RPC
-- `src/lib/checkoutPolling.js` — `refreshFn` returns new status; `hasAccessFn(newStatus)` uses returned value (no stale React ref)
-- `src/lib/useProStatus.js` — `refresh()` now returns the fetched status
-- `src/lib/stripeUrl.js` — `isValidStripeUrl(url, type)` validates HTTPS + approved hostname; zero deps
+- **Canonical Pro-access gate:** every access gate calls `hasProAccess(proStatus)` (reads the authoritative `can_use_pro`). `classifyProStatus()` is display-only. `FunnlAIPage` (`isProUser`), `BottomNav` (`canUsePro`), `CommandPalette` (`canUsePro`), and `interactionFormUtils.shouldShowAIFill` no longer use hand-written `permanent/trial/subscribed` allowlists — a future entitlement type is covered automatically. `classifyProStatus()` also hardened: any grant flag that contradicts `can_use_pro = false` (or a malformed shape) classifies as `'unavailable'`.
+- **Validated redirects:** all three Stripe redirect sites (`FunnlAIPage` checkout, `SettingsPage` checkout, `SettingsPage` portal) route the Edge Function response through `resolveStripeRedirect(data, error, type)` → `isValidStripeUrl` before assigning `window.location.href`; an invalid/missing URL shows the visible error and does not navigate. `checkout_creation_failed` fires on an invalid checkout URL; `billing_portal_opened` fires only after a valid portal URL is confirmed.
+- **Synchronous duplicate-action guards:** `createActionGuard()` (in `src/lib/actionGuard.js`) is engaged before generating the `attemptId` or invoking, so two rapid clicks produce exactly one session; the guard releases on controlled failure and stays engaged through successful navigation.
+- `SettingsPage.jsx` — Pro Access card: subscribe button, checkout return polling, "Manage billing →" portal button, visible `subscribeError` / `billingPortalError`, analytics
+- `FunnlAIPage.jsx` — subscribe button in locked/expired state, visible `subscribeError`
+- `src/lib/pro-ui-status.js` — `classifyProStatus()` (display-only, 6 states + contradiction guard); `hasProAccess()` (canonical `can_use_pro === true` gate)
+- `src/lib/stripeRedirect.js` — `resolveStripeRedirect(data, error, type)` shared redirect-decision helper
+- `src/lib/actionGuard.js` — `createActionGuard()` synchronous single-flight guard
+- `src/lib/checkoutPolling.js`, `src/lib/useProStatus.js`, `src/lib/stripeUrl.js` — unchanged from round 1
 
 ### Tests
 - `tests/checkout-polling.test.js` — 21 tests for `runCheckoutPolling` (was 19; 2 added for returned-value semantics)
 - `tests/checkout-helpers.test.js` — `isValidUUID`, `buildIdempotencyKey`, `isBlockedByExistingSubscription`
 - `tests/webhook-helpers.test.js` — `SUBSCRIPTION_STATUS_SEMANTICS`, `extractPriceId`, `statusGrantsAccess`, `shouldRetryOnMissingOwnership`, `isValidEventId`, `isValidStatus`
-- `tests/webhook-orchestrator.test.js` — 57 tests for the pure webhook decision logic: `validateEventShape` (C4), `validateAuthoritativeSub` (C6), `isInvoiceEvent` (C7), `buildDeletionFilter` (C5), `isAllowedSubscriptionStatus` (C8), `classifyClaim`, `buildEventLogPayload`
+- `tests/webhook-orchestrator.test.js` — 57 tests for the pure webhook validators
+- `tests/webhook-orchestration.test.js` — 32 tests driving the REAL `runWebhookOrchestration` through a mock Supabase client + injected Stripe fetch + injected clock/logger (claim/duplicate/in-progress, checkout + subscription success/failure paths, fetched-metadata-wins, deletion supersede, invoice-no-writes, token-mismatch→503, privacy-safe logs)
+- `tests/verify-stripe-signature.test.js` — 20 tests generating real HMAC signatures (valid/invalid/tampered/malformed hex/odd-length/missing t/missing v1/rotation/too-old/too-future/tolerance boundary/injected clock)
+- `tests/pro-ui-status.test.js` — hardened `classifyProStatus` contradiction cases + strict access-gate source contract (fails on any hand-written entitlement-state allowlist, including `subscribed`)
+- `tests/stripe-redirect.test.js` — 20 tests for `resolveStripeRedirect` + source contract that the 3 redirect sites validate before navigating
+- `tests/action-guard.test.js` — 11 tests for `createActionGuard` incl. "two immediate invocations → one invoke"
 - `tests/stripe-url.test.js` — 22 tests for `isValidStripeUrl` (checkout + portal + invalid input)
 
 ## Deployment order (do not deviate)
@@ -82,14 +102,18 @@ Each component is documented separately — the Stripe surface is a **mix** of d
 
 **No frontend `VITE_STRIPE_*` env vars are needed.** All Stripe credentials live in Supabase Edge Function secrets only.
 
-## Stripe TEST mode credentials (server-side only)
+## Required Supabase Edge Function secrets
 
-All Stripe secret values live only in Supabase Edge Function secrets and the Stripe dashboard — they are intentionally NOT stored in this repo. Read the exact values from the Supabase dashboard when configuring secrets.
+This implementation uses NO Stripe publishable key (it never runs Stripe.js on the client — it redirects to Stripe-hosted Checkout/Portal URLs returned by the Edge Functions). The publishable key is not a secret and is not required here.
 
-- `STRIPE_PUBLISHABLE_KEY` — publishable key (server-side secret; not needed by frontend)
+The exact values live only in Supabase Edge Function secrets and the Stripe dashboard — they are intentionally NOT stored in this repo. Read them from the Stripe dashboard when configuring the secrets.
+
+- `STRIPE_SECRET_KEY` — Stripe secret key (server-side only)
 - `STRIPE_PRO_PRICE_ID` — the Pro price ID (read server-side only)
-- `STRIPE_SECRET_KEY` — secret key (server-side only)
 - `STRIPE_WEBHOOK_SECRET` — webhook signing secret (added after the webhook is registered)
+
+No frontend `VITE_STRIPE_*` variables are needed.
+
 - Webhook URL: `https://jzybxhvgnksrwxfivdwt.supabase.co/functions/v1/stripe-webhook`
 
 ## Smoke test checklist (Stripe TEST mode)
