@@ -131,14 +131,17 @@ test('FunnlAIPage + SettingsPage import createActionGuard', () => {
   assert(settingsSrc.includes("from '../lib/actionGuard'"), 'SettingsPage must import createActionGuard')
 })
 
-test('checkout handlers guard with begin() before generating attemptId', () => {
-  // In both files, the `.begin()` guard check must appear before crypto.randomUUID().
+test('checkout handlers guard with begin() before invoking the Edge Function', () => {
+  // The synchronous guard (begin()) must be engaged BEFORE the checkout invoke, so
+  // two rapid clicks produce exactly one Edge Function call. (attemptId is now a
+  // non-authoritative correlation value generated inline in the invoke body — the
+  // server enforces single-flight via checkout_operations.)
   for (const [name, src] of [['FunnlAIPage', aiSrc], ['SettingsPage', settingsSrc]]) {
-    const idxBegin   = src.indexOf('.begin()')
-    const idxAttempt = src.indexOf('const attemptId = crypto.randomUUID()')
-    assert(idxBegin !== -1, `${name} must engage a guard via begin()`)
-    assert(idxAttempt !== -1, `${name} must generate an attemptId`)
-    assert(idxBegin < idxAttempt, `${name} must guard before generating the attemptId`)
+    const idxBegin  = src.indexOf('subscribeGuardRef.current.begin()')
+    const idxInvoke = src.indexOf("invoke('create-checkout-session'")
+    assert(idxBegin !== -1, `${name} must engage the subscribe guard via begin()`)
+    assert(idxInvoke !== -1, `${name} must invoke create-checkout-session`)
+    assert(idxBegin < idxInvoke, `${name} must guard before invoking`)
   }
 })
 

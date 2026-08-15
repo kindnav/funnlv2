@@ -173,6 +173,8 @@ export const VALID_FAILURE_CODES = new Set([
   'handler_exception',
   'invalid_event',
   'invalid_status',
+  'invalid_subscription_item', // R3: snapshot failed for our price (bad/missing period end, mixed items)
+  'identity_conflict',         // R6: Stripe identity already attached to a different Funnl user
 ])
 
 /**
@@ -198,4 +200,58 @@ export function shouldRetryOnMissingOwnership(eventType) {
     'invoice.payment_succeeded',
   ])
   return retryable.has(eventType)
+}
+
+// ── R3: modern billing-period extraction ────────────────────────────────────────
+//
+// Stripe removed the top-level `Subscription.current_period_end` in API version
+// 2025-03-31.basil; the billing period now lives on the subscription ITEM
+// (`sub.items.data[n].current_period_end`). This helper validates the single Funnl
+// Pro item and returns a normalized snapshot with BOTH the validated price and the
+// period end drawn from the SAME item — so price validation and period extraction can
+// never disagree.
+//
+// Funnl supports exactly one Pro price and no mixed subscription items, so it FAILS
+// CLOSED for any of: no items, malformed items, no item matching the configured price,
+// multiple items, multiple matching items, or a matched item with neither a valid
+// item-level period end nor a valid legacy top-level fallback.
+//
+// Returns:
+//   { ok: true,  priceId, periodEndIso, source: 'item'|'legacy' }
+//   { ok: false, reason }   where reason ∈
+//     'price_not_configured' | 'no_items' | 'malformed_items' | 'no_matching_item' |
+//     'multiple_matching_items' | 'unsupported_item_configuration' | 'no_period_end'
+//
+// Callers map 'no_matching_item' to "not our product" (ignore/200) and every other
+// failure to a fail-closed 5xx.
+export function extractProSubscriptionSnapshot(sub, priceId) {
+  if (typeof priceId !== 'string' || !priceId) {
+    return { ok: false, reason: 'price_not_configured' }
+  }
+  const items = sub?.items?.data
+  if (items === undefined || items === null) return { ok: false, reason: 'no_items' }
+  if (!Array.isArray(items)) return { ok: false, reason: 'malformed_items' }
+  if (items.length === 0) return { ok: false, reason: 'no_items' }
+
+  const matched = items.filter(it => it?.price?.id === priceId)
+  if (matched.length === 0) return { ok: false, reason: 'no_matching_item' }
+  if (matched.length > 1) return { ok: false, reason: 'multiple_matching_items' }
+  // Exactly one item must match AND there must be no other (mixed) items.
+  if (items.length !== 1) return { ok: false, reason: 'unsupported_item_configuration' }
+
+  const item = matched[0]
+  // Prefer the item-level period end; fall back to the legacy top-level field only.
+  const fromItem   = unixToIso(item?.current_period_end)
+  const fromLegacy = unixToIso(sub?.current_period_end)
+  if (fromItem)   return { ok: true, priceId, periodEndIso: fromItem,   source: 'item' }
+  if (fromLegacy) return { ok: true, priceId, periodEndIso: fromLegacy, source: 'legacy' }
+  return { ok: false, reason: 'no_period_end' }
+}
+
+// ── R6: Postgres unique-violation detection ─────────────────────────────────────
+// SQLSTATE 23505 = unique_violation. The webhook treats a unique violation on a Stripe
+// identity (customer or subscription id already attached to a different Funnl user) as
+// a fail-closed conflict rather than overwriting another user's row.
+export function isUniqueViolation(error) {
+  return !!error && error.code === '23505'
 }

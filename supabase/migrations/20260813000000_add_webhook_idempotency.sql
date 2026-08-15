@@ -101,11 +101,14 @@ CREATE TABLE public.stripe_webhook_events (
   ),
 
   -- C9: failure_code is restricted to the documented allowlist when set.
+  -- R3 adds 'invalid_subscription_item' (bad/mixed/period-less Pro item).
+  -- R6 adds 'identity_conflict' (Stripe identity already attached to another user).
   CONSTRAINT stripe_webhook_events_failure_code_check CHECK (
     failure_code IN (
       'missing_user_id', 'missing_ids', 'config_missing', 'stripe_fetch_failed',
       'ownership_lookup_failed', 'owner_not_found', 'db_write_failed',
-      'handler_exception', 'invalid_event', 'invalid_status'
+      'handler_exception', 'invalid_event', 'invalid_status',
+      'invalid_subscription_item', 'identity_conflict'
     )
   ),
 
@@ -129,6 +132,28 @@ GRANT ALL ON TABLE public.stripe_webhook_events TO service_role;
 CREATE INDEX stripe_webhook_events_unresolved_idx
   ON public.stripe_webhook_events (stripe_created_at DESC)
   WHERE status IN ('processing', 'failed');
+
+-- ── R6: subscriptions.stripe_subscription_id identity integrity ─────────────────
+--
+-- The subscriptions table already has a UNIQUE index on stripe_customer_id, but
+-- stripe_subscription_id was only NULL-able and NOT unique. A subscription id must
+-- never be attached to two Funnl users. This PARTIAL unique index enforces global
+-- uniqueness of stripe_subscription_id whenever it is non-null (NULLs are allowed
+-- because a row can exist before the subscription id is known).
+--
+-- Combined with the webhook's fail-closed upsert handling (a unique-violation → HTTP
+-- 500 with failure_code 'identity_conflict', never overwriting another user's row),
+-- this guarantees one Stripe subscription maps to at most one Funnl user.
+--
+-- VERIFICATION AFTER RUNNING (read-only):
+--   SELECT indexname FROM pg_indexes
+--     WHERE tablename = 'subscriptions'
+--       AND indexname = 'subscriptions_stripe_subscription_id_uniq';   -- present
+--   -- Attempting to attach the same stripe_subscription_id to two user rows must
+--   -- raise unique_violation (SQLSTATE 23505).
+CREATE UNIQUE INDEX subscriptions_stripe_subscription_id_uniq
+  ON public.subscriptions (stripe_subscription_id)
+  WHERE stripe_subscription_id IS NOT NULL;
 
 -- ── 2. claim_webhook_event() ──────────────────────────────────────────────────
 --

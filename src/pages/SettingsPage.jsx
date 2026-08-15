@@ -7,6 +7,7 @@ import { classifyProStatus, hasProAccess } from '../lib/pro-ui-status'
 import { runCheckoutPolling } from '../lib/checkoutPolling'
 import { resolveStripeRedirect } from '../lib/stripeRedirect'
 import { createActionGuard } from '../lib/actionGuard'
+import { subscriptionAttentionState } from '../lib/subscriptionStatusPolicy'
 import { track } from '../lib/analytics'
 import {
   validateDisplayName,
@@ -192,6 +193,9 @@ function SettingsPage() {
         if (!user?.id || newUid === user.id) return
         accountGenRef.current++
         currentUidRef.current = null
+        // Synchronously release the checkout/portal single-flight guards (R5).
+        subscribeGuardRef.current.release()
+        billingPortalGuardRef.current.release()
         // Clear all user-scoped state and flags.
         setLoading(true)
         setUser(null)
@@ -440,19 +444,33 @@ function SettingsPage() {
 
   // ── Stripe Checkout: create session and redirect ──────────────────────────
   async function handleSubscribe() {
-    // Synchronous guard engaged before generating the attempt ID or invoking, so two
-    // rapid clicks produce exactly one attemptId and one Edge Function call.
+    // Synchronous guard engaged before invoking, so two rapid clicks produce exactly
+    // one Edge Function call.
     if (!subscribeGuardRef.current.begin()) return
     const capturedGen = accountGenRef.current
-    const attemptId = crypto.randomUUID()
     setSubscribing(true)
     setSubscribeError('')
     track('checkout_started', { source: 'settings' })
-    const { data, error } = await supabase.functions.invoke('create-checkout-session', {
-      body: { attemptId },
-    })
+    let data, error
+    try {
+      // attemptId is a non-authoritative correlation value only; the server enforces
+      // single-flight via checkout_operations.
+      ;({ data, error } = await supabase.functions.invoke('create-checkout-session', {
+        body: { attemptId: crypto.randomUUID() },
+      }))
+    } catch {
+      // Thrown network/invoke failure. Surface the error only if still on the same
+      // account; always release the guard and clear loading so the button never sticks.
+      if (mountedRef.current && accountGenRef.current === capturedGen) {
+        setSubscribeError('Could not start checkout. Please try again.')
+        track('checkout_creation_failed', { source: 'settings' })
+        setSubscribing(false)
+      }
+      subscribeGuardRef.current.release()
+      return
+    }
     if (!mountedRef.current || accountGenRef.current !== capturedGen) {
-      // Unmounted or account switched - release the guard for a possible future mount.
+      // Unmounted or account switched - release the guard; never navigate the new account.
       subscribeGuardRef.current.release()
       return
     }
@@ -475,7 +493,17 @@ function SettingsPage() {
     const capturedGen = accountGenRef.current
     setBillingPortalOpening(true)
     setBillingPortalError('')
-    const { data, error } = await supabase.functions.invoke('create-billing-portal-session')
+    let data, error
+    try {
+      ;({ data, error } = await supabase.functions.invoke('create-billing-portal-session'))
+    } catch {
+      if (mountedRef.current && accountGenRef.current === capturedGen) {
+        setBillingPortalError('Could not open billing management. Please try again.')
+        setBillingPortalOpening(false)
+      }
+      billingPortalGuardRef.current.release()
+      return
+    }
     if (!mountedRef.current || accountGenRef.current !== capturedGen) {
       billingPortalGuardRef.current.release()
       return
@@ -497,6 +525,12 @@ function SettingsPage() {
   const proLoading = proStatus === null
   const proFailed  = !proLoading && proStatus === 'error'
   const proClass   = (proLoading || proFailed) ? null : classifyProStatus(proStatus)
+  // DISPLAY-ONLY: when an existing Stripe subscription is in a state the backend will
+  // not let us duplicate (past_due/trialing/unpaid/paused/incomplete), we must not
+  // show a normal Subscribe button. This is not an access gate - hasProAccess() is.
+  const attentionState = (proLoading || proFailed)
+    ? null
+    : subscriptionAttentionState(proStatus?.subscription_status)
 
   // ── Render ────────────────────────────────────────────────────────────────
   // The page shell renders immediately. Sign out, Appearance, and Pro Access
@@ -656,6 +690,29 @@ function SettingsPage() {
               {proStatus.ends_at && (
                 <p className="text-[10.5px] text-low mt-[3px] ml-[21px]">
                   Ends {formatTrialEnd(proStatus.ends_at)}
+                </p>
+              )}
+            </div>
+          ) : attentionState ? (
+            // An existing Stripe subscription needs attention (payment incomplete, or
+            // trialing/unpaid/paused). Do NOT show a normal Subscribe button - the
+            // backend would reject a duplicate. Direct the user to billing management.
+            <div>
+              <p className="text-[12px] text-warning mb-2">
+                {attentionState === 'payment_incomplete'
+                  ? 'Your payment is not complete. Finish it in billing management.'
+                  : 'Your subscription needs attention. Manage it in billing.'}
+              </p>
+              <button
+                onClick={handleBillingPortal}
+                disabled={billingPortalOpening}
+                className="text-[11px] font-semibold text-accent hover:opacity-80 transition-opacity motion-reduce:transition-none disabled:opacity-40"
+              >
+                {billingPortalOpening ? 'Opening…' : 'Manage billing →'}
+              </button>
+              {billingPortalError && (
+                <p role="alert" aria-live="assertive" className="text-[10.5px] text-danger mt-[6px]">
+                  {billingPortalError}
                 </p>
               )}
             </div>

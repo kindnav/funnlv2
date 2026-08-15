@@ -1,3 +1,5 @@
+import { isKnownSubscriptionStatus } from './subscriptionStatusPolicy.js'
+
 /**
  * Maps a proStatus value to a display classification for the AI page
  * and related Pro-access UI components.
@@ -45,12 +47,23 @@ export function classifyProStatus(proStatus) {
   if (proStatus === null || proStatus === 'error') return 'unavailable'
   // Unexpected non-object value (e.g. an unexpected string) is also unavailable.
   if (typeof proStatus !== 'object') return 'unavailable'
-  // Validate minimum shape: both boolean fields must be present and boolean.
-  // A missing or wrong-typed field must not be silently treated as a grant or denial.
+
+  // ── Field validation (R4) ──────────────────────────────────────────────────
+  // Required booleans: can_use_pro and permanent_pro must be present and boolean.
   if (
     typeof proStatus.can_use_pro !== 'boolean' ||
     typeof proStatus.permanent_pro !== 'boolean'
   ) {
+    return 'unavailable'
+  }
+  // Optional booleans: when present they MUST be booleans (reject malformed values).
+  // Absent is tolerated (older RPC shapes) and treated as false below.
+  for (const field of ['subscription_active', 'trial_active', 'trial_expired', 'cancel_at_period_end']) {
+    if (field in proStatus && typeof proStatus[field] !== 'boolean') return 'unavailable'
+  }
+  // subscription_status: when present and non-null, must be a known Stripe status
+  // string (the RPC returns COALESCE(status,'none'), so null/absent means "none").
+  if (proStatus.subscription_status != null && !isKnownSubscriptionStatus(proStatus.subscription_status)) {
     return 'unavailable'
   }
 
@@ -58,25 +71,29 @@ export function classifyProStatus(proStatus) {
   const permanent  = proStatus.permanent_pro === true
   const subscribed = proStatus.subscription_active === true
   const trialing   = proStatus.trial_active === true
+  const anyGrant   = permanent || subscribed || trialing
 
-  // Contradiction guard: any access-granting flag that disagrees with
-  // can_use_pro === false is a malformed / internally inconsistent RPC result.
-  // Never render a Pro label (permanent / subscribed / trial) in that case — the
-  // canonical entitlement boolean (can_use_pro, enforced by hasProAccess) wins,
-  // and the display falls back to a neutral 'unavailable'.
-  if (!canUse && (permanent || subscribed || trialing)) return 'unavailable'
+  // ── Consistency guards (both contradiction directions) ─────────────────────
+  // (a) A grant flag is true while can_use_pro is false → internally inconsistent.
+  // (b) can_use_pro is true while NO grant flag is true → access with no reason,
+  //     which would otherwise render 'non_pro' while hasProAccess() returns true,
+  //     recreating a UI/access mismatch.
+  // In both cases render a neutral 'unavailable'; can_use_pro (via hasProAccess)
+  // remains the sole authority for actual access.
+  if (!canUse && anyGrant) return 'unavailable'
+  if (canUse && !anyGrant) return 'unavailable'
 
   // classifyProStatus is DISPLAY-ONLY. It never gates access — hasProAccess() is the
-  // sole access gate. It maps a consistent status to the label/copy the UI shows.
+  // sole access gate. Reaching here, canUse === anyGrant (a consistent result).
 
-  // Permanent access takes display priority, regardless of trial or subscription.
+  // Permanent access takes display priority (may coexist with subscription/trial).
   if (permanent) return 'permanent'
-  // Active Stripe subscription.
+  // Active Stripe subscription (may coexist with an expired Funnl trial;
+  // cancel_at_period_end does not remove access).
   if (subscribed) return 'subscribed'
-  // Active trial (non-permanent, non-subscribed user with a running trial).
-  if (canUse && trialing) return 'trial'
-  // Expired trial (non-permanent, no subscription, no active access).
+  // Active trial (can_use_pro guaranteed true here).
+  if (trialing) return 'trial'
+  // No access and no grant flag: expired trial vs confirmed non-Pro (display only).
   if (proStatus.trial_expired === true) return 'expired'
-  // Confirmed non-Pro: no trial of any kind, no subscription, no permanent access.
   return 'non_pro'
 }

@@ -8,8 +8,9 @@ Each component is documented separately — the Stripe surface is a **mix** of d
 |---|---|---|---|
 | Migration `20260812000000_add_subscriptions.sql` | **Applied** | — | `subscriptions` table exists; `get_my_pro_access_status()` RPC works; data live |
 | Migration ledger for `20260812000000` | Gap (local-only) | — | **Required repair** before next `db push`: `npx supabase migration repair --status applied 20260812000000 --linked` |
-| Migration `20260813000000_add_webhook_idempotency.sql` | **NOT applied** | — | Adds `stripe_webhook_events` table + `claim_token`, `claim_webhook_event()` (jsonb), `mark_webhook_event()`. Must be applied **before** the updated stripe-webhook is deployed (the new handler calls `mark_webhook_event()` and reads `claim_token`) |
-| `create-checkout-session` Edge Function | **Deployed (older version)** | v2 | Live in production but predates this branch's reliability changes (`checkoutHelpers.js`, `stripeUrl` validation, `attemptId` idempotency). Redeploy from this branch to update. `verify_jwt = true` |
+| Migration `20260813000000_add_webhook_idempotency.sql` | **NOT applied** | — | Adds `stripe_webhook_events` (+`claim_token`, jsonb `claim_webhook_event()`, `mark_webhook_event()`), the R3/R6 failure codes, and (R6) the partial unique index `subscriptions_stripe_subscription_id_uniq`. Must be applied **before** the updated stripe-webhook is deployed |
+| Migration `20260815003056_add_checkout_session_singleflight.sql` | **NOT applied** | — | R1: `checkout_operations` table + `claim_checkout_operation()` / `finalize_checkout_operation()` RPCs (durable server-side checkout single-flight). Generated via `supabase migration new`. Must be applied **before** the updated create-checkout-session is deployed (the new handler calls both RPCs) |
+| `create-checkout-session` Edge Function | **Deployed (older version)** | v2 | Live but predates this branch. The older version relies on a browser `attemptId` for idempotency and blocks only active/past_due — it does **not** have the durable single-flight or full status policy. Redeploy from this branch **after** applying `20260815003056`. `verify_jwt = true` |
 | `stripe-webhook` Edge Function | **Deployed (older version)** | v4 | Live and has processed Stripe events; `verify_jwt = false` (correct — Stripe carries no Supabase JWT). Predates this branch's idempotency + reliability rewrite (`claim_token`/`mark_webhook_event`, event-shape validation, authoritative field validation, deletion filter, invoice-informational, status allowlist). **Do not redeploy until migration `20260813000000` is applied** |
 | `create-billing-portal-session` Edge Function | **NOT deployed** | — | Absent from `functions list`. Requires Stripe Customer Portal configured in the Stripe dashboard first |
 | `ai-chat` | **Deployed (subscription-aware)** | v17 | Entitlement check includes subscription state |
@@ -18,7 +19,18 @@ Each component is documented separately — the Stripe surface is a **mix** of d
 | `ai-categorize-contacts` | **Deployed (subscription-aware)** | v5 | Entitlement check includes subscription state |
 | Frontend (SettingsPage, FunnlAIPage, pro-ui-status, checkoutPolling, useProStatus, stripeUrl) | **NOT merged / NOT deployed** | — | All Stripe UI lives on this branch; awaiting merge to `main` |
 
-**Net effect:** checkout and the webhook are live at older versions, so the billing path partially functions today, but the idempotency table, the token-validated finalize, the authoritative-field/status hardening, the billing-portal function, and all frontend Stripe UI are **not** in production. Redeploying `create-checkout-session` and `stripe-webhook` from this branch (after applying migration `20260813000000`) is required to pick up the reliability corrections.
+**Net effect:** checkout and the webhook are live at older versions, so the billing path partially functions today, but the webhook-idempotency table, the checkout single-flight table, the token-validated finalizes, the authoritative-field/status/period hardening, the identity-uniqueness index, the billing-portal function, and all frontend Stripe UI are **not** in production. Redeploying `create-checkout-session` (after `20260815003056`) and `stripe-webhook` (after `20260813000000`) from this branch is required to pick up the corrections.
+
+**Duplicate-subscription protection is NOT the React guard.** `createActionGuard()` only protects a single mounted component; it does nothing across tabs, devices, sessions, or direct authenticated calls. The authoritative protection is the server-side `checkout_operations` single-flight (R1) plus the full status policy (R2) — both of which require applying `20260815003056` and redeploying the function. Until then, the older live function does **not** have this protection.
+
+## Reliability corrections (third review round)
+
+1. **Durable server-side checkout single-flight (R1).** New migration `20260815003056_add_checkout_session_singleflight.sql`: `checkout_operations` table + `claim_checkout_operation()` / `finalize_checkout_operation()` (SECURITY DEFINER, service_role-only, `SET search_path=''`, opaque claim-token ownership, terminal rows can't re-finalize). Two tabs/devices cannot create two Stripe sessions: an atomic `INSERT … ON CONFLICT (user_id) DO NOTHING` gives exactly one caller the claim; others get `in_progress` (no Stripe call). A ready, unexpired session is reused (bounded by Stripe's `expires_at`). The Stripe **idempotency key is the opaque operation UUID (`checkout-op-<uuid>`) — no user id or email**; a crash after Stripe success reuses the SAME operation id so Stripe returns the existing session. `create-checkout-session` is refactored into an injectable `runCheckoutOrchestration()` (thin `index.ts`); the browser `attemptId` is now non-authoritative.
+2. **Full subscription-status policy (R2).** One shared `src/lib/subscriptionStatusPolicy.js` used by the checkout backend AND the UI: active/past_due/trialing/unpaid/paused → block; incomplete → reuse-only; canceled/incomplete_expired/none → allow; unknown → fail closed. The UI no longer shows a normal Subscribe button when the backend would reject (a `billing_attention` / `payment_incomplete` display state routes to billing management). This is display-only — `hasProAccess()` remains the sole access gate.
+3. **Modern Stripe period-end (R3).** `extractProSubscriptionSnapshot()` reads the period end from the validated Pro subscription **item** (`items.data[n].current_period_end`), with the removed top-level field only as a documented legacy fallback; price validation and period extraction come from the same item; fail-closed on wrong/no/multiple/mixed items or missing period. Applied in checkout.session.completed, subscription.created, subscription.updated.
+4. **classifyProStatus consistency (R4).** Now rejects BOTH contradiction directions (grant flag with `can_use_pro=false`, AND `can_use_pro=true` with no grant flag) and validates every boolean field + `subscription_status`; malformed → `unavailable`.
+5. **Action-guard robustness (R5).** All three actions (FunnlAIPage checkout, SettingsPage checkout + billing portal) wrap the invoke in try/catch (thrown error → visible error, failed-analytics, guard release, clear loading, no navigate); account-switch paths synchronously release the guards and discard stale results.
+6. **DB identity integrity (R6).** Partial unique index `subscriptions_stripe_subscription_id_uniq` (in `20260813000000`); webhook upserts fail closed on a unique violation with failure code `identity_conflict` (never overwrite another user's row).
 
 ## Reliability corrections (second review round)
 
@@ -58,29 +70,32 @@ Each component is documented separately — the Stripe surface is a **mix** of d
 
 ### Tests
 - `tests/checkout-polling.test.js` — 21 tests for `runCheckoutPolling` (was 19; 2 added for returned-value semantics)
-- `tests/checkout-helpers.test.js` — `isValidUUID`, `buildIdempotencyKey`, `isBlockedByExistingSubscription`
-- `tests/webhook-helpers.test.js` — `SUBSCRIPTION_STATUS_SEMANTICS`, `extractPriceId`, `statusGrantsAccess`, `shouldRetryOnMissingOwnership`, `isValidEventId`, `isValidStatus`
+- `tests/checkout-helpers.test.js` — `isValidUUID`, `buildCheckoutIdempotencyKey` (opaque, no PII), `isValidCheckoutUrl`
+- `tests/checkout-orchestration.test.js` — 21 tests driving the REAL `runCheckoutOrchestration` (status gating, claim reuse/in_progress/blocked, single Stripe call, opaque idempotency key with no PII, stale-reclaim same key, Stripe throw vs error, finalize failure)
+- `tests/subscription-status-policy.test.js` — 38 tests for the full shared status policy table (checkoutMode / grantsAccess / uiState / attention)
+- `tests/webhook-period-end.test.js` — 14 tests for `extractProSubscriptionSnapshot` (item-level, legacy fallback, wrong/no/multiple/mixed items, missing/invalid period)
+- `tests/webhook-helpers.test.js` — pure helpers incl. `extractProSubscriptionSnapshot`, `isUniqueViolation`
 - `tests/webhook-orchestrator.test.js` — 57 tests for the pure webhook validators
-- `tests/webhook-orchestration.test.js` — 32 tests driving the REAL `runWebhookOrchestration` through a mock Supabase client + injected Stripe fetch + injected clock/logger (claim/duplicate/in-progress, checkout + subscription success/failure paths, fetched-metadata-wins, deletion supersede, invoice-no-writes, token-mismatch→503, privacy-safe logs)
-- `tests/verify-stripe-signature.test.js` — 20 tests generating real HMAC signatures (valid/invalid/tampered/malformed hex/odd-length/missing t/missing v1/rotation/too-old/too-future/tolerance boundary/injected clock)
-- `tests/pro-ui-status.test.js` — hardened `classifyProStatus` contradiction cases + strict access-gate source contract (fails on any hand-written entitlement-state allowlist, including `subscribed`)
-- `tests/stripe-redirect.test.js` — 20 tests for `resolveStripeRedirect` + source contract that the 3 redirect sites validate before navigating
-- `tests/action-guard.test.js` — 11 tests for `createActionGuard` incl. "two immediate invocations → one invoke"
-- `tests/stripe-url.test.js` — 22 tests for `isValidStripeUrl` (checkout + portal + invalid input)
+- `tests/webhook-orchestration.test.js` — 36 tests driving the REAL `runWebhookOrchestration` (adds R3 item-level period-end DB payload, `invalid_subscription_item`, R6 `identity_conflict`)
+- `tests/verify-stripe-signature.test.js` — 20 real-HMAC signature tests
+- `tests/pro-ui-status.test.js` — hardened `classifyProStatus`: both contradiction directions + every malformed field + strict access-gate source contract
+- `tests/stripe-redirect.test.js` — `resolveStripeRedirect` + 3-redirect-site source contract
+- `tests/action-guard.test.js` / `tests/checkout-action-safety.test.js` — synchronous guard behavior + handler try/catch + account-switch release source contracts
+- `tests/stripe-url.test.js` — `isValidStripeUrl` (checkout + portal + invalid input)
 
 ## Deployment order (do not deviate)
 
 **Prerequisites — must be done manually before any code deployment:**
 
 1. Verify `subscription_active` appears in `get_my_pro_access_status()` output (confirms `20260812000000` is applied)
-2. **Required: repair the migration ledger** so the applied `20260812000000` migration is not re-attempted by the next `supabase db push`: `npx supabase migration repair --status applied 20260812000000 --linked`. Confirm it still shows as local-only in `supabase migration list --linked` before running.
+2. **Required: repair the migration ledger** so the applied `20260812000000` migration is not re-attempted by the next `supabase db push`: `npx supabase migration repair --status applied 20260812000000 --linked`. Confirm it still shows as local-only in `supabase migration list --linked` before running. (This task did NOT run the repair.)
 3. Add `STRIPE_SECRET_KEY` to Supabase Edge Function secrets (value from the Stripe dashboard)
 4. Add `STRIPE_PRO_PRICE_ID` to Supabase Edge Function secrets (value from the Stripe dashboard — not stored in this repo)
-5. Apply idempotency migration: `supabase db push --linked` (verify exactly 1 pending migration first)
+5. Apply the two pending migrations: `supabase db push --linked`. **After the ledger repair, a dry run shows exactly TWO pending migrations** — `20260813000000_add_webhook_idempotency.sql` and `20260815003056_add_checkout_session_singleflight.sql`. (This is no longer "exactly one pending migration".) `20260813000000` must be applied before redeploying `stripe-webhook`; `20260815003056` before redeploying `create-checkout-session`.
 
 **Deployment steps (in order):**
 
-6. Deploy / redeploy Edge Functions. `stripe-webhook` and `create-checkout-session` are already live at older versions — these commands **update** them to this branch's code. `create-billing-portal-session` is a first-time deploy. **`stripe-webhook` must not be redeployed until migration `20260813000000` is applied (step 5)** — the new handler calls `mark_webhook_event()` and reads `claim_token`, which do not exist until then.
+6. Deploy / redeploy Edge Functions. `stripe-webhook` and `create-checkout-session` are already live at older versions — these commands **update** them to this branch's code. `create-billing-portal-session` is a first-time deploy. **`stripe-webhook` must not be redeployed until `20260813000000` is applied**, and **`create-checkout-session` must not be redeployed until `20260815003056` is applied** — the new handlers call RPCs (`mark_webhook_event`, `claim_checkout_operation`, `finalize_checkout_operation`) that do not exist until then.
    ```
    npx supabase functions deploy create-checkout-session --project-ref jzybxhvgnksrwxfivdwt --use-api   # updates v2 → branch
    npx supabase functions deploy stripe-webhook --project-ref jzybxhvgnksrwxfivdwt --use-api            # updates v4 → branch (AFTER migration 20260813000000)

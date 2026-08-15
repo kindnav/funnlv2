@@ -393,6 +393,60 @@ async function run() {
     assertEqual(supabaseAdmin.calls.upserts.length, 0)
   })
 
+  // R3 ── item-level period end is stored as the correct ISO in the DB payload
+  test('R3: modern item-level current_period_end stored as ISO in upsert', async () => {
+    const ITEM_PE = 1_704_067_200 // 2024-01-01T00:00:00Z
+    const { deps, supabaseAdmin } = makeDeps({
+      event: subEvent('customer.subscription.updated', { metadata: { user_id: USER } }),
+      fetchSubscription: async () => goodSub({
+        metadata: { user_id: USER },
+        current_period_end: undefined,
+        items: { data: [{ price: { id: PRICE }, current_period_end: ITEM_PE }] },
+      }),
+    })
+    const r = await runWebhookOrchestration(deps)
+    assertEqual(r.status, 200)
+    assertEqual(supabaseAdmin.calls.upserts[0].payload.current_period_end, '2024-01-01T00:00:00.000Z')
+  })
+
+  // R3 ── our price but a period-less / malformed item → fail closed
+  test('R3: our price but no valid period end → 500 invalid_subscription_item', async () => {
+    const { deps, supabaseAdmin } = makeDeps({
+      event: subEvent('customer.subscription.updated', { metadata: { user_id: USER } }),
+      fetchSubscription: async () => goodSub({
+        metadata: { user_id: USER },
+        current_period_end: undefined,
+        items: { data: [{ price: { id: PRICE } }] }, // no item-level pe, no legacy
+      }),
+    })
+    const r = await runWebhookOrchestration(deps)
+    assertEqual(r.status, 500)
+    assertEqual(supabaseAdmin.calls.mark[0].p_failure_code, 'invalid_subscription_item')
+  })
+
+  // R6 ── upsert unique-violation → identity conflict, fail closed
+  test('R6: upsert 23505 (identity attached to another user) → 500 identity_conflict', async () => {
+    const { deps, supabaseAdmin } = makeDeps({
+      event: subEvent('customer.subscription.updated', { metadata: { user_id: USER } }),
+      fetchSubscription: async () => goodSub({ metadata: { user_id: USER } }),
+      supa: { upsert: { error: { code: '23505' } } },
+    })
+    const r = await runWebhookOrchestration(deps)
+    assertEqual(r.status, 500)
+    assertEqual(supabaseAdmin.calls.mark[0].p_failure_code, 'identity_conflict')
+  })
+
+  test('R6: non-unique upsert error still → 500 db_write_failed', async () => {
+    const { deps, supabaseAdmin } = makeDeps({
+      event: subEvent('customer.subscription.updated', { metadata: { user_id: USER } }),
+      fetchSubscription: async () => goodSub({ metadata: { user_id: USER } }),
+      supa: { upsert: { error: { code: '55000' } } },
+    })
+    const r = await runWebhookOrchestration(deps)
+    assertEqual(r.status, 500)
+    assertEqual(supabaseAdmin.calls.mark[0].p_failure_code, 'db_write_failed')
+  })
+
   // 24 ── mark RPC error → 500 Finalize failed
   test('mark RPC error on processed finalize → 500', async () => {
     const { deps } = makeDeps({

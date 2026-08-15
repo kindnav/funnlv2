@@ -21,7 +21,13 @@
 // The function returns { status: number, body: string } — never a Deno Response —
 // so it is runtime-agnostic and unit-testable.
 
-import { isValidUUID, extractPriceId, unixToIso, shouldRetryOnMissingOwnership } from './webhookHelpers.js'
+import {
+  isValidUUID,
+  unixToIso,
+  shouldRetryOnMissingOwnership,
+  extractProSubscriptionSnapshot,
+  isUniqueViolation,
+} from './webhookHelpers.js'
 import {
   validateEventShape,
   validateAuthoritativeSub,
@@ -204,11 +210,17 @@ export async function runWebhookOrchestration({
           return finalize('failed', 'stripe_fetch_failed', resp(500, 'Subscription mismatch'))
         }
 
-        // Fail-closed price validation — only the fetched subscription's price counts.
-        const subPrice = extractPriceId(sub)
-        if (!subPrice || subPrice !== priceId) {
-          log('price_mismatch', { requestId, eventType })
-          return finalize('ignored', undefined, resp(200, 'ok'))
+        // R3: price validation AND period-end come from the SAME validated Pro item.
+        const snap = extractProSubscriptionSnapshot(sub, priceId)
+        if (!snap.ok) {
+          if (snap.reason === 'no_matching_item' || snap.reason === 'no_items') {
+            // No Funnl Pro item present — not our product. Acknowledge and ignore.
+            log('price_mismatch', { requestId, eventType })
+            return finalize('ignored', undefined, resp(200, 'ok'))
+          }
+          // Our price but a malformed / mixed / period-less item — fail closed.
+          log('invalid_subscription_item', { requestId, eventType, reason: snap.reason })
+          return finalize('failed', 'invalid_subscription_item', resp(500, 'Invalid subscription item'))
         }
 
         const subStatus = sub.status
@@ -217,7 +229,6 @@ export async function runWebhookOrchestration({
           return finalize('failed', 'invalid_status', resp(500, 'Invalid status'))
         }
 
-        const periodEnd = unixToIso(sub.current_period_end)
         const { error } = await supabaseAdmin
           .from('subscriptions')
           .upsert({
@@ -225,15 +236,18 @@ export async function runWebhookOrchestration({
             stripe_customer_id:     sub.customer,
             stripe_subscription_id: sub.id,
             status:                 subStatus,
-            current_period_end:     periodEnd,
+            current_period_end:     snap.periodEndIso,
             cancel_at_period_end:   Boolean(sub.cancel_at_period_end),
-            price_id:               subPrice,
+            price_id:               snap.priceId,
             updated_at:             now(),
           }, { onConflict: 'user_id' })
 
         if (error) {
-          log('db_write_failed', { requestId, eventType })
-          return finalize('failed', 'db_write_failed', resp(500, 'Database write failed'))
+          // R6: a unique-violation means this Stripe identity is already attached to a
+          // different Funnl user — fail closed (never overwrite another user's row).
+          const code = isUniqueViolation(error) ? 'identity_conflict' : 'db_write_failed'
+          log(code, { requestId, eventType })
+          return finalize('failed', code, resp(500, 'Database write failed'))
         }
         return finalize('processed', undefined, resp(200, 'ok'))
       }
@@ -265,13 +279,16 @@ export async function runWebhookOrchestration({
         }
 
         // From here on, use ONLY the authoritative fetched subscription.
-        const incomingPrice = extractPriceId(sub)
-        if (!incomingPrice) {
-          return finalize('ignored', undefined, resp(200, 'ok'))
-        }
-        if (incomingPrice !== priceId) {
-          log('price_mismatch', { requestId, eventType })
-          return finalize('ignored', undefined, resp(200, 'ok'))
+        // R3: price validation AND period-end come from the SAME validated Pro item.
+        const snap = extractProSubscriptionSnapshot(sub, priceId)
+        if (!snap.ok) {
+          if (snap.reason === 'no_matching_item' || snap.reason === 'no_items') {
+            // No Funnl Pro item present — not our product. Acknowledge and ignore.
+            log('price_mismatch', { requestId, eventType })
+            return finalize('ignored', undefined, resp(200, 'ok'))
+          }
+          log('invalid_subscription_item', { requestId, eventType, reason: snap.reason })
+          return finalize('failed', 'invalid_subscription_item', resp(500, 'Invalid subscription item'))
         }
 
         // C2: ownership resolution uses the FETCHED subscription's metadata + IDs,
@@ -300,7 +317,6 @@ export async function runWebhookOrchestration({
           return finalize('failed', 'invalid_status', resp(500, 'Invalid status'))
         }
 
-        const periodEnd = unixToIso(sub.current_period_end)
         const { error } = await supabaseAdmin
           .from('subscriptions')
           .upsert({
@@ -308,15 +324,17 @@ export async function runWebhookOrchestration({
             stripe_customer_id:     sub.customer,
             stripe_subscription_id: sub.id,
             status:                 subStatus,
-            current_period_end:     periodEnd,
+            current_period_end:     snap.periodEndIso,
             cancel_at_period_end:   Boolean(sub.cancel_at_period_end),
-            price_id:               incomingPrice,
+            price_id:               snap.priceId,
             updated_at:             now(),
           }, { onConflict: 'user_id' })
 
         if (error) {
-          log('db_write_failed', { requestId, eventType })
-          return finalize('failed', 'db_write_failed', resp(500, 'Database write failed'))
+          // R6: unique-violation → Stripe identity already attached to another user.
+          const code = isUniqueViolation(error) ? 'identity_conflict' : 'db_write_failed'
+          log(code, { requestId, eventType })
+          return finalize('failed', code, resp(500, 'Database write failed'))
         }
         return finalize('processed', undefined, resp(200, 'ok'))
       }

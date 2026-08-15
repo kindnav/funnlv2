@@ -12,6 +12,7 @@ import { extractChildrenText } from '../lib/extractChildrenText'
 import { createRequestGate } from '../lib/ai-chat-request-gate'
 import { resolveStripeRedirect } from '../lib/stripeRedirect'
 import { createActionGuard } from '../lib/actionGuard'
+import { subscriptionAttentionState } from '../lib/subscriptionStatusPolicy'
 import { getAvatarColor, getInitials } from '../lib/avatarUtils'
 import TopBar from '../components/TopBar'
 import {
@@ -264,6 +265,8 @@ function FunnlAIPage() {
   const displayStatus = classifyProStatus(proStatus)  // DISPLAY ONLY (badge/copy)
   const isProUser     = hasProAccess(proStatus)        // canonical access gate
   const isCheckingPro = proStatus === null
+  // DISPLAY-ONLY: an existing Stripe subscription the backend won't let us duplicate.
+  const attentionState = subscriptionAttentionState(proStatus?.subscription_status)
 
   const [userId,      setUserId]      = useState(null)
   const [contacts,    setContacts]    = useState([]) // [{id,name,company,role}] for ref validation
@@ -330,6 +333,12 @@ function FunnlAIPage() {
     if (!userId) return
     if (prevUserIdRef.current && prevUserIdRef.current !== userId) {
       gateRef.current.invalidate()
+      // Synchronously release the checkout guard and clear its loading/error so a
+      // stale in-flight checkout for the previous user cannot leave the button stuck
+      // or navigate the new account. The in-flight handler also re-checks the user.
+      subscribeGuardRef.current.release()
+      setSubscribing(false)
+      setSubscribeError('')
       setMessages([INITIAL_MESSAGE])
       setHistory([])
       setContacts([])
@@ -517,13 +526,31 @@ function FunnlAIPage() {
     // so two rapid clicks (before React commits setSubscribing) create exactly one
     // attemptId and one Edge Function call.
     if (!subscribeGuardRef.current.begin()) return
-    const attemptId = crypto.randomUUID()
+    const capturedUserId = prevUserIdRef.current
     setSubscribing(true)
     setSubscribeError('')
     track('checkout_started', { source: 'ai_page' })
-    const { data, error } = await supabase.functions.invoke('create-checkout-session', {
-      body: { attemptId },
-    })
+    let data, error
+    try {
+      ;({ data, error } = await supabase.functions.invoke('create-checkout-session', {
+        // attemptId is a non-authoritative request correlation value only; the server
+        // enforces single-flight via the checkout_operations table.
+        body: { attemptId: crypto.randomUUID() },
+      }))
+    } catch {
+      // Thrown network/invoke failure — show error, release guard, do not navigate.
+      track('checkout_creation_failed', { source: 'ai_page' })
+      setSubscribeError('Could not start checkout. Please try again.')
+      subscribeGuardRef.current.release()
+      setSubscribing(false)
+      return
+    }
+    // If the account switched while the request was in flight, discard the stale
+    // result: never navigate or mutate the new account's UI.
+    if (prevUserIdRef.current !== capturedUserId) {
+      subscribeGuardRef.current.release()
+      return
+    }
     // Validate the returned URL before navigating (must be checkout.stripe.com HTTPS).
     const redirect = resolveStripeRedirect(data, error, 'checkout')
     if (!redirect.ok) {
@@ -621,14 +648,28 @@ function FunnlAIPage() {
               {subscribeError}
             </p>
           )}
-          <button
-            onClick={handleSubscribe}
-            disabled={subscribing}
-            className="text-[13px] font-bold text-white px-5 py-[10px] rounded-[10px] disabled:opacity-40 hover:opacity-90 transition-opacity motion-reduce:transition-none"
-            style={{ background: 'var(--color-ember)' }}
-          >
-            {subscribing ? 'Loading…' : 'Subscribe - $7.99/month'}
-          </button>
+          {attentionState ? (
+            // An existing Stripe subscription needs attention — do NOT show a normal
+            // Subscribe button (the backend would reject a duplicate). Point to billing.
+            <Link
+              to="/settings"
+              className="inline-block text-[13px] font-semibold transition-opacity hover:opacity-80"
+              style={{ color: 'var(--color-ember)' }}
+            >
+              {attentionState === 'payment_incomplete'
+                ? 'Finish your payment in Settings →'
+                : 'Manage billing in Settings →'}
+            </Link>
+          ) : (
+            <button
+              onClick={handleSubscribe}
+              disabled={subscribing}
+              className="text-[13px] font-bold text-white px-5 py-[10px] rounded-[10px] disabled:opacity-40 hover:opacity-90 transition-opacity motion-reduce:transition-none"
+              style={{ background: 'var(--color-ember)' }}
+            >
+              {subscribing ? 'Loading…' : 'Subscribe - $7.99/month'}
+            </button>
+          )}
         </div>
       </div>
     )

@@ -197,6 +197,60 @@ await test('classifyProStatus: multiple grant flags but can_use_pro=false → un
   )
 })
 
+// ── R4: inverse contradiction (can_use_pro true, no grant flag) → unavailable ──
+await test('classifyProStatus: can_use_pro=true but NO grant flag → unavailable (inverse)', () => {
+  assert.strictEqual(
+    classifyProStatus({ can_use_pro: true, permanent_pro: false, subscription_active: false, trial_active: false }),
+    'unavailable',
+  )
+})
+await test('classifyProStatus: can_use_pro=true, only trial_expired true (no grant) → unavailable', () => {
+  assert.strictEqual(
+    classifyProStatus({ can_use_pro: true, permanent_pro: false, subscription_active: false, trial_active: false, trial_expired: true }),
+    'unavailable',
+  )
+})
+
+// ── R4: malformed field values → unavailable ──────────────────────────────────
+await test('classifyProStatus: subscription_active non-boolean → unavailable', () => {
+  assert.strictEqual(classifyProStatus({ can_use_pro: false, permanent_pro: false, subscription_active: 'yes' }), 'unavailable')
+})
+await test('classifyProStatus: trial_active non-boolean → unavailable', () => {
+  assert.strictEqual(classifyProStatus({ can_use_pro: false, permanent_pro: false, trial_active: 1 }), 'unavailable')
+})
+await test('classifyProStatus: trial_expired non-boolean → unavailable', () => {
+  assert.strictEqual(classifyProStatus({ can_use_pro: false, permanent_pro: false, trial_expired: 'no' }), 'unavailable')
+})
+await test('classifyProStatus: cancel_at_period_end non-boolean → unavailable', () => {
+  assert.strictEqual(classifyProStatus({ can_use_pro: true, permanent_pro: true, cancel_at_period_end: 'x' }), 'unavailable')
+})
+await test('classifyProStatus: unknown subscription_status string → unavailable', () => {
+  assert.strictEqual(classifyProStatus({ can_use_pro: false, permanent_pro: false, subscription_status: 'wat' }), 'unavailable')
+})
+await test('classifyProStatus: null subscription_status is tolerated (treated as none)', () => {
+  assert.strictEqual(classifyProStatus({ can_use_pro: false, permanent_pro: false, subscription_status: null }), 'non_pro')
+})
+
+// ── R4: valid coexisting combinations preserved ───────────────────────────────
+await test('classifyProStatus: subscribed coexists with expired Funnl trial → subscribed', () => {
+  assert.strictEqual(
+    classifyProStatus({ can_use_pro: true, permanent_pro: false, subscription_active: true, trial_active: false, trial_expired: true, subscription_status: 'active' }),
+    'subscribed',
+  )
+})
+await test('classifyProStatus: cancel_at_period_end=true does not remove subscription access', () => {
+  assert.strictEqual(
+    classifyProStatus({ can_use_pro: true, permanent_pro: false, subscription_active: true, cancel_at_period_end: true, subscription_status: 'active' }),
+    'subscribed',
+  )
+})
+await test('classifyProStatus: permanent + subscription both active → permanent (priority)', () => {
+  assert.strictEqual(
+    classifyProStatus({ can_use_pro: true, permanent_pro: true, subscription_active: true, subscription_status: 'active' }),
+    'permanent',
+  )
+})
+
 // ── hasProAccess: true cases ──────────────────────────────────────────────────
 
 await test('hasProAccess: permanent Pro → true', () => {

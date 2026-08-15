@@ -892,12 +892,12 @@ test('account-switch reset clears retrying flag', () => {
 })
 test('account-switch reset clears deletingAll flag', () => {
   const authIdx = sp.indexOf('onAuthStateChange')
-  const region = sp.slice(authIdx, authIdx + 1000)
+  const region = sp.slice(authIdx, authIdx + 1300)
   assert.ok(region.includes('setDeletingAll(false)'), 'account-switch must clear deletingAll flag')
 })
 test('account-switch reset clears deleting flag', () => {
   const authIdx = sp.indexOf('onAuthStateChange')
-  const region = sp.slice(authIdx, authIdx + 1200)
+  const region = sp.slice(authIdx, authIdx + 1400)
   assert.ok(region.includes('setDeleting(false)'), 'account-switch must clear deleting flag')
 })
 test('account-switch reset clears user state to null', () => {
