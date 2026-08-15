@@ -751,6 +751,32 @@ function SettingsPage() {
               </button>
             </div>
           )}
+
+          {/* Access-preserving billing warning: shown WITH the access label (not
+              instead of it) when a Stripe subscription needs attention (e.g. past_due
+              retains Pro) or a problematic Stripe status coexists with a trial/permanent
+              grant. Access is unchanged; hasProAccess() remains the only gate. */}
+          {attentionState && (proClass === 'permanent' || proClass === 'subscribed' || proClass === 'trial') && (
+            <div className="mt-3 pt-3 border-t border-line-1">
+              <p className="text-[11.5px] text-warning mb-1">
+                {attentionState === 'payment_incomplete'
+                  ? 'A payment is still processing on your account.'
+                  : 'Your payment needs attention to avoid losing access.'}
+              </p>
+              <button
+                onClick={handleBillingPortal}
+                disabled={billingPortalOpening}
+                className="text-[11px] font-semibold text-accent hover:opacity-80 transition-opacity motion-reduce:transition-none disabled:opacity-40"
+              >
+                {billingPortalOpening ? 'Opening…' : 'Manage billing →'}
+              </button>
+              {billingPortalError && (
+                <p role="alert" aria-live="assertive" className="text-[10.5px] text-danger mt-[6px]">
+                  {billingPortalError}
+                </p>
+              )}
+            </div>
+          )}
         </div>
 
         {/* ── Appearance ─────────────────────────────────────────────────── */}

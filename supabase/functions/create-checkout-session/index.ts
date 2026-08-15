@@ -25,12 +25,18 @@ function log(eventName: string, fields: Record<string, unknown>): void {
   console.log(JSON.stringify({ event: `create-checkout-session:${eventName}`, ...fields }))
 }
 
-// Real Stripe Checkout Session creation. Returns a normalized result; the
-// orchestration validates the returned URL. Never logs the Stripe response body.
+// Real Stripe Checkout Session creation. Classifies the provider outcome (R3) so the
+// orchestration can safely distinguish "no session was created" (definitive_failure)
+// from "we don't know" (unknown_failure). Never logs the Stripe response body.
+//
+//   success            — HTTP 2xx + parseable JSON (fields validated by the orchestration)
+//   definitive_failure — HTTP 4xx (client error: proves no session was created)
+//   unknown_failure    — HTTP 5xx / 429 (ambiguous), or HTTP 2xx with invalid JSON
+//   (a fetch throw is caught by the orchestration and treated as unknown_failure)
 async function createStripeSession(
   { params, idempotencyKey, stripeKey }:
   { params: URLSearchParams; idempotencyKey: string; stripeKey: string },
-): Promise<{ ok: boolean; status: number; session: Record<string, unknown> | null }> {
+): Promise<{ outcome: 'success' | 'definitive_failure' | 'unknown_failure'; status: number; session: Record<string, unknown> | null }> {
   const res = await fetch(`${STRIPE_API}/checkout/sessions`, {
     method: 'POST',
     headers: {
@@ -40,11 +46,17 @@ async function createStripeSession(
     },
     body: params.toString(),
   })
-  if (!res.ok) return { ok: false, status: res.status, session: null }
+  if (!res.ok) {
+    // 4xx proves the request was rejected and no session created → definitive.
+    // 5xx / 429 are ambiguous (a session might have been created) → unknown.
+    const outcome = res.status >= 400 && res.status < 500 ? 'definitive_failure' : 'unknown_failure'
+    return { outcome, status: res.status, session: null }
+  }
   try {
-    return { ok: true, status: res.status, session: await res.json() as Record<string, unknown> }
+    return { outcome: 'success', status: res.status, session: await res.json() as Record<string, unknown> }
   } catch {
-    return { ok: false, status: res.status, session: null }
+    // HTTP success but unparseable body — a session may exist → unknown, never definitive.
+    return { outcome: 'unknown_failure', status: res.status, session: null }
   }
 }
 

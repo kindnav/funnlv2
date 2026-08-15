@@ -13,6 +13,7 @@ import { createRequestGate } from '../lib/ai-chat-request-gate'
 import { resolveStripeRedirect } from '../lib/stripeRedirect'
 import { createActionGuard } from '../lib/actionGuard'
 import { subscriptionAttentionState } from '../lib/subscriptionStatusPolicy'
+import { isAccountSwitch, isStaleGeneration } from '../lib/accountSwitch'
 import { getAvatarColor, getInitials } from '../lib/avatarUtils'
 import TopBar from '../components/TopBar'
 import {
@@ -290,6 +291,8 @@ function FunnlAIPage() {
   const currentSessionIdRef = useRef(null) // stable ID for the active conversation
   const pendingFocusRef     = useRef(false) // focus composer after Pro resolves
   const prevUserIdRef       = useRef(null)  // detect genuine account switches
+  const userIdRef           = useRef(null)  // latest userId, readable inside auth listener
+  const accountGenRef       = useRef(0)     // increments on every real account switch
   const isComposingRef      = useRef(false) // IME composition guard
 
   const navigate = useNavigate()
@@ -327,15 +330,34 @@ function FunnlAIPage() {
     return () => { active = false }
   }, []) // mount only
 
+  // Keep a ref of the latest userId so the auth listener can read it synchronously.
+  useEffect(() => { userIdRef.current = userId }, [userId])
+
+  // Real account-switch detection. FunnlAIPage's mount getSession() only sets userId
+  // once, so without this listener a post-mount account switch (e.g. in another tab)
+  // would never be detected. On a genuine UID change we synchronously invalidate the
+  // previous account's in-flight work, then setUserId to trigger the reload effect.
+  useEffect(() => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      const newUid = session?.user?.id ?? null
+      if (isAccountSwitch(userIdRef.current, newUid)) {
+        accountGenRef.current++            // invalidate any in-flight checkout result
+        gateRef.current.invalidate()       // invalidate any in-flight AI request
+        subscribeGuardRef.current.release()
+        setSubscribing(false)
+        setSubscribeError('')
+        setUserId(newUid)                  // triggers the reload effect below
+      }
+    })
+    return () => subscription?.unsubscribe?.()
+  }, [])
+
   // Account-switch isolation: when userId changes mid-session (not first load),
-  // clear all per-user state before re-loading the new user's data.
+  // clear all per-user state AND load only the new user's data (generation-guarded).
   useEffect(() => {
     if (!userId) return
     if (prevUserIdRef.current && prevUserIdRef.current !== userId) {
       gateRef.current.invalidate()
-      // Synchronously release the checkout guard and clear its loading/error so a
-      // stale in-flight checkout for the previous user cannot leave the button stuck
-      // or navigate the new account. The in-flight handler also re-checks the user.
       subscribeGuardRef.current.release()
       setSubscribing(false)
       setSubscribeError('')
@@ -345,6 +367,22 @@ function FunnlAIPage() {
       setInput('')
       setLoading(false)
       currentSessionIdRef.current = null
+      // Load the NEW user's contacts + history, discarding the result if another
+      // switch happens first (stale generation).
+      const gen = accountGenRef.current
+      ;(async () => {
+        const { data: contactData } = await supabase
+          .from('contacts')
+          .select('id, name, company, role')
+          .eq('user_id', userId)
+        if (isStaleGeneration(gen, accountGenRef.current)) return
+        if (Array.isArray(contactData)) setContacts(contactData)
+        setHistory(parseStoredHistory(localStorage.getItem(historyKey(userId))))
+        const stored = parseStoredCurrentSession(localStorage.getItem(currentKey(userId)))
+        if (!isStaleGeneration(gen, accountGenRef.current) && stored.length > 0) {
+          setMessages([INITIAL_MESSAGE, ...stored])
+        }
+      })()
     }
     prevUserIdRef.current = userId
   }, [userId])
@@ -522,11 +560,12 @@ function FunnlAIPage() {
   }
 
   async function handleSubscribe() {
-    // Synchronous guard: set the ref BEFORE generating the attempt ID or invoking,
-    // so two rapid clicks (before React commits setSubscribing) create exactly one
-    // attemptId and one Edge Function call.
+    // Synchronous guard engaged before invoking, so two rapid clicks (before React
+    // commits setSubscribing) create exactly one Edge Function call.
     if (!subscribeGuardRef.current.begin()) return
-    const capturedUserId = prevUserIdRef.current
+    // Capture the account generation. If it changes (account switch) while the request
+    // is in flight, the result is stale and must not navigate, mutate state, or track.
+    const capturedGen = accountGenRef.current
     setSubscribing(true)
     setSubscribeError('')
     track('checkout_started', { source: 'ai_page' })
@@ -538,16 +577,19 @@ function FunnlAIPage() {
         body: { attemptId: crypto.randomUUID() },
       }))
     } catch {
-      // Thrown network/invoke failure — show error, release guard, do not navigate.
-      track('checkout_creation_failed', { source: 'ai_page' })
-      setSubscribeError('Could not start checkout. Please try again.')
+      // Thrown network/invoke failure. Only surface UI + analytics if this request
+      // still owns the current account generation; always release the guard.
+      if (!isStaleGeneration(capturedGen, accountGenRef.current)) {
+        track('checkout_creation_failed', { source: 'ai_page' })
+        setSubscribeError('Could not start checkout. Please try again.')
+        setSubscribing(false)
+      }
       subscribeGuardRef.current.release()
-      setSubscribing(false)
       return
     }
     // If the account switched while the request was in flight, discard the stale
-    // result: never navigate or mutate the new account's UI.
-    if (prevUserIdRef.current !== capturedUserId) {
+    // result: never navigate, mutate the new account's UI, or fire analytics.
+    if (isStaleGeneration(capturedGen, accountGenRef.current)) {
       subscribeGuardRef.current.release()
       return
     }
@@ -798,6 +840,20 @@ function FunnlAIPage() {
           <div className="flex-1 overflow-y-auto min-h-0 px-4 md:px-6 py-5">
             {!isProUser ? renderLocked() : (
               <div className="space-y-5 max-w-[680px] mx-auto">
+                {/* Non-blocking billing-attention notice: AI stays fully unlocked while
+                    can_use_pro is true (e.g. past_due). Access is unchanged — this only
+                    points the user to Settings to fix their payment. */}
+                {attentionState && (
+                  <div className="rounded-xl px-3.5 py-2.5 text-[12.5px]" role="status"
+                    style={{ background: 'rgba(255,184,77,0.10)', border: '1px solid rgba(255,184,77,0.25)', color: 'var(--color-warning)' }}>
+                    {attentionState === 'payment_incomplete'
+                      ? 'A payment is still processing. '
+                      : 'Your payment needs attention. '}
+                    <Link to="/settings" className="font-semibold underline" style={{ color: 'var(--color-warning)' }}>
+                      Manage billing in Settings
+                    </Link>
+                  </div>
+                )}
                 {messages.map(msg => (
                   <div key={msg.id}>
                     {msg.role === 'user' ? (

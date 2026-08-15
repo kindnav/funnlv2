@@ -63,9 +63,21 @@
 --   SELECT relrowsecurity FROM pg_class WHERE relname='checkout_operations';                       -- true
 --   SELECT has_table_privilege('authenticated','public.checkout_operations','SELECT');             -- false
 --   SELECT has_table_privilege('service_role','public.checkout_operations','INSERT');              -- true
---   SELECT has_function_privilege('service_role','public.claim_checkout_operation(uuid,text,boolean,integer)','EXECUTE');   -- true
---   SELECT has_function_privilege('authenticated','public.claim_checkout_operation(uuid,text,boolean,integer)','EXECUTE');  -- false
+--   SELECT has_function_privilege('service_role','public.claim_checkout_operation(uuid,text,text,integer)','EXECUTE');   -- true
+--   SELECT has_function_privilege('authenticated','public.claim_checkout_operation(uuid,text,text,integer)','EXECUTE');  -- false
 --   SELECT has_function_privilege('service_role','public.finalize_checkout_operation(uuid,uuid,text,text,text,timestamptz)','EXECUTE'); -- true
+--
+-- CHECKOUT MODE (p_mode) — set by the backend from the subscription-status policy:
+--   'reuse_or_create'  (status none)                 reuse an unexpired ready session if present, else create.
+--   'reuse_only'       (status incomplete)           reuse an unexpired ready session ONLY; never create → blocked_no_reuse.
+--   'fresh_only'       (status canceled/incomplete_expired)  NEVER reuse an old ready session (it may be a completed/obsolete
+--                                                    payment attempt); always start a genuinely new operation atomically.
+--   (block statuses never reach this RPC — the backend returns 409 first.)
+--
+-- SAME- vs DIFFERENT-PRICE stale recovery: a stale 'creating' row for the SAME configured
+-- price retains its operation_id (so the Stripe idempotency key is reused and Stripe returns
+-- the same session); a stale 'creating' row for a DIFFERENT price mints a NEW operation_id +
+-- token and clears stored session fields (reusing the key with different params is invalid).
 
 -- ── 1. checkout_operations table ────────────────────────────────────────────────
 CREATE TABLE public.checkout_operations (
@@ -95,7 +107,7 @@ GRANT ALL ON TABLE public.checkout_operations TO service_role;
 CREATE OR REPLACE FUNCTION public.claim_checkout_operation(
   p_user_id       uuid,
   p_price_id      text,
-  p_allow_create  boolean DEFAULT true,
+  p_mode          text    DEFAULT 'reuse_or_create',
   p_stale_seconds integer DEFAULT 120
 )
 RETURNS jsonb
@@ -104,18 +116,41 @@ SECURITY DEFINER
 SET search_path = ''
 AS $$
 DECLARE
-  v_state    text;
-  v_price    text;
-  v_url      text;
-  v_op       uuid;
-  v_token    uuid;
-  v_expires  timestamptz;
-  v_updated  timestamptz;
-  v_new_op   uuid;
-  v_new_tok  uuid;
-  v_rows     integer;
-  v_now      timestamptz := now();
+  v_state     text;
+  v_price     text;
+  v_url       text;
+  v_op        uuid;
+  v_token     uuid;
+  v_expires   timestamptz;
+  v_updated   timestamptz;
+  v_new_op    uuid;
+  v_new_tok   uuid;
+  v_rows      integer;
+  v_may_reuse boolean;
+  v_now       timestamptz := now();
 BEGIN
+  IF p_mode NOT IN ('reuse_or_create','reuse_only','fresh_only') THEN
+    RAISE EXCEPTION 'invalid_checkout_mode';
+  END IF;
+
+  -- ── reuse_only (status incomplete): reuse an existing ready session, else blocked.
+  -- Never inserts and never creates a new operation.
+  IF p_mode = 'reuse_only' THEN
+    SELECT state, price_id, checkout_url, operation_id, expires_at
+    INTO   v_state, v_price, v_url, v_op, v_expires
+    FROM   public.checkout_operations
+    WHERE  user_id = p_user_id;
+    IF FOUND
+       AND v_state = 'ready' AND v_price = p_price_id
+       AND v_url IS NOT NULL AND v_expires IS NOT NULL AND v_expires > v_now THEN
+      RETURN jsonb_build_object('result','reuse','checkout_url',v_url,'operation_id',v_op);
+    END IF;
+    RETURN jsonb_build_object('result','blocked_no_reuse');
+  END IF;
+
+  -- Modes that may create: reuse_or_create (may reuse) and fresh_only (must NOT reuse).
+  v_may_reuse := (p_mode = 'reuse_or_create');
+
   -- First-timer fast path: atomic INSERT. The first of N concurrent callers wins.
   v_new_op  := gen_random_uuid();
   v_new_tok := gen_random_uuid();
@@ -123,12 +158,6 @@ BEGIN
   VALUES (p_user_id, p_price_id, v_new_op, v_new_tok, 'creating', v_now, v_now)
   ON CONFLICT (user_id) DO NOTHING;
   IF FOUND THEN
-    IF NOT p_allow_create THEN
-      -- reuse_only caller must not create. Undo the just-inserted claim and report.
-      DELETE FROM public.checkout_operations
-      WHERE user_id = p_user_id AND claim_token = v_new_tok AND state = 'creating';
-      RETURN jsonb_build_object('result','blocked_no_reuse');
-    END IF;
     RETURN jsonb_build_object('result','claimed','operation_id',v_new_op,'claim_token',v_new_tok);
   END IF;
 
@@ -138,8 +167,10 @@ BEGIN
   FROM   public.checkout_operations
   WHERE  user_id = p_user_id;
 
-  -- Reuse an unexpired ready session for the same price (no Stripe call).
-  IF v_state = 'ready'
+  -- Reuse an unexpired ready session for the same price — ONLY for reuse_or_create.
+  -- fresh_only never reuses (a ready row may be a completed/obsolete payment attempt).
+  IF v_may_reuse
+     AND v_state = 'ready'
      AND v_price = p_price_id
      AND v_url IS NOT NULL
      AND v_expires IS NOT NULL
@@ -147,32 +178,45 @@ BEGIN
     RETURN jsonb_build_object('result','reuse','checkout_url',v_url,'operation_id',v_op);
   END IF;
 
-  -- reuse_only callers stop here — never create a new operation.
-  IF NOT p_allow_create THEN
-    RETURN jsonb_build_object('result','blocked_no_reuse');
-  END IF;
-
-  -- Another instance is actively creating (recent) — tell caller to retry, no Stripe.
+  -- Another instance is actively creating (recent) — retryable, no Stripe call.
+  -- Preserves single-flight for both reuse_or_create AND fresh_only.
   IF v_state = 'creating' AND v_now - v_updated <= make_interval(secs => p_stale_seconds) THEN
     RETURN jsonb_build_object('result','in_progress');
   END IF;
 
-  -- Stale 'creating' (crashed handler): CAS-reclaim, REUSE the same operation_id for
-  -- Stripe idempotency crash-safety, rotate only the ownership token.
+  -- Stale 'creating' (crashed handler): CAS-reclaim.
   IF v_state = 'creating' AND v_now - v_updated > make_interval(secs => p_stale_seconds) THEN
-    v_new_tok := gen_random_uuid();
-    UPDATE public.checkout_operations
-    SET    claim_token = v_new_tok, price_id = p_price_id, updated_at = v_now
-    WHERE  user_id = p_user_id AND state = 'creating' AND updated_at = v_updated;  -- CAS on read timestamp
-    GET DIAGNOSTICS v_rows = ROW_COUNT;
-    IF v_rows > 0 THEN
-      RETURN jsonb_build_object('result','claimed','operation_id',v_op,'claim_token',v_new_tok);
+    IF v_price = p_price_id THEN
+      -- SAME price: retain operation_id (reuse the Stripe idempotency key), rotate token.
+      v_new_tok := gen_random_uuid();
+      UPDATE public.checkout_operations
+      SET    claim_token = v_new_tok, updated_at = v_now
+      WHERE  user_id = p_user_id AND state = 'creating' AND updated_at = v_updated;  -- CAS
+      GET DIAGNOSTICS v_rows = ROW_COUNT;
+      IF v_rows > 0 THEN
+        RETURN jsonb_build_object('result','claimed','operation_id',v_op,'claim_token',v_new_tok);
+      END IF;
+    ELSE
+      -- DIFFERENT price: mint a NEW operation_id (never reuse a key across params),
+      -- new token, and clear stored session fields — atomically.
+      v_new_op  := gen_random_uuid();
+      v_new_tok := gen_random_uuid();
+      UPDATE public.checkout_operations
+      SET    operation_id = v_new_op, claim_token = v_new_tok, price_id = p_price_id,
+             state = 'creating', stripe_session_id = NULL, checkout_url = NULL,
+             expires_at = NULL, updated_at = v_now
+      WHERE  user_id = p_user_id AND state = 'creating' AND updated_at = v_updated;  -- CAS
+      GET DIAGNOSTICS v_rows = ROW_COUNT;
+      IF v_rows > 0 THEN
+        RETURN jsonb_build_object('result','claimed','operation_id',v_new_op,'claim_token',v_new_tok);
+      END IF;
     END IF;
     RETURN jsonb_build_object('result','in_progress');  -- lost the reclaim race
   END IF;
 
-  -- Terminal / expired / different-price → start a genuinely NEW operation
-  -- (fresh operation_id + token). CAS on the read claim_token so only one caller wins.
+  -- Terminal ('failed'), or 'ready' not reused (expired, different price, or fresh_only):
+  -- start a genuinely NEW operation (fresh operation_id + token). CAS on the read
+  -- claim_token so two concurrent callers cannot both create — one wins, other in_progress.
   v_new_op  := gen_random_uuid();
   v_new_tok := gen_random_uuid();
   UPDATE public.checkout_operations
@@ -189,10 +233,10 @@ BEGIN
 END;
 $$;
 
-REVOKE EXECUTE ON FUNCTION public.claim_checkout_operation(uuid, text, boolean, integer) FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION public.claim_checkout_operation(uuid, text, boolean, integer) FROM anon;
-REVOKE EXECUTE ON FUNCTION public.claim_checkout_operation(uuid, text, boolean, integer) FROM authenticated;
-GRANT  EXECUTE ON FUNCTION public.claim_checkout_operation(uuid, text, boolean, integer) TO service_role;
+REVOKE EXECUTE ON FUNCTION public.claim_checkout_operation(uuid, text, text, integer) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.claim_checkout_operation(uuid, text, text, integer) FROM anon;
+REVOKE EXECUTE ON FUNCTION public.claim_checkout_operation(uuid, text, text, integer) FROM authenticated;
+GRANT  EXECUTE ON FUNCTION public.claim_checkout_operation(uuid, text, text, integer) TO service_role;
 
 -- ── 3. finalize_checkout_operation() ────────────────────────────────────────────
 CREATE OR REPLACE FUNCTION public.finalize_checkout_operation(

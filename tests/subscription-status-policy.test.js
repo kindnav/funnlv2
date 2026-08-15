@@ -5,6 +5,7 @@
 import {
   SUBSCRIPTION_STATUS_POLICY,
   checkoutPolicyForStatus,
+  checkoutModeForStatus,
   isCheckoutCreationAllowed,
   isCheckoutReuseOnly,
   isKnownSubscriptionStatus,
@@ -18,16 +19,28 @@ function assertEqual(a, b, m) { if (a !== b) throw new Error(m ?? `Expected ${JS
 
 // Full documented table: [status, checkoutMode, grantsAccess, uiState]
 const TABLE = [
-  ['active',             'block',      true,  'subscribed'],
-  ['past_due',           'block',      true,  'billing_attention'],
-  ['incomplete',         'reuse_only', false, 'payment_incomplete'],
-  ['trialing',           'block',      false, 'billing_attention'],
-  ['unpaid',             'block',      false, 'billing_attention'],
-  ['paused',             'block',      false, 'billing_attention'],
-  ['canceled',           'allow',      false, 'can_checkout'],
-  ['incomplete_expired', 'allow',      false, 'can_checkout'],
-  ['none',               'allow',      false, 'can_checkout'],
+  ['active',             'block',           true,  'subscribed'],
+  ['past_due',           'block',           true,  'billing_attention'],
+  ['incomplete',         'reuse_only',      false, 'payment_incomplete'],
+  ['trialing',           'block',           false, 'billing_attention'],
+  ['unpaid',             'block',           false, 'billing_attention'],
+  ['paused',             'block',           false, 'billing_attention'],
+  ['canceled',           'fresh_only',      false, 'can_checkout'],
+  ['incomplete_expired', 'fresh_only',      false, 'can_checkout'],
+  ['none',               'reuse_or_create', false, 'can_checkout'],
 ]
+
+// R1: canceled/incomplete_expired must NEVER reuse an old ready session (fresh_only);
+// none may reuse-or-create; incomplete is reuse_only.
+test('checkoutModeForStatus matches the table', () => {
+  for (const [status, mode] of TABLE) assertEqual(checkoutModeForStatus(status), mode, status)
+})
+test('canceled + incomplete_expired are fresh_only (no reuse of old completed session)', () => {
+  assertEqual(checkoutModeForStatus('canceled'), 'fresh_only')
+  assertEqual(checkoutModeForStatus('incomplete_expired'), 'fresh_only')
+})
+test('none is reuse_or_create', () => assertEqual(checkoutModeForStatus('none'), 'reuse_or_create'))
+test('unknown status → block mode', () => assertEqual(checkoutModeForStatus('wat'), 'block'))
 
 for (const [status, mode, grants, uiState] of TABLE) {
   test(`${status}: checkoutMode=${mode}`, () => assertEqual(checkoutPolicyForStatus(status).checkoutMode, mode))
@@ -49,10 +62,10 @@ test('isCheckoutReuseOnly: only incomplete', () => {
   }
 })
 
-// null / undefined / '' → treated as none (checkout allowed).
-test('null status → allow (none)', () => assertEqual(checkoutPolicyForStatus(null).checkoutMode, 'allow'))
-test('undefined status → allow (none)', () => assertEqual(checkoutPolicyForStatus(undefined).checkoutMode, 'allow'))
-test('empty string status → allow (none)', () => assertEqual(checkoutPolicyForStatus('').checkoutMode, 'allow'))
+// null / undefined / '' → treated as none (reuse_or_create).
+test('null status → reuse_or_create (none)', () => assertEqual(checkoutPolicyForStatus(null).checkoutMode, 'reuse_or_create'))
+test('undefined status → reuse_or_create (none)', () => assertEqual(checkoutPolicyForStatus(undefined).checkoutMode, 'reuse_or_create'))
+test('empty string status → reuse_or_create (none)', () => assertEqual(checkoutPolicyForStatus('').checkoutMode, 'reuse_or_create'))
 
 // Unknown non-empty status → fail closed (block + billing_attention).
 test('unknown status → fail closed (block)', () => {

@@ -250,16 +250,16 @@ async function run() {
     assertEqual(supabaseAdmin.calls.mark[0].p_failure_code, 'config_missing')
   })
 
-  // 14 ── missing subscription price → ignored 200 (subscription.updated)
-  test('subscription.updated with no extractable price → 200 ignored', async () => {
+  // 14 ── R4: empty items (no_items) FAILS CLOSED → 500 invalid_subscription_item
+  test('subscription.updated with empty items (no_items) → 500 invalid_subscription_item', async () => {
     const { deps, supabaseAdmin } = makeDeps({
-      event: subEvent('customer.subscription.updated'),
-      fetchSubscription: async () => goodSub({ items: { data: [] } }),
+      event: subEvent('customer.subscription.updated', { metadata: { user_id: USER } }),
+      fetchSubscription: async () => goodSub({ metadata: { user_id: USER }, items: { data: [] } }),
     })
     const r = await runWebhookOrchestration(deps)
-    assertEqual(r.status, 200)
+    assertEqual(r.status, 500)
     assertEqual(supabaseAdmin.calls.upserts.length, 0)
-    assertEqual(supabaseAdmin.calls.mark[0].p_status, 'ignored')
+    assertEqual(supabaseAdmin.calls.mark[0].p_failure_code, 'invalid_subscription_item')
   })
 
   // 15 ── wrong price → 200 ignored
@@ -445,6 +445,45 @@ async function run() {
     const r = await runWebhookOrchestration(deps)
     assertEqual(r.status, 500)
     assertEqual(supabaseAdmin.calls.mark[0].p_failure_code, 'db_write_failed')
+  })
+
+  // ── R4: no_items / malformed items fail closed on ALL routes; only no_matching_item ignores ──
+  const malformedItemCases = [
+    ['no_items (empty)',       { data: [] }],
+    ['malformed_items',        { data: 'nope' }],
+    ['multiple items (mixed)', { data: [{ price: { id: PRICE }, current_period_end: 1_704_067_200 }, { price: { id: 'other' }, current_period_end: 1_704_067_200 }] }],
+    ['no_period_end',          { data: [{ price: { id: PRICE } }] }],
+  ]
+  for (const [label, items] of malformedItemCases) {
+    test(`R4: subscription.created ${label} → 500 invalid_subscription_item`, async () => {
+      const { deps, supabaseAdmin } = makeDeps({
+        event: subEvent('customer.subscription.created', { metadata: { user_id: USER } }),
+        fetchSubscription: async () => goodSub({ metadata: { user_id: USER }, current_period_end: undefined, items }),
+      })
+      const r = await runWebhookOrchestration(deps)
+      assertEqual(r.status, 500)
+      assertEqual(supabaseAdmin.calls.mark[0].p_failure_code, 'invalid_subscription_item')
+      assertEqual(supabaseAdmin.calls.upserts.length, 0)
+    })
+    test(`R4: checkout.session.completed ${label} → 500 invalid_subscription_item`, async () => {
+      const { deps, supabaseAdmin } = makeDeps({
+        event: checkoutEvent(),
+        fetchSubscription: async () => goodSub({ current_period_end: undefined, items }),
+      })
+      const r = await runWebhookOrchestration(deps)
+      assertEqual(r.status, 500)
+      assertEqual(supabaseAdmin.calls.mark[0].p_failure_code, 'invalid_subscription_item')
+      assertEqual(supabaseAdmin.calls.upserts.length, 0)
+    })
+  }
+  test('R4: only no_matching_item is ignored 200 (subscription.updated, wrong price)', async () => {
+    const { deps, supabaseAdmin } = makeDeps({
+      event: subEvent('customer.subscription.updated'),
+      fetchSubscription: async () => goodSub({ items: { data: [{ price: { id: 'price_OTHER' }, current_period_end: 1_704_067_200 }] } }),
+    })
+    const r = await runWebhookOrchestration(deps)
+    assertEqual(r.status, 200)
+    assertEqual(supabaseAdmin.calls.mark[0].p_status, 'ignored')
   })
 
   // 24 ── mark RPC error → 500 Finalize failed

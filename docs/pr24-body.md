@@ -4,6 +4,8 @@
 
 Each component is documented separately — the Stripe surface is a **mix** of deployed-but-older-version and not-deployed. Do NOT read this as "all deployed" or "all undeployed."
 
+**Preview vs production:** merging/pushing this PR causes Vercel to automatically build a **PR Preview** deployment. That is NOT a production deployment — the branch frontend is not on `www.getfunnl.com`. "Nothing deployed to production" is accurate; "nothing deployed" is not (a preview exists).
+
 | Component | Deployed? | Prod version | Notes |
 |---|---|---|---|
 | Migration `20260812000000_add_subscriptions.sql` | **Applied** | — | `subscriptions` table exists; `get_my_pro_access_status()` RPC works; data live |
@@ -22,6 +24,17 @@ Each component is documented separately — the Stripe surface is a **mix** of d
 **Net effect:** checkout and the webhook are live at older versions, so the billing path partially functions today, but the webhook-idempotency table, the checkout single-flight table, the token-validated finalizes, the authoritative-field/status/period hardening, the identity-uniqueness index, the billing-portal function, and all frontend Stripe UI are **not** in production. Redeploying `create-checkout-session` (after `20260815003056`) and `stripe-webhook` (after `20260813000000`) from this branch is required to pick up the corrections.
 
 **Duplicate-subscription protection is NOT the React guard.** `createActionGuard()` only protects a single mounted component; it does nothing across tabs, devices, sessions, or direct authenticated calls. The authoritative protection is the server-side `checkout_operations` single-flight (R1) plus the full status policy (R2) — both of which require applying `20260815003056` and redeploying the function. Until then, the older live function does **not** have this protection.
+
+## Reliability corrections (fourth review round)
+
+1. **No reuse of a completed/obsolete Checkout Session (R1).** `claim_checkout_operation` now takes a checkout MODE (not a boolean): `reuse_or_create` (none), `reuse_only` (incomplete), `fresh_only` (canceled/incomplete_expired). `fresh_only` NEVER reuses an old ready session — a resubscribe after cancel starts a genuinely new operation atomically (single-flight preserved: two concurrent fresh callers → one claimed, one in_progress).
+2. **Price change never reuses a Stripe idempotency key (R2).** A stale `creating` row for the SAME price retains its `operation_id` (reuses the key); for a DIFFERENT price it mints a NEW `operation_id` + token and clears session fields — never reusing a key with different params.
+3. **Ambiguous provider outcomes are safe (R3).** `createStripeSession` classifies `success` / `definitive_failure` (HTTP 4xx) / `unknown_failure` (HTTP 5xx-429, HTTP-success-with-invalid-JSON, throw). A `success` is only finalized `ready` when the session has a non-empty id, a valid `checkout.stripe.com` URL, and a FUTURE `expires_at`; otherwise it is treated as unknown (not finalized, 503, operation retained for idempotent retry). `definitive_failure` finalizes `failed` and returns 502 ONLY after the failed finalize is durable (RPC ok AND returned true); a finalize RPC error or `data=false` returns 503. A ready finalize that returns `data=false` (ownership lost) returns 503, never a false success.
+4. **`no_items` fails closed in the webhook (R4).** Only `no_matching_item` (items exist but none is our price) is ignored 200. `no_items` / malformed / multiple / mixed / `no_period_end` fail closed with `invalid_subscription_item` (500) on checkout.session.completed, subscription.created, and subscription.updated — a malformed authoritative response never silently locks a paying user.
+5. **Real FunnlAIPage account-switch (R5).** FunnlAIPage now subscribes to `onAuthStateChange`, bumps an account generation on a genuine UID change, releases the checkout guard, invalidates the AI request gate, clears the old user's state, and loads the new user's data (generation-guarded). `handleSubscribe` captures the generation and gates every post-await side effect (navigation, state, analytics) — including the catch path — on staleness.
+6. **Billing attention is not masked by access (R6).** SettingsPage renders an access-preserving billing warning + Manage billing alongside the `permanent`/`subscribed`/`trial` label (e.g. `past_due` keeps Pro AND shows a warning); FunnlAIPage stays unlocked while `can_use_pro` and shows a small non-blocking notice linking to Settings. A normal Subscribe button is never shown for a status the backend blocks/reuse-onlys. `hasProAccess()` remains the only access gate.
+7. **Shared policy in an Edge-safe location (R7).** The single canonical policy now lives at `supabase/functions/shared/subscriptionStatusPolicy.js`; the checkout Edge Function imports it via `../shared/…`, and `src/lib/subscriptionStatusPolicy.js` is a thin re-export. No duplicated status map. Vite build + Node module-graph resolution both verified without deploying.
+8. **User-facing em dashes removed (R8).** The billing-portal Edge Function's API error messages (and checkout copy) use periods, not U+2014. A targeted test scans the Stripe user-visible strings only.
 
 ## Reliability corrections (third review round)
 

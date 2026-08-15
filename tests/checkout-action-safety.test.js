@@ -61,8 +61,8 @@ test('SettingsPage handleBillingPortal releases the guard on failure', () => {
 
 // ── stale result cannot navigate after account switch ───────────────────────
 test('FunnlAIPage handleSubscribe bails when the account switched mid-invoke', () => {
-  assert(aiSubscribe.includes('prevUserIdRef.current !== capturedUserId'),
-    'must compare the captured user id against the current one before navigating')
+  assert(aiSubscribe.includes('isStaleGeneration(capturedGen, accountGenRef.current)'),
+    'must compare the captured account generation before navigating')
 })
 test('SettingsPage handleSubscribe bails when the account switched mid-invoke', () => {
   assert(setSubscribe.includes('accountGenRef.current !== capturedGen'))

@@ -51,3 +51,30 @@ export function isValidCheckoutUrl(url) {
     return false
   }
 }
+
+/**
+ * Validates a Stripe Checkout Session object returned on an HTTP-success response.
+ * A session may only be finalized as 'ready' (and later reused) when ALL are true:
+ *   - id is a non-empty string
+ *   - url is a valid checkout.stripe.com HTTPS URL
+ *   - expires_at is a finite positive integer AND strictly in the future
+ * A `ready` row without a valid future expires_at could never be reused, so the next
+ * request would create ANOTHER session — hence we require it here. Any failure means
+ * the outcome is ambiguous (a session may or may not exist): the caller must treat it
+ * as unknown, NOT finalize, and leave the operation for an idempotent retry.
+ *
+ * @param {unknown} session — parsed Stripe session (may be null/malformed)
+ * @param {number} nowSec — current time in Unix SECONDS (injectable)
+ * @returns {{ ok: true, id: string, url: string, expiresAtIso: string }
+ *          | { ok: false, reason: 'missing_session'|'missing_id'|'invalid_url'|'missing_expires_at'|'expired' }}
+ */
+export function validateStripeSession(session, nowSec) {
+  if (!session || typeof session !== 'object') return { ok: false, reason: 'missing_session' }
+  const id = session.id
+  if (typeof id !== 'string' || id.length === 0) return { ok: false, reason: 'missing_id' }
+  if (!isValidCheckoutUrl(session.url)) return { ok: false, reason: 'invalid_url' }
+  const exp = session.expires_at
+  if (typeof exp !== 'number' || !Number.isFinite(exp) || exp <= 0) return { ok: false, reason: 'missing_expires_at' }
+  if (typeof nowSec !== 'number' || exp <= nowSec) return { ok: false, reason: 'expired' }
+  return { ok: true, id, url: session.url, expiresAtIso: new Date(exp * 1000).toISOString() }
+}

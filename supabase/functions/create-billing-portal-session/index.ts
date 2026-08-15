@@ -88,7 +88,7 @@ Deno.serve(async (req) => {
         dbCode: subError.code,
       })
       return new Response(
-        JSON.stringify({ error: 'Could not load billing information — please try again' }),
+        JSON.stringify({ error: 'Could not load billing information. Please try again.' }),
         { status: 503, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       )
     }
@@ -107,7 +107,7 @@ Deno.serve(async (req) => {
     if (!stripeKey) {
       console.error('create-billing-portal-session: STRIPE_SECRET_KEY not set', { requestId })
       return new Response(
-        JSON.stringify({ error: 'Billing portal not configured — please try again later' }),
+        JSON.stringify({ error: 'Billing portal not configured. Please try again later.' }),
         { status: 503, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       )
     }
@@ -131,7 +131,7 @@ Deno.serve(async (req) => {
         providerStatus: stripeRes.status,
       })
       return new Response(
-        JSON.stringify({ error: 'Could not open billing portal — please try again' }),
+        JSON.stringify({ error: 'Could not open billing portal. Please try again.' }),
         { status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       )
     }
@@ -146,7 +146,7 @@ Deno.serve(async (req) => {
         providerStatus: stripeRes.status,
       })
       return new Response(
-        JSON.stringify({ error: 'Could not open billing portal — please try again' }),
+        JSON.stringify({ error: 'Could not open billing portal. Please try again.' }),
         { status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       )
     }
@@ -166,7 +166,7 @@ Deno.serve(async (req) => {
         providerStatus: stripeRes.status,
       })
       return new Response(
-        JSON.stringify({ error: 'Could not open billing portal — please try again' }),
+        JSON.stringify({ error: 'Could not open billing portal. Please try again.' }),
         { status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       )
     }
@@ -182,7 +182,7 @@ Deno.serve(async (req) => {
       requestId,
     })
     return new Response(
-      JSON.stringify({ error: 'Something went wrong — please try again' }),
+      JSON.stringify({ error: 'Something went wrong. Please try again.' }),
       { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
     )
   }

@@ -213,12 +213,16 @@ export async function runWebhookOrchestration({
         // R3: price validation AND period-end come from the SAME validated Pro item.
         const snap = extractProSubscriptionSnapshot(sub, priceId)
         if (!snap.ok) {
-          if (snap.reason === 'no_matching_item' || snap.reason === 'no_items') {
-            // No Funnl Pro item present — not our product. Acknowledge and ignore.
+          // Only a subscription whose items exist but do NOT include our configured
+          // price is provably "not our product" → acknowledge and ignore (200).
+          if (snap.reason === 'no_matching_item') {
             log('price_mismatch', { requestId, eventType })
             return finalize('ignored', undefined, resp(200, 'ok'))
           }
-          // Our price but a malformed / mixed / period-less item — fail closed.
+          // Every other reason (no_items, malformed_items, multiple_matching_items,
+          // unsupported_item_configuration, no_period_end) is a malformed/ambiguous
+          // authoritative response — fail closed so Stripe retries, rather than
+          // silently 200-acknowledging and risking a permanently locked paying user.
           log('invalid_subscription_item', { requestId, eventType, reason: snap.reason })
           return finalize('failed', 'invalid_subscription_item', resp(500, 'Invalid subscription item'))
         }
@@ -282,11 +286,13 @@ export async function runWebhookOrchestration({
         // R3: price validation AND period-end come from the SAME validated Pro item.
         const snap = extractProSubscriptionSnapshot(sub, priceId)
         if (!snap.ok) {
-          if (snap.reason === 'no_matching_item' || snap.reason === 'no_items') {
-            // No Funnl Pro item present — not our product. Acknowledge and ignore.
+          // Only items that exist but do NOT include our price prove "not our product".
+          if (snap.reason === 'no_matching_item') {
             log('price_mismatch', { requestId, eventType })
             return finalize('ignored', undefined, resp(200, 'ok'))
           }
+          // no_items / malformed / multiple / no_period_end → malformed authoritative
+          // response → fail closed so Stripe retries (never silently 200-acknowledge).
           log('invalid_subscription_item', { requestId, eventType, reason: snap.reason })
           return finalize('failed', 'invalid_subscription_item', resp(500, 'Invalid subscription item'))
         }

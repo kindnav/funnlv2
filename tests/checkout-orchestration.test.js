@@ -1,10 +1,11 @@
 /**
  * Tests for supabase/functions/create-checkout-session/checkoutOrchestrator.js
  *
- * Drives the REAL exported runCheckoutOrchestration (the same function index.ts calls)
- * through a mock Supabase client (subscription lookup + claim/finalize RPCs) and an
- * injected Stripe session creator. Asserts on {status, body}, the RPC/Stripe calls it
- * made, and the idempotency key (no PII).
+ * Drives the REAL exported runCheckoutOrchestration through a mock Supabase client
+ * (subscription lookup + claim/finalize RPCs) and an injected Stripe session creator
+ * that returns an explicit provider OUTCOME. Asserts on {status, body}, the RPC/Stripe
+ * calls, the checkout mode passed to claim, the opaque idempotency key (no PII), and
+ * the R3 ambiguous-outcome handling.
  *
  * Zero deps — runs with: node tests/checkout-orchestration.test.js
  */
@@ -23,6 +24,10 @@ const OP    = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
 const TOK   = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
 const READY_URL = 'https://checkout.stripe.com/c/pay/cs_ready'
 const NEW_URL   = 'https://checkout.stripe.com/c/pay/cs_new'
+const NOW_MS  = 1_700_000_000_000
+const NOW_SEC = 1_700_000_000
+const FUTURE  = NOW_SEC + 3600   // 1h ahead
+const PAST    = NOW_SEC - 10
 
 function makeSupabase(cfg = {}) {
   const calls = { rpc: [], finalize: [], lookups: 0 }
@@ -43,6 +48,8 @@ function makeSupabase(cfg = {}) {
       }
       if (fn === 'finalize_checkout_operation') {
         calls.finalize.push(args)
+        // Allow separate config for ready vs failed finalize.
+        if (args.p_state === 'failed' && cfg.finalizeFailed) return Promise.resolve(cfg.finalizeFailed)
         return Promise.resolve(cfg.finalize ?? { data: true, error: null })
       }
       return Promise.resolve({ data: null, error: null })
@@ -50,14 +57,15 @@ function makeSupabase(cfg = {}) {
   }
 }
 
+// createStripeSession fake: returns { outcome, status, session } or throws.
 function makeStripe(cfg = {}) {
   const calls = []
   const fn = async ({ params, idempotencyKey, stripeKey }) => {
     calls.push({ idempotencyKey, params: params.toString(), stripeKey })
     if (cfg.throw) throw new Error('network down')
     return cfg.result ?? {
-      ok: true, status: 200,
-      session: { url: NEW_URL, id: 'cs_new', expires_at: 1_893_456_000 },
+      outcome: 'success', status: 200,
+      session: { id: 'cs_new', url: NEW_URL, expires_at: FUTURE },
     }
   }
   fn.calls = calls
@@ -73,7 +81,7 @@ function makeDeps(over = {}) {
     supabaseAdmin,
     createStripeSession,
     env: over.env ?? { priceId: PRICE, stripeKey: 'sk_test', successUrl: 'https://x/s', cancelUrl: 'https://x/c' },
-    now: () => '2026-08-15T00:00:00.000Z',
+    now: () => NOW_MS,
     log: (name, fields) => logs.push({ name, fields }),
     requestId: 'req-1',
   }
@@ -81,31 +89,25 @@ function makeDeps(over = {}) {
 }
 
 async function run() {
-  // ── config / auth guards ──────────────────────────────────────────────────
+  // ── auth / config ─────────────────────────────────────────────────────────
   test('missing user → 401', async () => {
-    const { deps } = makeDeps({ user: {} })
-    assertEqual((await runCheckoutOrchestration(deps)).status, 401)
+    assertEqual((await runCheckoutOrchestration(makeDeps({ user: {} }).deps)).status, 401)
   })
-  test('missing price/key config → 503, no Stripe', async () => {
+  test('missing config → 503, no Stripe', async () => {
     const { deps, createStripeSession } = makeDeps({ env: { priceId: '', stripeKey: '' } })
     assertEqual((await runCheckoutOrchestration(deps)).status, 503)
     assertEqual(createStripeSession.calls.length, 0)
   })
 
-  // ── subscription-status gating (R2) ─────────────────────────────────────────
-  test('active subscription blocks checkout → 409, no claim, no Stripe', async () => {
+  // ── status gating (R2 policy) ────────────────────────────────────────────────
+  test('active blocks → 409, no claim, no Stripe', async () => {
     const { deps, supabaseAdmin, createStripeSession } = makeDeps({ supa: { subLookup: { data: { status: 'active' }, error: null } } })
-    const r = await runCheckoutOrchestration(deps)
-    assertEqual(r.status, 409)
-    assertEqual(supabaseAdmin.calls.rpc.length, 0, 'must not claim when blocked')
+    assertEqual((await runCheckoutOrchestration(deps)).status, 409)
+    assertEqual(supabaseAdmin.calls.rpc.length, 0)
     assertEqual(createStripeSession.calls.length, 0)
   })
-  test('past_due subscription blocks checkout → 409', async () => {
-    const { deps } = makeDeps({ supa: { subLookup: { data: { status: 'past_due' }, error: null } } })
-    assertEqual((await runCheckoutOrchestration(deps)).status, 409)
-  })
-  test('trialing/unpaid/paused block checkout → 409', async () => {
-    for (const status of ['trialing', 'unpaid', 'paused']) {
+  test('past_due / trialing / unpaid / paused block → 409', async () => {
+    for (const status of ['past_due', 'trialing', 'unpaid', 'paused']) {
       const { deps } = makeDeps({ supa: { subLookup: { data: { status }, error: null } } })
       assertEqual((await runCheckoutOrchestration(deps)).status, 409, status)
     }
@@ -116,117 +118,149 @@ async function run() {
     assertEqual(createStripeSession.calls.length, 0)
   })
 
-  // ── incomplete = reuse_only ──────────────────────────────────────────────────
-  test('incomplete + reusable ready session → 200 reuse, no Stripe, allow_create=false', async () => {
-    const { deps, supabaseAdmin, createStripeSession } = makeDeps({
-      supa: {
-        subLookup: { data: { status: 'incomplete' }, error: null },
-        claim: { data: { result: 'reuse', checkout_url: READY_URL, operation_id: OP }, error: null },
-      },
-    })
-    const r = await runCheckoutOrchestration(deps)
-    assertEqual(r.status, 200)
-    assertEqual(r.body.url, READY_URL)
-    assertEqual(createStripeSession.calls.length, 0)
-    assertEqual(supabaseAdmin.calls.rpc[0].args.p_allow_create, false, 'incomplete must not allow create')
+  // ── checkout mode passed to claim (R1) ───────────────────────────────────────
+  test('none → claim p_mode=reuse_or_create', async () => {
+    const { deps, supabaseAdmin } = makeDeps({ supa: { subLookup: { data: null, error: null } } })
+    await runCheckoutOrchestration(deps)
+    assertEqual(supabaseAdmin.calls.rpc[0].args.p_mode, 'reuse_or_create')
   })
-  test('incomplete + no reusable session → 409 blocked_no_reuse, no Stripe', async () => {
-    const { deps, createStripeSession } = makeDeps({
-      supa: {
-        subLookup: { data: { status: 'incomplete' }, error: null },
-        claim: { data: { result: 'blocked_no_reuse' }, error: null },
-      },
+  test('canceled → claim p_mode=fresh_only (never reuse old completed session)', async () => {
+    const { deps, supabaseAdmin } = makeDeps({ supa: { subLookup: { data: { status: 'canceled' }, error: null } } })
+    await runCheckoutOrchestration(deps)
+    assertEqual(supabaseAdmin.calls.rpc[0].args.p_mode, 'fresh_only')
+  })
+  test('incomplete_expired → claim p_mode=fresh_only', async () => {
+    const { deps, supabaseAdmin } = makeDeps({ supa: { subLookup: { data: { status: 'incomplete_expired' }, error: null } } })
+    await runCheckoutOrchestration(deps)
+    assertEqual(supabaseAdmin.calls.rpc[0].args.p_mode, 'fresh_only')
+  })
+  test('incomplete → claim p_mode=reuse_only', async () => {
+    const { deps, supabaseAdmin } = makeDeps({
+      supa: { subLookup: { data: { status: 'incomplete' }, error: null }, claim: { data: { result: 'blocked_no_reuse' }, error: null } },
     })
-    assertEqual((await runCheckoutOrchestration(deps)).status, 409)
-    assertEqual(createStripeSession.calls.length, 0)
+    await runCheckoutOrchestration(deps)
+    assertEqual(supabaseAdmin.calls.rpc[0].args.p_mode, 'reuse_only')
   })
 
   // ── claim results ────────────────────────────────────────────────────────────
-  test('reuse: second tab receives the same ready URL, no Stripe call', async () => {
+  test('reuse → 200 with stored URL, no Stripe', async () => {
     const { deps, createStripeSession } = makeDeps({
       supa: { claim: { data: { result: 'reuse', checkout_url: READY_URL, operation_id: OP }, error: null } },
     })
     const r = await runCheckoutOrchestration(deps)
-    assertEqual(r.status, 200)
-    assertEqual(r.body.url, READY_URL)
+    assertEqual(r.status, 200); assertEqual(r.body.url, READY_URL)
     assertEqual(createStripeSession.calls.length, 0)
   })
   test('reuse with invalid stored URL → 502', async () => {
     const { deps } = makeDeps({ supa: { claim: { data: { result: 'reuse', checkout_url: 'https://evil.com/x', operation_id: OP }, error: null } } })
     assertEqual((await runCheckoutOrchestration(deps)).status, 502)
   })
-  test('in_progress claim → 409, no Stripe (single-flight: no second call)', async () => {
+  test('incomplete blocked_no_reuse → 409, no Stripe', async () => {
+    const { deps, createStripeSession } = makeDeps({
+      supa: { subLookup: { data: { status: 'incomplete' }, error: null }, claim: { data: { result: 'blocked_no_reuse' }, error: null } },
+    })
+    assertEqual((await runCheckoutOrchestration(deps)).status, 409)
+    assertEqual(createStripeSession.calls.length, 0)
+  })
+  test('in_progress → 409, no Stripe', async () => {
     const { deps, createStripeSession } = makeDeps({ supa: { claim: { data: { result: 'in_progress' }, error: null } } })
     assertEqual((await runCheckoutOrchestration(deps)).status, 409)
     assertEqual(createStripeSession.calls.length, 0)
   })
-  test('claim RPC error → 503, no Stripe, no duplicate', async () => {
+  test('claim RPC error → 503, no Stripe', async () => {
     const { deps, createStripeSession } = makeDeps({ supa: { claim: { data: null, error: { code: 'XX' } } } })
     assertEqual((await runCheckoutOrchestration(deps)).status, 503)
     assertEqual(createStripeSession.calls.length, 0)
-  })
-  test('unknown claim result → 503 fail closed', async () => {
-    const { deps } = makeDeps({ supa: { claim: { data: { result: 'weird' }, error: null } } })
-    assertEqual((await runCheckoutOrchestration(deps)).status, 503)
   })
   test('claimed without operation_id/token → 503 fail closed', async () => {
     const { deps } = makeDeps({ supa: { claim: { data: { result: 'claimed' }, error: null } } })
     assertEqual((await runCheckoutOrchestration(deps)).status, 503)
   })
 
-  // ── claimed → Stripe ─────────────────────────────────────────────────────────
-  test('claimed → exactly one Stripe call, 200 with new URL, finalized ready', async () => {
+  // ── success path ───────────────────────────────────────────────────────────
+  test('success (id+url+future expires) → 200, one Stripe call, finalize ready', async () => {
     const { deps, supabaseAdmin, createStripeSession } = makeDeps()
     const r = await runCheckoutOrchestration(deps)
-    assertEqual(r.status, 200)
-    assertEqual(r.body.url, NEW_URL)
-    assertEqual(createStripeSession.calls.length, 1, 'exactly one Stripe call')
+    assertEqual(r.status, 200); assertEqual(r.body.url, NEW_URL)
+    assertEqual(createStripeSession.calls.length, 1)
     assertEqual(supabaseAdmin.calls.finalize.length, 1)
     assertEqual(supabaseAdmin.calls.finalize[0].p_state, 'ready')
-    assertEqual(supabaseAdmin.calls.finalize[0].p_claim_token, TOK, 'finalize is token-validated')
-    assertEqual(supabaseAdmin.calls.finalize[0].p_checkout_url, NEW_URL)
-    // expires_at from Stripe's session.expires_at:
-    assertEqual(supabaseAdmin.calls.finalize[0].p_expires_at, new Date(1_893_456_000 * 1000).toISOString())
+    assertEqual(supabaseAdmin.calls.finalize[0].p_claim_token, TOK)
+    assertEqual(supabaseAdmin.calls.finalize[0].p_session_id, 'cs_new')
+    assertEqual(supabaseAdmin.calls.finalize[0].p_expires_at, new Date(FUTURE * 1000).toISOString())
   })
-  test('idempotency key is the opaque operation id and contains NO PII', async () => {
+  test('idempotency key = opaque operation id, no PII', async () => {
     const { deps, createStripeSession } = makeDeps()
     await runCheckoutOrchestration(deps)
     const key = createStripeSession.calls[0].idempotencyKey
     assertEqual(key, `checkout-op-${OP}`)
-    assert(!key.includes(USER), 'key must not contain the user id')
-    assert(!key.includes(EMAIL), 'key must not contain the email')
+    assert(!key.includes(USER)); assert(!key.includes(EMAIL))
   })
-  test('stale reclaim reuses the SAME operation id → SAME idempotency key (crash-safety)', async () => {
-    // A reclaimed 'creating' operation returns the same operation_id from claim.
-    const { deps, createStripeSession } = makeDeps({
-      supa: { claim: { data: { result: 'claimed', operation_id: OP, claim_token: 'rotated-token' }, error: null } },
-    })
+  test('stale reclaim reuses same operation id → same idempotency key', async () => {
+    const { deps, createStripeSession } = makeDeps({ supa: { claim: { data: { result: 'claimed', operation_id: OP, claim_token: 'rot' }, error: null } } })
     await runCheckoutOrchestration(deps)
-    assertEqual(createStripeSession.calls[0].idempotencyKey, `checkout-op-${OP}`,
-      'reclaim must reuse the same Stripe idempotency key so Stripe returns the existing session')
+    assertEqual(createStripeSession.calls[0].idempotencyKey, `checkout-op-${OP}`)
   })
 
-  // ── Stripe failure paths ─────────────────────────────────────────────────────
-  test('Stripe throws (network) → 503, NOT finalized (leaves creating for crash-retry)', async () => {
+  // ── R3: ambiguous success (missing/invalid fields) → unknown, NOT finalized ──
+  const AMBIG = [
+    ['missing id',            { id: undefined, url: NEW_URL, expires_at: FUTURE }],
+    ['missing url',           { id: 'cs', url: undefined, expires_at: FUTURE }],
+    ['invalid url',           { id: 'cs', url: 'https://evil.com/x', expires_at: FUTURE }],
+    ['missing expires_at',    { id: 'cs', url: NEW_URL, expires_at: undefined }],
+    ['non-numeric expires_at',{ id: 'cs', url: NEW_URL, expires_at: 'soon' }],
+    ['expired expires_at',    { id: 'cs', url: NEW_URL, expires_at: PAST }],
+  ]
+  for (const [label, session] of AMBIG) {
+    test(`success but ${label} → 503, NOT finalized (retain operation)`, async () => {
+      const { deps, supabaseAdmin } = makeDeps({ stripeCfg: { result: { outcome: 'success', status: 200, session } } })
+      const r = await runCheckoutOrchestration(deps)
+      assertEqual(r.status, 503)
+      assertEqual(supabaseAdmin.calls.finalize.length, 0, 'must not finalize an ambiguous success')
+    })
+  }
+
+  // ── R3: unknown vs definitive provider failures ──────────────────────────────
+  test('network throw → 503, NOT finalized (retain operation)', async () => {
     const { deps, supabaseAdmin } = makeDeps({ stripeCfg: { throw: true } })
-    const r = await runCheckoutOrchestration(deps)
-    assertEqual(r.status, 503)
-    assertEqual(supabaseAdmin.calls.finalize.length, 0, 'must NOT finalize on unknown outcome')
+    assertEqual((await runCheckoutOrchestration(deps)).status, 503)
+    assertEqual(supabaseAdmin.calls.finalize.length, 0)
   })
-  test('Stripe definitive error → 502 + finalize failed', async () => {
-    const { deps, supabaseAdmin } = makeDeps({ stripeCfg: { result: { ok: false, status: 400, session: null } } })
-    const r = await runCheckoutOrchestration(deps)
-    assertEqual(r.status, 502)
-    assertEqual(supabaseAdmin.calls.finalize[0].p_state, 'failed')
+  test('unknown_failure (HTTP-success invalid JSON / 5xx) → 503, NOT finalized', async () => {
+    const { deps, supabaseAdmin } = makeDeps({ stripeCfg: { result: { outcome: 'unknown_failure', status: 500, session: null } } })
+    assertEqual((await runCheckoutOrchestration(deps)).status, 503)
+    assertEqual(supabaseAdmin.calls.finalize.length, 0, 'unknown outcome must retain the operation for idempotent retry')
   })
-  test('Stripe ok but invalid URL → 502 + finalize failed', async () => {
-    const { deps, supabaseAdmin } = makeDeps({ stripeCfg: { result: { ok: true, status: 200, session: { url: 'https://evil.com/x', id: 'cs' } } } })
+  test('definitive_failure → 502 after durable failed finalize', async () => {
+    const { deps, supabaseAdmin } = makeDeps({ stripeCfg: { result: { outcome: 'definitive_failure', status: 400, session: null } } })
     const r = await runCheckoutOrchestration(deps)
     assertEqual(r.status, 502)
     assertEqual(supabaseAdmin.calls.finalize[0].p_state, 'failed')
   })
-  test('finalize RPC error on ready → 503 (retryable, no duplicate)', async () => {
+
+  // ── R3: finalize error / data=false handling ─────────────────────────────────
+  test('ready finalize RPC error → 503', async () => {
     const { deps } = makeDeps({ supa: { finalize: { data: null, error: { code: 'XX' } } } })
+    assertEqual((await runCheckoutOrchestration(deps)).status, 503)
+  })
+  test('ready finalize data=false (ownership lost) → 503, not 200', async () => {
+    const { deps } = makeDeps({ supa: { finalize: { data: false, error: null } } })
+    const r = await runCheckoutOrchestration(deps)
+    assert(r.status !== 200, 'must not claim success when finalize returned false')
+    assertEqual(r.status, 503)
+  })
+  test('failed finalize RPC error (after definitive failure) → 503, not 502', async () => {
+    const { deps } = makeDeps({
+      stripeCfg: { result: { outcome: 'definitive_failure', status: 400, session: null } },
+      supa: { finalizeFailed: { data: null, error: { code: 'XX' } } },
+    })
+    assertEqual((await runCheckoutOrchestration(deps)).status, 503)
+  })
+  test('failed finalize data=false (after definitive failure) → 503, not 502', async () => {
+    const { deps } = makeDeps({
+      stripeCfg: { result: { outcome: 'definitive_failure', status: 400, session: null } },
+      supa: { finalizeFailed: { data: false, error: null } },
+    })
     assertEqual((await runCheckoutOrchestration(deps)).status, 503)
   })
 
