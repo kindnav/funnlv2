@@ -162,6 +162,20 @@ async function run() {
     assertEqual((await runCheckoutOrchestration(deps)).status, 409)
     assertEqual(createStripeSession.calls.length, 0)
   })
+  test('P8: LEGACY incomplete with NO reusable operation → controlled recovery (409 payment_incomplete), no duplicate, no false URL', async () => {
+    // A legacy incomplete subscription created before checkout_operations existed has no
+    // reusable operation row → claim returns blocked_no_reuse. The response must direct
+    // the user to recovery (state: payment_incomplete), must NOT create a second
+    // subscription (no Stripe call, no claim of a reusable URL).
+    const { deps, createStripeSession } = makeDeps({
+      supa: { subLookup: { data: { status: 'incomplete' }, error: null }, claim: { data: { result: 'blocked_no_reuse' }, error: null } },
+    })
+    const r = await runCheckoutOrchestration(deps)
+    assertEqual(r.status, 409)
+    assertEqual(r.body.state, 'payment_incomplete', 'must direct to a controlled recovery state')
+    assert(!('url' in r.body), 'must NOT claim a reusable Checkout URL exists when no operation row exists')
+    assertEqual(createStripeSession.calls.length, 0, 'must not create a duplicate subscription')
+  })
   test('in_progress → 409, no Stripe', async () => {
     const { deps, createStripeSession } = makeDeps({ supa: { claim: { data: { result: 'in_progress' }, error: null } } })
     assertEqual((await runCheckoutOrchestration(deps)).status, 409)
@@ -240,6 +254,12 @@ async function run() {
     const { deps, supabaseAdmin } = makeDeps({ stripeCfg: { throw: true } })
     assertEqual((await runCheckoutOrchestration(deps)).status, 503)
     assertEqual(supabaseAdmin.calls.finalize.length, 0)
+  })
+  test('P5: Stripe TimeoutError throw → 503, NOT finalized (retain operation for idempotent retry)', async () => {
+    const stripe = async () => { const e = new Error('stripe_request_timeout'); e.name = 'TimeoutError'; throw e }
+    const { deps, supabaseAdmin } = makeDeps({ stripe })
+    assertEqual((await runCheckoutOrchestration(deps)).status, 503)
+    assertEqual(supabaseAdmin.calls.finalize.length, 0, 'timeout must not finalize the checkout operation')
   })
   test('unknown_failure (HTTP-success invalid JSON / 5xx) → 503, NOT finalized', async () => {
     const { deps, supabaseAdmin } = makeDeps({ stripeCfg: { result: { outcome: 'unknown_failure', status: 500, session: null } } })

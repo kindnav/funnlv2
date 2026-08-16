@@ -25,6 +25,41 @@ Each component is documented separately — the Stripe surface is a **mix** of d
 
 **Duplicate-subscription protection is NOT the React guard.** `createActionGuard()` only protects a single mounted component; it does nothing across tabs, devices, sessions, or direct authenticated calls. The authoritative protection is the server-side `checkout_operations` single-flight (R1) plus the full status policy (R2) — both of which require applying `20260815003056` and redeploying the function. Until then, the older live function does **not** have this protection.
 
+## Reliability corrections (sixth review round)
+
+1. **Newest-request-wins Pro status (P1).** A dependency-free `createProStatusController()` (`src/lib/proStatusController.js`) owns request sequencing. Every status request (auth-triggered fetch OR `refresh()`) mints a new token; only the newest token for the unchanged UID may write shared state, so an older same-account refresh that resolves later can never overwrite a newer one and re-lock a paying user. Account changes/sign-out bump the token (and a separate `accountGeneration`); unmount deactivates.
+2. **Authoritative auth UID/generation for Settings polling (P2).** The provider now exposes `authUserId` and `accountGeneration` (from the auth session, not a separately-loaded profile). Settings checkout polling does not start until the authoritative UID is known (`shouldStartCheckoutPoll`), captures UID+generation, aborts synchronously on any change, and discards stale results — so an account switch that happens before the profile query finishes is still safe.
+3. **Real runtime controllers under test (P3).** Tests import and exercise the production `createProStatusController`, `isStalePollResult`, and `shouldStartCheckoutPoll` (no mirrored business logic), covering overlapping same-UID refreshes (both orderings), UID switch/sign-out/unmount during a refresh, TOKEN_REFRESHED, switch-before-profile-load, polling with unknown UID, switch-during-polling, and stale-confirmed/stale-timeout firing no analytics.
+4. **Canonical subscription access policy (P4).** `subscriptionGrantsAccess(status)` is exported from the canonical `subscriptionStatusPolicy.js`; `evaluateProEntitlement()` delegates to it (the hardcoded `active || past_due` allowlist is removed). The SQL RPC cannot import JS, so it MIRRORS the granting set (`v_sub_active := v_sub_status IN ('active','past_due')`); a parity test reads the migration SQL and asserts its granting set equals the JS granting set. This is not one executable source across JS and SQL — it is one JS source plus a tested SQL mirror.
+5. **Bounded Stripe network timeouts (P5).** Shared `fetchWithTimeout` (`shared/boundedFetch.js`, ~20s AbortController, timers always cleared) wraps every Stripe call. `create-checkout-session`: timeout is an unknown_failure → retryable 503, operation NOT finalized (preserved for idempotent retry). `create-billing-portal-session`: timeout → retryable 503 with the existing visible error. `stripe-webhook`: authoritative-retrieval timeout finalizes the claimed event with the new controlled code `provider_timeout` (token-safe) and returns 503, so Stripe retries and the event is reclaimable; a finalize failure itself returns 500. No raw error/body/PII is logged.
+6. **Webhook ownership metadata cross-check (P6).** `crossCheckOwnership(metaUserId, otherUserId)`: when the authoritative subscription `metadata.user_id` is present AND disagrees with the resolved owner (the Checkout Session user, or the DB owner by subscription/customer id), no write happens — the event finalizes with `ownership_mismatch` and returns retryable 5xx. Missing legacy metadata is NOT required and falls back to the existing customer/subscription ownership checks. Applied to `checkout.session.completed` and `customer.subscription.created/updated`.
+
+## Required migration-ledger repair preflight (P7)
+
+**Do NOT run the repair in this task.** Before ANY future `supabase migration repair --status applied 20260812000000 --linked`, a fresh READ-ONLY production comparison must confirm every physical object from `20260812000000_add_subscriptions.sql` matches the local migration. Repair is permitted only when ALL of the following are verified read-only:
+
+- `public.subscriptions` columns match the migration
+- `subscriptions_pkey` exists (PK on `user_id`)
+- `subscriptions_stripe_customer_id_idx` exists AND is unique
+- `subscriptions_status_check` matches the migration's allowed status set
+- FK `user_id` → `auth.users(id)` `ON DELETE CASCADE`
+- RLS is enabled on `subscriptions`
+- `subscriptions_select_own` is the ONLY policy
+- `authenticated` has SELECT only (no INSERT/UPDATE/DELETE)
+- `anon` has NO access
+- `service_role` has full table privileges
+- `get_my_pro_access_status()` is SECURITY INVOKER
+- the live RPC's `search_path` is empty
+- `authenticated` and `service_role` may EXECUTE the RPC
+- `PUBLIC` and `anon` may NOT EXECUTE the RPC
+- the live RPC includes `active`/`past_due` subscriptions in `can_use_pro`
+
+If any object diverges, do NOT repair — reconcile first. (Codex's read-only audit on the review date confirmed all of the above match, but a fresh check is required at repair time because production can change.)
+
+## Legacy incomplete-subscription rollout safety (P8)
+
+As of the read-only audit, production has **zero `incomplete` and zero `incomplete_expired` subscription rows**, so no current user is affected by the reuse-only behavior. Compatibility rule (documented + tested): a legacy `incomplete` subscription created before `checkout_operations` existed has no reusable operation row, so `claim_checkout_operation` (reuse_only mode) returns `blocked_no_reuse` and the function returns a controlled **409 with `state: payment_incomplete`** directing the user to recovery/billing management. It never creates a duplicate subscription and never claims a reusable Checkout URL exists. The zero-row production preflight remains a required rollout check.
+
 ## Reliability corrections (fifth review round)
 
 1. **Checkout clock-type bug fixed (C1).** `create-checkout-session/index.ts` previously passed `now: () => new Date().toISOString()` to the orchestration, which computed `Math.floor(now()/1000)` = NaN, defeating the future-expiration check. Production now passes `nowMs: () => Date.now()` (milliseconds; the contract is named `nowMs`), and `validateStripeSession` fails closed on a non-finite / non-positive `nowSec` (`invalid_clock`). A broken clock can never let a session pass.

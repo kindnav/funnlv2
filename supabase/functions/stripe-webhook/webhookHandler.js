@@ -27,6 +27,7 @@ import {
   shouldRetryOnMissingOwnership,
   extractProSubscriptionSnapshot,
   isUniqueViolation,
+  crossCheckOwnership,
 } from './webhookHelpers.js'
 import {
   validateEventShape,
@@ -198,6 +199,12 @@ export async function runWebhookOrchestration({
         }
 
         const sub = await fetchSubscription(subscriptionId, stripeKey)
+        if (sub === 'timeout') {
+          // Bounded Stripe retrieval timed out — retryable. Finalize the claimed event
+          // as failed (token-safe) so Stripe retries and the event can be reclaimed.
+          log('provider_timeout', { requestId, eventType })
+          return finalize('failed', 'provider_timeout', resp(503, 'Provider timeout'))
+        }
         if (!sub) {
           log('stripe_fetch_failed', { requestId, eventType })
           return finalize('failed', 'stripe_fetch_failed', resp(500, 'Stripe fetch failed'))
@@ -225,6 +232,15 @@ export async function runWebhookOrchestration({
           // silently 200-acknowledging and risking a permanently locked paying user.
           log('invalid_subscription_item', { requestId, eventType, reason: snap.reason })
           return finalize('failed', 'invalid_subscription_item', resp(500, 'Invalid subscription item'))
+        }
+
+        // P6: the authoritative subscription's metadata.user_id (if present) must match
+        // the resolved Checkout Session user. A mismatch means the fetched subscription
+        // belongs to a different Funnl user than the session — never write; fail closed.
+        const checkoutCross = crossCheckOwnership(sub.metadata?.user_id ?? null, userId)
+        if (checkoutCross.mismatch) {
+          log('ownership_mismatch', { requestId, eventType })
+          return finalize('failed', 'ownership_mismatch', resp(500, 'Ownership mismatch'))
         }
 
         const subStatus = sub.status
@@ -270,6 +286,10 @@ export async function runWebhookOrchestration({
         }
 
         const sub = await fetchSubscription(expectedSubId, stripeKey)
+        if (sub === 'timeout') {
+          log('provider_timeout', { requestId, eventType })
+          return finalize('failed', 'provider_timeout', resp(503, 'Provider timeout'))
+        }
         if (!sub) {
           log('stripe_fetch_failed', { requestId, eventType })
           return finalize('failed', 'stripe_fetch_failed', resp(500, 'Stripe fetch failed'))
@@ -297,11 +317,11 @@ export async function runWebhookOrchestration({
           return finalize('failed', 'invalid_subscription_item', resp(500, 'Invalid subscription item'))
         }
 
-        // C2: ownership resolution uses the FETCHED subscription's metadata + IDs,
-        // never the (possibly stale) event snapshot.
+        // Ownership resolution uses the FETCHED subscription only. Resolve the DB owner
+        // (by subscription/customer id) AND the authoritative metadata owner, then P6
+        // cross-check them: if BOTH are present and disagree, refuse to write.
         const fetchedMetaUserId = sub.metadata?.user_id ?? null
-        const { userId, error: lookupError } = await resolveUserId({
-          metaUserId:     fetchedMetaUserId,
+        const { userId: dbUserId, error: lookupError } = await resolveUserId({
           subscriptionId: sub.id,
           customerId:     sub.customer,
         })
@@ -309,6 +329,17 @@ export async function runWebhookOrchestration({
         if (lookupError) {
           return finalize('failed', 'ownership_lookup_failed', resp(500, 'Ownership lookup failed'))
         }
+
+        // P6: metadata owner vs DB owner. A mismatch means this subscription's Stripe
+        // metadata claims a different user than the one that owns the DB row — never
+        // write; fail closed (retryable) so it can be investigated.
+        const cross = crossCheckOwnership(fetchedMetaUserId, dbUserId)
+        if (cross.mismatch) {
+          log('ownership_mismatch', { requestId, eventType })
+          return finalize('failed', 'ownership_mismatch', resp(500, 'Ownership mismatch'))
+        }
+        const userId = cross.userId
+
         if (!userId) {
           if (shouldRetryOnMissingOwnership(eventType)) {
             log('owner_not_found', { requestId, eventType })

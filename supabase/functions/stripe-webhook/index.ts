@@ -1,25 +1,30 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { verifyStripeSignature } from './verifyStripeSignature.js'
 import { runWebhookOrchestration } from './webhookHandler.js'
+import { fetchWithTimeout, isTimeoutError } from '../shared/boundedFetch.js'
 
 // ── Stripe API helper ─────────────────────────────────────────────────────────
 
 const STRIPE_API = 'https://api.stripe.com/v1'
 
-// Fetches the authoritative current state of a subscription from Stripe.
-// Returns the parsed subscription object, or null on failure.
-// Callers must return 5xx when this returns null — never silently proceed.
+// Fetches the authoritative current state of a subscription from Stripe with a bounded
+// ~20s timeout. Returns:
+//   object    — parsed subscription
+//   'timeout' — the request timed out (distinct so the handler can finalize the event
+//               with the controlled failure code provider_timeout and return 503)
+//   null      — any other failure (non-2xx, network error, invalid JSON)
+// Callers must return 5xx and finalize the claimed event when this is not an object.
 async function fetchStripeSubscription(
   subscriptionId: string,
   stripeKey: string,
-): Promise<Record<string, unknown> | null> {
+): Promise<Record<string, unknown> | 'timeout' | null> {
   let res: Response
   try {
-    res = await fetch(`${STRIPE_API}/subscriptions/${subscriptionId}`, {
+    res = await fetchWithTimeout(`${STRIPE_API}/subscriptions/${subscriptionId}`, {
       headers: { 'Authorization': `Bearer ${stripeKey}` },
     })
-  } catch {
-    return null
+  } catch (err) {
+    return isTimeoutError(err) ? 'timeout' : null
   }
   if (!res.ok) return null
   try {

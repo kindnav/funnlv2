@@ -37,6 +37,21 @@ export function getNextPollDelay(attempt) {
  * @returns {Promise<'confirmed' | 'timeout' | 'aborted'>}
  */
 /**
+ * Whether checkout-return confirmation polling may START. It may only start for the
+ * success banner, once the AUTHORITATIVE auth UID is known (non-null — never with an
+ * unknown UID), and only once (not if a run already started for this banner).
+ *
+ * @param {Object} o
+ * @param {'success'|'cancelled'|null|undefined} o.banner
+ * @param {string|null|undefined} o.authUserId  — authoritative UID (null until auth resolves)
+ * @param {boolean} o.alreadyStarted
+ * @returns {boolean}
+ */
+export function shouldStartCheckoutPoll({ banner, authUserId, alreadyStarted }) {
+  return banner === 'success' && authUserId != null && !alreadyStarted
+}
+
+/**
  * Whether a completed checkout-return polling run's result is STALE and must be
  * discarded (must not set confirmed/timed_out/error or fire analytics). A result is
  * stale when the component unmounted, the run was aborted, the account generation

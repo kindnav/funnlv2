@@ -103,12 +103,15 @@ CREATE TABLE public.stripe_webhook_events (
   -- C9: failure_code is restricted to the documented allowlist when set.
   -- R3 adds 'invalid_subscription_item' (bad/mixed/period-less Pro item).
   -- R6 adds 'identity_conflict' (Stripe identity already attached to another user).
+  -- P5 adds 'provider_timeout' (bounded Stripe retrieval timed out — retryable).
+  -- P6 adds 'ownership_mismatch' (authoritative subscription metadata owner disagreement).
   CONSTRAINT stripe_webhook_events_failure_code_check CHECK (
     failure_code IN (
       'missing_user_id', 'missing_ids', 'config_missing', 'stripe_fetch_failed',
       'ownership_lookup_failed', 'owner_not_found', 'db_write_failed',
       'handler_exception', 'invalid_event', 'invalid_status',
-      'invalid_subscription_item', 'identity_conflict'
+      'invalid_subscription_item', 'identity_conflict',
+      'provider_timeout', 'ownership_mismatch'
     )
   ),
 

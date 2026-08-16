@@ -115,6 +115,26 @@ export function isCheckoutReuseOnly(status) {
   return checkoutModeForStatus(status) === 'reuse_only'
 }
 
+/**
+ * CANONICAL entitlement check: does this Stripe subscription status grant Pro access?
+ * This is the single source of truth for the JS/Edge layer (evaluateProEntitlement in
+ * shared/pro-entitlement.js delegates here). Derived from the same policy table, so the
+ * granting set (active + past_due, per `grantsAccess`) cannot drift from the checkout
+ * policy. Unknown / null / malformed statuses never grant access (fail closed).
+ *
+ * NOTE: the SQL RPC get_my_pro_access_status() cannot import JavaScript; it MIRRORS this
+ * granting set in `v_sub_active := v_sub_status IN ('active','past_due')`. There is not
+ * literally one executable source across JS and SQL; a parity test asserts the migration
+ * SQL's granting set equals this function's granting set.
+ *
+ * @param {string|null|undefined} status
+ * @returns {boolean}
+ */
+export function subscriptionGrantsAccess(status) {
+  if (typeof status !== 'string') return false
+  return SUBSCRIPTION_STATUS_POLICY[status]?.grantsAccess === true
+}
+
 /** The set of known Stripe subscription-status strings (plus 'none'). */
 export const KNOWN_SUBSCRIPTION_STATUSES = new Set(Object.keys(SUBSCRIPTION_STATUS_POLICY))
 

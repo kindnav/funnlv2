@@ -2,9 +2,9 @@ import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useLocation } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { getTheme, setTheme } from '../lib/theme'
-import { useProStatus, useProRefresh } from '../lib/useProStatus'
+import { useProStatus, useProRefresh, useProAuthUserId, useProAccountGeneration } from '../lib/useProStatus'
 import { classifyProStatus, hasProAccess } from '../lib/pro-ui-status'
-import { runCheckoutPolling, isStalePollResult } from '../lib/checkoutPolling'
+import { runCheckoutPolling, isStalePollResult, shouldStartCheckoutPoll } from '../lib/checkoutPolling'
 import { resolveStripeRedirect } from '../lib/stripeRedirect'
 import { createActionGuard } from '../lib/actionGuard'
 import { subscriptionAttentionState } from '../lib/subscriptionStatusPolicy'
@@ -58,6 +58,15 @@ function SettingsPage() {
   // Shared refresh - re-runs the RPC and updates rawProStatus for all consumers.
   // Use proRefresh() in retry handlers; never call the access-status RPC directly.
   const proRefresh   = useProRefresh()
+  // Authoritative authenticated identity from the shared provider (derived from the
+  // auth session, NOT from this page's separately-loaded profile/user query). Checkout
+  // polling uses these so an account switch is detected even before the profile loads.
+  const authUserId         = useProAuthUserId()
+  const accountGeneration  = useProAccountGeneration()
+  const authUserIdRef        = useRef(authUserId)
+  const accountGenerationRef = useRef(accountGeneration)
+  useEffect(() => { authUserIdRef.current = authUserId }, [authUserId])
+  useEffect(() => { accountGenerationRef.current = accountGeneration }, [accountGeneration])
 
   // ── Unmount protection ────────────────────────────────────────────────────
   // Prevents state updates on async handlers that complete after unmount.
@@ -119,6 +128,10 @@ function SettingsPage() {
   // sign-out can synchronously cancel it (its stale result must never confirm/timeout
   // or fire analytics for a different account).
   const pollAbortRef = useRef(null)
+  // The authoritative (authUserId, accountGeneration) captured when polling began, plus
+  // a once-guard so we start exactly one poll for the current checkout-success banner.
+  const pollCaptureRef = useRef(null)
+  const pollStartedRef = useRef(false)
 
   // ── Theme ─────────────────────────────────────────────────────────────────
   const [currentTheme, setCurrentTheme] = useState(() => getTheme())
@@ -407,22 +420,32 @@ function SettingsPage() {
     })
   }
 
-  // ── Checkout return: bounded polling for Pro access confirmation ──────────
-  // On mount with ?checkout=success, immediately clean the URL, fire analytics,
-  // then start a bounded polling loop (staged delays: 1.5s→3s→6s→12s, ~22.5s total)
-  // that refreshes Pro status until access is confirmed or the loop times out.
-  // AbortController cleans up on unmount - no state mutations after unmount.
+  // ── Checkout return: clean URL + one-time return analytics (mount) ────────
+  // Runs once. The URL is cleaned immediately; the cancelled/success return event is
+  // fired once. Success POLLING is handled separately below, gated on the authoritative
+  // auth UID so it never begins with an unknown account.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!checkoutBanner) return
-    // Clean URL immediately regardless of result.
     navigate('/settings', { replace: true })
     if (checkoutBanner === 'cancelled') {
       track('checkout_returned', { result: 'cancelled' })
-      return
+    } else if (checkoutBanner === 'success') {
+      track('checkout_returned', { result: 'success' })
     }
-    if (checkoutBanner !== 'success') return
-    track('checkout_returned', { result: 'success' })
+  }, []) // intentionally runs only on mount
+
+  // ── Checkout return: bounded polling for Pro access confirmation ──────────
+  // Starts ONLY once the authoritative auth UID is known (authUserId != null). Captures
+  // the authoritative (authUserId, accountGeneration) from the shared provider, not this
+  // page's separately-loaded profile, so an account switch that happens before the
+  // profile query finishes is still detected. A stale poll never confirms/timeouts/errors
+  // or fires analytics for a different account.
+  useEffect(() => {
+    // Gate: success banner + authoritative UID known + not already started.
+    if (!shouldStartCheckoutPoll({ banner: checkoutBanner, authUserId, alreadyStarted: pollStartedRef.current })) return
+    pollStartedRef.current = true
+
     // If the webhook already fired before the page loaded, confirm immediately.
     if (hasProAccess(proStatusRef.current)) {
       setPollingState('confirmed')
@@ -430,25 +453,24 @@ function SettingsPage() {
       return
     }
     setPollingState('polling')
-    // Capture the account UID + generation for this polling run. Abort any prior run.
-    const capturedGen = accountGenRef.current
-    const capturedUid = currentUidRef.current
+
+    const capturedUid = authUserId
+    const capturedGen = accountGeneration
+    pollCaptureRef.current = { uid: capturedUid, gen: capturedGen }
     pollAbortRef.current?.abort()
     const controller = new AbortController()
     pollAbortRef.current = controller
-    // A stale poll (after an account switch / sign-out / newer run / unmount) must not
-    // confirm, timeout, error, or fire analytics for a different account. The account
-    // generation is the primary signal (bumped on every real UID change); the UID check
-    // is a secondary guard, applied only when both UIDs are known so the mount-time
-    // null→uid load of the SAME initial account is never treated as a switch.
+
+    // A stale poll (account switch / sign-out / newer run / unmount) must not confirm,
+    // timeout, error, or fire analytics. Uses the AUTHORITATIVE auth identity refs.
     const stale = () => isStalePollResult({
       mounted:     mountedRef.current,
       aborted:     controller.signal.aborted,
-      capturedGen, currentGen: accountGenRef.current,
-      capturedUid, currentUid: currentUidRef.current,
+      capturedGen, currentGen: accountGenerationRef.current,
+      capturedUid, currentUid: authUserIdRef.current,
     })
     runCheckoutPolling({
-      refreshFn:   () => proRefresh(),           // proRefresh() now returns the new status
+      refreshFn:   () => proRefresh(),           // proRefresh() returns the new status
       hasAccessFn: (s) => hasProAccess(s),       // receives returned status; no stale ref
       signal:      controller.signal,
     }).then(result => {
@@ -463,7 +485,16 @@ function SettingsPage() {
       // 'aborted' means nothing to do (superseded/unmounted/switched).
     })
     return () => controller.abort()
-  }, []) // intentionally runs only on mount
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [checkoutBanner, authUserId, accountGeneration])
+
+  // Abort an in-flight poll synchronously when the authoritative account changes.
+  useEffect(() => {
+    const cap = pollCaptureRef.current
+    if (cap && (authUserId !== cap.uid || accountGeneration !== cap.gen)) {
+      pollAbortRef.current?.abort()
+    }
+  }, [authUserId, accountGeneration])
 
   // ── Stripe Checkout: create session and redirect ──────────────────────────
   async function handleSubscribe() {

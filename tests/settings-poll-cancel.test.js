@@ -8,7 +8,7 @@
  *
  * Zero deps — runs with: node tests/settings-poll-cancel.test.js
  */
-import { runCheckoutPolling, isStalePollResult } from '../src/lib/checkoutPolling.js'
+import { runCheckoutPolling, isStalePollResult, shouldStartCheckoutPoll } from '../src/lib/checkoutPolling.js'
 
 let passed = 0, failed = 0
 const RUN = []
@@ -129,7 +129,25 @@ test('after old poll aborts, a NEW account can poll and confirm', async () => {
   assertEqual(fresh.analytics[0], 'subscription_access_confirmed')
 })
 
-// ── Source contract: SettingsPage wires the abort + stale gate ─────────────────
+// ── P2/P3: shouldStartCheckoutPoll — never start with an unknown UID ───────────
+test('8. does NOT start polling with an unknown UID (authUserId null)', () => {
+  assertEqual(shouldStartCheckoutPoll({ banner: 'success', authUserId: null, alreadyStarted: false }), false)
+})
+test('7. account switch before profile load: still gated by authoritative UID, not profile', () => {
+  // authUserId comes from the provider (auth session), independent of the profile query.
+  // Until it is known, polling must not start; once known, it may.
+  assertEqual(shouldStartCheckoutPoll({ banner: 'success', authUserId: undefined, alreadyStarted: false }), false)
+  assertEqual(shouldStartCheckoutPoll({ banner: 'success', authUserId: 'A', alreadyStarted: false }), true)
+})
+test('does not start for non-success banners', () => {
+  assertEqual(shouldStartCheckoutPoll({ banner: 'cancelled', authUserId: 'A', alreadyStarted: false }), false)
+  assertEqual(shouldStartCheckoutPoll({ banner: null, authUserId: 'A', alreadyStarted: false }), false)
+})
+test('starts exactly once (alreadyStarted guard)', () => {
+  assertEqual(shouldStartCheckoutPoll({ banner: 'success', authUserId: 'A', alreadyStarted: true }), false)
+})
+
+// ── Source contract: SettingsPage wires the abort + stale gate + auth gating ──
 import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
@@ -138,6 +156,11 @@ test('SettingsPage aborts polling on account switch and gates results via isStal
   assert(sp.includes('pollAbortRef'), 'must keep an abort handle for polling')
   assert(sp.includes('pollAbortRef.current?.abort()'), 'must abort the poll on account switch')
   assert(sp.includes('isStalePollResult('), 'must gate poll results via isStalePollResult')
+})
+test('SettingsPage polling uses authoritative provider auth identity + shouldStartCheckoutPoll', () => {
+  assert(sp.includes('shouldStartCheckoutPoll('), 'must gate the poll start on the authoritative UID')
+  assert(sp.includes('useProAuthUserId') && sp.includes('useProAccountGeneration'), 'must read authoritative auth identity from the provider')
+  assert(sp.includes('authUserIdRef.current') && sp.includes('accountGenerationRef.current'), 'stale-check must use the authoritative auth refs')
 })
 
 for (const { name, fn } of RUN) {

@@ -1,4 +1,5 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+import { fetchWithTimeout, isTimeoutError } from '../shared/boundedFetch.js'
 
 // ── CORS ──────────────────────────────────────────────────────────────────────
 
@@ -116,14 +117,29 @@ Deno.serve(async (req) => {
     params.set('customer', sub.stripe_customer_id)
     params.set('return_url', RETURN_URL)
 
-    const stripeRes = await fetch(`${STRIPE_API}/billing_portal/sessions`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${stripeKey}`,
-        'Content-Type':  'application/x-www-form-urlencoded',
-      },
-      body: params.toString(),
-    })
+    let stripeRes: Response
+    try {
+      // Bounded ~20s timeout — a stalled Stripe call must not hold the function.
+      stripeRes = await fetchWithTimeout(`${STRIPE_API}/billing_portal/sessions`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${stripeKey}`,
+          'Content-Type':  'application/x-www-form-urlencoded',
+        },
+        body: params.toString(),
+      })
+    } catch (err) {
+      // Timeout or network failure — return a controlled retryable 503. The frontend's
+      // existing visible billing error continues to appear. Never log the raw error.
+      console.error('create-billing-portal-session: stripe-request-unavailable', {
+        requestId,
+        timeout: isTimeoutError(err),
+      })
+      return new Response(
+        JSON.stringify({ error: 'Could not open billing portal. Please try again.' }),
+        { status: 503, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
+      )
+    }
 
     if (!stripeRes.ok) {
       console.error('create-billing-portal-session: Stripe API error', {

@@ -16,6 +16,29 @@ export function isValidUUID(str) {
 }
 
 /**
+ * P6: cross-check the authoritative subscription metadata owner against another
+ * resolved owner (the Checkout Session user, or the DB owner resolved by
+ * subscription/customer id). Returns:
+ *   { userId, mismatch: false } — the effective owner (metadata is authoritative when
+ *                                 present-and-valid; otherwise the other resolved owner).
+ *   { userId: null, mismatch: true } — BOTH owners are present-and-valid AND disagree.
+ *
+ * A missing/invalid metadata owner is NOT a mismatch (legacy subscriptions predate the
+ * metadata write): the other owner is used, subject to the existing customer/subscription
+ * ownership checks. Never trusts a non-UUID value.
+ *
+ * @param {unknown} metaUserId   — authoritative subscription metadata.user_id
+ * @param {unknown} otherUserId  — resolved Checkout Session user id, or DB-resolved owner
+ * @returns {{ userId: string|null, mismatch: boolean }}
+ */
+export function crossCheckOwnership(metaUserId, otherUserId) {
+  const meta  = isValidUUID(metaUserId)  ? metaUserId  : null
+  const other = isValidUUID(otherUserId) ? otherUserId : null
+  if (meta && other && meta !== other) return { userId: null, mismatch: true }
+  return { userId: meta ?? other, mismatch: false }
+}
+
+/**
  * Safely extract the price ID from a Stripe subscription object.
  * Returns null when the path does not exist or throws.
  *
@@ -175,6 +198,8 @@ export const VALID_FAILURE_CODES = new Set([
   'invalid_status',
   'invalid_subscription_item', // R3: snapshot failed for our price (bad/missing period end, mixed items)
   'identity_conflict',         // R6: Stripe identity already attached to a different Funnl user
+  'provider_timeout',          // P5: bounded Stripe subscription retrieval timed out (retryable)
+  'ownership_mismatch',        // P6: authoritative subscription metadata.user_id disagrees with the resolved owner
 ])
 
 /**

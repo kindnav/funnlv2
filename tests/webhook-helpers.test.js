@@ -11,6 +11,7 @@ import {
   statusGrantsAccess,
   unixToIso,
   shouldRetryOnMissingOwnership,
+  crossCheckOwnership,
 } from '../supabase/functions/stripe-webhook/webhookHelpers.js'
 
 // ── Minimal test runner ───────────────────────────────────────────────────────
@@ -236,6 +237,37 @@ test('returns false for null', () => {
 })
 test('returns false for unknown event type', () => {
   assert(!shouldRetryOnMissingOwnership('unknown.event.type'))
+})
+
+// ── crossCheckOwnership (P6) ────────────────────────────────────────────────────
+const UA = '11111111-1111-4111-8111-111111111111'
+const UB = '22222222-2222-4222-8222-222222222222'
+test('both present + match → userId, no mismatch', () => {
+  const r = crossCheckOwnership(UA, UA)
+  assert(!r.mismatch); assert(r.userId === UA)
+})
+test('both present + differ → mismatch, userId null', () => {
+  const r = crossCheckOwnership(UA, UB)
+  assert(r.mismatch === true); assert(r.userId === null)
+})
+test('meta present, other absent → uses meta (legacy write path), no mismatch', () => {
+  const r = crossCheckOwnership(UA, null)
+  assert(!r.mismatch); assert(r.userId === UA)
+})
+test('meta absent (legacy), other present → uses other, no mismatch', () => {
+  const r = crossCheckOwnership(null, UB)
+  assert(!r.mismatch); assert(r.userId === UB)
+})
+test('both absent → userId null, no mismatch', () => {
+  const r = crossCheckOwnership(null, null)
+  assert(!r.mismatch); assert(r.userId === null)
+})
+test('invalid (non-UUID) values are ignored (never trusted)', () => {
+  assert(crossCheckOwnership('not-a-uuid', UB).userId === UB)   // invalid meta ignored
+  assert(crossCheckOwnership(UA, 'not-a-uuid').userId === UA)   // invalid other ignored
+  assert(crossCheckOwnership('x', 'y').userId === null)
+  // An invalid value never causes a false mismatch.
+  assert(crossCheckOwnership('not-a-uuid', UB).mismatch === false)
 })
 
 // ── Summary ───────────────────────────────────────────────────────────────────

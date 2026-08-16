@@ -8,8 +8,11 @@
 // src/lib/ai.js) is cosmetic only — it gates UI, not API access.
 //
 // Layer D (Stripe): subscription check is now included. To update billing
-// logic (e.g. add grace periods, new statuses), update evaluateProEntitlement
-// and the subscriptions table — no changes needed in individual Edge Functions.
+// logic (e.g. add grace periods, new statuses), update the CANONICAL
+// subscriptionGrantsAccess() in shared/subscriptionStatusPolicy.js — this file
+// delegates to it, so the access-granting status set cannot drift.
+
+import { subscriptionGrantsAccess } from './subscriptionStatusPolicy.js'
 
 /**
  * Pure Pro entitlement evaluation given raw DB row values and a reference instant.
@@ -33,11 +36,12 @@ export function evaluateProEntitlement(profile, trial, subscription, now) {
     return { canUse: true, reason: 'permanent' }
   }
 
-  // 2. Active Stripe subscription — 'past_due' included (dunning window; Stripe
-  //    retries the charge and reverts to 'active' on success or 'canceled'/'unpaid'
-  //    on final failure). Access is preserved during this window.
-  const subStatus = subscription?.status
-  if (subStatus === 'active' || subStatus === 'past_due') {
+  // 2. Active Stripe subscription — delegates to the CANONICAL subscriptionGrantsAccess()
+  //    (active + past_due, per the shared policy table). 'past_due' is included for the
+  //    dunning window (Stripe retries and reverts to 'active' on success or a terminal
+  //    status on final failure). No local status allowlist — the granting set lives in
+  //    exactly one place so it cannot drift from the checkout policy.
+  if (subscriptionGrantsAccess(subscription?.status)) {
     return { canUse: true, reason: 'subscription' }
   }
 
@@ -132,10 +136,12 @@ async function safeQuery(queryPromise) {
  * wrapped by safeQuery so a thrown exception is caught and mapped to an error
  * flag. The outer Promise.all cannot reject.
  *
- * subscriptionError is non-fatal: a failed subscription query is logged but
- * does not block permanent or trial users. A subscribed-only user whose
- * subscription query fails will temporarily receive a 403 (not a silent grant)
- * — this is rare and transient.
+ * Error flags are consumed by decideEntitlement(): a source that already proves access
+ * (permanent or active trial) is unaffected by another source failing. When NO source
+ * proves access AND any entitlement query failed, decideEntitlement returns `unknown`,
+ * which the Edge Functions map to a retryable internal_error (5xx) — NOT pro_required
+ * (403). So a subscription-only paying user whose subscription query fails transiently
+ * gets a retryable 5xx, never a false 403.
  *
  * Returns raw rows plus error flags. Never throws — callers check error flags.
  *

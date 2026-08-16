@@ -24,78 +24,82 @@
 import { createContext, createElement, useCallback, useContext, useEffect, useRef, useState } from 'react'
 import { getProAccessStatus } from './pro-access-status'
 import { supabase } from './supabase'
-import { proStatusTransition, shouldApplyProStatusResult } from './proStatusGeneration'
+import { createProStatusController } from './proStatusController'
 
-// Context shape: { status: null | 'error' | object, refresh: () => Promise<...> }
-// Default refresh is a no-op so consumers outside the provider never throw.
-const ProStatusContext = createContext({ status: null, refresh: async () => {} })
+// Context shape:
+//   { status, refresh, authUserId, accountGeneration }
+// authUserId / accountGeneration expose the AUTHORITATIVE authenticated identity so
+// consumers (e.g. Settings checkout polling) do not depend on a separately-loaded
+// profile/user object. Defaults are safe no-ops for consumers outside the provider.
+const ProStatusContext = createContext({
+  status: null,
+  refresh: async () => 'error',
+  authUserId: null,
+  accountGeneration: 0,
+})
 
 export function ProStatusProvider({ children }) {
   // null = loading/unavailable-after-switch; 'error' = RPC failed; object = loaded status.
   const [proStatus, setProStatus] = useState(null)
+  // Authoritative auth identity mirrored into React state so consumers re-render.
+  const [authUserId, setAuthUserId] = useState(null)
+  const [accountGeneration, setAccountGeneration] = useState(0)
 
-  // The UID whose status is currently loaded, and a request generation that is bumped
-  // on every account change/refresh. An async result may only be applied when BOTH the
-  // captured UID and generation still match — see shouldApplyProStatusResult.
-  const currentUidRef = useRef(null)
-  const genRef        = useRef(0)
-  const activeRef     = useRef(true)
+  // One production request-sequencing controller owns "may this result apply?".
+  const ctlRef = useRef(null)
+  if (!ctlRef.current) ctlRef.current = createProStatusController()
+  const ctl = ctlRef.current
 
   // Account-aware load: subscribe to auth changes (supabase-js emits INITIAL_SESSION on
-  // subscribe, so the initial load happens here too). On a genuine UID change we
-  // synchronously invalidate the previous generation, clear the previous status (so the
-  // old account's can_use_pro can never leak), and fetch the new user's status. On
-  // sign-out we clear and do NOT fetch. A same-UID event (e.g. token refresh) is ignored
-  // so valid state is not needlessly discarded.
+  // subscribe, so the initial load happens here too). onAuth decides ignore / clear /
+  // fetch and mints a fresh request token that invalidates all prior in-flight requests.
   useEffect(() => {
-    activeRef.current = true
+    ctl.activate()
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      const newUid = session?.user?.id ?? null
-      const action = proStatusTransition(currentUidRef.current, newUid)
-      if (action === 'ignore') return
+      const { action, token, uid } = ctl.onAuth(session?.user?.id ?? null)
+      if (action === 'ignore') return   // same UID (e.g. token refresh) — keep valid state
 
-      currentUidRef.current = newUid
-      const gen = ++genRef.current   // invalidate any in-flight fetch/refresh
-      setProStatus(null)             // fail-closed: cannot grant Pro during transition
+      setAuthUserId(uid)
+      setAccountGeneration(ctl.accountGeneration)
+      setProStatus(null)                // fail-closed: cannot grant Pro during a transition
 
-      if (action === 'clear') return // signed out — no fetch
+      if (action === 'clear') return    // signed out — no fetch
 
       getProAccessStatus().then(status => {
-        if (!activeRef.current) return
-        if (!shouldApplyProStatusResult(newUid, gen, currentUidRef.current, genRef.current)) return
+        if (!ctl.canApply(token, uid)) return   // stale (superseded / switched / unmounted)
         setProStatus(status ?? 'error')
       })
     })
     return () => {
-      activeRef.current = false
+      ctl.deactivate()
       subscription?.unsubscribe?.()
     }
-  }, [])
+  }, [ctl])
 
-  // Stable refresh: captures the current UID + generation and discards its result if
-  // either changed (account switch or a newer request superseded it). Returns the
-  // fetched status for callers that need it (e.g. checkout polling), or 'error' when the
-  // result is stale so any caller that reads it fails closed.
+  // Stable refresh: mints a NEW request token so an older same-UID refresh is superseded.
+  // Discards its result (returns 'error', a non-granting sentinel) if it is no longer the
+  // newest request for the current UID, was switched away, or the provider unmounted.
   const refresh = useCallback(async () => {
-    const uidAtStart = currentUidRef.current
-    const genAtStart = genRef.current
+    const { token, uid } = ctl.beginRefresh()
     const status = await getProAccessStatus()
     const normalized = status ?? 'error'
-    if (!activeRef.current) return normalized
-    if (!shouldApplyProStatusResult(uidAtStart, genAtStart, currentUidRef.current, genRef.current)) {
-      return 'error'   // stale — do not overwrite the newer account's state; fail closed
+    if (!ctl.canApply(token, uid)) {
+      return 'error'   // stale — do not overwrite newer state; fail closed for the caller
     }
     setProStatus(normalized)
     return normalized
-  }, [])
+  }, [ctl])
 
   // No JSX in .js files — use createElement directly.
-  return createElement(ProStatusContext.Provider, { value: { status: proStatus, refresh } }, children)
+  return createElement(
+    ProStatusContext.Provider,
+    { value: { status: proStatus, refresh, authUserId, accountGeneration } },
+    children,
+  )
 }
 
 /**
  * Returns the current Pro status from context.
- * Must be used inside <ProStatusProvider>.
  * Returns null before the RPC resolves (loading state).
  */
 export function useProStatus() {
@@ -103,11 +107,28 @@ export function useProStatus() {
 }
 
 /**
- * Returns the shared refresh function from context.
- * Calling refresh() re-runs getProAccessStatus() and updates the provider state,
- * so every consumer of useProStatus() receives the fresh value.
- * Must be used inside <ProStatusProvider>.
+ * Returns the shared refresh function from context. refresh() re-runs
+ * getProAccessStatus(), updates shared state when it is the newest request, and returns
+ * the fetched status (or 'error' when stale/failed).
  */
 export function useProRefresh() {
   return useContext(ProStatusContext).refresh
+}
+
+/**
+ * Returns the authoritative authenticated user id (null until auth resolves / after
+ * sign-out). Consumers that must not act until the UID is known should wait for a
+ * non-null value.
+ */
+export function useProAuthUserId() {
+  return useContext(ProStatusContext).authUserId
+}
+
+/**
+ * Returns the account generation — a counter bumped ONLY on account transitions (real
+ * UID change or sign-out), not on ordinary refreshes. Use with authUserId to detect an
+ * account switch during a long-running operation.
+ */
+export function useProAccountGeneration() {
+  return useContext(ProStatusContext).accountGeneration
 }

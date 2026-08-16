@@ -1,6 +1,7 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { runCheckoutOrchestration } from './checkoutOrchestrator.js'
 import { classifyProviderStatus } from './checkoutHelpers.js'
+import { fetchWithTimeout } from '../shared/boundedFetch.js'
 
 // ── CORS ──────────────────────────────────────────────────────────────────────
 const corsHeaders = {
@@ -39,7 +40,10 @@ async function createStripeSession(
   { params, idempotencyKey, stripeKey }:
   { params: URLSearchParams; idempotencyKey: string; stripeKey: string },
 ): Promise<{ outcome: 'success' | 'definitive_failure' | 'unknown_failure'; status: number; session: Record<string, unknown> | null }> {
-  const res = await fetch(`${STRIPE_API}/checkout/sessions`, {
+  // Bounded ~20s timeout. On timeout fetchWithTimeout throws (TimeoutError); the throw
+  // propagates to runCheckoutOrchestration's catch, which classifies it as an
+  // unknown_failure → retryable 503 without finalizing (operation retained for retry).
+  const res = await fetchWithTimeout(`${STRIPE_API}/checkout/sessions`, {
     method: 'POST',
     headers: {
       'Authorization':   `Bearer ${stripeKey}`,

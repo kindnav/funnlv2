@@ -1,14 +1,14 @@
 /**
- * C3 tests: account-aware shared Pro-status provider.
+ * P1/P3 tests: the REAL Pro-status request-sequencing controller.
  *
- * Tests the extracted production helpers (proStatusTransition, shouldApplyProStatusResult)
- * and a behavioral harness that mirrors ProStatusProvider's async control flow using
- * THOSE SAME helpers — so a previous account's status can never leak or overwrite a new
- * account's state. Access assertions go through the real hasProAccess().
+ * Imports and exercises the production createProStatusController() (src/lib/proStatusController.js)
+ * — the same object ProStatusProvider owns — through a small driver that mirrors ONLY the
+ * provider's wiring (fetch → canApply → apply), never the controller's business logic.
+ * Access assertions go through the real hasProAccess().
  *
  * Zero deps — runs with: node tests/pro-status-provider.test.js
  */
-import { proStatusTransition, shouldApplyProStatusResult } from '../src/lib/proStatusGeneration.js'
+import { createProStatusController } from '../src/lib/proStatusController.js'
 import { hasProAccess } from '../src/lib/pro-ui-status.js'
 
 let passed = 0, failed = 0
@@ -20,131 +20,169 @@ function assertEqual(a, b, m) { if (a !== b) throw new Error(m ?? `Expected ${JS
 const SUBSCRIBED = { can_use_pro: true,  permanent_pro: false, subscription_active: true,  subscription_status: 'active' }
 const NON_PRO    = { can_use_pro: false, permanent_pro: false, subscription_active: false, subscription_status: 'none' }
 
-// ── pure helpers ───────────────────────────────────────────────────────────────
-test('transition: same uid → ignore (token refresh keeps state)', () => assertEqual(proStatusTransition('A', 'A'), 'ignore'))
-test('transition: A → B → switch', () => assertEqual(proStatusTransition('A', 'B'), 'switch'))
-test('transition: A → null → clear (sign-out)', () => assertEqual(proStatusTransition('A', null), 'clear'))
-test('transition: null → A → switch (initial load)', () => assertEqual(proStatusTransition(null, 'A'), 'switch'))
-test('transition: null → null → ignore', () => assertEqual(proStatusTransition(null, null), 'ignore'))
-
-test('apply: same uid + gen → apply', () => assert(shouldApplyProStatusResult('A', 2, 'A', 2)))
-test('apply: different gen → discard', () => assert(!shouldApplyProStatusResult('A', 1, 'A', 2)))
-test('apply: different uid → discard', () => assert(!shouldApplyProStatusResult('A', 2, 'B', 2)))
-
-// ── Behavioral harness mirroring ProStatusProvider (uses the real helpers) ──────
+// Deferred fetch so tests control resolution ordering precisely.
 function deferred() { let resolve; const promise = new Promise(r => { resolve = r }); return { promise, resolve } }
 
-function makeProvider() {
-  let status = null, currentUid = null, gen = 0
-  const fetches = []                       // queue of deferreds, one per fetch call
-  function nextFetch() { const d = deferred(); fetches.push(d); return d.promise }
+// Driver = the exact provider wiring around the REAL controller. It records applied state.
+function makeDriver() {
+  const ctl = createProStatusController()
+  let status = null
+  const fetches = []                       // FIFO of deferreds, one per status request
+  const nextFetch = () => { const d = deferred(); fetches.push(d); return d.promise }
 
   function onAuth(newUid) {
-    const action = proStatusTransition(currentUid, newUid)
+    const { action, token, uid } = ctl.onAuth(newUid)
     if (action === 'ignore') return
-    currentUid = newUid
-    const g = ++gen
-    status = null                          // clear immediately (fail-closed)
+    status = null
     if (action === 'clear') return
-    const capUid = newUid
-    nextFetch().then(s => {
-      if (shouldApplyProStatusResult(capUid, g, currentUid, gen)) status = (s ?? 'error')
-    })
+    nextFetch().then(s => { if (ctl.canApply(token, uid)) status = (s ?? 'error') })
   }
   async function refresh() {
-    const capUid = currentUid, capGen = gen
+    const { token, uid } = ctl.beginRefresh()
     const s = await nextFetch()
     const norm = s ?? 'error'
-    if (!shouldApplyProStatusResult(capUid, capGen, currentUid, gen)) return 'error'
+    if (!ctl.canApply(token, uid)) return 'error'
     status = norm
     return norm
   }
-  // Resolve the Nth outstanding fetch (FIFO) with a value.
-  function resolveFetch(value) { fetches.shift().resolve(value) }
-  return { onAuth, refresh, resolveFetch, get status() { return status } }
+  const resolveFetch = (value) => fetches.shift().resolve(value)
+  return { ctl, onAuth, refresh, resolveFetch, get status() { return status } }
 }
 const tick = () => new Promise(r => setTimeout(r, 0))
 
-test('subscribed A → non-Pro B: B never sees A\'s Pro; B ends non-Pro', async () => {
-  const p = makeProvider()
-  p.onAuth('A'); p.resolveFetch(SUBSCRIBED); await tick()
-  assertEqual(hasProAccess(p.status), true)
-  p.onAuth('B')
-  assertEqual(p.status, null, 'status must clear immediately on switch (no A leak)')
-  p.resolveFetch(NON_PRO); await tick()
-  assertEqual(hasProAccess(p.status), false, 'B must be non-Pro')
+// ── Controller units ───────────────────────────────────────────────────────────
+test('every request mints a newer token (requestSeq advances)', () => {
+  const c = createProStatusController()
+  c.onAuth('A')
+  const r1 = c.beginRefresh().token
+  const r2 = c.beginRefresh().token
+  assert(r2 > r1, 'refresh tokens must be monotonically increasing')
+})
+test('canApply true only for the newest token + unchanged uid + active', () => {
+  const c = createProStatusController()
+  const a = c.onAuth('A')                 // token for the fetch
+  assert(c.canApply(a.token, 'A'))
+  const r = c.beginRefresh()              // newer token supersedes the auth-fetch
+  assert(!c.canApply(a.token, 'A'), 'older token must be stale')
+  assert(c.canApply(r.token, 'A'))
+})
+test('accountGeneration bumps on switch/sign-out but NOT on refresh', () => {
+  const c = createProStatusController()
+  c.onAuth('A'); const g1 = c.accountGeneration
+  c.beginRefresh(); assertEqual(c.accountGeneration, g1, 'refresh must not bump accountGeneration')
+  c.onAuth('B');   assert(c.accountGeneration > g1, 'switch must bump accountGeneration')
+  c.onAuth(null);  assert(c.accountGeneration > g1 + 1, 'sign-out must bump accountGeneration')
+})
+test('same-uid onAuth is ignore (no counter change)', () => {
+  const c = createProStatusController()
+  c.onAuth('A'); const seq = c.requestSeq, gen = c.accountGeneration
+  const r = c.onAuth('A')
+  assertEqual(r.action, 'ignore')
+  assertEqual(c.requestSeq, seq); assertEqual(c.accountGeneration, gen)
+})
+test('deactivate discards everything', () => {
+  const c = createProStatusController()
+  const a = c.onAuth('A')
+  c.deactivate()
+  assert(!c.canApply(a.token, 'A'))
 })
 
-test('non-Pro A → subscribed B: B becomes Pro (not stuck locked)', async () => {
-  const p = makeProvider()
-  p.onAuth('A'); p.resolveFetch(NON_PRO); await tick()
-  assertEqual(hasProAccess(p.status), false)
-  p.onAuth('B'); assertEqual(p.status, null)
-  p.resolveFetch(SUBSCRIBED); await tick()
-  assertEqual(hasProAccess(p.status), true)
+// ── P1 core race: same-account overlapping refreshes → newest wins ─────────────
+test('1. older same-UID refresh finishing AFTER a newer refresh is discarded', async () => {
+  const d = makeDriver()
+  d.onAuth('A'); d.resolveFetch(NON_PRO); await tick()   // initial: non-Pro
+  const older = d.refresh()                               // older refresh (fetch #1 pending)
+  const newer = d.refresh()                               // newer refresh (fetch #2 pending)
+  d.resolveFetch(SUBSCRIBED)                              // resolve OLDER's fetch (FIFO) → wait
+  // The newer refresh resolves with Pro; the older (already superseded) must be discarded.
+  d.resolveFetch(SUBSCRIBED)
+  assertEqual(await older, 'error', 'older same-uid refresh must return stale sentinel')
+  assertEqual(await newer, SUBSCRIBED, 'newer refresh returns the fresh status')
+  assertEqual(hasProAccess(d.status), true, 'a stale older refresh must not re-lock a paying user')
 })
 
-test('subscribed A → signed out: status cleared, no Pro', async () => {
-  const p = makeProvider()
-  p.onAuth('A'); p.resolveFetch(SUBSCRIBED); await tick()
-  p.onAuth(null)
-  assertEqual(p.status, null)
-  assertEqual(hasProAccess(p.status), false)
+test('2. older same-UID refresh finishing BEFORE a newer refresh: newer still wins', async () => {
+  const d = makeDriver()
+  d.onAuth('A'); d.resolveFetch(SUBSCRIBED); await tick()
+  const older = d.refresh()
+  d.resolveFetch(NON_PRO)                    // older resolves first (non-Pro) but it is NOT the newest
+  const newer = d.refresh()                  // newer starts → older superseded
+  assertEqual(await older, 'error', 'older refresh already superseded → stale')
+  d.resolveFetch(SUBSCRIBED)
+  assertEqual(await newer, SUBSCRIBED)
+  assertEqual(hasProAccess(d.status), true)
 })
 
-test('slow A request resolves AFTER switch to B → discarded', async () => {
-  const p = makeProvider()
-  p.onAuth('A')                       // A fetch pending (not resolved)
-  p.onAuth('B')                       // B fetch pending
-  p.resolveFetch(SUBSCRIBED); await tick()   // this resolves A's fetch (FIFO) → stale
-  assertEqual(p.status, null, 'stale A result must not apply')
-  p.resolveFetch(NON_PRO); await tick()      // B's fetch
-  assertEqual(hasProAccess(p.status), false)
+test('3. UID switch during an outstanding refresh → discarded', async () => {
+  const d = makeDriver()
+  d.onAuth('A'); d.resolveFetch(SUBSCRIBED); await tick()
+  const p = d.refresh()          // refresh for A pending
+  d.onAuth('B')                  // switch to B (fetch for B pending)
+  d.resolveFetch(SUBSCRIBED)     // resolves A's refresh → stale
+  assertEqual(await p, 'error')
+  assertEqual(d.status, null, 'B is still loading; A refresh must not apply')
 })
 
-test('slow B request resolves AFTER switching back to A → discarded', async () => {
-  const p = makeProvider()
-  p.onAuth('A'); p.resolveFetch(NON_PRO); await tick()  // A settled non-Pro
-  p.onAuth('B')                                          // B fetch pending
-  p.onAuth('A')                                          // back to A → A fetch pending
-  p.resolveFetch(SUBSCRIBED); await tick()               // resolves B's fetch → stale
-  assertEqual(p.status, null, 'stale B result must not apply after switching back to A')
+test('4. sign-out during a refresh → discarded, status cleared', async () => {
+  const d = makeDriver()
+  d.onAuth('A'); d.resolveFetch(SUBSCRIBED); await tick()
+  const p = d.refresh()
+  d.onAuth(null)                 // sign-out clears + invalidates
+  d.resolveFetch(SUBSCRIBED)
+  assertEqual(await p, 'error')
+  assertEqual(d.status, null)
+  assertEqual(hasProAccess(d.status), false)
 })
 
-test('refresh started for A resolves AFTER switch to B → discarded (returns error)', async () => {
-  const p = makeProvider()
-  p.onAuth('A'); p.resolveFetch(SUBSCRIBED); await tick()
-  const refreshP = p.refresh()        // refresh for A, fetch pending
-  p.onAuth('B')                       // switch → clears, B fetch pending
-  p.resolveFetch(SUBSCRIBED)          // resolves refresh's fetch (FIFO) → stale
-  assertEqual(await refreshP, 'error', 'stale refresh must fail closed and not overwrite state')
-  assertEqual(p.status, null, 'B state (cleared) must be preserved')
+test('5. unmount (deactivate) during a refresh → discarded', async () => {
+  const d = makeDriver()
+  d.onAuth('A'); d.resolveFetch(NON_PRO); await tick()
+  const p = d.refresh()
+  d.ctl.deactivate()
+  d.resolveFetch(SUBSCRIBED)
+  assertEqual(await p, 'error', 'unmounted refresh must not apply or grant')
 })
 
-test('same-user auth refresh does not discard valid state', async () => {
-  const p = makeProvider()
-  p.onAuth('A'); p.resolveFetch(SUBSCRIBED); await tick()
-  p.onAuth('A')                       // token refresh, same uid → ignore
-  assertEqual(hasProAccess(p.status), true, 'valid state kept on same-user event')
+test('6. same-UID TOKEN_REFRESHED event keeps valid state', async () => {
+  const d = makeDriver()
+  d.onAuth('A'); d.resolveFetch(SUBSCRIBED); await tick()
+  d.onAuth('A')                  // token refresh, same uid → ignore
+  assertEqual(hasProAccess(d.status), true)
 })
 
-test('provider error leaves access fail-closed (unavailable)', async () => {
-  const p = makeProvider()
-  p.onAuth('A'); p.resolveFetch(null); await tick()  // RPC null → 'error'
-  assertEqual(p.status, 'error')
-  assertEqual(hasProAccess(p.status), false)
+// ── Account switch semantics still hold ────────────────────────────────────────
+test('subscribed A → non-Pro B: B never sees A\'s Pro', async () => {
+  const d = makeDriver()
+  d.onAuth('A'); d.resolveFetch(SUBSCRIBED); await tick()
+  d.onAuth('B'); assertEqual(d.status, null)
+  d.resolveFetch(NON_PRO); await tick()
+  assertEqual(hasProAccess(d.status), false)
+})
+test('non-Pro A → subscribed B: B becomes Pro', async () => {
+  const d = makeDriver()
+  d.onAuth('A'); d.resolveFetch(NON_PRO); await tick()
+  d.onAuth('B'); d.resolveFetch(SUBSCRIBED); await tick()
+  assertEqual(hasProAccess(d.status), true)
+})
+test('provider error fails closed (unavailable)', async () => {
+  const d = makeDriver()
+  d.onAuth('A'); d.resolveFetch(null); await tick()
+  assertEqual(d.status, 'error')
+  assertEqual(hasProAccess(d.status), false)
 })
 
-// ── Source contract: provider wires the real mechanism ─────────────────────────
+// ── Source contract: provider wires the real controller + exposes auth identity ─
 import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
 const src = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'lib', 'useProStatus.js'), 'utf8')
-test('ProStatusProvider subscribes to onAuthStateChange + uses the generation helpers', () => {
+test('ProStatusProvider uses createProStatusController + exposes authUserId/accountGeneration', () => {
+  assert(src.includes('createProStatusController('), 'must own a controller')
+  assert(src.includes('ctl.beginRefresh('), 'refresh must mint a new token via beginRefresh')
+  assert(src.includes('ctl.canApply('), 'must gate results via canApply')
   assert(src.includes('onAuthStateChange'), 'must subscribe to auth changes')
-  assert(src.includes('proStatusTransition('), 'must use proStatusTransition')
-  assert(src.includes('shouldApplyProStatusResult('), 'must gate async results')
-  assert(src.includes('subscription?.unsubscribe'), 'must unsubscribe on unmount')
+  assert(src.includes('export function useProAuthUserId'), 'must expose authUserId')
+  assert(src.includes('export function useProAccountGeneration'), 'must expose accountGeneration')
 })
 
 for (const { name, fn } of RUN) {

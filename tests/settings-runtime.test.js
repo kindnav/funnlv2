@@ -255,10 +255,11 @@ test('useCallback is imported for stable refresh reference', () => {
   assert.ok(providerSrc.includes('useCallback'), 'must import useCallback for stable refresh function')
 })
 test('context default shape includes status and refresh', () => {
+  const ctxIdx = providerSrc.indexOf('createContext(')
+  const region = providerSrc.slice(ctxIdx, ctxIdx + 220)
   assert.ok(
-    providerSrc.includes("{ status: null, refresh:") ||
-    providerSrc.includes('{ status: null, refresh:'),
-    'context default must include status null and refresh'
+    region.includes('status: null') && /refresh:\s*async/.test(region),
+    'context default must include status null and an async refresh'
   )
 })
 test('useProStatus returns context.status (not the whole context)', () => {

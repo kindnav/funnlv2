@@ -307,16 +307,70 @@ async function run() {
   })
 
   // 19 ── authoritative fetched metadata used (fetched wins over event snapshot)
-  test('C2: fetched metadata.user_id wins over event metadata', async () => {
+  test('C2/P6: fetched metadata.user_id is authoritative; DB owner absent → no mismatch', async () => {
     const { deps, supabaseAdmin } = makeDeps({
       // Event snapshot says USER2; fetched subscription says USER — fetched must win.
+      // P6 now always performs the DB lookup for the cross-check (no short-circuit); with
+      // no DB owner, the metadata owner is used and there is no mismatch.
       event: subEvent('customer.subscription.updated', { metadata: { user_id: USER2 } }),
       fetchSubscription: async () => goodSub({ metadata: { user_id: USER } }),
     })
     const r = await runWebhookOrchestration(deps)
     assertEqual(r.status, 200)
     assertEqual(supabaseAdmin.calls.upserts[0].payload.user_id, USER, 'must use fetched metadata user_id')
-    assertEqual(supabaseAdmin.calls.lookups.length, 0, 'valid fetched metadata short-circuits DB lookup')
+  })
+
+  // ── P6: metadata owner vs DB owner cross-check ─────────────────────────────────
+  test('P6: metadata owner MATCHES DB owner → 200 write', async () => {
+    const { deps, supabaseAdmin } = makeDeps({
+      event: subEvent('customer.subscription.updated', { metadata: { user_id: USER } }),
+      fetchSubscription: async () => goodSub({ metadata: { user_id: USER } }),
+      supa: { lookupBySub: { data: { user_id: USER }, error: null } },
+    })
+    const r = await runWebhookOrchestration(deps)
+    assertEqual(r.status, 200)
+    assertEqual(supabaseAdmin.calls.upserts[0].payload.user_id, USER)
+  })
+  test('P6: metadata owner MISMATCHES DB owner → 500 ownership_mismatch, no write', async () => {
+    const { deps, supabaseAdmin } = makeDeps({
+      event: subEvent('customer.subscription.updated', { metadata: { user_id: USER } }),
+      fetchSubscription: async () => goodSub({ metadata: { user_id: USER } }),
+      supa: { lookupBySub: { data: { user_id: USER2 }, error: null } },  // DB owner differs
+    })
+    const r = await runWebhookOrchestration(deps)
+    assertEqual(r.status, 500)
+    assertEqual(supabaseAdmin.calls.mark[0].p_failure_code, 'ownership_mismatch')
+    assertEqual(supabaseAdmin.calls.upserts.length, 0, 'must not write on ownership mismatch')
+  })
+  test('P6: missing legacy metadata → DB owner used, no mismatch', async () => {
+    const { deps, supabaseAdmin } = makeDeps({
+      event: subEvent('customer.subscription.updated', { metadata: {} }),
+      fetchSubscription: async () => goodSub({ metadata: {} }),   // legacy: no metadata.user_id
+      supa: { lookupBySub: { data: { user_id: USER }, error: null } },
+    })
+    const r = await runWebhookOrchestration(deps)
+    assertEqual(r.status, 200)
+    assertEqual(supabaseAdmin.calls.upserts[0].payload.user_id, USER)
+  })
+  test('P6 (checkout): fetched sub metadata owner != session user → 500 ownership_mismatch, no write', async () => {
+    // checkoutEvent session user is USER; the fetched subscription claims USER2.
+    const { deps, supabaseAdmin } = makeDeps({
+      event: checkoutEvent(),   // session metadata.user_id = USER
+      fetchSubscription: async () => goodSub({ metadata: { user_id: USER2 } }),
+    })
+    const r = await runWebhookOrchestration(deps)
+    assertEqual(r.status, 500)
+    assertEqual(supabaseAdmin.calls.mark[0].p_failure_code, 'ownership_mismatch')
+    assertEqual(supabaseAdmin.calls.upserts.length, 0)
+  })
+  test('P6 (checkout): fetched sub metadata owner == session user → 200 write', async () => {
+    const { deps, supabaseAdmin } = makeDeps({
+      event: checkoutEvent(),
+      fetchSubscription: async () => goodSub({ metadata: { user_id: USER } }),
+    })
+    const r = await runWebhookOrchestration(deps)
+    assertEqual(r.status, 200)
+    assertEqual(supabaseAdmin.calls.upserts[0].payload.user_id, USER)
   })
 
   // 19b ── fetched metadata missing → existing subscription lookup resolves ownership
@@ -484,6 +538,37 @@ async function run() {
     const r = await runWebhookOrchestration(deps)
     assertEqual(r.status, 200)
     assertEqual(supabaseAdmin.calls.mark[0].p_status, 'ignored')
+  })
+
+  // ── P5: bounded Stripe retrieval timeout → finalize failed provider_timeout, 503 ──
+  test('P5: fetch timeout on checkout.session.completed → 503 provider_timeout (finalized)', async () => {
+    const { deps, supabaseAdmin } = makeDeps({
+      event: checkoutEvent(),
+      fetchSubscription: async () => 'timeout',
+    })
+    const r = await runWebhookOrchestration(deps)
+    assertEqual(r.status, 503)
+    assertEqual(supabaseAdmin.calls.mark[0].p_status, 'failed')
+    assertEqual(supabaseAdmin.calls.mark[0].p_failure_code, 'provider_timeout')
+    assertEqual(supabaseAdmin.calls.upserts.length, 0)
+  })
+  test('P5: fetch timeout on subscription.updated → 503 provider_timeout (finalized, reclaimable)', async () => {
+    const { deps, supabaseAdmin } = makeDeps({
+      event: subEvent('customer.subscription.updated', { metadata: { user_id: USER } }),
+      fetchSubscription: async () => 'timeout',
+    })
+    const r = await runWebhookOrchestration(deps)
+    assertEqual(r.status, 503)
+    assertEqual(supabaseAdmin.calls.mark[0].p_failure_code, 'provider_timeout')
+  })
+  test('P5: non-timeout fetch failure still → 500 stripe_fetch_failed (distinct from timeout)', async () => {
+    const { deps, supabaseAdmin } = makeDeps({
+      event: checkoutEvent(),
+      fetchSubscription: async () => null,
+    })
+    const r = await runWebhookOrchestration(deps)
+    assertEqual(r.status, 500)
+    assertEqual(supabaseAdmin.calls.mark[0].p_failure_code, 'stripe_fetch_failed')
   })
 
   // 24 ── mark RPC error → 500 Finalize failed
