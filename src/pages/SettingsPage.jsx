@@ -20,6 +20,7 @@ import {
   canCloseDialog,
   THEME_ORDER,
 } from '../lib/settingsLifecycle'
+import ProComingSoon from '../components/ProComingSoon'
 
 // ── Shared style tokens ─────────────────────────────────────────────────────
 const SECTION_LABEL =
@@ -462,12 +463,18 @@ function SettingsPage() {
               )}
             </div>
           ) : proClass === 'expired' ? (
-            <p className="text-[12px] text-low">
-              Trial ended{proStatus.ends_at ? ' ' + formatTrialEnd(proStatus.ends_at) : ''}
-            </p>
+            <div>
+              <p className="text-[12px] text-low mb-2">
+                Trial ended{proStatus.ends_at ? ' ' + formatTrialEnd(proStatus.ends_at) : ''}
+              </p>
+              <ProComingSoon size="sm" />
+            </div>
           ) : (
             // non_pro
-            <p className="text-[12px] text-low">No active Pro access.</p>
+            <div>
+              <p className="text-[12px] text-low mb-2">No active Pro access.</p>
+              <ProComingSoon size="sm" />
+            </div>
           )}
         </div>
 

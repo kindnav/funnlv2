@@ -12,6 +12,7 @@ import { extractChildrenText } from '../lib/extractChildrenText'
 import { createRequestGate } from '../lib/ai-chat-request-gate'
 import { getAvatarColor, getInitials } from '../lib/avatarUtils'
 import TopBar from '../components/TopBar'
+import ProComingSoon from '../components/ProComingSoon'
 import {
   MAX_HISTORY_SESSIONS, historyKey, currentKey,
   INITIAL_MESSAGE, TICKER_PHRASES,
@@ -574,18 +575,18 @@ function FunnlAIPage() {
           {proStatus?.trial_expired ? (
             <>
               <h3 className="font-display text-[18px] font-bold text-hi mb-2">Your trial has ended</h3>
-              <p className="text-[13px] leading-relaxed text-muted">
+              <p className="text-[13px] leading-relaxed text-muted mb-5">
                 Your 7-day free trial ended on{' '}
                 {new Date(proStatus.ends_at).toLocaleDateString('en-US', { month: 'long', day: 'numeric' })}.
-                Contact us to continue with Funnl Pro.
               </p>
             </>
           ) : (
             <>
               <h3 className="font-display text-[18px] font-bold text-hi mb-2">AI only available for Pro</h3>
-              <p className="text-[13px] leading-relaxed text-muted">Ask anything about your network — who's gone cold, who you know at a specific company, what to follow up on next.</p>
+              <p className="text-[13px] leading-relaxed text-muted mb-5">Ask anything about your network — who's gone cold, who you know at a specific company, what to follow up on next.</p>
             </>
           )}
+          <ProComingSoon size="md" />
         </div>
       </div>
     )
