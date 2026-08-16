@@ -25,7 +25,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { useProStatus } from '../lib/useProStatus'
-import { classifyProStatus } from '../lib/pro-ui-status'
+import { hasProAccess } from '../lib/pro-ui-status'
 import { useContactPicker } from '../lib/useContactPicker'
 import { buildPickerNavigationState } from '../lib/contactPickerUtils'
 import ContactPickerResults from './ContactPickerResults'
@@ -149,10 +149,8 @@ export default function BottomNav() {
   const [followUpCount, setFollowUpCount] = useState(0)
 
   // Pro access — from shared context (one RPC per app mount, not one per component)
-  const proStatus = useProStatus()
-  const displayStatus = classifyProStatus(proStatus)
-  // 'permanent' or 'trial' → show AI actions; all other states → hide (fail closed)
-  const canUsePro = displayStatus === 'permanent' || displayStatus === 'trial'
+  const proStatus     = useProStatus()
+  const canUsePro     = hasProAccess(proStatus)   // canonical access gate (never a state allowlist)
 
   // Sheet state
   const [sheetOpen, setSheetOpen] = useState(false)

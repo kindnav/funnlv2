@@ -6,7 +6,7 @@ import TopBar from '../components/TopBar'
 import { getAvatarColor, getInitials } from '../lib/avatarUtils'
 import { track } from '../lib/analytics'
 import { useProStatus } from '../lib/useProStatus'
-import { classifyProStatus } from '../lib/pro-ui-status'
+import { hasProAccess } from '../lib/pro-ui-status'
 import {
   getLocalToday,
   getLocalWeekStartDate,
@@ -399,8 +399,7 @@ function CompletionStrip() {
 function DashboardPage() {
   const navigate = useNavigate()
   const proStatus = useProStatus()
-  const displayStatus = classifyProStatus(proStatus)
-  const canUsePro = displayStatus === 'permanent' || displayStatus === 'trial'
+  const canUsePro = hasProAccess(proStatus)
 
   // ── Data state ─────────────────────────────────────────────────────────────
   const [contactCount,          setContactCount]          = useState(0)

@@ -3,13 +3,19 @@ import ReactMarkdown from 'react-markdown'
 import { Link, useNavigate, useLocation } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { useProStatus, useProRefresh } from '../lib/useProStatus'
-import { classifyProStatus } from '../lib/pro-ui-status'
+import { classifyProStatus, hasProAccess } from '../lib/pro-ui-status'
 import { track } from '../lib/analytics'
 import { extractInvokeError } from '../lib/ai-chat-error'
 import { buildProviderMessages, isRetryEligible } from '../lib/ai-chat-conversation'
 import { isValidContactLink } from '../lib/contactLinkValidator'
 import { extractChildrenText } from '../lib/extractChildrenText'
 import { createRequestGate } from '../lib/ai-chat-request-gate'
+import { resolveStripeRedirect } from '../lib/stripeRedirect'
+import { createActionGuard } from '../lib/actionGuard'
+import { subscriptionAttentionState } from '../lib/subscriptionStatusPolicy'
+import { isAccountSwitch, isStaleGeneration } from '../lib/accountSwitch'
+import { PRO_PRICE_DISPLAY, BILLING_ENABLED } from '../lib/proPricing'
+import ProComingSoon from '../components/ProComingSoon'
 import { getAvatarColor, getInitials } from '../lib/avatarUtils'
 import TopBar from '../components/TopBar'
 import {
@@ -259,9 +265,11 @@ function FunnlAIPage() {
   // useProRefresh() updates all consumers (Sidebar, Settings, FunnlAIPage).
   const proStatus     = useProStatus()
   const proRefresh    = useProRefresh()
-  const displayStatus = classifyProStatus(proStatus)
-  const isProUser     = displayStatus === 'permanent' || displayStatus === 'trial'
+  const displayStatus = classifyProStatus(proStatus)  // DISPLAY ONLY (badge/copy)
+  const isProUser     = hasProAccess(proStatus)        // canonical access gate
   const isCheckingPro = proStatus === null
+  // DISPLAY-ONLY: an existing Stripe subscription the backend won't let us duplicate.
+  const attentionState = subscriptionAttentionState(proStatus?.subscription_status)
 
   const [userId,      setUserId]      = useState(null)
   const [contacts,    setContacts]    = useState([]) // [{id,name,company,role}] for ref validation
@@ -271,8 +279,12 @@ function FunnlAIPage() {
   const [loading,     setLoading]     = useState(false)
   const [isRetrying,  setIsRetrying]  = useState(false)
   const [historyOpen, setHistoryOpen] = useState(false)
+  const [subscribing,    setSubscribing]    = useState(false)
+  const [subscribeError, setSubscribeError] = useState('')
 
   const isRetryingRef       = useRef(false)
+  const subscribeGuardRef   = useRef(null)   // synchronous duplicate-action guard for checkout
+  if (!subscribeGuardRef.current) subscribeGuardRef.current = createActionGuard()
   const bottomRef           = useRef(null)
   const inputRef            = useRef(null)
   const historyTriggerRef   = useRef(null) // for focus restoration after mobile modal closes
@@ -281,6 +293,8 @@ function FunnlAIPage() {
   const currentSessionIdRef = useRef(null) // stable ID for the active conversation
   const pendingFocusRef     = useRef(false) // focus composer after Pro resolves
   const prevUserIdRef       = useRef(null)  // detect genuine account switches
+  const userIdRef           = useRef(null)  // latest userId, readable inside auth listener
+  const accountGenRef       = useRef(0)     // increments on every real account switch
   const isComposingRef      = useRef(false) // IME composition guard
 
   const navigate = useNavigate()
@@ -318,18 +332,59 @@ function FunnlAIPage() {
     return () => { active = false }
   }, []) // mount only
 
+  // Keep a ref of the latest userId so the auth listener can read it synchronously.
+  useEffect(() => { userIdRef.current = userId }, [userId])
+
+  // Real account-switch detection. FunnlAIPage's mount getSession() only sets userId
+  // once, so without this listener a post-mount account switch (e.g. in another tab)
+  // would never be detected. On a genuine UID change we synchronously invalidate the
+  // previous account's in-flight work, then setUserId to trigger the reload effect.
+  useEffect(() => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      const newUid = session?.user?.id ?? null
+      if (isAccountSwitch(userIdRef.current, newUid)) {
+        accountGenRef.current++            // invalidate any in-flight checkout result
+        gateRef.current.invalidate()       // invalidate any in-flight AI request
+        subscribeGuardRef.current.release()
+        setSubscribing(false)
+        setSubscribeError('')
+        setUserId(newUid)                  // triggers the reload effect below
+      }
+    })
+    return () => subscription?.unsubscribe?.()
+  }, [])
+
   // Account-switch isolation: when userId changes mid-session (not first load),
-  // clear all per-user state before re-loading the new user's data.
+  // clear all per-user state AND load only the new user's data (generation-guarded).
   useEffect(() => {
     if (!userId) return
     if (prevUserIdRef.current && prevUserIdRef.current !== userId) {
       gateRef.current.invalidate()
+      subscribeGuardRef.current.release()
+      setSubscribing(false)
+      setSubscribeError('')
       setMessages([INITIAL_MESSAGE])
       setHistory([])
       setContacts([])
       setInput('')
       setLoading(false)
       currentSessionIdRef.current = null
+      // Load the NEW user's contacts + history, discarding the result if another
+      // switch happens first (stale generation).
+      const gen = accountGenRef.current
+      ;(async () => {
+        const { data: contactData } = await supabase
+          .from('contacts')
+          .select('id, name, company, role')
+          .eq('user_id', userId)
+        if (isStaleGeneration(gen, accountGenRef.current)) return
+        if (Array.isArray(contactData)) setContacts(contactData)
+        setHistory(parseStoredHistory(localStorage.getItem(historyKey(userId))))
+        const stored = parseStoredCurrentSession(localStorage.getItem(currentKey(userId)))
+        if (!isStaleGeneration(gen, accountGenRef.current) && stored.length > 0) {
+          setMessages([INITIAL_MESSAGE, ...stored])
+        }
+      })()
     }
     prevUserIdRef.current = userId
   }, [userId])
@@ -506,6 +561,58 @@ function FunnlAIPage() {
     if (userId) try { localStorage.setItem(currentKey(userId), JSON.stringify(session.messages)) } catch { /* ignore */ }
   }
 
+  async function handleSubscribe() {
+    // Defensive: when billing is disabled the Subscribe button is not rendered
+    // (a ProComingSoon state is shown instead); never invoke checkout even if this
+    // handler is reached some other way.
+    if (!BILLING_ENABLED) return
+    // Synchronous guard engaged before invoking, so two rapid clicks (before React
+    // commits setSubscribing) create exactly one Edge Function call.
+    if (!subscribeGuardRef.current.begin()) return
+    // Capture the account generation. If it changes (account switch) while the request
+    // is in flight, the result is stale and must not navigate, mutate state, or track.
+    const capturedGen = accountGenRef.current
+    setSubscribing(true)
+    setSubscribeError('')
+    track('checkout_started', { source: 'ai_page' })
+    let data, error
+    try {
+      ;({ data, error } = await supabase.functions.invoke('create-checkout-session', {
+        // attemptId is a non-authoritative request correlation value only; the server
+        // enforces single-flight via the checkout_operations table.
+        body: { attemptId: crypto.randomUUID(), origin: window.location.origin },
+      }))
+    } catch {
+      // Thrown network/invoke failure. Only surface UI + analytics if this request
+      // still owns the current account generation; always release the guard.
+      if (!isStaleGeneration(capturedGen, accountGenRef.current)) {
+        track('checkout_creation_failed', { source: 'ai_page' })
+        setSubscribeError('Could not start checkout. Please try again.')
+        setSubscribing(false)
+      }
+      subscribeGuardRef.current.release()
+      return
+    }
+    // If the account switched while the request was in flight, discard the stale
+    // result: never navigate, mutate the new account's UI, or fire analytics.
+    if (isStaleGeneration(capturedGen, accountGenRef.current)) {
+      subscribeGuardRef.current.release()
+      return
+    }
+    // Validate the returned URL before navigating (must be checkout.stripe.com HTTPS).
+    const redirect = resolveStripeRedirect(data, error, 'checkout')
+    if (!redirect.ok) {
+      track('checkout_creation_failed', { source: 'ai_page' })
+      setSubscribeError('Could not start checkout. Please try again.')
+      subscribeGuardRef.current.release()   // clear guard on controlled failure
+      setSubscribing(false)
+      return
+    }
+    // Navigating away — intentionally leave the guard set so a late second
+    // invocation cannot start another checkout session.
+    window.location.href = redirect.url
+  }
+
   async function retryProStatus() {
     if (isRetryingRef.current) return
     isRetryingRef.current = true
@@ -570,21 +677,48 @@ function FunnlAIPage() {
         <div className="w-14 h-14 rounded-2xl flex items-center justify-center opacity-60 text-white" style={{ background: 'var(--color-ember)' }}>
           <SparkleIcon size={22}/>
         </div>
-        <div className="max-w-[260px]">
+        <div className="max-w-[280px]">
           {proStatus?.trial_expired ? (
             <>
               <h3 className="font-display text-[18px] font-bold text-hi mb-2">Your trial has ended</h3>
-              <p className="text-[13px] leading-relaxed text-muted">
-                Your 7-day free trial ended on{' '}
-                {new Date(proStatus.ends_at).toLocaleDateString('en-US', { month: 'long', day: 'numeric' })}.
-                Contact us to continue with Funnl Pro.
+              <p className="text-[13px] leading-relaxed text-muted mb-5">
+                Subscribe to continue asking questions about your network: who to follow up with, who's gone cold, who you know at a specific company.
               </p>
             </>
           ) : (
             <>
               <h3 className="font-display text-[18px] font-bold text-hi mb-2">AI only available for Pro</h3>
-              <p className="text-[13px] leading-relaxed text-muted">Ask anything about your network — who's gone cold, who you know at a specific company, what to follow up on next.</p>
+              <p className="text-[13px] leading-relaxed text-muted mb-5">Ask anything about your network — who's gone cold, who you know at a specific company, what to follow up on next.</p>
             </>
+          )}
+          {subscribeError && (
+            <p role="alert" aria-live="assertive" className="text-[11.5px] text-danger mb-2">
+              {subscribeError}
+            </p>
+          )}
+          {attentionState ? (
+            // An existing Stripe subscription needs attention — do NOT show a normal
+            // Subscribe button (the backend would reject a duplicate). Point to billing.
+            <Link
+              to="/settings"
+              className="inline-block text-[13px] font-semibold transition-opacity hover:opacity-80"
+              style={{ color: 'var(--color-ember)' }}
+            >
+              {attentionState === 'payment_incomplete'
+                ? 'Finish your payment in Settings →'
+                : 'Manage billing in Settings →'}
+            </Link>
+          ) : BILLING_ENABLED ? (
+            <button
+              onClick={handleSubscribe}
+              disabled={subscribing}
+              className="text-[13px] font-bold text-white px-5 py-[10px] rounded-[10px] disabled:opacity-40 hover:opacity-90 transition-opacity motion-reduce:transition-none"
+              style={{ background: 'var(--color-ember)' }}
+            >
+              {subscribing ? 'Loading…' : `Subscribe - ${PRO_PRICE_DISPLAY}`}
+            </button>
+          ) : (
+            <ProComingSoon size="md" />
           )}
         </div>
       </div>
@@ -627,7 +761,7 @@ function FunnlAIPage() {
 
   // ── Pro badge for TopBar actions slot ──────────────────────────────────────
 
-  const proBadge = displayStatus === 'permanent' ? (
+  const proBadge = (displayStatus === 'permanent' || displayStatus === 'subscribed') ? (
     <span className="font-mono text-[9.5px] font-bold tracking-[0.5px] px-1.5 py-0.5 rounded-[5px]"
       style={{ color: 'var(--color-ember)', background: 'rgba(255,68,35,0.1)', border: '1px solid rgba(255,68,35,0.22)' }}>
       PRO
@@ -714,6 +848,20 @@ function FunnlAIPage() {
           <div className="flex-1 overflow-y-auto min-h-0 px-4 md:px-6 py-5">
             {!isProUser ? renderLocked() : (
               <div className="space-y-5 max-w-[680px] mx-auto">
+                {/* Non-blocking billing-attention notice: AI stays fully unlocked while
+                    can_use_pro is true (e.g. past_due). Access is unchanged — this only
+                    points the user to Settings to fix their payment. */}
+                {attentionState && (
+                  <div className="rounded-xl px-3.5 py-2.5 text-[12.5px]" role="status"
+                    style={{ background: 'rgba(255,184,77,0.10)', border: '1px solid rgba(255,184,77,0.25)', color: 'var(--color-warning)' }}>
+                    {attentionState === 'payment_incomplete'
+                      ? 'A payment is still processing. '
+                      : 'Your payment needs attention. '}
+                    <Link to="/settings" className="font-semibold underline" style={{ color: 'var(--color-warning)' }}>
+                      Manage billing in Settings
+                    </Link>
+                  </div>
+                )}
                 {messages.map(msg => (
                   <div key={msg.id}>
                     {msg.role === 'user' ? (

@@ -1,9 +1,14 @@
 import { useEffect, useRef, useState } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate, useLocation } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { getTheme, setTheme } from '../lib/theme'
-import { useProStatus, useProRefresh } from '../lib/useProStatus'
-import { classifyProStatus } from '../lib/pro-ui-status'
+import { useProStatus, useProRefresh, useProAuthUserId, useProAccountGeneration } from '../lib/useProStatus'
+import { classifyProStatus, hasProAccess } from '../lib/pro-ui-status'
+import { runCheckoutPolling, isStalePollResult, shouldStartCheckoutPoll } from '../lib/checkoutPolling'
+import { resolveStripeRedirect } from '../lib/stripeRedirect'
+import { createActionGuard } from '../lib/actionGuard'
+import { subscriptionAttentionState } from '../lib/subscriptionStatusPolicy'
+import { track } from '../lib/analytics'
 import {
   validateDisplayName,
   normalizeDisplayName,
@@ -20,6 +25,8 @@ import {
   canCloseDialog,
   THEME_ORDER,
 } from '../lib/settingsLifecycle'
+import { PRO_PRICE_DISPLAY, BILLING_ENABLED } from '../lib/proPricing'
+import ProComingSoon from '../components/ProComingSoon'
 
 // ── Shared style tokens ─────────────────────────────────────────────────────
 const SECTION_LABEL =
@@ -47,11 +54,21 @@ function trapFocus(e, onEscape, disabled) {
 
 function SettingsPage() {
   const navigate     = useNavigate()
+  const location     = useLocation()
   // Shared Pro status - a single RPC shared across all authenticated surfaces.
   const rawProStatus = useProStatus()
   // Shared refresh - re-runs the RPC and updates rawProStatus for all consumers.
   // Use proRefresh() in retry handlers; never call the access-status RPC directly.
   const proRefresh   = useProRefresh()
+  // Authoritative authenticated identity from the shared provider (derived from the
+  // auth session, NOT from this page's separately-loaded profile/user query). Checkout
+  // polling uses these so an account switch is detected even before the profile loads.
+  const authUserId         = useProAuthUserId()
+  const accountGeneration  = useProAccountGeneration()
+  const authUserIdRef        = useRef(authUserId)
+  const accountGenerationRef = useRef(accountGeneration)
+  useEffect(() => { authUserIdRef.current = authUserId }, [authUserId])
+  useEffect(() => { accountGenerationRef.current = accountGeneration }, [accountGeneration])
 
   // ── Unmount protection ────────────────────────────────────────────────────
   // Prevents state updates on async handlers that complete after unmount.
@@ -84,6 +101,42 @@ function SettingsPage() {
   // Retry calls proRefresh() which updates the provider state for all consumers.
   const proStatus  = rawProStatus
   const [retrying, setRetrying] = useState(false)
+
+  // Always-current ref: updated on every render so polling closures read fresh state
+  // without needing proStatus in their dependency arrays.
+  const proStatusRef = useRef(null)
+  proStatusRef.current = proStatus
+
+  // ── Stripe Checkout ────────────────────────────────────────────────────────
+  // checkoutBanner: computed once from URL on mount ('success', 'cancelled', null).
+  // subscribing: true while the create-checkout-session call is in flight.
+  // pollingState: 'polling' | 'confirmed' | 'timed_out' | null
+  const [checkoutBanner, setCheckoutBanner] = useState(() => {
+    // Billing disabled → never surface checkout-return / confirmation / error state,
+    // even if a stray ?checkout= param is present. No checkout could have started.
+    if (!BILLING_ENABLED) return null
+    const p = new URLSearchParams(location.search)
+    return p.get('checkout')  // 'success' | 'cancelled' | null
+  })
+  const [subscribing,       setSubscribing]       = useState(false)
+  const [subscribeError,    setSubscribeError]    = useState('')
+  const [pollingState,      setPollingState]      = useState(null)
+  const [billingPortalOpening, setBillingPortalOpening] = useState(false)
+  const [billingPortalError,   setBillingPortalError]   = useState('')
+  // Synchronous duplicate-action guards - engaged before generating an attemptId or
+  // invoking, so two rapid clicks cannot create two sessions before React re-renders.
+  const subscribeGuardRef   = useRef(null)
+  if (!subscribeGuardRef.current) subscribeGuardRef.current = createActionGuard()
+  const billingPortalGuardRef = useRef(null)
+  if (!billingPortalGuardRef.current) billingPortalGuardRef.current = createActionGuard()
+  // Abort handle for an in-flight checkout-return polling run, so an account switch or
+  // sign-out can synchronously cancel it (its stale result must never confirm/timeout
+  // or fire analytics for a different account).
+  const pollAbortRef = useRef(null)
+  // The authoritative (authUserId, accountGeneration) captured when polling began, plus
+  // a once-guard so we start exactly one poll for the current checkout-success banner.
+  const pollCaptureRef = useRef(null)
+  const pollStartedRef = useRef(false)
 
   // ── Theme ─────────────────────────────────────────────────────────────────
   const [currentTheme, setCurrentTheme] = useState(() => getTheme())
@@ -125,13 +178,11 @@ function SettingsPage() {
               .from('profiles')
               .select('display_name')
               .eq('id', u.id)
-              .maybeSingle()
-              .catch(() => ({ data: null })),
+              .maybeSingle(),
             supabase
               .from('contacts')
               .select('id', { count: 'exact', head: true })
-              .eq('user_id', u.id)
-              .catch(() => ({ count: 0 })),
+              .eq('user_id', u.id),
           ])
           if (!mountedRef.current || accountGenRef.current !== capturedGen) return
           if (profileResult.data) {
@@ -160,10 +211,15 @@ function SettingsPage() {
         const newUid = session?.user?.id ?? null
         // Only act if we have a loaded user and the UID has changed.
         if (!user?.id || newUid === user.id) return
-        // New generation: all in-flight requests for the previous user will bail.
         accountGenRef.current++
         currentUidRef.current = null
-        // Clear all user-scoped state, including flags that could block the new user's UI.
+        // Synchronously abort any in-flight checkout-return polling so its stale result
+        // cannot confirm/timeout or fire analytics for the new account (C4).
+        pollAbortRef.current?.abort()
+        // Synchronously release the checkout/portal single-flight guards (R5).
+        subscribeGuardRef.current.release()
+        billingPortalGuardRef.current.release()
+        // Clear all user-scoped state and flags.
         setLoading(true)
         setUser(null)
         setDisplayName('')
@@ -175,6 +231,12 @@ function SettingsPage() {
         setSignOutError('')
         setSigningOut(false)
         setRetrying(false)
+        setSubscribing(false)
+        setSubscribeError('')
+        setCheckoutBanner(null)
+        setPollingState(null)
+        setBillingPortalOpening(false)
+        setBillingPortalError('')
         setShowDeleteAllModal(false)
         setDeleteAllInput('')
         setDeleteAllError('')
@@ -197,13 +259,16 @@ function SettingsPage() {
     async function refreshCount() {
       if (!user?.id) return
       const capturedGen = accountGenRef.current
-      const { count } = await supabase
-        .from('contacts')
-        .select('id', { count: 'exact', head: true })
-        .eq('user_id', user.id)
-        .catch(() => ({ count: null }))
-      if (!mountedRef.current || accountGenRef.current !== capturedGen) return
-      if (count !== null) setContactCount(count)
+      try {
+        const { count } = await supabase
+          .from('contacts')
+          .select('id', { count: 'exact', head: true })
+          .eq('user_id', user.id)
+        if (!mountedRef.current || accountGenRef.current !== capturedGen) return
+        if (count != null) setContactCount(count)
+      } catch {
+        // Count refresh failed - keep the existing displayed count.
+      }
     }
     window.addEventListener('funnl:contacts-changed', refreshCount)
     return () => window.removeEventListener('funnl:contacts-changed', refreshCount)
@@ -244,13 +309,19 @@ function SettingsPage() {
 
   // ── Pro-status retry ──────────────────────────────────────────────────────
   // Delegates to the shared provider - updates proStatus for ALL consumers.
+  // Also used as the "Check again" handler after a checkout confirmation timeout.
   async function handleProRetry() {
     if (retrying) return
     const capturedGen = accountGenRef.current
     setRetrying(true)
-    await proRefresh()
+    const newStatus = await proRefresh()
     if (!mountedRef.current || accountGenRef.current !== capturedGen) return
     setRetrying(false)
+    // Use the returned status directly (React state may not have committed yet).
+    if (pollingState === 'timed_out' && hasProAccess(newStatus)) {
+      setPollingState('confirmed')
+      track('subscription_access_confirmed')
+    }
   }
 
   // ── Sign out ──────────────────────────────────────────────────────────────
@@ -355,10 +426,175 @@ function SettingsPage() {
     })
   }
 
+  // ── Checkout return: clean URL + one-time return analytics (mount) ────────
+  // Runs once. The URL is cleaned immediately; the cancelled/success return event is
+  // fired once. Success POLLING is handled separately below, gated on the authoritative
+  // auth UID so it never begins with an unknown account.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (!checkoutBanner) return
+    navigate('/settings', { replace: true })
+    if (checkoutBanner === 'cancelled') {
+      track('checkout_returned', { result: 'cancelled' })
+    } else if (checkoutBanner === 'success') {
+      track('checkout_returned', { result: 'success' })
+    }
+  }, []) // intentionally runs only on mount
+
+  // ── Checkout return: bounded polling for Pro access confirmation ──────────
+  // Starts ONLY once the authoritative auth UID is known (authUserId != null). Captures
+  // the authoritative (authUserId, accountGeneration) from the shared provider, not this
+  // page's separately-loaded profile, so an account switch that happens before the
+  // profile query finishes is still detected. A stale poll never confirms/timeouts/errors
+  // or fires analytics for a different account.
+  useEffect(() => {
+    // Gate: success banner + authoritative UID known + not already started.
+    if (!shouldStartCheckoutPoll({ banner: checkoutBanner, authUserId, alreadyStarted: pollStartedRef.current })) return
+    pollStartedRef.current = true
+
+    // If the webhook already fired before the page loaded, confirm immediately.
+    if (hasProAccess(proStatusRef.current)) {
+      setPollingState('confirmed')
+      track('subscription_access_confirmed')
+      return
+    }
+    setPollingState('polling')
+
+    const capturedUid = authUserId
+    const capturedGen = accountGeneration
+    pollCaptureRef.current = { uid: capturedUid, gen: capturedGen }
+    pollAbortRef.current?.abort()
+    const controller = new AbortController()
+    pollAbortRef.current = controller
+
+    // A stale poll (account switch / sign-out / newer run / unmount) must not confirm,
+    // timeout, error, or fire analytics. Uses the AUTHORITATIVE auth identity refs.
+    const stale = () => isStalePollResult({
+      mounted:     mountedRef.current,
+      aborted:     controller.signal.aborted,
+      capturedGen, currentGen: accountGenerationRef.current,
+      capturedUid, currentUid: authUserIdRef.current,
+    })
+    runCheckoutPolling({
+      refreshFn:   () => proRefresh(),           // proRefresh() returns the new status
+      hasAccessFn: (s) => hasProAccess(s),       // receives returned status; no stale ref
+      signal:      controller.signal,
+    }).then(result => {
+      if (stale()) return
+      if (result === 'confirmed') {
+        setPollingState('confirmed')
+        track('subscription_access_confirmed')
+      } else if (result === 'timeout') {
+        setPollingState('timed_out')
+        track('subscription_confirmation_timed_out')
+      }
+      // 'aborted' means nothing to do (superseded/unmounted/switched).
+    })
+    return () => controller.abort()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [checkoutBanner, authUserId, accountGeneration])
+
+  // Abort an in-flight poll synchronously when the authoritative account changes.
+  useEffect(() => {
+    const cap = pollCaptureRef.current
+    if (cap && (authUserId !== cap.uid || accountGeneration !== cap.gen)) {
+      pollAbortRef.current?.abort()
+    }
+  }, [authUserId, accountGeneration])
+
+  // ── Stripe Checkout: create session and redirect ──────────────────────────
+  async function handleSubscribe() {
+    // Defensive: when billing is disabled the Subscribe button is not rendered
+    // (a ProComingSoon state is shown instead), but never invoke checkout even if
+    // this handler is reached some other way.
+    if (!BILLING_ENABLED) return
+    // Synchronous guard engaged before invoking, so two rapid clicks produce exactly
+    // one Edge Function call.
+    if (!subscribeGuardRef.current.begin()) return
+    const capturedGen = accountGenRef.current
+    setSubscribing(true)
+    setSubscribeError('')
+    track('checkout_started', { source: 'settings' })
+    let data, error
+    try {
+      // attemptId is a non-authoritative correlation value only; the server enforces
+      // single-flight via checkout_operations.
+      ;({ data, error } = await supabase.functions.invoke('create-checkout-session', {
+        body: { attemptId: crypto.randomUUID(), origin: window.location.origin },
+      }))
+    } catch {
+      // Thrown network/invoke failure. Surface the error only if still on the same
+      // account; always release the guard and clear loading so the button never sticks.
+      if (mountedRef.current && accountGenRef.current === capturedGen) {
+        setSubscribeError('Could not start checkout. Please try again.')
+        track('checkout_creation_failed', { source: 'settings' })
+        setSubscribing(false)
+      }
+      subscribeGuardRef.current.release()
+      return
+    }
+    if (!mountedRef.current || accountGenRef.current !== capturedGen) {
+      // Unmounted or account switched - release the guard; never navigate the new account.
+      subscribeGuardRef.current.release()
+      return
+    }
+    // Validate the returned URL before navigating (must be checkout.stripe.com HTTPS).
+    const redirect = resolveStripeRedirect(data, error, 'checkout')
+    if (!redirect.ok) {
+      setSubscribeError('Could not start checkout. Please try again.')
+      track('checkout_creation_failed', { source: 'settings' })
+      subscribeGuardRef.current.release()   // clear guard on controlled failure
+      setSubscribing(false)
+      return
+    }
+    // Navigating away - leave the guard set so a late click cannot open a 2nd session.
+    window.location.href = redirect.url
+  }
+
+  // ── Billing portal: open Stripe Customer Portal ───────────────────────────
+  async function handleBillingPortal() {
+    if (!billingPortalGuardRef.current.begin()) return
+    const capturedGen = accountGenRef.current
+    setBillingPortalOpening(true)
+    setBillingPortalError('')
+    let data, error
+    try {
+      ;({ data, error } = await supabase.functions.invoke('create-billing-portal-session'))
+    } catch {
+      if (mountedRef.current && accountGenRef.current === capturedGen) {
+        setBillingPortalError('Could not open billing management. Please try again.')
+        setBillingPortalOpening(false)
+      }
+      billingPortalGuardRef.current.release()
+      return
+    }
+    if (!mountedRef.current || accountGenRef.current !== capturedGen) {
+      billingPortalGuardRef.current.release()
+      return
+    }
+    // Validate the returned URL before navigating (must be billing.stripe.com HTTPS).
+    const redirect = resolveStripeRedirect(data, error, 'portal')
+    if (!redirect.ok) {
+      setBillingPortalError('Could not open billing management. Please try again.')
+      billingPortalGuardRef.current.release()   // clear guard on controlled failure
+      setBillingPortalOpening(false)
+      return
+    }
+    // Analytics fire ONLY after a valid portal URL is confirmed, just before navigation.
+    track('billing_portal_opened', { source: 'settings' })
+    window.location.href = redirect.url
+  }
+
   // ── Pro-status classification ─────────────────────────────────────────────
   const proLoading = proStatus === null
   const proFailed  = !proLoading && proStatus === 'error'
   const proClass   = (proLoading || proFailed) ? null : classifyProStatus(proStatus)
+  // DISPLAY-ONLY: when an existing Stripe subscription is in a state the backend will
+  // not let us duplicate (past_due/trialing/unpaid/paused/incomplete), we must not
+  // show a normal Subscribe button. This is not an access gate - hasProAccess() is.
+  const attentionState = (proLoading || proFailed)
+    ? null
+    : subscriptionAttentionState(proStatus?.subscription_status)
 
   // ── Render ────────────────────────────────────────────────────────────────
   // The page shell renders immediately. Sign out, Appearance, and Pro Access
@@ -422,6 +658,35 @@ function SettingsPage() {
         <div className={`${CARD} mb-[14px]`}>
           <span className={SECTION_LABEL}>Pro Access</span>
 
+          {/* Checkout return banners */}
+          {pollingState === 'polling' && (
+            <p role="status" aria-live="polite" className="text-[11.5px] text-muted animate-pulse motion-reduce:animate-none mb-2">
+              Confirming subscription…
+            </p>
+          )}
+          {pollingState === 'confirmed' && (
+            <p role="status" aria-live="polite" className="text-[11.5px] font-semibold text-success mb-2">
+              &#x2713; You&apos;re on Funnl Pro - welcome!
+            </p>
+          )}
+          {pollingState === 'timed_out' && (
+            <div className="mb-2">
+              <p className="text-[11.5px] text-muted mb-1">
+                Payment is processing. Your Pro access will appear shortly.
+              </p>
+              <button
+                onClick={handleProRetry}
+                disabled={retrying}
+                className="text-[11px] font-semibold text-accent hover:opacity-80 transition-opacity motion-reduce:transition-none disabled:opacity-40"
+              >
+                {retrying ? 'Checking…' : 'Check again'}
+              </button>
+            </div>
+          )}
+          {checkoutBanner === 'cancelled' && pollingState === null && (
+            <p className="text-[11.5px] text-muted mb-2">Checkout cancelled. You weren&apos;t charged.</p>
+          )}
+
           {proLoading ? (
             <p className="text-[12px] text-low animate-pulse motion-reduce:animate-none">Loading…</p>
           ) : proFailed ? (
@@ -443,6 +708,37 @@ function SettingsPage() {
               </svg>
               <span className="text-[12px] font-semibold text-hi">Funnl Pro · permanent access</span>
             </div>
+          ) : proClass === 'subscribed' ? (
+            <div>
+              <div className="flex items-center gap-[8px]">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                  <path d="M3 4H21L15 12.5V20H9V12.5Z" fill="#FF4423"/>
+                </svg>
+                <span className="text-[12px] font-semibold text-hi">Funnl Pro · subscribed</span>
+              </div>
+              {proStatus.cancel_at_period_end && proStatus.subscription_period_end && (
+                <p className="text-[10.5px] text-warning mt-[3px] ml-[21px]">
+                  Cancels {formatTrialEnd(proStatus.subscription_period_end)}
+                </p>
+              )}
+              {!proStatus.cancel_at_period_end && proStatus.subscription_period_end && (
+                <p className="text-[10.5px] text-low mt-[3px] ml-[21px]">
+                  Renews {formatTrialEnd(proStatus.subscription_period_end)}
+                </p>
+              )}
+              <button
+                onClick={handleBillingPortal}
+                disabled={billingPortalOpening}
+                className="mt-[10px] text-[11px] font-semibold text-accent hover:opacity-80 transition-opacity motion-reduce:transition-none disabled:opacity-40"
+              >
+                {billingPortalOpening ? 'Opening…' : 'Manage billing →'}
+              </button>
+              {billingPortalError && (
+                <p role="alert" aria-live="assertive" className="text-[10.5px] text-danger mt-[6px]">
+                  {billingPortalError}
+                </p>
+              )}
+            </div>
           ) : proClass === 'trial' ? (
             <div>
               <div className="flex items-center gap-[8px]">
@@ -461,13 +757,101 @@ function SettingsPage() {
                 </p>
               )}
             </div>
+          ) : attentionState ? (
+            // An existing Stripe subscription needs attention (payment incomplete, or
+            // trialing/unpaid/paused). Do NOT show a normal Subscribe button - the
+            // backend would reject a duplicate. Direct the user to billing management.
+            <div>
+              <p className="text-[12px] text-warning mb-2">
+                {attentionState === 'payment_incomplete'
+                  ? 'Your payment is not complete. Finish it in billing management.'
+                  : 'Your subscription needs attention. Manage it in billing.'}
+              </p>
+              <button
+                onClick={handleBillingPortal}
+                disabled={billingPortalOpening}
+                className="text-[11px] font-semibold text-accent hover:opacity-80 transition-opacity motion-reduce:transition-none disabled:opacity-40"
+              >
+                {billingPortalOpening ? 'Opening…' : 'Manage billing →'}
+              </button>
+              {billingPortalError && (
+                <p role="alert" aria-live="assertive" className="text-[10.5px] text-danger mt-[6px]">
+                  {billingPortalError}
+                </p>
+              )}
+            </div>
           ) : proClass === 'expired' ? (
-            <p className="text-[12px] text-low">
-              Trial ended{proStatus.ends_at ? ' ' + formatTrialEnd(proStatus.ends_at) : ''}
-            </p>
+            <div>
+              <p className="text-[12px] text-low mb-2">
+                Trial ended{proStatus.ends_at ? ' ' + formatTrialEnd(proStatus.ends_at) : ''}.
+                {BILLING_ENABLED ? ' Subscribe to continue with Funnl Pro.' : ''}
+              </p>
+              {BILLING_ENABLED ? (
+                <>
+                  {subscribeError && (
+                    <p className="text-[10.5px] text-danger mb-2">{subscribeError}</p>
+                  )}
+                  <button
+                    onClick={handleSubscribe}
+                    disabled={subscribing}
+                    className="text-[12px] font-bold text-white px-4 py-[9px] rounded-[9px] disabled:opacity-40 hover:opacity-90 transition-opacity motion-reduce:transition-none"
+                    style={{ background: 'var(--color-ember)' }}
+                  >
+                    {subscribing ? 'Loading…' : `Subscribe - ${PRO_PRICE_DISPLAY}`}
+                  </button>
+                </>
+              ) : (
+                <ProComingSoon size="sm" />
+              )}
+            </div>
           ) : (
-            // non_pro
-            <p className="text-[12px] text-low">No active Pro access.</p>
+            // non_pro: no trial, no subscription
+            <div>
+              <p className="text-[12px] text-low mb-2">No active Pro access.</p>
+              {BILLING_ENABLED ? (
+                <>
+                  {subscribeError && (
+                    <p className="text-[10.5px] text-danger mb-2">{subscribeError}</p>
+                  )}
+                  <button
+                    onClick={handleSubscribe}
+                    disabled={subscribing}
+                    className="text-[12px] font-bold text-white px-4 py-[9px] rounded-[9px] disabled:opacity-40 hover:opacity-90 transition-opacity motion-reduce:transition-none"
+                    style={{ background: 'var(--color-ember)' }}
+                  >
+                    {subscribing ? 'Loading…' : `Subscribe - ${PRO_PRICE_DISPLAY}`}
+                  </button>
+                </>
+              ) : (
+                <ProComingSoon size="sm" />
+              )}
+            </div>
+          )}
+
+          {/* Access-preserving billing warning: shown WITH the access label (not
+              instead of it) when a Stripe subscription needs attention (e.g. past_due
+              retains Pro) or a problematic Stripe status coexists with a trial/permanent
+              grant. Access is unchanged; hasProAccess() remains the only gate. */}
+          {attentionState && (proClass === 'permanent' || proClass === 'subscribed' || proClass === 'trial') && (
+            <div className="mt-3 pt-3 border-t border-line-1">
+              <p className="text-[11.5px] text-warning mb-1">
+                {attentionState === 'payment_incomplete'
+                  ? 'A payment is still processing on your account.'
+                  : 'Your payment needs attention to avoid losing access.'}
+              </p>
+              <button
+                onClick={handleBillingPortal}
+                disabled={billingPortalOpening}
+                className="text-[11px] font-semibold text-accent hover:opacity-80 transition-opacity motion-reduce:transition-none disabled:opacity-40"
+              >
+                {billingPortalOpening ? 'Opening…' : 'Manage billing →'}
+              </button>
+              {billingPortalError && (
+                <p role="alert" aria-live="assertive" className="text-[10.5px] text-danger mt-[6px]">
+                  {billingPortalError}
+                </p>
+              )}
+            </div>
           )}
         </div>
 

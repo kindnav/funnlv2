@@ -5,7 +5,7 @@ import { track } from '../lib/analytics'
 import { useProStatus } from '../lib/useProStatus'
 import { classifyProStatus } from '../lib/pro-ui-status'
 import { findDuplicate } from '../lib/contactFormUtils'
-import { viewExistingRoute } from '../lib/interactionFormUtils'
+import { viewExistingRoute, shouldShowAIFill } from '../lib/interactionFormUtils'
 
 function normalizeUrl(url) {
   const s = (url || '').trim()
@@ -46,10 +46,11 @@ function AddContactDrawer({ contact, contacts = [], onClose, onSuccess, initialN
   const [submitting, setSubmitting] = useState(false)
   const [error,      setError]      = useState('')
 
-  // Pro status for AI Fill gate (add mode only)
+  // Pro status: classifyProStatus is DISPLAY-ONLY (badge label). The AI Fill gate
+  // goes through shouldShowAIFill → hasProAccess (the canonical access gate).
   const proStatus = useProStatus()
   const proClass  = classifyProStatus(proStatus)
-  const showAIFill = !isEditMode && (proClass === 'permanent' || proClass === 'trial')
+  const showAIFill = shouldShowAIFill(proStatus, isEditMode)
 
   // AI Fill state
   const [aiText,              setAiText]              = useState('')

@@ -239,15 +239,18 @@ test('BottomNav imports useProStatus for Pro status', () => {
   assert.ok(bottomNav.includes('useProStatus'), 'BottomNav must use useProStatus hook for Pro-gating AI action')
 })
 
-test('BottomNav imports classifyProStatus for status classification', () => {
-  assert.ok(bottomNav.includes('classifyProStatus'), 'BottomNav must use classifyProStatus for canonical status classification')
+test('BottomNav imports hasProAccess for the canonical access gate', () => {
+  assert.ok(bottomNav.includes('hasProAccess'), 'BottomNav must use hasProAccess for the canonical Pro access gate')
 })
 
-test('BottomNav canUsePro: permanent or trial → show AI action', () => {
+test('BottomNav canUsePro is computed via hasProAccess (not a state allowlist)', () => {
   assert.ok(
-    bottomNav.includes("=== 'permanent' || displayStatus === 'trial'") ||
-    bottomNav.includes("permanent' || displayStatus === 'trial'"),
-    'BottomNav must show AI action only when displayStatus is permanent or trial'
+    /canUsePro\s*=\s*hasProAccess\(/.test(bottomNav),
+    'BottomNav canUsePro must be hasProAccess(proStatus) — never a hand-written permanent/trial/subscribed allowlist'
+  )
+  assert.ok(
+    !/canUsePro\s*=\s*[^\n]*===\s*['"](permanent|trial|subscribed)['"]/.test(bottomNav),
+    'BottomNav canUsePro must not enumerate entitlement states'
   )
 })
 

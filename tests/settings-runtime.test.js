@@ -84,9 +84,13 @@ test('missing required boolean fields → unavailable', () => {
   assert.strictEqual(classifyProStatus({ can_use_pro: true }), 'unavailable')
   assert.strictEqual(classifyProStatus({ permanent_pro: false }), 'unavailable')
 })
-test('permanent_pro=true → permanent (regardless of trial fields)', () => {
+test('permanent_pro=true with can_use_pro=true → permanent', () => {
   assert.strictEqual(classifyProStatus({ permanent_pro: true, can_use_pro: true }), 'permanent')
-  assert.strictEqual(classifyProStatus({ permanent_pro: true, can_use_pro: false, trial_active: false }), 'permanent')
+})
+test('permanent_pro=true but can_use_pro=false → unavailable (contradiction guard)', () => {
+  // A grant flag that disagrees with can_use_pro=false is internally inconsistent;
+  // classifyProStatus must not render a Pro label. can_use_pro is authoritative.
+  assert.strictEqual(classifyProStatus({ permanent_pro: true, can_use_pro: false, trial_active: false }), 'unavailable')
 })
 test('permanent_pro=false, can_use_pro=true, trial_active=true → trial', () => {
   assert.strictEqual(
@@ -251,10 +255,11 @@ test('useCallback is imported for stable refresh reference', () => {
   assert.ok(providerSrc.includes('useCallback'), 'must import useCallback for stable refresh function')
 })
 test('context default shape includes status and refresh', () => {
+  const ctxIdx = providerSrc.indexOf('createContext(')
+  const region = providerSrc.slice(ctxIdx, ctxIdx + 220)
   assert.ok(
-    providerSrc.includes("{ status: null, refresh:") ||
-    providerSrc.includes('{ status: null, refresh:'),
-    'context default must include status null and refresh'
+    region.includes('status: null') && /refresh:\s*async/.test(region),
+    'context default must include status null and an async refresh'
   )
 })
 test('useProStatus returns context.status (not the whole context)', () => {
@@ -281,7 +286,7 @@ test('refresh function calls getProAccessStatus', () => {
 })
 test('refresh updates provider state with null-coalesced error sentinel', () => {
   const refreshIdx = providerSrc.indexOf('const refresh = useCallback')
-  const region = providerSrc.slice(refreshIdx, refreshIdx + 200)
+  const region = providerSrc.slice(refreshIdx, refreshIdx + 320)
   assert.ok(
     region.includes("?? 'error'") || region.includes('?? "error"'),
     'refresh must coalesce null to error sentinel'

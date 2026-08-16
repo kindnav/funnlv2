@@ -882,22 +882,22 @@ test('account-switch reset clears saving flag', () => {
 })
 test('account-switch reset clears signingOut flag', () => {
   const authIdx = sp.indexOf('onAuthStateChange')
-  const region = sp.slice(authIdx, authIdx + 1000)
+  const region = sp.slice(authIdx, authIdx + 1200)
   assert.ok(region.includes('setSigningOut(false)'), 'account-switch must clear signingOut flag')
 })
 test('account-switch reset clears retrying flag', () => {
   const authIdx = sp.indexOf('onAuthStateChange')
-  const region = sp.slice(authIdx, authIdx + 1000)
+  const region = sp.slice(authIdx, authIdx + 1200)
   assert.ok(region.includes('setRetrying(false)'), 'account-switch must clear retrying flag')
 })
 test('account-switch reset clears deletingAll flag', () => {
   const authIdx = sp.indexOf('onAuthStateChange')
-  const region = sp.slice(authIdx, authIdx + 1000)
+  const region = sp.slice(authIdx, authIdx + 1500)
   assert.ok(region.includes('setDeletingAll(false)'), 'account-switch must clear deletingAll flag')
 })
 test('account-switch reset clears deleting flag', () => {
   const authIdx = sp.indexOf('onAuthStateChange')
-  const region = sp.slice(authIdx, authIdx + 1200)
+  const region = sp.slice(authIdx, authIdx + 1600)
   assert.ok(region.includes('setDeleting(false)'), 'account-switch must clear deleting flag')
 })
 test('account-switch reset clears user state to null', () => {
