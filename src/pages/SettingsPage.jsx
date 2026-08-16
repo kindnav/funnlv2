@@ -512,7 +512,7 @@ function SettingsPage() {
       // attemptId is a non-authoritative correlation value only; the server enforces
       // single-flight via checkout_operations.
       ;({ data, error } = await supabase.functions.invoke('create-checkout-session', {
-        body: { attemptId: crypto.randomUUID() },
+        body: { attemptId: crypto.randomUUID(), origin: window.location.origin },
       }))
     } catch {
       // Thrown network/invoke failure. Surface the error only if still on the same

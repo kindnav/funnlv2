@@ -575,7 +575,7 @@ function FunnlAIPage() {
       ;({ data, error } = await supabase.functions.invoke('create-checkout-session', {
         // attemptId is a non-authoritative request correlation value only; the server
         // enforces single-flight via the checkout_operations table.
-        body: { attemptId: crypto.randomUUID() },
+        body: { attemptId: crypto.randomUUID(), origin: window.location.origin },
       }))
     } catch {
       // Thrown network/invoke failure. Only surface UI + analytics if this request

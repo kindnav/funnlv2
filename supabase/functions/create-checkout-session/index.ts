@@ -1,6 +1,6 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { runCheckoutOrchestration } from './checkoutOrchestrator.js'
-import { classifyProviderStatus } from './checkoutHelpers.js'
+import { classifyProviderStatus, buildCheckoutRedirects } from './checkoutHelpers.js'
 import { fetchWithTimeout } from '../shared/boundedFetch.js'
 
 // ── CORS ──────────────────────────────────────────────────────────────────────
@@ -11,8 +11,10 @@ const corsHeaders = {
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const STRIPE_API  = 'https://api.stripe.com/v1'
-const SUCCESS_URL = 'https://www.getfunnl.com/settings?checkout=success'
-const CANCEL_URL  = 'https://www.getfunnl.com/settings?checkout=cancelled'
+// success_url / cancel_url are NOT hardcoded to production — they are derived
+// per-request from the caller's validated origin (buildCheckoutRedirects), so a
+// checkout begun on a Vercel Preview returns to that Preview. Untrusted or missing
+// origins fall back to the canonical production origin (open-redirect safe).
 
 function jsonResponse(body: unknown, status: number): Response {
   return new Response(
@@ -83,9 +85,22 @@ Deno.serve(async (req) => {
     const { data: { user }, error: authError } = await supabaseUser.auth.getUser()
     if (authError || !user) return jsonResponse({ error: 'Not authenticated' }, 401)
 
-    // Note: a browser-supplied attemptId (if present) is NON-authoritative and is
-    // deliberately ignored for deduplication — the server-side checkout_operations
-    // single-flight is the authority. We do not parse the body for it.
+    // ── Resolve the post-checkout redirect origin ───────────────────────────────
+    // The browser sends its window.location.origin so Stripe returns the user to the
+    // SAME origin that started checkout (production OR a trusted Vercel Preview).
+    // buildCheckoutRedirects validates it against a strict allowlist and falls back
+    // to canonical production for anything untrusted — so this is never an open
+    // redirect. A browser-supplied attemptId (if present) remains NON-authoritative
+    // and is ignored for deduplication (the checkout_operations single-flight is the
+    // authority); only `origin` is read from the body.
+    let requestedOrigin: unknown
+    try {
+      const body = await req.json()
+      requestedOrigin = body?.origin
+    } catch {
+      requestedOrigin = undefined
+    }
+    const { successUrl, cancelUrl } = buildCheckoutRedirects(requestedOrigin)
 
     // ── Service-role client + delegate to tested orchestration ──────────────────
     const supabaseAdmin = createClient(
@@ -100,8 +115,8 @@ Deno.serve(async (req) => {
       env: {
         priceId:    Deno.env.get('STRIPE_PRO_PRICE_ID') ?? '',
         stripeKey:  Deno.env.get('STRIPE_SECRET_KEY') ?? '',
-        successUrl: SUCCESS_URL,
-        cancelUrl:  CANCEL_URL,
+        successUrl,
+        cancelUrl,
       },
       // CLOCK CONTRACT: nowMs must return Unix time in MILLISECONDS (Date.now()).
       // The orchestration derives nowSec = Math.floor(nowMs() / 1000); an ISO string

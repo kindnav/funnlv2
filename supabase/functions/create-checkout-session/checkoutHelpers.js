@@ -113,3 +113,72 @@ export function classifyProviderStatus(status) {
   if (typeof status === 'number' && status >= 400 && status < 500) return 'definitive_failure'
   return 'unknown_failure'
 }
+
+// ── Post-checkout redirect origin resolution ──────────────────────────────────
+//
+// Stripe returns the user to success_url / cancel_url after checkout. Those URLs
+// must point back to the SAME origin that started checkout — otherwise a checkout
+// begun on a Vercel Preview returns to production (www.getfunnl.com), where the
+// Preview's Supabase auth session does not exist, dumping the user at /signin.
+//
+// The browser sends its window.location.origin. Because that value is
+// attacker-controllable, it is validated against a strict allowlist before use;
+// anything untrusted (or missing/malformed) falls back to the canonical
+// production origin, so this can NEVER be turned into an open redirect.
+
+// Canonical fallback — used whenever the requested origin is absent or untrusted.
+export const CANONICAL_ORIGIN = 'https://www.getfunnl.com'
+
+// Exact production origins (https only).
+const PROD_ORIGINS = new Set(['https://www.getfunnl.com', 'https://getfunnl.com'])
+
+// Trusted Vercel Preview hosts for THIS project only. Vercel preview hostnames are
+// `<project>-...-<team>.vercel.app`; here both project slug and team slug are
+// `funnlv2`. Requiring BOTH the `funnlv2-` prefix AND the `-funnlv2.vercel.app`
+// suffix anchors to the team-scoped namespace (only the funnlv2 team can deploy
+// hosts ending in `-funnlv2.vercel.app`), so an arbitrary `*.vercel.app` attacker
+// host cannot match. Fully anchored; lowercase host only.
+const PREVIEW_HOST_RE = /^funnlv2-[a-z0-9-]+-funnlv2\.vercel\.app$/
+
+/**
+ * Resolves a browser-supplied origin to a TRUSTED https origin string.
+ * Returns CANONICAL_ORIGIN for anything missing, malformed, non-https, carrying
+ * credentials or an explicit port, or not on the allowlist. Never returns an
+ * attacker-controlled origin.
+ *
+ * @param {unknown} rawOrigin — e.g. window.location.origin from the browser
+ * @returns {string} a trusted `https://host` origin (no path/query/port)
+ */
+export function resolveCheckoutOrigin(rawOrigin) {
+  if (typeof rawOrigin !== 'string' || rawOrigin.length === 0) return CANONICAL_ORIGIN
+  let u
+  try {
+    u = new URL(rawOrigin)
+  } catch {
+    return CANONICAL_ORIGIN
+  }
+  if (u.protocol !== 'https:') return CANONICAL_ORIGIN
+  if (u.username || u.password) return CANONICAL_ORIGIN   // no userinfo trickery
+  if (u.port) return CANONICAL_ORIGIN                     // prod/preview never use a custom port
+  const origin = `https://${u.hostname}`
+  if (PROD_ORIGINS.has(origin)) return origin
+  if (PREVIEW_HOST_RE.test(u.hostname)) return origin
+  return CANONICAL_ORIGIN
+}
+
+/**
+ * Builds the Stripe success_url / cancel_url from a browser-supplied origin,
+ * validated through resolveCheckoutOrigin. The path + query are constructed
+ * server-side (never taken from the browser), so only the trusted origin varies.
+ *
+ * @param {unknown} rawOrigin
+ * @returns {{ successUrl: string, cancelUrl: string, origin: string }}
+ */
+export function buildCheckoutRedirects(rawOrigin) {
+  const origin = resolveCheckoutOrigin(rawOrigin)
+  return {
+    origin,
+    successUrl: `${origin}/settings?checkout=success`,
+    cancelUrl:  `${origin}/settings?checkout=cancelled`,
+  }
+}
