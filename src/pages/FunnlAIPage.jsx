@@ -14,7 +14,8 @@ import { resolveStripeRedirect } from '../lib/stripeRedirect'
 import { createActionGuard } from '../lib/actionGuard'
 import { subscriptionAttentionState } from '../lib/subscriptionStatusPolicy'
 import { isAccountSwitch, isStaleGeneration } from '../lib/accountSwitch'
-import { PRO_PRICE_DISPLAY } from '../lib/proPricing'
+import { PRO_PRICE_DISPLAY, BILLING_ENABLED } from '../lib/proPricing'
+import ProComingSoon from '../components/ProComingSoon'
 import { getAvatarColor, getInitials } from '../lib/avatarUtils'
 import TopBar from '../components/TopBar'
 import {
@@ -561,6 +562,10 @@ function FunnlAIPage() {
   }
 
   async function handleSubscribe() {
+    // Defensive: when billing is disabled the Subscribe button is not rendered
+    // (a ProComingSoon state is shown instead); never invoke checkout even if this
+    // handler is reached some other way.
+    if (!BILLING_ENABLED) return
     // Synchronous guard engaged before invoking, so two rapid clicks (before React
     // commits setSubscribing) create exactly one Edge Function call.
     if (!subscribeGuardRef.current.begin()) return
@@ -703,7 +708,7 @@ function FunnlAIPage() {
                 ? 'Finish your payment in Settings →'
                 : 'Manage billing in Settings →'}
             </Link>
-          ) : (
+          ) : BILLING_ENABLED ? (
             <button
               onClick={handleSubscribe}
               disabled={subscribing}
@@ -712,6 +717,8 @@ function FunnlAIPage() {
             >
               {subscribing ? 'Loading…' : `Subscribe - ${PRO_PRICE_DISPLAY}`}
             </button>
+          ) : (
+            <ProComingSoon size="md" />
           )}
         </div>
       </div>

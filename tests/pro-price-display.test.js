@@ -48,7 +48,7 @@ test('SettingsPage.jsx does not display $7.99 / 7.99', () => {
   assert.ok(!/7\.99/.test(settings), 'SettingsPage still contains 7.99')
 })
 test('SettingsPage.jsx renders the price via PRO_PRICE_DISPLAY', () => {
-  assert.ok(settings.includes("import { PRO_PRICE_DISPLAY } from '../lib/proPricing'"),
+  assert.ok(/import\s*\{[^}]*PRO_PRICE_DISPLAY[^}]*\}\s*from\s*'\.\.\/lib\/proPricing'/.test(settings),
     'SettingsPage does not import PRO_PRICE_DISPLAY')
   assert.ok(settings.includes('Subscribe - ${PRO_PRICE_DISPLAY}'),
     'SettingsPage Subscribe CTA does not use PRO_PRICE_DISPLAY')
@@ -60,7 +60,7 @@ test('FunnlAIPage.jsx does not display $7.99 / 7.99', () => {
   assert.ok(!/7\.99/.test(funnlAI), 'FunnlAIPage still contains 7.99')
 })
 test('FunnlAIPage.jsx renders the price via PRO_PRICE_DISPLAY', () => {
-  assert.ok(funnlAI.includes("import { PRO_PRICE_DISPLAY } from '../lib/proPricing'"),
+  assert.ok(/import\s*\{[^}]*PRO_PRICE_DISPLAY[^}]*\}\s*from\s*'\.\.\/lib\/proPricing'/.test(funnlAI),
     'FunnlAIPage does not import PRO_PRICE_DISPLAY')
   assert.ok(funnlAI.includes('Subscribe - ${PRO_PRICE_DISPLAY}'),
     'FunnlAIPage Subscribe CTA does not use PRO_PRICE_DISPLAY')

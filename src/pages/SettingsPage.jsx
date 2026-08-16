@@ -25,7 +25,8 @@ import {
   canCloseDialog,
   THEME_ORDER,
 } from '../lib/settingsLifecycle'
-import { PRO_PRICE_DISPLAY } from '../lib/proPricing'
+import { PRO_PRICE_DISPLAY, BILLING_ENABLED } from '../lib/proPricing'
+import ProComingSoon from '../components/ProComingSoon'
 
 // ── Shared style tokens ─────────────────────────────────────────────────────
 const SECTION_LABEL =
@@ -111,6 +112,9 @@ function SettingsPage() {
   // subscribing: true while the create-checkout-session call is in flight.
   // pollingState: 'polling' | 'confirmed' | 'timed_out' | null
   const [checkoutBanner, setCheckoutBanner] = useState(() => {
+    // Billing disabled → never surface checkout-return / confirmation / error state,
+    // even if a stray ?checkout= param is present. No checkout could have started.
+    if (!BILLING_ENABLED) return null
     const p = new URLSearchParams(location.search)
     return p.get('checkout')  // 'success' | 'cancelled' | null
   })
@@ -500,6 +504,10 @@ function SettingsPage() {
 
   // ── Stripe Checkout: create session and redirect ──────────────────────────
   async function handleSubscribe() {
+    // Defensive: when billing is disabled the Subscribe button is not rendered
+    // (a ProComingSoon state is shown instead), but never invoke checkout even if
+    // this handler is reached some other way.
+    if (!BILLING_ENABLED) return
     // Synchronous guard engaged before invoking, so two rapid clicks produce exactly
     // one Edge Function call.
     if (!subscribeGuardRef.current.begin()) return
@@ -776,35 +784,47 @@ function SettingsPage() {
             <div>
               <p className="text-[12px] text-low mb-2">
                 Trial ended{proStatus.ends_at ? ' ' + formatTrialEnd(proStatus.ends_at) : ''}.
-                {' '}Subscribe to continue with Funnl Pro.
+                {BILLING_ENABLED ? ' Subscribe to continue with Funnl Pro.' : ''}
               </p>
-              {subscribeError && (
-                <p className="text-[10.5px] text-danger mb-2">{subscribeError}</p>
+              {BILLING_ENABLED ? (
+                <>
+                  {subscribeError && (
+                    <p className="text-[10.5px] text-danger mb-2">{subscribeError}</p>
+                  )}
+                  <button
+                    onClick={handleSubscribe}
+                    disabled={subscribing}
+                    className="text-[12px] font-bold text-white px-4 py-[9px] rounded-[9px] disabled:opacity-40 hover:opacity-90 transition-opacity motion-reduce:transition-none"
+                    style={{ background: 'var(--color-ember)' }}
+                  >
+                    {subscribing ? 'Loading…' : `Subscribe - ${PRO_PRICE_DISPLAY}`}
+                  </button>
+                </>
+              ) : (
+                <ProComingSoon size="sm" />
               )}
-              <button
-                onClick={handleSubscribe}
-                disabled={subscribing}
-                className="text-[12px] font-bold text-white px-4 py-[9px] rounded-[9px] disabled:opacity-40 hover:opacity-90 transition-opacity motion-reduce:transition-none"
-                style={{ background: 'var(--color-ember)' }}
-              >
-                {subscribing ? 'Loading…' : `Subscribe - ${PRO_PRICE_DISPLAY}`}
-              </button>
             </div>
           ) : (
             // non_pro: no trial, no subscription
             <div>
               <p className="text-[12px] text-low mb-2">No active Pro access.</p>
-              {subscribeError && (
-                <p className="text-[10.5px] text-danger mb-2">{subscribeError}</p>
+              {BILLING_ENABLED ? (
+                <>
+                  {subscribeError && (
+                    <p className="text-[10.5px] text-danger mb-2">{subscribeError}</p>
+                  )}
+                  <button
+                    onClick={handleSubscribe}
+                    disabled={subscribing}
+                    className="text-[12px] font-bold text-white px-4 py-[9px] rounded-[9px] disabled:opacity-40 hover:opacity-90 transition-opacity motion-reduce:transition-none"
+                    style={{ background: 'var(--color-ember)' }}
+                  >
+                    {subscribing ? 'Loading…' : `Subscribe - ${PRO_PRICE_DISPLAY}`}
+                  </button>
+                </>
+              ) : (
+                <ProComingSoon size="sm" />
               )}
-              <button
-                onClick={handleSubscribe}
-                disabled={subscribing}
-                className="text-[12px] font-bold text-white px-4 py-[9px] rounded-[9px] disabled:opacity-40 hover:opacity-90 transition-opacity motion-reduce:transition-none"
-                style={{ background: 'var(--color-ember)' }}
-              >
-                {subscribing ? 'Loading…' : `Subscribe - ${PRO_PRICE_DISPLAY}`}
-              </button>
             </div>
           )}
 
