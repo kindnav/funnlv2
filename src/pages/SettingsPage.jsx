@@ -25,6 +25,7 @@ import {
   canCloseDialog,
   THEME_ORDER,
 } from '../lib/settingsLifecycle'
+import { PRO_PRICE_DISPLAY } from '../lib/proPricing'
 
 // ── Shared style tokens ─────────────────────────────────────────────────────
 const SECTION_LABEL =
@@ -173,13 +174,11 @@ function SettingsPage() {
               .from('profiles')
               .select('display_name')
               .eq('id', u.id)
-              .maybeSingle()
-              .catch(() => ({ data: null })),
+              .maybeSingle(),
             supabase
               .from('contacts')
               .select('id', { count: 'exact', head: true })
-              .eq('user_id', u.id)
-              .catch(() => ({ count: 0 })),
+              .eq('user_id', u.id),
           ])
           if (!mountedRef.current || accountGenRef.current !== capturedGen) return
           if (profileResult.data) {
@@ -256,13 +255,16 @@ function SettingsPage() {
     async function refreshCount() {
       if (!user?.id) return
       const capturedGen = accountGenRef.current
-      const { count } = await supabase
-        .from('contacts')
-        .select('id', { count: 'exact', head: true })
-        .eq('user_id', user.id)
-        .catch(() => ({ count: null }))
-      if (!mountedRef.current || accountGenRef.current !== capturedGen) return
-      if (count !== null) setContactCount(count)
+      try {
+        const { count } = await supabase
+          .from('contacts')
+          .select('id', { count: 'exact', head: true })
+          .eq('user_id', user.id)
+        if (!mountedRef.current || accountGenRef.current !== capturedGen) return
+        if (count != null) setContactCount(count)
+      } catch {
+        // Count refresh failed - keep the existing displayed count.
+      }
     }
     window.addEventListener('funnl:contacts-changed', refreshCount)
     return () => window.removeEventListener('funnl:contacts-changed', refreshCount)
@@ -785,7 +787,7 @@ function SettingsPage() {
                 className="text-[12px] font-bold text-white px-4 py-[9px] rounded-[9px] disabled:opacity-40 hover:opacity-90 transition-opacity motion-reduce:transition-none"
                 style={{ background: 'var(--color-ember)' }}
               >
-                {subscribing ? 'Loading…' : 'Subscribe - $7.99/month'}
+                {subscribing ? 'Loading…' : `Subscribe - ${PRO_PRICE_DISPLAY}`}
               </button>
             </div>
           ) : (
@@ -801,7 +803,7 @@ function SettingsPage() {
                 className="text-[12px] font-bold text-white px-4 py-[9px] rounded-[9px] disabled:opacity-40 hover:opacity-90 transition-opacity motion-reduce:transition-none"
                 style={{ background: 'var(--color-ember)' }}
               >
-                {subscribing ? 'Loading…' : 'Subscribe - $7.99/month'}
+                {subscribing ? 'Loading…' : `Subscribe - ${PRO_PRICE_DISPLAY}`}
               </button>
             </div>
           )}

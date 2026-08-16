@@ -93,13 +93,16 @@ function NavRail() {
 
   const fetchProfile = useCallback(async (uid) => {
     if (!uid) return
-    const { data: p } = await supabase
-      .from('profiles')
-      .select('display_name')
-      .eq('id', uid)
-      .maybeSingle()
-      .catch(() => ({ data: null }))
-    setProfile(p)
+    try {
+      const { data: p } = await supabase
+        .from('profiles')
+        .select('display_name')
+        .eq('id', uid)
+        .maybeSingle()
+      setProfile(p)
+    } catch {
+      // Profile load failed - sidebar falls back to email / default name.
+    }
   }, [])
 
   useEffect(() => {

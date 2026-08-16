@@ -14,6 +14,7 @@ import { resolveStripeRedirect } from '../lib/stripeRedirect'
 import { createActionGuard } from '../lib/actionGuard'
 import { subscriptionAttentionState } from '../lib/subscriptionStatusPolicy'
 import { isAccountSwitch, isStaleGeneration } from '../lib/accountSwitch'
+import { PRO_PRICE_DISPLAY } from '../lib/proPricing'
 import { getAvatarColor, getInitials } from '../lib/avatarUtils'
 import TopBar from '../components/TopBar'
 import {
@@ -709,7 +710,7 @@ function FunnlAIPage() {
               className="text-[13px] font-bold text-white px-5 py-[10px] rounded-[10px] disabled:opacity-40 hover:opacity-90 transition-opacity motion-reduce:transition-none"
               style={{ background: 'var(--color-ember)' }}
             >
-              {subscribing ? 'Loading…' : 'Subscribe - $7.99/month'}
+              {subscribing ? 'Loading…' : `Subscribe - ${PRO_PRICE_DISPLAY}`}
             </button>
           )}
         </div>
