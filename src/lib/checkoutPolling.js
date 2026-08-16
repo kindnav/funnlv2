@@ -36,6 +36,31 @@ export function getNextPollDelay(attempt) {
  * @param {(ms: number) => Promise<void>} [opts.delayFn] — injectable sleep (default: real setTimeout)
  * @returns {Promise<'confirmed' | 'timeout' | 'aborted'>}
  */
+/**
+ * Whether a completed checkout-return polling run's result is STALE and must be
+ * discarded (must not set confirmed/timed_out/error or fire analytics). A result is
+ * stale when the component unmounted, the run was aborted, the account generation
+ * changed, or the account UID changed. The account generation is the primary signal;
+ * the UID check is secondary and applied only when both UIDs are known, so the
+ * mount-time null→uid load of the SAME initial account is never treated as a switch.
+ *
+ * @param {Object} o
+ * @param {boolean} o.mounted
+ * @param {boolean} o.aborted
+ * @param {number}  o.capturedGen
+ * @param {number}  o.currentGen
+ * @param {string|null} o.capturedUid
+ * @param {string|null} o.currentUid
+ * @returns {boolean} true when the result must be discarded
+ */
+export function isStalePollResult({ mounted, aborted, capturedGen, currentGen, capturedUid, currentUid }) {
+  if (!mounted) return true
+  if (aborted) return true
+  if (currentGen !== capturedGen) return true
+  if (capturedUid != null && currentUid != null && currentUid !== capturedUid) return true
+  return false
+}
+
 export async function runCheckoutPolling({ refreshFn, hasAccessFn, signal, delayFn }) {
   const sleep = delayFn ?? ((ms) => new Promise(resolve => setTimeout(resolve, ms)))
 

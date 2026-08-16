@@ -63,6 +63,46 @@ export function evaluateProEntitlement(profile, trial, subscription, now) {
 }
 
 /**
+ * Central entitlement decision used by ALL four AI Edge Functions so they cannot drift.
+ *
+ * Combines the pure evaluateProEntitlement with the per-source error flags from
+ * loadProEntitlement into a single, fail-closed-but-not-false-403 decision:
+ *
+ *   'allow'   — a successfully-loaded source proves access (permanent OR active
+ *               subscription OR active trial). A different source failing is irrelevant
+ *               once access is already proven (a paying subscriber is never denied
+ *               because a redundant profile/trial query failed).
+ *   'unknown' — NO source grants access AND at least one entitlement query FAILED, so
+ *               entitlement cannot be determined. The caller MUST return a retryable
+ *               5xx (internal_error), NEVER pro_required. This prevents a temporary DB
+ *               failure (e.g. the subscriptions query) from being reported as non-Pro
+ *               for a subscription-only paying user.
+ *   'deny'    — NO source grants access AND every entitlement query succeeded, so the
+ *               user is confirmed non-Pro. The caller returns pro_required (403).
+ *
+ * @param {{
+ *   profile: {ai_enabled: boolean}|null,
+ *   trial: {started_at: string|null, ends_at: string|null}|null,
+ *   subscription: {status: string}|null,
+ *   profileError: boolean, trialError: boolean, subscriptionError: boolean,
+ * }} loaded — the object returned by loadProEntitlement
+ * @param {Date} now
+ * @returns {{ status: 'allow'|'unknown'|'deny', reason: string }}
+ */
+export function decideEntitlement(loaded, now) {
+  const evaluated = evaluateProEntitlement(loaded?.profile ?? null, loaded?.trial ?? null, loaded?.subscription ?? null, now)
+  if (evaluated.canUse) {
+    return { status: 'allow', reason: evaluated.reason }
+  }
+  const anyQueryFailed = Boolean(loaded?.profileError || loaded?.trialError || loaded?.subscriptionError)
+  if (anyQueryFailed) {
+    // Entitlement unknown due to a transient failure — retryable, never a false 403.
+    return { status: 'unknown', reason: 'entitlement_unavailable' }
+  }
+  return { status: 'deny', reason: evaluated.reason }
+}
+
+/**
  * Runs a single Supabase query promise and catches any thrown exception.
  * Returns the standard { data, error } shape in all cases — never rejects.
  *

@@ -16,7 +16,7 @@
 //                         (may THROW on network failure — treated as unknown/retryable)
 //   env                 — { priceId, stripeKey, successUrl, cancelUrl }
 //   user                — { id, email }
-//   now (ms), log, requestId
+//   nowMs () => Unix time in MILLISECONDS (Date.now()); log; requestId
 //
 // Returns { status: number, body: object } — index.ts serializes body as JSON.
 //
@@ -36,7 +36,7 @@ export async function runCheckoutOrchestration({
   supabaseAdmin,
   createStripeSession,
   env,
-  now = () => Date.now(),
+  nowMs = () => Date.now(),   // Unix time in MILLISECONDS
   log = noopLog,
   requestId = '',
 }) {
@@ -186,7 +186,7 @@ export async function runCheckoutOrchestration({
     return resp(503, { error: 'Could not start checkout. Please try again.' })
   }
 
-  const nowSec = Math.floor(now() / 1000)
+  const nowSec = Math.floor(nowMs() / 1000)  // nowMs() is milliseconds → seconds
   const valid  = validateStripeSession(providerResult.session, nowSec)
   if (!valid.ok) {
     // HTTP success but the session is missing id / URL / a valid FUTURE expires_at.

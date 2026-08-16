@@ -64,17 +64,52 @@ export function isValidCheckoutUrl(url) {
  * as unknown, NOT finalize, and leave the operation for an idempotent retry.
  *
  * @param {unknown} session — parsed Stripe session (may be null/malformed)
- * @param {number} nowSec — current time in Unix SECONDS (injectable)
+ * @param {number} nowSec — current time in Unix SECONDS (must be a finite positive number).
+ *   A non-finite value (NaN / Infinity — e.g. from a mis-wired clock) or a non-positive
+ *   value is rejected as 'invalid_clock' so a broken clock can NEVER let a session pass.
  * @returns {{ ok: true, id: string, url: string, expiresAtIso: string }
- *          | { ok: false, reason: 'missing_session'|'missing_id'|'invalid_url'|'missing_expires_at'|'expired' }}
+ *          | { ok: false, reason: 'missing_session'|'missing_id'|'invalid_url'|'missing_expires_at'|'invalid_clock'|'expired' }}
  */
 export function validateStripeSession(session, nowSec) {
+  // Clock guard FIRST: a non-finite / non-positive nowSec (e.g. Math.floor(<ISO string>/1000)
+  // === NaN from a mis-wired production clock) must fail closed, never fall through to ok.
+  if (typeof nowSec !== 'number' || !Number.isFinite(nowSec) || nowSec <= 0) {
+    return { ok: false, reason: 'invalid_clock' }
+  }
   if (!session || typeof session !== 'object') return { ok: false, reason: 'missing_session' }
   const id = session.id
   if (typeof id !== 'string' || id.length === 0) return { ok: false, reason: 'missing_id' }
   if (!isValidCheckoutUrl(session.url)) return { ok: false, reason: 'invalid_url' }
   const exp = session.expires_at
   if (typeof exp !== 'number' || !Number.isFinite(exp) || exp <= 0) return { ok: false, reason: 'missing_expires_at' }
-  if (typeof nowSec !== 'number' || exp <= nowSec) return { ok: false, reason: 'expired' }
+  if (exp <= nowSec) return { ok: false, reason: 'expired' }
   return { ok: true, id, url: session.url, expiresAtIso: new Date(exp * 1000).toISOString() }
+}
+
+// HTTP statuses in the 4xx range that are AMBIGUOUS about whether a Checkout Session
+// was created (an interrupted request, an idempotency conflict, or rate limiting), so
+// they must be retried idempotently rather than treated as proof of no session.
+//   408 Request Timeout  — the request may have reached Stripe and created a session.
+//   409 Conflict         — an idempotency conflict; the original request may have succeeded.
+//   429 Too Many Requests — throttled; ambiguous, retry with the same idempotency key.
+export const AMBIGUOUS_4XX = new Set([408, 409, 429])
+
+/**
+ * Classifies a Stripe HTTP status into a checkout provider outcome. (JSON-parse
+ * failures on a 2xx response and network throws are handled by the caller as
+ * 'unknown_failure' — they are not status-based.)
+ *
+ *   2xx                                   → 'success'
+ *   408 / 409 / 429                       → 'unknown_failure' (ambiguous; idempotent retry)
+ *   other 4xx (400,401,402,403,404,422,…) → 'definitive_failure' (proves no session was created)
+ *   5xx / 3xx / <200 / non-number         → 'unknown_failure' (safest: retain the operation)
+ *
+ * @param {number} status
+ * @returns {'success'|'definitive_failure'|'unknown_failure'}
+ */
+export function classifyProviderStatus(status) {
+  if (typeof status === 'number' && status >= 200 && status < 300) return 'success'
+  if (AMBIGUOUS_4XX.has(status)) return 'unknown_failure'
+  if (typeof status === 'number' && status >= 400 && status < 500) return 'definitive_failure'
+  return 'unknown_failure'
 }

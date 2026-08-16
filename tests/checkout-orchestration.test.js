@@ -81,7 +81,7 @@ function makeDeps(over = {}) {
     supabaseAdmin,
     createStripeSession,
     env: over.env ?? { priceId: PRICE, stripeKey: 'sk_test', successUrl: 'https://x/s', cancelUrl: 'https://x/c' },
-    now: () => NOW_MS,
+    nowMs: over.nowMs ?? (() => NOW_MS),   // milliseconds
     log: (name, fields) => logs.push({ name, fields }),
     requestId: 'req-1',
   }
@@ -219,6 +219,21 @@ async function run() {
       assertEqual(supabaseAdmin.calls.finalize.length, 0, 'must not finalize an ambiguous success')
     })
   }
+
+  // ── C1: the OLD production wiring (ISO-string clock) must FAIL, never finalize ─
+  // Regression: index.ts used to pass now: () => new Date().toISOString(). The
+  // orchestration computes Math.floor(nowMs()/1000) → NaN for a string, and
+  // validateStripeSession must fail closed on a non-finite clock.
+  test('C1: ISO-string clock (old broken wiring) → 503, NOT finalized', async () => {
+    const { deps, supabaseAdmin } = makeDeps({ nowMs: () => new Date(NOW_MS).toISOString() })
+    const r = await runCheckoutOrchestration(deps)
+    assertEqual(r.status, 503)
+    assertEqual(supabaseAdmin.calls.finalize.length, 0, 'a broken clock must never finalize a session')
+  })
+  test('C1: numeric millisecond clock (Date.now()) → 200 success', async () => {
+    const { deps } = makeDeps({ nowMs: () => NOW_MS })
+    assertEqual((await runCheckoutOrchestration(deps)).status, 200)
+  })
 
   // ── R3: unknown vs definitive provider failures ──────────────────────────────
   test('network throw → 503, NOT finalized (retain operation)', async () => {

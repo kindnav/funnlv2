@@ -21,35 +21,70 @@
  *   Gate AI with:  const canUsePro = hasProAccess(proStatus)   // from pro-ui-status.js
  *   Badge display: const displayStatus = classifyProStatus(proStatus)
  */
-import { createContext, createElement, useCallback, useContext, useEffect, useState } from 'react'
+import { createContext, createElement, useCallback, useContext, useEffect, useRef, useState } from 'react'
 import { getProAccessStatus } from './pro-access-status'
+import { supabase } from './supabase'
+import { proStatusTransition, shouldApplyProStatusResult } from './proStatusGeneration'
 
-// Context shape: { status: null | 'error' | object, refresh: () => Promise<void> }
+// Context shape: { status: null | 'error' | object, refresh: () => Promise<...> }
 // Default refresh is a no-op so consumers outside the provider never throw.
 const ProStatusContext = createContext({ status: null, refresh: async () => {} })
 
 export function ProStatusProvider({ children }) {
-  // null = loading; 'error' = RPC failed/unavailable; object = loaded status
+  // null = loading/unavailable-after-switch; 'error' = RPC failed; object = loaded status.
   const [proStatus, setProStatus] = useState(null)
 
-  // Initial load — runs once on mount.
+  // The UID whose status is currently loaded, and a request generation that is bumped
+  // on every account change/refresh. An async result may only be applied when BOTH the
+  // captured UID and generation still match — see shouldApplyProStatusResult.
+  const currentUidRef = useRef(null)
+  const genRef        = useRef(0)
+  const activeRef     = useRef(true)
+
+  // Account-aware load: subscribe to auth changes (supabase-js emits INITIAL_SESSION on
+  // subscribe, so the initial load happens here too). On a genuine UID change we
+  // synchronously invalidate the previous generation, clear the previous status (so the
+  // old account's can_use_pro can never leak), and fetch the new user's status. On
+  // sign-out we clear and do NOT fetch. A same-UID event (e.g. token refresh) is ignored
+  // so valid state is not needlessly discarded.
   useEffect(() => {
-    let active = true
-    getProAccessStatus().then(status => {
-      if (!active) return
-      // null from RPC means "unavailable" — store 'error' to distinguish from loading null
-      setProStatus(status ?? 'error')
+    activeRef.current = true
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      const newUid = session?.user?.id ?? null
+      const action = proStatusTransition(currentUidRef.current, newUid)
+      if (action === 'ignore') return
+
+      currentUidRef.current = newUid
+      const gen = ++genRef.current   // invalidate any in-flight fetch/refresh
+      setProStatus(null)             // fail-closed: cannot grant Pro during transition
+
+      if (action === 'clear') return // signed out — no fetch
+
+      getProAccessStatus().then(status => {
+        if (!activeRef.current) return
+        if (!shouldApplyProStatusResult(newUid, gen, currentUidRef.current, genRef.current)) return
+        setProStatus(status ?? 'error')
+      })
     })
-    return () => { active = false }
+    return () => {
+      activeRef.current = false
+      subscription?.unsubscribe?.()
+    }
   }, [])
 
-  // Stable refresh function — stable reference across renders so consumers do not
-  // re-render from a changing callback reference. Calls the RPC, updates the
-  // shared provider state so every consumer sees the fresh result, and returns
-  // the newly fetched status for callers that need it (e.g. checkout polling).
+  // Stable refresh: captures the current UID + generation and discards its result if
+  // either changed (account switch or a newer request superseded it). Returns the
+  // fetched status for callers that need it (e.g. checkout polling), or 'error' when the
+  // result is stale so any caller that reads it fails closed.
   const refresh = useCallback(async () => {
+    const uidAtStart = currentUidRef.current
+    const genAtStart = genRef.current
     const status = await getProAccessStatus()
     const normalized = status ?? 'error'
+    if (!activeRef.current) return normalized
+    if (!shouldApplyProStatusResult(uidAtStart, genAtStart, currentUidRef.current, genRef.current)) {
+      return 'error'   // stale — do not overwrite the newer account's state; fail closed
+    }
     setProStatus(normalized)
     return normalized
   }, [])

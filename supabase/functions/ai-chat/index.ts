@@ -3,7 +3,7 @@ import { formatNetworkContext, resolveToday } from './helpers.js'
 import { normalizeMessages } from './normalizeMessages.js'
 import { runProviderAttempts } from './providerCall.js'
 import { sanitizeContactLinks, sanitizeAssistantReply } from './sanitizeReply.js'
-import { loadProEntitlement, evaluateProEntitlement } from '../shared/pro-entitlement.js'
+import { loadProEntitlement, decideEntitlement } from '../shared/pro-entitlement.js'
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -127,7 +127,7 @@ Deno.serve(async (req) => {
     }
 
     // ── 2. Check effective Pro access via service-role key (authoritative) ───────
-    // Uses shared loadProEntitlement + evaluateProEntitlement from ../shared/pro-entitlement.js.
+    // Uses shared loadProEntitlement + decideEntitlement from ../shared/pro-entitlement.js.
     // DB failure on either query → internal_error (retryable 500), not pro_required (403).
     // A transient DB issue must not permanently block the user's request.
     const supabaseAdmin = createClient(
@@ -135,36 +135,33 @@ Deno.serve(async (req) => {
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
     )
 
-    const {
-      profile, trial, subscription,
-      profileError, trialError, subscriptionError,
-      _profileErrorCode, _trialErrorCode, _subscriptionErrorCode,
-    } = await loadProEntitlement(supabaseAdmin, user.id)
+    const loaded = await loadProEntitlement(supabaseAdmin, user.id)
 
-    if (profileError || trialError) {
-      console.error('ai-chat entitlement-query-failed', {
+    // Central entitlement decision (shared across all 4 AI functions). A failed
+    // entitlement query with no proven access is UNKNOWN → retryable 500, never a
+    // false pro_required 403 (which would wrongly lock out a paying subscriber whose
+    // subscription query merely failed transiently).
+    const decision = decideEntitlement(loaded, new Date())
+
+    if (decision.status === 'unknown') {
+      console.error('ai-chat entitlement-unavailable', {
         requestId,
-        profileErrorCode: _profileErrorCode,
-        trialErrorCode:   _trialErrorCode,
+        profileErrorCode:      loaded._profileErrorCode,
+        trialErrorCode:        loaded._trialErrorCode,
+        subscriptionErrorCode: loaded._subscriptionErrorCode,
       })
       return errorResponse(
         'internal_error',
-        'Could not verify access — please try again',
+        'Could not verify access. Please try again.',
         true,
         requestId,
         500
       )
     }
-    if (subscriptionError) {
-      console.warn('ai-chat subscription-query-failed', { requestId, code: _subscriptionErrorCode })
-    }
-
-    const entitlement = evaluateProEntitlement(profile, trial, subscription, new Date())
-
-    if (!entitlement.canUse) {
+    if (decision.status === 'deny') {
       return errorResponse(
         'pro_required',
-        'Funnl AI is a Pro feature — access not enabled for this account',
+        'Funnl AI is a Pro feature. Access is not enabled for this account.',
         false,
         requestId,
         403

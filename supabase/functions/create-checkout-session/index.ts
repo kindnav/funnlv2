@@ -1,5 +1,6 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { runCheckoutOrchestration } from './checkoutOrchestrator.js'
+import { classifyProviderStatus } from './checkoutHelpers.js'
 
 // ── CORS ──────────────────────────────────────────────────────────────────────
 const corsHeaders = {
@@ -25,14 +26,15 @@ function log(eventName: string, fields: Record<string, unknown>): void {
   console.log(JSON.stringify({ event: `create-checkout-session:${eventName}`, ...fields }))
 }
 
-// Real Stripe Checkout Session creation. Classifies the provider outcome (R3) so the
+// Real Stripe Checkout Session creation. Classifies the provider outcome via the shared
+// pure classifyProviderStatus() helper (the same one the tests exercise) so the
 // orchestration can safely distinguish "no session was created" (definitive_failure)
 // from "we don't know" (unknown_failure). Never logs the Stripe response body.
 //
-//   success            — HTTP 2xx + parseable JSON (fields validated by the orchestration)
-//   definitive_failure — HTTP 4xx (client error: proves no session was created)
-//   unknown_failure    — HTTP 5xx / 429 (ambiguous), or HTTP 2xx with invalid JSON
-//   (a fetch throw is caught by the orchestration and treated as unknown_failure)
+// See classifyProviderStatus for the mapping. Notably 408 / 409 / 429 are AMBIGUOUS
+// (unknown_failure), NOT definitive — a session may have been created, so the operation
+// is retained for an idempotent retry. A 2xx with invalid JSON and a network throw are
+// also unknown_failure.
 async function createStripeSession(
   { params, idempotencyKey, stripeKey }:
   { params: URLSearchParams; idempotencyKey: string; stripeKey: string },
@@ -47,10 +49,7 @@ async function createStripeSession(
     body: params.toString(),
   })
   if (!res.ok) {
-    // 4xx proves the request was rejected and no session created → definitive.
-    // 5xx / 429 are ambiguous (a session might have been created) → unknown.
-    const outcome = res.status >= 400 && res.status < 500 ? 'definitive_failure' : 'unknown_failure'
-    return { outcome, status: res.status, session: null }
+    return { outcome: classifyProviderStatus(res.status), status: res.status, session: null }
   }
   try {
     return { outcome: 'success', status: res.status, session: await res.json() as Record<string, unknown> }
@@ -100,7 +99,10 @@ Deno.serve(async (req) => {
         successUrl: SUCCESS_URL,
         cancelUrl:  CANCEL_URL,
       },
-      now: () => new Date().toISOString(),
+      // CLOCK CONTRACT: nowMs must return Unix time in MILLISECONDS (Date.now()).
+      // The orchestration derives nowSec = Math.floor(nowMs() / 1000); an ISO string
+      // here would produce NaN and be rejected by validateStripeSession's clock guard.
+      nowMs: () => Date.now(),
       log,
       requestId,
     })

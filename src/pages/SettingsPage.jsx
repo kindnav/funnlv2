@@ -4,7 +4,7 @@ import { supabase } from '../lib/supabase'
 import { getTheme, setTheme } from '../lib/theme'
 import { useProStatus, useProRefresh } from '../lib/useProStatus'
 import { classifyProStatus, hasProAccess } from '../lib/pro-ui-status'
-import { runCheckoutPolling } from '../lib/checkoutPolling'
+import { runCheckoutPolling, isStalePollResult } from '../lib/checkoutPolling'
 import { resolveStripeRedirect } from '../lib/stripeRedirect'
 import { createActionGuard } from '../lib/actionGuard'
 import { subscriptionAttentionState } from '../lib/subscriptionStatusPolicy'
@@ -115,6 +115,10 @@ function SettingsPage() {
   if (!subscribeGuardRef.current) subscribeGuardRef.current = createActionGuard()
   const billingPortalGuardRef = useRef(null)
   if (!billingPortalGuardRef.current) billingPortalGuardRef.current = createActionGuard()
+  // Abort handle for an in-flight checkout-return polling run, so an account switch or
+  // sign-out can synchronously cancel it (its stale result must never confirm/timeout
+  // or fire analytics for a different account).
+  const pollAbortRef = useRef(null)
 
   // ── Theme ─────────────────────────────────────────────────────────────────
   const [currentTheme, setCurrentTheme] = useState(() => getTheme())
@@ -193,6 +197,9 @@ function SettingsPage() {
         if (!user?.id || newUid === user.id) return
         accountGenRef.current++
         currentUidRef.current = null
+        // Synchronously abort any in-flight checkout-return polling so its stale result
+        // cannot confirm/timeout or fire analytics for the new account (C4).
+        pollAbortRef.current?.abort()
         // Synchronously release the checkout/portal single-flight guards (R5).
         subscribeGuardRef.current.release()
         billingPortalGuardRef.current.release()
@@ -423,13 +430,29 @@ function SettingsPage() {
       return
     }
     setPollingState('polling')
+    // Capture the account UID + generation for this polling run. Abort any prior run.
+    const capturedGen = accountGenRef.current
+    const capturedUid = currentUidRef.current
+    pollAbortRef.current?.abort()
     const controller = new AbortController()
+    pollAbortRef.current = controller
+    // A stale poll (after an account switch / sign-out / newer run / unmount) must not
+    // confirm, timeout, error, or fire analytics for a different account. The account
+    // generation is the primary signal (bumped on every real UID change); the UID check
+    // is a secondary guard, applied only when both UIDs are known so the mount-time
+    // null→uid load of the SAME initial account is never treated as a switch.
+    const stale = () => isStalePollResult({
+      mounted:     mountedRef.current,
+      aborted:     controller.signal.aborted,
+      capturedGen, currentGen: accountGenRef.current,
+      capturedUid, currentUid: currentUidRef.current,
+    })
     runCheckoutPolling({
       refreshFn:   () => proRefresh(),           // proRefresh() now returns the new status
       hasAccessFn: (s) => hasProAccess(s),       // receives returned status; no stale ref
       signal:      controller.signal,
     }).then(result => {
-      if (!mountedRef.current) return
+      if (stale()) return
       if (result === 'confirmed') {
         setPollingState('confirmed')
         track('subscription_access_confirmed')
@@ -437,7 +460,7 @@ function SettingsPage() {
         setPollingState('timed_out')
         track('subscription_confirmation_timed_out')
       }
-      // 'aborted' means unmount - safe to ignore.
+      // 'aborted' means nothing to do (superseded/unmounted/switched).
     })
     return () => controller.abort()
   }, []) // intentionally runs only on mount

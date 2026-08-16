@@ -7,6 +7,7 @@ import {
   buildCheckoutIdempotencyKey,
   isValidCheckoutUrl,
   validateStripeSession,
+  classifyProviderStatus,
 } from '../supabase/functions/create-checkout-session/checkoutHelpers.js'
 
 let passed = 0, failed = 0
@@ -74,6 +75,38 @@ test('zero/negative expires_at → missing_expires_at', () => {
 })
 test('expired expires_at (past) → expired', () => assertEqual(validateStripeSession({ id: 'cs', url: URL_OK, expires_at: NOW - 5 }, NOW).reason, 'expired'))
 test('expires_at exactly now → expired (must be strictly future)', () => assertEqual(validateStripeSession({ id: 'cs', url: URL_OK, expires_at: NOW }, NOW).reason, 'expired'))
+test('expires_at one second in the future → ok', () => assert(validateStripeSession({ id: 'cs', url: URL_OK, expires_at: NOW + 1 }, NOW).ok))
+
+// ── C1: clock guard — a broken clock must NEVER let a session pass ──────────────
+const GOOD = { id: 'cs', url: URL_OK, expires_at: NOW + 3600 }
+test('NaN nowSec → invalid_clock (NEVER ok, even with a valid future session)', () => {
+  const r = validateStripeSession(GOOD, NaN)
+  assert(!r.ok, 'NaN clock must not pass')
+  assertEqual(r.reason, 'invalid_clock')
+})
+test('Infinity nowSec → invalid_clock', () => assertEqual(validateStripeSession(GOOD, Infinity).reason, 'invalid_clock'))
+test('-Infinity nowSec → invalid_clock', () => assertEqual(validateStripeSession(GOOD, -Infinity).reason, 'invalid_clock'))
+test('negative nowSec → invalid_clock', () => assertEqual(validateStripeSession(GOOD, -5).reason, 'invalid_clock'))
+test('zero nowSec → invalid_clock', () => assertEqual(validateStripeSession(GOOD, 0).reason, 'invalid_clock'))
+test('non-number nowSec (string) → invalid_clock', () => assertEqual(validateStripeSession(GOOD, '1700000000').reason, 'invalid_clock'))
+test('valid positive numeric clock → ok', () => assert(validateStripeSession(GOOD, NOW).ok))
+
+// ── C2: classifyProviderStatus ─────────────────────────────────────────────────
+console.log('\nclassifyProviderStatus')
+const DEFINITIVE = [400, 401, 402, 403, 404, 422]
+const UNKNOWN    = [408, 409, 429, 500, 502, 503]
+for (const s of DEFINITIVE) test(`HTTP ${s} → definitive_failure`, () => assertEqual(classifyProviderStatus(s), 'definitive_failure'))
+for (const s of UNKNOWN)    test(`HTTP ${s} → unknown_failure`, () => assertEqual(classifyProviderStatus(s), 'unknown_failure'))
+test('HTTP 200 → success', () => assertEqual(classifyProviderStatus(200), 'success'))
+test('HTTP 201 → success', () => assertEqual(classifyProviderStatus(201), 'success'))
+test('429 is NOT definitive (the fix): unknown_failure', () => assertEqual(classifyProviderStatus(429), 'unknown_failure'))
+test('408 (interrupted) → unknown_failure', () => assertEqual(classifyProviderStatus(408), 'unknown_failure'))
+test('409 (idempotency conflict) → unknown_failure', () => assertEqual(classifyProviderStatus(409), 'unknown_failure'))
+test('3xx / <200 / non-number → unknown_failure (safest)', () => {
+  assertEqual(classifyProviderStatus(302), 'unknown_failure')
+  assertEqual(classifyProviderStatus(100), 'unknown_failure')
+  assertEqual(classifyProviderStatus(undefined), 'unknown_failure')
+})
 
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed\n`)
 if (failed > 0) process.exit(1)

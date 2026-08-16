@@ -1,6 +1,6 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { UUID_V4_RE, MAX_CONTACTS, ALLOWED_REL_TYPES, normalizeTags, sanitizeOutput } from '../shared/categorization-helpers.js'
-import { loadProEntitlement, evaluateProEntitlement } from '../shared/pro-entitlement.js'
+import { loadProEntitlement, decideEntitlement } from '../shared/pro-entitlement.js'
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -37,7 +37,7 @@ Deno.serve(async (req) => {
     }
 
     // ── 2. Check effective Pro access via service-role key (authoritative) ───────
-    // Uses shared loadProEntitlement + evaluateProEntitlement from ../shared/pro-entitlement.js.
+    // Uses shared loadProEntitlement + decideEntitlement from ../shared/pro-entitlement.js.
     // DB failure on either query → 500 (retriable), not 403. A transient DB issue
     // must not permanently lock out a Pro user.
     const supabaseAdmin = createClient(
@@ -45,31 +45,26 @@ Deno.serve(async (req) => {
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
     )
 
-    const {
-      profile, trial, subscription,
-      profileError, trialError, subscriptionError,
-      _profileErrorCode, _trialErrorCode, _subscriptionErrorCode,
-    } = await loadProEntitlement(supabaseAdmin, user.id)
+    const loaded = await loadProEntitlement(supabaseAdmin, user.id)
 
-    if (profileError || trialError) {
-      console.error('[ai-categorize-contacts] entitlement-query-failed', {
-        profileErrorCode: _profileErrorCode,
-        trialErrorCode:   _trialErrorCode,
+    // Central entitlement decision. Unknown (a failed query with no proven access) →
+    // retryable 500, never a false pro_required 403 for a paying subscriber.
+    const decision = decideEntitlement(loaded, new Date())
+
+    if (decision.status === 'unknown') {
+      console.error('[ai-categorize-contacts] entitlement-unavailable', {
+        profileErrorCode:      loaded._profileErrorCode,
+        trialErrorCode:        loaded._trialErrorCode,
+        subscriptionErrorCode: loaded._subscriptionErrorCode,
       })
       return new Response(
-        JSON.stringify({ error: 'Could not verify access — please try again' }),
+        JSON.stringify({ error: 'Could not verify access. Please try again.' }),
         { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       )
     }
-    if (subscriptionError) {
-      console.warn('[ai-categorize-contacts] subscription-query-failed', { code: _subscriptionErrorCode })
-    }
-
-    const entitlement = evaluateProEntitlement(profile, trial, subscription, new Date())
-
-    if (!entitlement.canUse) {
+    if (decision.status === 'deny') {
       return new Response(
-        JSON.stringify({ error: 'Funnl AI is a Pro feature — access not enabled for this account' }),
+        JSON.stringify({ error: 'Funnl AI is a Pro feature. Access is not enabled for this account.' }),
         { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       )
     }

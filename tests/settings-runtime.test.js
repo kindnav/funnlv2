@@ -285,7 +285,7 @@ test('refresh function calls getProAccessStatus', () => {
 })
 test('refresh updates provider state with null-coalesced error sentinel', () => {
   const refreshIdx = providerSrc.indexOf('const refresh = useCallback')
-  const region = providerSrc.slice(refreshIdx, refreshIdx + 200)
+  const region = providerSrc.slice(refreshIdx, refreshIdx + 320)
   assert.ok(
     region.includes("?? 'error'") || region.includes('?? "error"'),
     'refresh must coalesce null to error sentinel'
