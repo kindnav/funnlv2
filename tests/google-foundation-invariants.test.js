@@ -187,5 +187,46 @@ test('start performs bounded best-effort stale-state cleanup', () => {
   assert.ok(/google_oauth_states'\)\.delete\(\)\.lt\('created_at'/.test(start))
 })
 
+// ── Correction round 2: callback fail-closed, headers, method, JSON, disconnect ─
+console.log('\ncallback fail-closed on lookups')
+const startSrc = read('supabase/functions/google-oauth-start/index.ts')
+const disconnectSrc = read('supabase/functions/google-oauth-disconnect/index.ts')
+
+test('callback inspects BOTH lookup errors and returns before persistence', () => {
+  assert.ok(/error:\s*connLookupErr[\s\S]*?if \(connLookupErr\)[\s\S]*?return redirect/.test(callback),
+    'connection lookup error must fail closed')
+  assert.ok(/error:\s*tokenLookupErr[\s\S]*?if \(tokenLookupErr\)[\s\S]*?return redirect/.test(callback),
+    'token lookup error must fail closed')
+})
+test('callback does NOT revoke on an unresolved lookup failure', () => {
+  // The lookup-error branches return the error redirect without a revokeToken call.
+  const connBranch = callback.slice(callback.indexOf('if (connLookupErr)'), callback.indexOf('if (connLookupErr)') + 160)
+  assert.ok(!/revokeToken/.test(connBranch), 'no blind revoke on connection lookup failure')
+})
+
+console.log('\nOAuth security headers + method')
+test('callback rejects non-GET without processing', () => {
+  assert.ok(/req\.method !== 'GET'[\s\S]*?status: 405/.test(callback))
+})
+test('callback + start set no-store / no-referrer / nosniff security headers', () => {
+  for (const [name, src] of [['callback', callback], ['start', startSrc]]) {
+    assert.ok(/'Cache-Control':\s*'no-store'/.test(src), `${name} Cache-Control`)
+    assert.ok(/'Referrer-Policy':\s*'no-referrer'/.test(src), `${name} Referrer-Policy`)
+    assert.ok(/'X-Content-Type-Options':\s*'nosniff'/.test(src), `${name} nosniff`)
+    assert.ok(/'Pragma':\s*'no-cache'/.test(src), `${name} Pragma`)
+  }
+})
+
+console.log('\nmalformed provider JSON')
+test('callback guards token + userinfo .json() parsing', () => {
+  assert.ok(/tokenData = await tokenRes\.json\(\)[\s\S]*?catch[\s\S]*?token_json_malformed/.test(callback))
+  assert.ok(/identity = await userinfoRes\.json\(\)[\s\S]*?catch[\s\S]*?userinfo_json_malformed/.test(callback))
+})
+
+console.log('\ndisconnect requires both local deletions')
+test('disconnect returns 500 when either local deletion errors', () => {
+  assert.ok(/oauthStateDeleteError \|\| connectionDeleteError[\s\S]*?internal_error[\s\S]*?500/.test(disconnectSrc))
+})
+
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed\n`)
 if (failed > 0) process.exit(1)

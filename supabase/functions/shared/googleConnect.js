@@ -21,7 +21,9 @@ import {
   grantedScopesIncludeCalendar,
   validateGoogleIdentity,
   isSameGoogleAccount,
-  requiresNewRefreshToken,
+  resolveRefreshRequirement,
+  hasStoredRefreshTokenPair,
+  shouldRevokeNewTokenOnFailure,
   resolveRefreshTokenColumns,
 } from './googleOauthHelpers.js'
 
@@ -70,25 +72,34 @@ export async function finalizeGoogleConnection(deps) {
     return { ok: false, reason: 'identity_invalid' }
   }
 
-  // 3. Refresh-token requirement for a new / different account.
-  const sameSub = isSameGoogleAccount(existingConnection, idResult.sub)
-  if (requiresNewRefreshToken(sameSub, Boolean(refreshToken))) {
+  // 3. Refresh-token requirement. `active` is stored only when the connection
+  //    will have usable refresh credentials: a new refresh token (any account),
+  //    or the SAME account with a COMPLETE existing stored pair. Never active with
+  //    null/incomplete refresh credentials.
+  const sameSub       = isSameGoogleAccount(existingConnection, idResult.sub)
+  const hasNewRefresh = Boolean(refreshToken)
+  const hasStoredPair = hasStoredRefreshTokenPair(existingRefreshRow)
+  const requirement   = resolveRefreshRequirement({ sameSub, hasNewRefresh, hasStoredPair })
+  if (!requirement.ok) {
     await revokeNew()
-    return { ok: false, reason: 'refresh_token_required' }
+    return { ok: false, reason: requirement.reason }
   }
 
-  // 4. Encrypt tokens. Refresh preserved ONLY for the same account.
-  const encAccess  = await encryptAccess(accessToken)
-  const encRefresh = refreshToken ? await encryptRefresh(refreshToken) : null
-  const refreshCols = resolveRefreshTokenColumns(encRefresh, existingRefreshRow, sameSub)
-
-  // 5. Atomic persistence (single RPC). On failure, revoke the new token and
-  //    leave NO partial active connection (the RPC rolls both rows back).
-  const tokenExpiresAt = exchange?.expiresIn
-    ? new Date(nowMs + exchange.expiresIn * 1000).toISOString()
-    : null
-  const scopes = (exchange?.scope || '').split(' ').filter(Boolean)
+  // 4-5. Encrypt + resolve + build expiry + ATOMIC persist — ALL inside one
+  //      try/catch so any failure (encryptAccess, encryptRefresh, column
+  //      resolution, expiry construction, or the store RPC) produces a controlled
+  //      failure and never escapes. Compensation: best-effort revoke the newly
+  //      issued token for a new/different account, but PRESERVE the existing local
+  //      connection + combined grant for the same account with a working pair.
   try {
+    const encAccess  = await encryptAccess(accessToken)
+    const encRefresh = refreshToken ? await encryptRefresh(refreshToken) : null
+    // Refresh preserved ONLY for the same account (and only when not replaced).
+    const refreshCols = resolveRefreshTokenColumns(encRefresh, existingRefreshRow, sameSub)
+    const tokenExpiresAt = exchange?.expiresIn
+      ? new Date(nowMs + exchange.expiresIn * 1000).toISOString()
+      : null
+    const scopes = (exchange?.scope || '').split(' ').filter(Boolean)
     await store({
       p_user_id:          userId,
       p_google_sub:       idResult.sub,
@@ -103,7 +114,10 @@ export async function finalizeGoogleConnection(deps) {
       p_key_version:      1,
     })
   } catch {
-    await revokeNew()
+    if (shouldRevokeNewTokenOnFailure(sameSub, hasStoredPair)) {
+      await revokeNew()
+    }
+    // The atomic RPC rolls both rows back; no partial connection/token is left.
     return { ok: false, reason: 'persist_failed' }
   }
 

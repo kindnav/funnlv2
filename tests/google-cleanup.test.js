@@ -29,7 +29,9 @@ function makeFakeAdmin(opts = {}) {
             },
             then: (resolve) => {
               deletes.push({ table, col, val })
-              const error = (table === 'google_connections' && opts.connDeleteError) ? { code: 'del' } : null
+              let error = null
+              if (table === 'google_connections' && opts.connDeleteError) error = { code: 'del' }
+              if (table === 'google_oauth_states' && opts.stateDeleteError) error = { code: 'del' }
               resolve({ error })
             },
           }
@@ -111,14 +113,28 @@ await test('no revocable token → revoke skipped, deletes run', async () => {
   assert.ok(deletedTables(admin).includes('google_connections'))
 })
 
-await test('connection delete error is reported', async () => {
+await test('connection delete error is reported (separately)', async () => {
   const admin = makeFakeAdmin({ conn: CONN, tokens: TOKENS, connDeleteError: true })
-  const res = await runGoogleLocalCleanup({
-    admin, userId: UID,
-    resolveToken: async () => 'tok',
-    revoke: async () => {},
-  })
+  const res = await runGoogleLocalCleanup({ admin, userId: UID, resolveToken: async () => 'tok', revoke: async () => {} })
   assert.strictEqual(res.connectionDeleteError, true)
+  assert.strictEqual(res.oauthStateDeleteError, false)
+})
+
+await test('oauth-state delete error is reported (separately)', async () => {
+  const admin = makeFakeAdmin({ conn: CONN, tokens: TOKENS, stateDeleteError: true })
+  const res = await runGoogleLocalCleanup({ admin, userId: UID, resolveToken: async () => 'tok', revoke: async () => {} })
+  assert.strictEqual(res.oauthStateDeleteError, true)
+  assert.strictEqual(res.connectionDeleteError, false)
+  // Both deletes are still ATTEMPTED even when one errors.
+  assert.ok(deletedTables(admin).includes('google_oauth_states'))
+  assert.ok(deletedTables(admin).includes('google_connections'))
+})
+
+await test('clean success → both delete errors false', async () => {
+  const admin = makeFakeAdmin({ conn: CONN, tokens: TOKENS })
+  const res = await runGoogleLocalCleanup({ admin, userId: UID, resolveToken: async () => 'tok', revoke: async () => {} })
+  assert.strictEqual(res.oauthStateDeleteError, false)
+  assert.strictEqual(res.connectionDeleteError, false)
 })
 
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed\n`)

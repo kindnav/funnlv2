@@ -31,8 +31,17 @@ import { finalizeGoogleConnection } from '../shared/googleConnect.js'
 
 const GOOGLE_FETCH_TIMEOUT_MS = 10_000
 
+// Security headers on every response: never cache an OAuth redirect, never leak
+// the URL (with its code/state) via Referer, and no MIME sniffing.
+const securityHeaders = {
+  'Cache-Control':          'no-store',
+  'Pragma':                 'no-cache',
+  'Referrer-Policy':        'no-referrer',
+  'X-Content-Type-Options': 'nosniff',
+}
+
 function redirect(location: string): Response {
-  return new Response(null, { status: 302, headers: { Location: location } })
+  return new Response(null, { status: 302, headers: { ...securityHeaders, Location: location } })
 }
 
 async function boundedFetch(url: string, init: RequestInit): Promise<Response> {
@@ -54,6 +63,12 @@ async function revokeToken(token: string): Promise<void> {
 }
 
 Deno.serve(async (req) => {
+  // Google's redirect is a top-level GET navigation. Any other method is rejected
+  // WITHOUT processing a state or code.
+  if (req.method !== 'GET') {
+    return new Response('Method not allowed', { status: 405, headers: securityHeaders })
+  }
+
   // A safe error redirect needs a validated origin; until the state is resolved we
   // can only trust the canonical production origin.
   let safeErrorRedirect = CANONICAL_ERROR_REDIRECT
@@ -141,7 +156,14 @@ Deno.serve(async (req) => {
       console.error('google-oauth-callback token_exchange_failed', tokenRes.status)
       return redirect(safeErrorRedirect)
     }
-    const tokenData = await tokenRes.json()
+    // Malformed token JSON → controlled error (no usable token to revoke).
+    let tokenData: Record<string, unknown>
+    try {
+      tokenData = await tokenRes.json()
+    } catch {
+      console.error('google-oauth-callback token_json_malformed')
+      return redirect(safeErrorRedirect)
+    }
     const accessToken = tokenData.access_token as string | undefined
     if (!accessToken) {
       console.error('google-oauth-callback no_access_token')
@@ -154,26 +176,45 @@ Deno.serve(async (req) => {
     })
     if (!userinfoRes.ok) {
       console.error('google-oauth-callback userinfo_failed', userinfoRes.status)
-      // Best-effort revoke the token we cannot verify.
       try { await revokeToken(accessToken) } catch { /* best-effort */ }
       return redirect(safeErrorRedirect)
     }
-    const identity = await userinfoRes.json()
+    // Malformed userinfo JSON: once an access token exists we cannot verify
+    // identity → controlled error, best-effort revoke, NO persistence.
+    let identity: Record<string, unknown>
+    try {
+      identity = await userinfoRes.json()
+    } catch {
+      console.error('google-oauth-callback userinfo_json_malformed')
+      try { await revokeToken(accessToken) } catch { /* best-effort */ }
+      return redirect(safeErrorRedirect)
+    }
 
-    // ── Load the user's existing connection + tokens (for same-account logic
-    //    and old-account revocation) BEFORE any write ────────────────────────
-    const { data: existingConnection } = await admin
+    // ── Load the user's existing connection + tokens BEFORE any write ───────
+    // FAIL CLOSED: a query error is NOT "no connection"/"no token". On any lookup
+    // error, discard the in-memory credentials, do NOT persist, do NOT revoke (an
+    // unresolved DB error must not invalidate a possibly-working combined grant),
+    // and leave the previous local connection untouched.
+    const { data: existingConnection, error: connLookupErr } = await admin
       .from('google_connections')
       .select('id, google_sub')
       .eq('user_id', stateRow.user_id)
       .maybeSingle()
+    if (connLookupErr) {
+      console.error('google-oauth-callback connection_lookup_failed')
+      return redirect(safeErrorRedirect)
+    }
     let existingRefreshRow: Record<string, string | null> | null = null
     if (existingConnection) {
-      const { data } = await admin
+      const { data, error: tokenLookupErr } = await admin
         .from('google_tokens')
         .select('refresh_token_ciphertext, refresh_token_nonce, access_token_ciphertext, access_token_nonce')
         .eq('connection_id', existingConnection.id)
         .maybeSingle()
+      if (tokenLookupErr) {
+        console.error('google-oauth-callback token_lookup_failed')
+        return redirect(safeErrorRedirect)
+      }
       existingRefreshRow = data ?? null
     }
 

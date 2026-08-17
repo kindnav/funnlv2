@@ -76,14 +76,17 @@ Deno.serve(async (req) => {
     )
 
     const resolveToken = await makeResolveToken()
-    const { connectionDeleteError } = await runGoogleLocalCleanup({
+    const { oauthStateDeleteError, connectionDeleteError } = await runGoogleLocalCleanup({
       admin,
       userId: user.id,
       resolveToken,
       revoke,
     })
 
-    if (connectionDeleteError) {
+    // Success only when BOTH local deletions succeeded. Remote revocation is
+    // best-effort and never affects this result. A local failure → controlled 500
+    // so the user can retry; no raw database details are returned.
+    if (oauthStateDeleteError || connectionDeleteError) {
       console.error('google-oauth-disconnect local_delete_failed')
       return json({ error: 'internal_error' }, 500)
     }

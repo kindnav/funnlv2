@@ -196,13 +196,58 @@ export function isSameGoogleAccount(existingConnection, newSub) {
 /**
  * A new refresh token is REQUIRED (cannot fall back to a stored one) whenever the
  * connection is new or the Google account changed — i.e. whenever it is not the
- * same account. Re-consent on the same account may keep the stored token.
+ * same account. Re-consent on the same account may keep a COMPLETE stored token.
+ * NOTE: this alone does not verify the stored pair is complete — use
+ * resolveRefreshRequirement() for the authoritative decision.
  * @param {boolean} sameSub
  * @param {boolean} hasNewRefresh
  * @returns {boolean} true when the flow must be rejected for lacking a refresh token
  */
 export function requiresNewRefreshToken(sameSub, hasNewRefresh) {
   return !sameSub && !hasNewRefresh
+}
+
+/**
+ * True only when the stored google_tokens row has a COMPLETE encrypted refresh
+ * pair: both ciphertext and nonce are non-empty strings.
+ * @param {{ refresh_token_ciphertext?: unknown, refresh_token_nonce?: unknown }|null} row
+ * @returns {boolean}
+ */
+export function hasStoredRefreshTokenPair(row) {
+  return Boolean(row) &&
+    typeof row.refresh_token_ciphertext === 'string' && row.refresh_token_ciphertext.length > 0 &&
+    typeof row.refresh_token_nonce === 'string' && row.refresh_token_nonce.length > 0
+}
+
+/**
+ * Authoritative refresh-token requirement decision. A connection may be stored
+ * active only when it will have usable refresh credentials:
+ *   - a newly issued refresh token (any account), OR
+ *   - the SAME google_sub with a COMPLETE existing stored pair.
+ * Every other case is rejected — active is never stored with null/incomplete
+ * refresh credentials.
+ *
+ * @param {{ sameSub: boolean, hasNewRefresh: boolean, hasStoredPair: boolean }} p
+ * @returns {{ ok: true, useStored: boolean } | { ok: false, reason: 'refresh_token_required' }}
+ */
+export function resolveRefreshRequirement({ sameSub, hasNewRefresh, hasStoredPair }) {
+  if (hasNewRefresh) return { ok: true, useStored: false }
+  if (sameSub && hasStoredPair) return { ok: true, useStored: true }
+  return { ok: false, reason: 'refresh_token_required' }
+}
+
+/**
+ * Whether to best-effort revoke the newly issued Google token after an
+ * encryption/persistence failure. Revoke for a new/different account, but NOT for
+ * the same account with an existing working refresh pair — revoking there would
+ * invalidate the still-working combined Google grant just because a replacement
+ * write failed.
+ * @param {boolean} sameSub
+ * @param {boolean} hasStoredPair
+ * @returns {boolean}
+ */
+export function shouldRevokeNewTokenOnFailure(sameSub, hasStoredPair) {
+  return !(sameSub && hasStoredPair)
 }
 
 // ── Stale OAuth-state cleanup cutoff ──────────────────────────────────────────

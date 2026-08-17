@@ -112,11 +112,71 @@ await test('SECURITY: DIFFERENT account (A→B) WITH new refresh → stores B re
   assert.deepStrictEqual(rec.revoked, ['OLD_A_TOKEN'])                   // old A revoked AFTER store
 })
 
-await test('persistence failure → reject persist_failed + revoke new token, no active partial', async () => {
+await test('RPC failure (NEW account) → persist_failed + revoke new token', async () => {
   const { deps, rec } = makeDeps({ storeThrows: true, exchange: { accessToken: 'ACCESS', refreshToken: 'R1', scope: SCOPE_OK } })
   const r = await finalizeGoogleConnection(deps)
   assert.strictEqual(r.ok, false); assert.strictEqual(r.reason, 'persist_failed')
   assert.deepStrictEqual(rec.revoked, ['R1'])  // new token revoked; RPC atomicity means no partial row
+})
+
+await test('RPC failure (DIFFERENT account) → persist_failed + revoke NEW token, old untouched', async () => {
+  const { deps, rec } = makeDeps({
+    storeThrows: true,
+    identity: VERIFIED('sub-B'),
+    existingConnection: { google_sub: 'sub-A' },
+    existingRefreshRow: { refresh_token_ciphertext: 'A_ct', refresh_token_nonce: 'A_n' },
+    exchange: { accessToken: 'ACCESS', refreshToken: 'B_refresh', scope: SCOPE_OK },
+  })
+  const r = await finalizeGoogleConnection(deps)
+  assert.strictEqual(r.reason, 'persist_failed')
+  assert.deepStrictEqual(rec.revoked, ['B_refresh'])  // never revokes/uses A
+})
+
+await test('RPC failure (SAME account with working pair) → persist_failed but DOES NOT revoke (preserve grant)', async () => {
+  const { deps, rec } = makeDeps({
+    storeThrows: true,
+    identity: VERIFIED('sub-A'),
+    existingConnection: { google_sub: 'sub-A' },
+    existingRefreshRow: { refresh_token_ciphertext: 'A_ct', refresh_token_nonce: 'A_n' },
+    exchange: { accessToken: 'ACCESS', refreshToken: null, scope: SCOPE_OK },  // omitted → uses stored
+  })
+  const r = await finalizeGoogleConnection(deps)
+  assert.strictEqual(r.reason, 'persist_failed')
+  assert.deepStrictEqual(rec.revoked, [])  // preserve the still-working combined grant
+})
+
+await test('access-token encryption failure → persist_failed + revoke new (new account)', async () => {
+  const { deps, rec } = makeDeps({
+    exchange: { accessToken: 'ACCESS', refreshToken: 'R1', scope: SCOPE_OK },
+    encryptAccess: async () => { throw new Error('enc') },
+  })
+  const r = await finalizeGoogleConnection(deps)
+  assert.strictEqual(r.reason, 'persist_failed')
+  assert.deepStrictEqual(rec.revoked, ['R1'])
+  assert.strictEqual(rec.storeArgs.length, 0)  // never stored
+})
+
+await test('refresh-token encryption failure → persist_failed + revoke new (new account)', async () => {
+  const { deps, rec } = makeDeps({
+    exchange: { accessToken: 'ACCESS', refreshToken: 'R1', scope: SCOPE_OK },
+    encryptRefresh: async () => { throw new Error('enc') },
+  })
+  const r = await finalizeGoogleConnection(deps)
+  assert.strictEqual(r.reason, 'persist_failed')
+  assert.deepStrictEqual(rec.revoked, ['R1'])
+  assert.strictEqual(rec.storeArgs.length, 0)
+})
+
+await test('SAME account + omitted refresh + INCOMPLETE stored pair → reject, no store', async () => {
+  const { deps, rec } = makeDeps({
+    identity: VERIFIED('sub-A'),
+    existingConnection: { google_sub: 'sub-A' },
+    existingRefreshRow: { refresh_token_ciphertext: 'A_ct', refresh_token_nonce: null },  // incomplete
+    exchange: { accessToken: 'ACCESS', refreshToken: null, scope: SCOPE_OK },
+  })
+  const r = await finalizeGoogleConnection(deps)
+  assert.strictEqual(r.ok, false); assert.strictEqual(r.reason, 'refresh_token_required')
+  assert.strictEqual(rec.storeArgs.length, 0)  // never store active with null refresh
 })
 
 await test('old-account revoke failure does not fail the successful new connection', async () => {

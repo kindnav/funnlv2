@@ -16,7 +16,7 @@
  *   resolveToken: (tokensRow: object) => Promise<string|null>, // decrypts a revocable token
  *   revoke: (token: string) => Promise<void>,    // best-effort; may reject
  * }} deps
- * @returns {Promise<{ revoked: boolean, connectionDeleteError: boolean }>}
+ * @returns {Promise<{ revoked: boolean, oauthStateDeleteError: boolean, connectionDeleteError: boolean }>}
  */
 export async function runGoogleLocalCleanup({ admin, userId, resolveToken, revoke }) {
   let revoked = false
@@ -50,12 +50,20 @@ export async function runGoogleLocalCleanup({ admin, userId, resolveToken, revok
 
   // ── Always delete local Google state ────────────────────────────────────────
   // Deleting the connection cascades google_tokens (ON DELETE CASCADE); oauth
-  // states are deleted explicitly. All scoped to the user.
-  await admin.from('google_oauth_states').delete().eq('user_id', userId)
+  // states are deleted explicitly. Both delete results are inspected and reported
+  // separately so the caller can decide (disconnect requires both to succeed).
+  const { error: stateDelErr } = await admin
+    .from('google_oauth_states')
+    .delete()
+    .eq('user_id', userId)
   const { error: connDelErr } = await admin
     .from('google_connections')
     .delete()
     .eq('user_id', userId)
 
-  return { revoked, connectionDeleteError: Boolean(connDelErr) }
+  return {
+    revoked,
+    oauthStateDeleteError: Boolean(stateDelErr),
+    connectionDeleteError: Boolean(connDelErr),
+  }
 }

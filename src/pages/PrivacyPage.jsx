@@ -106,12 +106,12 @@ function PrivacyPage() {
           <ul className="list-disc pl-5 space-y-1.5">
             <li><strong className="text-hi font-semibold">What is accessed</strong> — read-only access to your Google Calendar events. This release requests only read-only Calendar access and does <strong className="text-hi font-semibold">not</strong> request or read Gmail.</li>
             <li><strong className="text-hi font-semibold">Why</strong> — to help you remember and log your networking interactions (for example, suggesting a meeting you had as an interaction to record). Funnl does not modify your calendar.</li>
-            <li><strong className="text-hi font-semibold">How authorization is stored</strong> — the tokens Google issues are encrypted at rest and used only by Funnl's servers. They are never sent to your browser or to any third party.</li>
+            <li><strong className="text-hi font-semibold">How authorization is stored</strong> — the tokens Google issues are encrypted at rest. Authorization tokens are never exposed to your browser or unrelated third parties. They are used only by Funnl's servers when communicating with Google's authorization and Calendar APIs.</li>
             <li><strong className="text-hi font-semibold">Disconnect and deletion</strong> — disconnecting from Settings revokes the authorization with Google on a best-effort basis and immediately deletes the stored Google tokens and connection from Funnl. Deleting your account does the same and removes all of your data.</li>
           </ul>
           <p>
             Funnl's use of information received from Google APIs adheres to the{' '}
-            <a href="https://developers.google.com/terms/api-services-user-data-policy" target="_blank" rel="noopener noreferrer" className="text-accent hover:text-tag no-underline">Google API Services User Data Policy →</a>, including the Limited Use requirements. Google Calendar data is used only to provide and improve the interaction-logging features described above. It is <strong className="text-hi font-semibold">not sold</strong>, <strong className="text-hi font-semibold">not used for advertising</strong>, and <strong className="text-hi font-semibold">not used to train generalized or foundation AI models</strong>.
+            <a href="https://developers.google.com/terms/api-services-user-data-policy" target="_blank" rel="noopener noreferrer" className="text-accent hover:text-tag no-underline">Google API Services User Data Policy →</a>, including the Limited Use requirements. Google Calendar data is used only to provide the interaction-logging features you request. It is <strong className="text-hi font-semibold">not sold</strong>, <strong className="text-hi font-semibold">not used for advertising</strong>, and <strong className="text-hi font-semibold">not used to train generalized or foundation AI models</strong>.
           </p>
         </Section>
 

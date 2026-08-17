@@ -26,6 +26,15 @@ const corsHeaders = {
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 }
 
+// Security headers: never cache an OAuth start response (it mints CSRF state),
+// never leak the URL via Referer, and no MIME sniffing. CORS is preserved.
+const securityHeaders = {
+  'Cache-Control':          'no-store',
+  'Pragma':                 'no-cache',
+  'Referrer-Policy':        'no-referrer',
+  'X-Content-Type-Options': 'nosniff',
+}
+
 const STATE_TTL_MS = 10 * 60 * 1000 // 10 minutes
 // Any OAuth state row older than this is well past its 10-minute TTL and unusable
 // (whether consumed or expired). Cleaned up best-effort when a new flow starts.
@@ -34,7 +43,7 @@ const STATE_CLEANUP_RETENTION_MS = 24 * 60 * 60 * 1000 // 24 hours
 function json(body: unknown, status: number): Response {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    headers: { ...corsHeaders, ...securityHeaders, 'Content-Type': 'application/json' },
   })
 }
 

@@ -28,8 +28,13 @@ export default function GoogleConnectionCard() {
   const [showDisconnectModal, setShowDisconnectModal] = useState(false)
   const [banner, setBanner]             = useState(null)   // 'connected' | 'error' | null
 
+  // Strict-Mode safe: set true on (re)mount and false on cleanup, so a dev-mode
+  // effect replay does not leave mountedRef stuck false and drop state updates.
   const mountedRef = useRef(true)
-  useEffect(() => () => { mountedRef.current = false }, [])
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
 
   async function fetchConnection() {
     setLoading(true)
@@ -165,7 +170,21 @@ export default function GoogleConnectionCard() {
         </div>
 
         <div className="flex-none">
-          {(state === 'not_connected' || state === 'error') && (
+          {/* Status failed to load → Retry only (NEVER offer Connect, which could
+              start a second OAuth for an account we could not verify). Disabled
+              while a fetch is in flight to prevent duplicate retries. */}
+          {state === 'error' && (
+            <button
+              type="button"
+              onClick={fetchConnection}
+              disabled={loading}
+              className="text-[11.5px] font-semibold text-accent hover:opacity-80 transition-opacity motion-reduce:transition-none disabled:opacity-40"
+            >
+              {loading ? 'Retrying…' : 'Retry'}
+            </button>
+          )}
+          {/* Start/replace OAuth only from a definitive not_connected/needs_reauth state. */}
+          {state === 'not_connected' && (
             <button type="button" onClick={handleConnect} disabled={connecting} className={emberBtn} style={{ background: 'var(--color-ember)' }}>
               {connecting ? 'Connecting…' : 'Connect Google Calendar'}
             </button>

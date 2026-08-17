@@ -21,6 +21,9 @@ import {
   validateGoogleIdentity,
   isSameGoogleAccount,
   requiresNewRefreshToken,
+  hasStoredRefreshTokenPair,
+  resolveRefreshRequirement,
+  shouldRevokeNewTokenOnFailure,
   staleOauthStateCutoffIso,
 } from '../supabase/functions/shared/googleOauthHelpers.js'
 
@@ -174,6 +177,48 @@ await test('requiresNewRefreshToken only when new/different account lacks a refr
   assert.strictEqual(requiresNewRefreshToken(false, true), false)  // new/different WITH refresh → ok
   assert.strictEqual(requiresNewRefreshToken(true, false), false)  // same account may keep stored
   assert.strictEqual(requiresNewRefreshToken(true, true), false)
+})
+
+// ── hasStoredRefreshTokenPair (both parts non-empty) ──────────────────────────
+console.log('\nhasStoredRefreshTokenPair')
+await test('true only when both ciphertext and nonce are non-empty strings', () => {
+  assert.ok(hasStoredRefreshTokenPair({ refresh_token_ciphertext: 'ct', refresh_token_nonce: 'n' }))
+  assert.ok(!hasStoredRefreshTokenPair({ refresh_token_ciphertext: 'ct', refresh_token_nonce: '' }))
+  assert.ok(!hasStoredRefreshTokenPair({ refresh_token_ciphertext: '', refresh_token_nonce: 'n' }))
+  assert.ok(!hasStoredRefreshTokenPair({ refresh_token_ciphertext: 'ct', refresh_token_nonce: null }))
+  assert.ok(!hasStoredRefreshTokenPair({ refresh_token_ciphertext: null, refresh_token_nonce: null }))
+  assert.ok(!hasStoredRefreshTokenPair(null))
+})
+
+// ── resolveRefreshRequirement (complete truth table) ──────────────────────────
+console.log('\nresolveRefreshRequirement')
+await test('new account + new refresh → allowed (use new)', () => {
+  const r = resolveRefreshRequirement({ sameSub: false, hasNewRefresh: true, hasStoredPair: false })
+  assert.deepStrictEqual(r, { ok: true, useStored: false })
+})
+await test('new account + no refresh → rejected', () => {
+  assert.strictEqual(resolveRefreshRequirement({ sameSub: false, hasNewRefresh: false, hasStoredPair: false }).ok, false)
+})
+await test('different sub + new refresh → allowed', () => {
+  assert.strictEqual(resolveRefreshRequirement({ sameSub: false, hasNewRefresh: true, hasStoredPair: true }).ok, true)
+})
+await test('different sub + no refresh → rejected (never reuse other account pair)', () => {
+  assert.strictEqual(resolveRefreshRequirement({ sameSub: false, hasNewRefresh: false, hasStoredPair: true }).ok, false)
+})
+await test('same sub + no new + COMPLETE stored pair → allowed (use stored)', () => {
+  assert.deepStrictEqual(resolveRefreshRequirement({ sameSub: true, hasNewRefresh: false, hasStoredPair: true }), { ok: true, useStored: true })
+})
+await test('same sub + no new + missing/incomplete stored pair → rejected', () => {
+  assert.strictEqual(resolveRefreshRequirement({ sameSub: true, hasNewRefresh: false, hasStoredPair: false }).ok, false)
+})
+
+// ── shouldRevokeNewTokenOnFailure ─────────────────────────────────────────────
+console.log('\nshouldRevokeNewTokenOnFailure')
+await test('revoke for new/different account; PRESERVE for same account with working pair', () => {
+  assert.strictEqual(shouldRevokeNewTokenOnFailure(false, false), true)  // new
+  assert.strictEqual(shouldRevokeNewTokenOnFailure(false, true), true)   // different sub
+  assert.strictEqual(shouldRevokeNewTokenOnFailure(true, false), true)   // same sub, no working pair
+  assert.strictEqual(shouldRevokeNewTokenOnFailure(true, true), false)   // same sub + working pair → don't kill grant
 })
 
 // ── Stale state cutoff ────────────────────────────────────────────────────────
