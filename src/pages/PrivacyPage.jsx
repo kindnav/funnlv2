@@ -55,9 +55,10 @@ function PrivacyPage() {
           <ul className="list-disc pl-5 space-y-1.5">
             <li><strong className="text-hi font-semibold">Account information</strong> — your email address and password (encrypted). This is used to sign you in.</li>
             <li><strong className="text-hi font-semibold">Your network data</strong> — the contacts, interactions, and notes you choose to log inside Funnl. You control what goes in, and you can delete it at any time.</li>
+            <li><strong className="text-hi font-semibold">Connected-account authorization</strong> — if you connect Google Calendar, Funnl stores the authorization (access tokens) needed to read your calendar. These tokens are encrypted and are accessible only to Funnl's servers, never in your browser. Funnl never stores your Google password. Disconnecting, or deleting your account, removes this authorization.</li>
           </ul>
           <p>
-            Funnl does not collect any data about you beyond what you explicitly enter. We don't read your email inbox, LinkedIn, or any other account.
+            Funnl does not collect data about you beyond what you explicitly enter or explicitly connect. Funnl does not read your Gmail or your LinkedIn. If you choose to connect Google Calendar (described below), Funnl can read your calendar events on a read-only basis to help you log networking interactions — and only after you explicitly connect it. You can disconnect at any time.
           </p>
         </Section>
 
@@ -90,7 +91,28 @@ function PrivacyPage() {
               <p className="font-semibold text-hi mb-1">Vercel — web hosting</p>
               <p>Vercel serves the Funnl web application. Standard server logs (IP address, browser type, request details) may be retained briefly by Vercel as part of normal hosting operations. <a href="https://vercel.com/legal/privacy-policy" target="_blank" rel="noopener noreferrer" className="text-accent hover:text-tag no-underline">Vercel privacy policy →</a></p>
             </div>
+
+            <div className="pl-4 border-l-2 border-[rgba(255,255,255,0.08)]">
+              <p className="font-semibold text-hi mb-1">Google — optional Calendar connection</p>
+              <p>If, and only if, you choose to connect Google Calendar, Funnl uses Google's OAuth service to obtain read-only access to your calendar events. Funnl requests read-only Calendar access; it does not request Gmail access in this release. Your Google authorization tokens are stored encrypted on Funnl's servers and are never exposed to the browser. <a href="https://policies.google.com/privacy" target="_blank" rel="noopener noreferrer" className="text-accent hover:text-tag no-underline">Google privacy policy →</a></p>
+            </div>
           </div>
+        </Section>
+
+        <Section title="Google Calendar connection">
+          <p>
+            Connecting Google Calendar is entirely optional. Nothing is accessed until you explicitly connect it from Settings, and you can disconnect at any time.
+          </p>
+          <ul className="list-disc pl-5 space-y-1.5">
+            <li><strong className="text-hi font-semibold">What is accessed</strong> — read-only access to your Google Calendar events. This release requests only read-only Calendar access and does <strong className="text-hi font-semibold">not</strong> request or read Gmail.</li>
+            <li><strong className="text-hi font-semibold">Why</strong> — to help you remember and log your networking interactions (for example, suggesting a meeting you had as an interaction to record). Funnl does not modify your calendar.</li>
+            <li><strong className="text-hi font-semibold">How authorization is stored</strong> — the tokens Google issues are encrypted at rest. Authorization tokens are never exposed to your browser or unrelated third parties. They are used only by Funnl's servers when communicating with Google's authorization and Calendar APIs.</li>
+            <li><strong className="text-hi font-semibold">Disconnect and deletion</strong> — disconnecting from Settings revokes the authorization with Google on a best-effort basis and immediately deletes the stored Google tokens and connection from Funnl. Deleting your account does the same and removes all of your data.</li>
+          </ul>
+          <p>
+            Funnl's use of information received from Google APIs adheres to the{' '}
+            <a href="https://developers.google.com/terms/api-services-user-data-policy" target="_blank" rel="noopener noreferrer" className="text-accent hover:text-tag no-underline">Google API Services User Data Policy →</a>, including the Limited Use requirements. Google Calendar data is used only to provide the interaction-logging features you request. It is <strong className="text-hi font-semibold">not sold</strong>, <strong className="text-hi font-semibold">not used for advertising</strong>, and <strong className="text-hi font-semibold">not used to train generalized or foundation AI models</strong>.
+          </p>
         </Section>
 
         <Section title="Analytics: behavior, not content">

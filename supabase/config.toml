@@ -382,6 +382,14 @@ inspector_port = 8083
 # The Deno major version to use.
 deno_version = 2
 
+# ── Per-function JWT verification settings ────────────────────────────────────
+# google-oauth-callback receives Google's browser redirect, which carries no
+# Supabase JWT. JWT verification is disabled here; security comes instead from the
+# one-time, hashed, expiring OAuth state validated inside the handler.
+# google-oauth-start and google-oauth-disconnect keep the default verify_jwt = true.
+[functions.google-oauth-callback]
+verify_jwt = false
+
 # [edge_runtime.secrets]
 # secret_key = "env(SECRET_VALUE)"
 
