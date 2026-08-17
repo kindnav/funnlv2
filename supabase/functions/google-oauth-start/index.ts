@@ -18,6 +18,7 @@ import {
   sha256Hex,
   pkceChallengeFromVerifier,
   buildGoogleAuthUrl,
+  staleOauthStateCutoffIso,
 } from '../shared/googleOauthHelpers.js'
 
 const corsHeaders = {
@@ -26,6 +27,9 @@ const corsHeaders = {
 }
 
 const STATE_TTL_MS = 10 * 60 * 1000 // 10 minutes
+// Any OAuth state row older than this is well past its 10-minute TTL and unusable
+// (whether consumed or expired). Cleaned up best-effort when a new flow starts.
+const STATE_CLEANUP_RETENTION_MS = 24 * 60 * 60 * 1000 // 24 hours
 
 function json(body: unknown, status: number): Response {
   return new Response(JSON.stringify(body), {
@@ -86,6 +90,18 @@ Deno.serve(async (req) => {
       Deno.env.get('SUPABASE_URL') ?? '',
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '',
     )
+
+    // Bounded best-effort cleanup of old OAuth state rows (no scheduler). Deletes
+    // only rows created before the retention cutoff — safely past their 10-minute
+    // TTL, whether consumed or expired. A failure here must NOT weaken or block the
+    // new OAuth request, so it is fully swallowed.
+    try {
+      const cutoff = staleOauthStateCutoffIso(Date.now(), STATE_CLEANUP_RETENTION_MS)
+      await admin.from('google_oauth_states').delete().lt('created_at', cutoff)
+    } catch {
+      console.error('google-oauth-start state_cleanup_skipped')
+    }
+
     const { error: insertError } = await admin.from('google_oauth_states').insert({
       state_hash:               stateHash,
       user_id:                  user.id,

@@ -7,6 +7,7 @@ if (!globalThis.crypto) globalThis.crypto = webcrypto
 
 import {
   GOOGLE_OAUTH_SCOPES,
+  REQUIRED_CALENDAR_SCOPE,
   resolveReturnOrigin,
   buildSettingsRedirect,
   CANONICAL_ERROR_REDIRECT,
@@ -15,6 +16,12 @@ import {
   pkceChallengeFromVerifier,
   buildGoogleAuthUrl,
   resolveRefreshTokenColumns,
+  parseGrantedScopes,
+  grantedScopesIncludeCalendar,
+  validateGoogleIdentity,
+  isSameGoogleAccount,
+  requiresNewRefreshToken,
+  staleOauthStateCutoffIso,
 } from '../supabase/functions/shared/googleOauthHelpers.js'
 
 let passed = 0, failed = 0
@@ -110,13 +117,14 @@ await test('challenge = base64url(SHA256(verifier)) — RFC 7636 test vector', a
 
 // ── Auth URL ──────────────────────────────────────────────────────────────────
 console.log('\nbuildGoogleAuthUrl')
-await test('offline access + S256 + scopes + state + challenge; no gmail', () => {
+await test('offline access + re-consent + account selection + S256; no gmail', () => {
   const url = buildGoogleAuthUrl({
     clientId: 'CID', redirectUri: 'https://cb.example/callback', state: 'ST', codeChallenge: 'CH',
   })
   const u = new URL(url)
   assert.strictEqual(u.origin + u.pathname, 'https://accounts.google.com/o/oauth2/v2/auth')
   assert.strictEqual(u.searchParams.get('access_type'), 'offline')
+  assert.strictEqual(u.searchParams.get('prompt'), 'consent select_account')
   assert.strictEqual(u.searchParams.get('code_challenge_method'), 'S256')
   assert.strictEqual(u.searchParams.get('code_challenge'), 'CH')
   assert.strictEqual(u.searchParams.get('state'), 'ST')
@@ -125,20 +133,75 @@ await test('offline access + S256 + scopes + state + challenge; no gmail', () =>
   assert.ok(!/gmail/i.test(url), 'no gmail scope in the URL')
 })
 
+// ── Granted-scope validation ──────────────────────────────────────────────────
+console.log('\ngranted-scope validation')
+await test('grantedScopesIncludeCalendar true only when Calendar read-only granted', () => {
+  assert.ok(grantedScopesIncludeCalendar(`openid email ${REQUIRED_CALENDAR_SCOPE}`))
+  assert.ok(!grantedScopesIncludeCalendar('openid email profile'))
+  assert.ok(!grantedScopesIncludeCalendar(''))
+  assert.ok(!grantedScopesIncludeCalendar(undefined))
+})
+await test('parseGrantedScopes splits and drops empties', () => {
+  assert.deepStrictEqual(parseGrantedScopes('a  b '), ['a', 'b'])
+  assert.deepStrictEqual(parseGrantedScopes(null), [])
+})
+
+// ── Identity validation (email_verified required) ─────────────────────────────
+console.log('\nidentity validation')
+await test('valid identity (sub + email + email_verified true)', () => {
+  const r = validateGoogleIdentity({ sub: 'g-123', email: 'a@b.com', email_verified: true })
+  assert.ok(r.ok); assert.strictEqual(r.sub, 'g-123'); assert.strictEqual(r.email, 'a@b.com')
+})
+await test('UNVERIFIED email rejected', () => {
+  assert.strictEqual(validateGoogleIdentity({ sub: 'g', email: 'a@b.com', email_verified: false }).ok, false)
+  assert.strictEqual(validateGoogleIdentity({ sub: 'g', email: 'a@b.com' }).ok, false) // missing → not true
+})
+await test('missing sub or email rejected', () => {
+  assert.strictEqual(validateGoogleIdentity({ sub: '', email: 'a@b.com', email_verified: true }).ok, false)
+  assert.strictEqual(validateGoogleIdentity({ sub: 'g', email: '', email_verified: true }).ok, false)
+  assert.strictEqual(validateGoogleIdentity(null).ok, false)
+})
+
+// ── Same-account comparison + refresh requirement ─────────────────────────────
+console.log('\naccount identity + refresh requirement')
+await test('isSameGoogleAccount compares google_sub, not email', () => {
+  assert.ok(isSameGoogleAccount({ google_sub: 'g-1' }, 'g-1'))
+  assert.ok(!isSameGoogleAccount({ google_sub: 'g-1' }, 'g-2'))
+  assert.ok(!isSameGoogleAccount(null, 'g-1'))
+})
+await test('requiresNewRefreshToken only when new/different account lacks a refresh token', () => {
+  assert.strictEqual(requiresNewRefreshToken(false, false), true)  // new/different, no refresh → require
+  assert.strictEqual(requiresNewRefreshToken(false, true), false)  // new/different WITH refresh → ok
+  assert.strictEqual(requiresNewRefreshToken(true, false), false)  // same account may keep stored
+  assert.strictEqual(requiresNewRefreshToken(true, true), false)
+})
+
+// ── Stale state cutoff ────────────────────────────────────────────────────────
+console.log('\nstaleOauthStateCutoffIso')
+await test('cutoff is now minus the retention window', () => {
+  const now = Date.parse('2026-08-16T12:00:00.000Z')
+  assert.strictEqual(staleOauthStateCutoffIso(now, 24 * 60 * 60 * 1000), '2026-08-15T12:00:00.000Z')
+})
+
 // ── Refresh-token preservation ────────────────────────────────────────────────
 console.log('\nresolveRefreshTokenColumns')
-await test('new refresh token replaces the stored one', () => {
-  const r = resolveRefreshTokenColumns({ ciphertext: 'NEWct', nonce: 'NEWn' }, { refresh_token_ciphertext: 'OLDct', refresh_token_nonce: 'OLDn' })
+await test('new refresh token replaces the stored one (any account)', () => {
+  const r = resolveRefreshTokenColumns({ ciphertext: 'NEWct', nonce: 'NEWn' }, { refresh_token_ciphertext: 'OLDct', refresh_token_nonce: 'OLDn' }, false)
   assert.strictEqual(r.refresh_token_ciphertext, 'NEWct')
   assert.strictEqual(r.refresh_token_nonce, 'NEWn')
 })
-await test('omitted refresh token PRESERVES the existing one', () => {
-  const r = resolveRefreshTokenColumns(null, { refresh_token_ciphertext: 'OLDct', refresh_token_nonce: 'OLDn' })
+await test('SAME account + omitted refresh → PRESERVES the existing one', () => {
+  const r = resolveRefreshTokenColumns(null, { refresh_token_ciphertext: 'OLDct', refresh_token_nonce: 'OLDn' }, true)
   assert.strictEqual(r.refresh_token_ciphertext, 'OLDct')
   assert.strictEqual(r.refresh_token_nonce, 'OLDn')
 })
-await test('omitted refresh token with no prior row → null pair', () => {
-  const r = resolveRefreshTokenColumns(null, null)
+await test('SECURITY: DIFFERENT account + omitted refresh → null (never reuse A on B)', () => {
+  const r = resolveRefreshTokenColumns(null, { refresh_token_ciphertext: 'A_ct', refresh_token_nonce: 'A_n' }, false)
+  assert.strictEqual(r.refresh_token_ciphertext, null)
+  assert.strictEqual(r.refresh_token_nonce, null)
+})
+await test('same account, no prior row → null pair', () => {
+  const r = resolveRefreshTokenColumns(null, null, true)
   assert.strictEqual(r.refresh_token_ciphertext, null)
   assert.strictEqual(r.refresh_token_nonce, null)
 })

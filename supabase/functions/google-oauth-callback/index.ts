@@ -1,19 +1,20 @@
-// google-oauth-callback — Google redirects here after consent. This function is
-// deployed with verify_jwt=false (Google's redirect carries no Supabase JWT); it
-// is instead securely gated by the one-time, hashed, expiring OAuth state that
-// was created by google-oauth-start.
+// google-oauth-callback — Google redirects here after consent. Deployed with
+// verify_jwt=false (Google's redirect carries no Supabase JWT); it is instead
+// securely gated by the one-time, hashed, expiring OAuth state from oauth-start.
 //
-// Flow: validate+atomically consume state → exchange code (PKCE) server-side →
-// verify the Google identity via the official userinfo endpoint → bind to the
-// Funnl user stored with the state → encrypt+store tokens (preserving an existing
-// refresh token if omitted) → redirect ONLY to the previously validated origin
-// with a server-constructed /settings?google=connected|error path.
+// Flow: resolve + atomically consume state (also gives the validated redirect
+// origin) → exchange code (PKCE) server-side → verify Google identity via the
+// official userinfo endpoint → delegate the decision + ATOMIC persistence to the
+// tested finalizeGoogleConnection helper (granted-scope check, email_verified,
+// same-account refresh preservation, refresh-required-for-new-account, atomic
+// store via RPC, best-effort revoke on failure, old-account revoke after replace)
+// → redirect ONLY to the validated origin with a server-constructed
+// /settings?google=connected|error path.
 //
 // Tokens are never returned to the browser. Only controlled error codes are logged.
 //
-// Server config (Edge secrets):
-//   GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_OAUTH_CALLBACK_URL,
-//   GOOGLE_TOKEN_ENCRYPTION_KEY_V1
+// Server config: GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_OAUTH_CALLBACK_URL,
+// GOOGLE_TOKEN_ENCRYPTION_KEY_V1.
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { importKeyFromBase64, encryptToken, decryptToken } from '../shared/googleTokenCrypto.js'
@@ -21,11 +22,12 @@ import {
   sha256Hex,
   buildSettingsRedirect,
   resolveReturnOrigin,
-  resolveRefreshTokenColumns,
   CANONICAL_ERROR_REDIRECT,
   GOOGLE_TOKEN_ENDPOINT,
   GOOGLE_USERINFO_ENDPOINT,
+  GOOGLE_REVOKE_ENDPOINT,
 } from '../shared/googleOauthHelpers.js'
+import { finalizeGoogleConnection } from '../shared/googleConnect.js'
 
 const GOOGLE_FETCH_TIMEOUT_MS = 10_000
 
@@ -43,19 +45,28 @@ async function boundedFetch(url: string, init: RequestInit): Promise<Response> {
   }
 }
 
+async function revokeToken(token: string): Promise<void> {
+  await boundedFetch(GOOGLE_REVOKE_ENDPOINT, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ token }).toString(),
+  })
+}
+
 Deno.serve(async (req) => {
-  // Google redirects with a GET. A safe error redirect needs a validated origin;
-  // until the state is resolved we can only trust the canonical production origin.
+  // A safe error redirect needs a validated origin; until the state is resolved we
+  // can only trust the canonical production origin.
   let safeErrorRedirect = CANONICAL_ERROR_REDIRECT
 
   try {
     const url = new URL(req.url)
-    const code       = url.searchParams.get('code')
-    const state      = url.searchParams.get('state')
-    const googleError = url.searchParams.get('error')
+    const code        = url.searchParams.get('code')
+    const state       = url.searchParams.get('state')
+    const googleError = url.searchParams.get('error')  // e.g. access_denied
 
-    if (googleError || !code || !state) {
-      console.error('google-oauth-callback missing_code_or_state')
+    // With no state we can never trust a browser-supplied origin.
+    if (!state) {
+      console.error('google-oauth-callback missing_state')
       return redirect(safeErrorRedirect)
     }
 
@@ -66,7 +77,8 @@ Deno.serve(async (req) => {
 
     // ── Atomically consume the one-time state ───────────────────────────────
     // A single conditional UPDATE marks it consumed only if not already consumed
-    // and not expired; RETURNING the row proves this caller won the race.
+    // and not expired; RETURNING the row proves this caller won the race. This
+    // runs even on error/denial so we can redirect to the ORIGINATING origin.
     const stateHash = await sha256Hex(state)
     const nowIso = new Date().toISOString()
     const { data: stateRow, error: consumeError } = await admin
@@ -79,16 +91,21 @@ Deno.serve(async (req) => {
       .maybeSingle()
 
     if (consumeError || !stateRow) {
-      // Missing, expired, already-used, or mismatched state.
       console.error('google-oauth-callback invalid_state')
-      return redirect(safeErrorRedirect)
+      return redirect(safeErrorRedirect)  // canonical — no trusted origin
     }
 
-    // From here we have a validated origin to redirect to.
+    // We now have a validated origin for all subsequent redirects.
     const validatedOrigin = resolveReturnOrigin(stateRow.return_origin)
     safeErrorRedirect = validatedOrigin
       ? buildSettingsRedirect(validatedOrigin, 'error')
       : CANONICAL_ERROR_REDIRECT
+
+    // Google returned an error (e.g. access_denied) or no code → error to origin.
+    if (googleError || !code) {
+      console.error('google-oauth-callback provider_error_or_no_code')
+      return redirect(safeErrorRedirect)
+    }
 
     // ── Server config ───────────────────────────────────────────────────────
     const clientId     = Deno.env.get('GOOGLE_CLIENT_ID') ?? ''
@@ -107,7 +124,6 @@ Deno.serve(async (req) => {
       stateRow.pkce_verifier_nonce,
       key,
     )
-
     const tokenParams = new URLSearchParams({
       code,
       client_id:     clientId,
@@ -126,10 +142,7 @@ Deno.serve(async (req) => {
       return redirect(safeErrorRedirect)
     }
     const tokenData = await tokenRes.json()
-    const accessToken  = tokenData.access_token as string | undefined
-    const refreshToken = tokenData.refresh_token as string | undefined
-    const expiresIn    = tokenData.expires_in as number | undefined
-    const grantedScope = (tokenData.scope as string | undefined) ?? ''
+    const accessToken = tokenData.access_token as string | undefined
     if (!accessToken) {
       console.error('google-oauth-callback no_access_token')
       return redirect(safeErrorRedirect)
@@ -141,72 +154,71 @@ Deno.serve(async (req) => {
     })
     if (!userinfoRes.ok) {
       console.error('google-oauth-callback userinfo_failed', userinfoRes.status)
+      // Best-effort revoke the token we cannot verify.
+      try { await revokeToken(accessToken) } catch { /* best-effort */ }
       return redirect(safeErrorRedirect)
     }
-    const userinfo = await userinfoRes.json()
-    const googleSub   = userinfo.sub as string | undefined
-    const googleEmail = userinfo.email as string | undefined
-    if (!googleSub || !googleEmail) {
-      console.error('google-oauth-callback userinfo_incomplete')
-      return redirect(safeErrorRedirect)
-    }
+    const identity = await userinfoRes.json()
 
-    // ── Upsert the connection (one per user) bound to the state's user ──────
-    const tokenExpiresAt = expiresIn
-      ? new Date(Date.now() + expiresIn * 1000).toISOString()
-      : null
-    const scopes = grantedScope ? grantedScope.split(' ').filter(Boolean) : []
-    const { data: conn, error: connError } = await admin
+    // ── Load the user's existing connection + tokens (for same-account logic
+    //    and old-account revocation) BEFORE any write ────────────────────────
+    const { data: existingConnection } = await admin
       .from('google_connections')
-      .upsert({
-        user_id:          stateRow.user_id,
-        google_sub:       googleSub,
-        google_email:     googleEmail,
-        scopes,
-        status:           'active',
-        token_expires_at: tokenExpiresAt,
-        updated_at:       new Date().toISOString(),
-      }, { onConflict: 'user_id' })
-      .select('id')
-      .single()
-    if (connError || !conn) {
-      console.error('google-oauth-callback connection_upsert_failed', connError?.code ?? 'db_error')
-      return redirect(safeErrorRedirect)
-    }
-
-    // ── Encrypt + store tokens, preserving an existing refresh token ────────
-    const encAccess = await encryptToken(accessToken, key)
-    const encRefresh = refreshToken ? await encryptToken(refreshToken, key) : null
-
-    const { data: existingTokens } = await admin
-      .from('google_tokens')
-      .select('refresh_token_ciphertext, refresh_token_nonce')
-      .eq('connection_id', conn.id)
+      .select('id, google_sub')
+      .eq('user_id', stateRow.user_id)
       .maybeSingle()
+    let existingRefreshRow: Record<string, string | null> | null = null
+    if (existingConnection) {
+      const { data } = await admin
+        .from('google_tokens')
+        .select('refresh_token_ciphertext, refresh_token_nonce, access_token_ciphertext, access_token_nonce')
+        .eq('connection_id', existingConnection.id)
+        .maybeSingle()
+      existingRefreshRow = data ?? null
+    }
 
-    const refreshCols = resolveRefreshTokenColumns(encRefresh, existingTokens ?? null)
+    // ── Delegate the decision + ATOMIC persistence ──────────────────────────
+    const result = await finalizeGoogleConnection({
+      exchange: {
+        accessToken,
+        refreshToken: tokenData.refresh_token ?? null,
+        expiresIn:    tokenData.expires_in ?? null,
+        scope:        tokenData.scope ?? '',
+      },
+      identity,
+      userId: stateRow.user_id,
+      existingConnection: existingConnection ?? null,
+      existingRefreshRow,
+      encryptAccess:  (t: string) => encryptToken(t, key),
+      encryptRefresh: (t: string) => encryptToken(t, key),
+      // Atomic single-RPC persistence; throws on DB error so finalize compensates.
+      store: async (args: Record<string, unknown>) => {
+        const { data, error } = await admin.rpc('store_google_connection', args)
+        if (error) throw new Error('store_failed')
+        return data as string
+      },
+      revoke: revokeToken,
+      // Old account's revocable token (used only when the account changed).
+      resolveOldToken: async () => {
+        if (!existingRefreshRow) return null
+        if (existingRefreshRow.refresh_token_ciphertext && existingRefreshRow.refresh_token_nonce) {
+          return decryptToken(existingRefreshRow.refresh_token_ciphertext, existingRefreshRow.refresh_token_nonce, key)
+        }
+        if (existingRefreshRow.access_token_ciphertext && existingRefreshRow.access_token_nonce) {
+          return decryptToken(existingRefreshRow.access_token_ciphertext, existingRefreshRow.access_token_nonce, key)
+        }
+        return null
+      },
+    })
 
-    const { error: tokenStoreError } = await admin
-      .from('google_tokens')
-      .upsert({
-        connection_id:           conn.id,
-        access_token_ciphertext: encAccess.ciphertext,
-        access_token_nonce:      encAccess.nonce,
-        refresh_token_ciphertext: refreshCols.refresh_token_ciphertext,
-        refresh_token_nonce:      refreshCols.refresh_token_nonce,
-        key_version:             1,
-        updated_at:              new Date().toISOString(),
-      }, { onConflict: 'connection_id' })
-    if (tokenStoreError) {
-      console.error('google-oauth-callback token_store_failed', tokenStoreError.code ?? 'db_error')
+    if (!result.ok) {
+      console.error('google-oauth-callback finalize_rejected', result.reason)
       return redirect(safeErrorRedirect)
     }
 
-    // ── Success: redirect only to the validated origin ──────────────────────
-    const successRedirect = validatedOrigin
-      ? buildSettingsRedirect(validatedOrigin, 'connected')
-      : CANONICAL_ERROR_REDIRECT
-    return redirect(successRedirect)
+    return redirect(
+      validatedOrigin ? buildSettingsRedirect(validatedOrigin, 'connected') : CANONICAL_ERROR_REDIRECT,
+    )
   } catch {
     console.error('google-oauth-callback internal_error')
     return redirect(safeErrorRedirect)

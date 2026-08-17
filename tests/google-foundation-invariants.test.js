@@ -103,6 +103,7 @@ const googleSources = [
   'supabase/functions/shared/googleOauthHelpers.js',
   'supabase/functions/shared/googleTokenCrypto.js',
   'supabase/functions/shared/googleCleanup.js',
+  'supabase/functions/shared/googleConnect.js',
   'src/components/GoogleConnectionCard.jsx',
   'src/lib/googleConnection.js',
   migrationRel(),
@@ -142,6 +143,48 @@ test('exactly three google_* tables defined in the migration', () => {
 test('only the three google-oauth-* edge functions exist', () => {
   const fns = readdirSync(join(root, 'supabase/functions')).filter(n => n.startsWith('google'))
   assert.deepStrictEqual(fns.sort(), ['google-oauth-callback', 'google-oauth-disconnect', 'google-oauth-start'])
+})
+
+// ── Atomic persistence RPC (hardening pass) ───────────────────────────────────
+console.log('\natomic persistence RPC')
+const helpers = read('supabase/functions/shared/googleOauthHelpers.js')
+const callback = read('supabase/functions/google-oauth-callback/index.ts')
+
+test('store_google_connection RPC exists, SECURITY DEFINER, empty search_path', () => {
+  assert.ok(/CREATE OR REPLACE FUNCTION public\.store_google_connection\(/.test(migration))
+  const fn = migration.slice(migration.indexOf('CREATE OR REPLACE FUNCTION public.store_google_connection'))
+  assert.ok(/SECURITY DEFINER/.test(fn))
+  assert.ok(/SET search_path = ''/.test(fn))
+  // Fully-qualified table references inside the function.
+  assert.ok(/INSERT INTO public\.google_connections/.test(fn))
+  assert.ok(/INSERT INTO public\.google_tokens/.test(fn))
+})
+test('RPC execution revoked from PUBLIC/anon/authenticated, granted only to service_role', () => {
+  assert.ok(/REVOKE ALL ON FUNCTION public\.store_google_connection\([\s\S]*?\) FROM PUBLIC, anon, authenticated/.test(migration))
+  assert.ok(/GRANT EXECUTE ON FUNCTION public\.store_google_connection\([\s\S]*?\) TO service_role/.test(migration))
+})
+test('callback persists via the atomic RPC (not two separate table writes)', () => {
+  assert.ok(callback.includes("admin.rpc('store_google_connection'"), 'callback must call the atomic RPC')
+  assert.ok(!/\.from\('google_connections'\)[\s\S]*?\.upsert\(/.test(callback), 'no direct connection upsert')
+  assert.ok(!/\.from\('google_tokens'\)[\s\S]*?\.upsert\(/.test(callback), 'no direct token upsert')
+  assert.ok(callback.includes('finalizeGoogleConnection'), 'callback delegates to finalize')
+})
+
+// ── Lifecycle hardening invariants ────────────────────────────────────────────
+console.log('\nlifecycle hardening')
+test('auth URL requests offline access + re-consent + account selection', () => {
+  assert.ok(/access_type:\s*'offline'/.test(helpers))
+  assert.ok(/prompt:\s*'consent select_account'/.test(helpers))
+})
+test('identity validation requires email_verified === true', () => {
+  assert.ok(/email_verified !== true/.test(helpers), 'must reject unverified email')
+})
+test('refresh preservation is account-scoped (sameSub) — never cross-account', () => {
+  assert.ok(/sameSub === true/.test(helpers), 'preserve only for same account')
+})
+test('start performs bounded best-effort stale-state cleanup', () => {
+  const start = read('supabase/functions/google-oauth-start/index.ts')
+  assert.ok(/google_oauth_states'\)\.delete\(\)\.lt\('created_at'/.test(start))
 })
 
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed\n`)

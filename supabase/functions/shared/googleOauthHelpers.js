@@ -13,11 +13,13 @@
 import { bytesToBase64 } from './googleTokenCrypto.js'
 
 // ── Scopes (Phase 0A: Calendar read-only only — NO Gmail) ─────────────────────
+export const REQUIRED_CALENDAR_SCOPE = 'https://www.googleapis.com/auth/calendar.events.readonly'
+
 export const GOOGLE_OAUTH_SCOPES = Object.freeze([
   'openid',
   'email',
   'profile',
-  'https://www.googleapis.com/auth/calendar.events.readonly',
+  REQUIRED_CALENDAR_SCOPE,
 ])
 
 export const GOOGLE_AUTH_ENDPOINT  = 'https://accounts.google.com/o/oauth2/v2/auth'
@@ -125,8 +127,12 @@ export function buildGoogleAuthUrl({ clientId, redirectUri, state, codeChallenge
     redirect_uri:          redirectUri,
     response_type:         'code',
     scope:                 scopes.join(' '),
-    access_type:           'offline',      // web-server flow → refresh token
-    prompt:                'consent',      // ensure a refresh token is issued
+    access_type:           'offline',                // web-server flow → refresh token
+    // 'consent' forces re-consent so a refresh token is re-issued even for a
+    // previously-authorized account; 'select_account' lets the user pick or replace
+    // the Google account being connected. Background Calendar sync (a later phase)
+    // needs a usable refresh token, so re-consent must be reliable.
+    prompt:                'consent select_account',
     include_granted_scopes:'true',
     state,
     code_challenge:        codeChallenge,
@@ -135,25 +141,112 @@ export function buildGoogleAuthUrl({ clientId, redirectUri, state, codeChallenge
   return `${GOOGLE_AUTH_ENDPOINT}?${params.toString()}`
 }
 
+// ── Granted-scope validation ──────────────────────────────────────────────────
 /**
- * Decides the refresh-token columns to persist, preserving an existing refresh
- * token when a later token response omits refresh_token (Google only returns it
- * on first consent). Pure and testable.
+ * Parses a space-delimited granted-scope string into an array.
+ * @param {unknown} scopeString
+ * @returns {string[]}
+ */
+export function parseGrantedScopes(scopeString) {
+  if (typeof scopeString !== 'string') return []
+  return scopeString.split(' ').filter(Boolean)
+}
+
+/**
+ * True only when the granted scopes include the required Calendar read-only scope.
+ * @param {unknown} scopeString — the `scope` field of the token response
+ * @returns {boolean}
+ */
+export function grantedScopesIncludeCalendar(scopeString) {
+  return parseGrantedScopes(scopeString).includes(REQUIRED_CALENDAR_SCOPE)
+}
+
+// ── Google identity validation ────────────────────────────────────────────────
+/**
+ * Validates the verified Google identity (from the userinfo/ID-token response).
+ * Requires a non-empty `sub`, a non-empty `email`, and `email_verified === true`.
+ * google_sub is the stable identity key — email is never the primary key.
  *
- * @param {{ ciphertext: string, nonce: string }|null} newlyEncrypted — encrypted new refresh token, or null if none returned
+ * @param {{ sub?: unknown, email?: unknown, email_verified?: unknown }|null} identity
+ * @returns {{ ok: true, sub: string, email: string } | { ok: false, reason: string }}
+ */
+export function validateGoogleIdentity(identity) {
+  const sub = identity?.sub
+  const email = identity?.email
+  if (typeof sub !== 'string' || sub.length === 0) return { ok: false, reason: 'missing_sub' }
+  if (typeof email !== 'string' || email.length === 0) return { ok: false, reason: 'missing_email' }
+  if (identity?.email_verified !== true) return { ok: false, reason: 'email_unverified' }
+  return { ok: true, sub, email }
+}
+
+// ── Account identity comparison ───────────────────────────────────────────────
+/**
+ * True when an existing connection belongs to the SAME Google account as the newly
+ * verified sub. Used to decide whether a stored refresh token may be preserved.
+ * @param {{ google_sub?: string }|null} existingConnection
+ * @param {string} newSub
+ * @returns {boolean}
+ */
+export function isSameGoogleAccount(existingConnection, newSub) {
+  return Boolean(existingConnection) &&
+    typeof existingConnection.google_sub === 'string' &&
+    existingConnection.google_sub === newSub
+}
+
+/**
+ * A new refresh token is REQUIRED (cannot fall back to a stored one) whenever the
+ * connection is new or the Google account changed — i.e. whenever it is not the
+ * same account. Re-consent on the same account may keep the stored token.
+ * @param {boolean} sameSub
+ * @param {boolean} hasNewRefresh
+ * @returns {boolean} true when the flow must be rejected for lacking a refresh token
+ */
+export function requiresNewRefreshToken(sameSub, hasNewRefresh) {
+  return !sameSub && !hasNewRefresh
+}
+
+// ── Stale OAuth-state cleanup cutoff ──────────────────────────────────────────
+/**
+ * ISO cutoff for best-effort deletion of old OAuth state rows: any row created
+ * before (now - retentionMs) is safely past its short TTL (10 min) and unusable,
+ * whether it was consumed or simply expired.
+ * @param {number} nowMs
+ * @param {number} retentionMs
+ * @returns {string} ISO timestamp
+ */
+export function staleOauthStateCutoffIso(nowMs, retentionMs) {
+  return new Date(nowMs - retentionMs).toISOString()
+}
+
+/**
+ * Decides the refresh-token columns to persist.
+ *
+ * A stored refresh token may be preserved ONLY when the response omits a new one
+ * AND the connection is the SAME Google account (sameSub === true). When the
+ * account differs, the previous account's refresh token is NEVER reused —
+ * account A's refresh token can never be attached to account B. In that case, if
+ * no new refresh token is present, the null pair is returned (the caller must
+ * reject the flow via requiresNewRefreshToken()).
+ *
+ * @param {{ ciphertext: string, nonce: string }|null} newlyEncrypted — encrypted new refresh token, or null
  * @param {{ refresh_token_ciphertext: string|null, refresh_token_nonce: string|null }|null} existingRow — existing google_tokens row, or null
+ * @param {boolean} sameSub — whether the existing connection is the same Google account
  * @returns {{ refresh_token_ciphertext: string|null, refresh_token_nonce: string|null }}
  */
-export function resolveRefreshTokenColumns(newlyEncrypted, existingRow) {
+export function resolveRefreshTokenColumns(newlyEncrypted, existingRow, sameSub) {
   if (newlyEncrypted && newlyEncrypted.ciphertext && newlyEncrypted.nonce) {
     return {
       refresh_token_ciphertext: newlyEncrypted.ciphertext,
       refresh_token_nonce:      newlyEncrypted.nonce,
     }
   }
-  // No new refresh token — keep whatever was stored before (may be null).
-  return {
-    refresh_token_ciphertext: existingRow?.refresh_token_ciphertext ?? null,
-    refresh_token_nonce:      existingRow?.refresh_token_nonce ?? null,
+  // No new refresh token: keep the stored one ONLY for the same Google account.
+  if (sameSub === true) {
+    return {
+      refresh_token_ciphertext: existingRow?.refresh_token_ciphertext ?? null,
+      refresh_token_nonce:      existingRow?.refresh_token_nonce ?? null,
+    }
   }
+  // Different (or unknown) account with no new refresh token — never reuse.
+  return { refresh_token_ciphertext: null, refresh_token_nonce: null }
 }

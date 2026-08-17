@@ -129,3 +129,74 @@ REVOKE ALL ON TABLE public.google_oauth_states FROM anon;
 REVOKE ALL ON TABLE public.google_oauth_states FROM authenticated;
 GRANT ALL  ON TABLE public.google_oauth_states TO service_role;
 -- Intentionally NO GRANT and NO POLICY for authenticated.
+
+
+-- ── 4. store_google_connection() — atomic connection + token persistence ──────
+--
+-- Writes the non-secret connection row AND the encrypted token row in a SINGLE
+-- transaction (a plpgsql function is one transaction), so a failure rolls BOTH
+-- back — the callback can never leave an active connection without its tokens.
+--
+-- Tokens are passed ALREADY ENCRYPTED (ciphertext + nonce). Plaintext tokens are
+-- NEVER passed into the database; encryption stays in the Edge Function.
+--
+-- SECURITY DEFINER + fixed empty search_path + fully-qualified objects. Callable
+-- only by service_role (the Edge Function's admin client). Returns the connection id.
+
+CREATE OR REPLACE FUNCTION public.store_google_connection(
+  p_user_id          uuid,
+  p_google_sub       text,
+  p_google_email     text,
+  p_scopes           text[],
+  p_status           text,
+  p_token_expires_at timestamptz,
+  p_access_ct        text,
+  p_access_nonce     text,
+  p_refresh_ct       text,
+  p_refresh_nonce    text,
+  p_key_version      smallint
+)
+RETURNS uuid
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_conn_id uuid;
+BEGIN
+  INSERT INTO public.google_connections
+    (user_id, google_sub, google_email, scopes, status, token_expires_at, updated_at)
+  VALUES
+    (p_user_id, p_google_sub, p_google_email, p_scopes, p_status, p_token_expires_at, now())
+  ON CONFLICT (user_id) DO UPDATE
+    SET google_sub       = EXCLUDED.google_sub,
+        google_email     = EXCLUDED.google_email,
+        scopes           = EXCLUDED.scopes,
+        status           = EXCLUDED.status,
+        token_expires_at = EXCLUDED.token_expires_at,
+        updated_at       = now()
+  RETURNING id INTO v_conn_id;
+
+  INSERT INTO public.google_tokens
+    (connection_id, access_token_ciphertext, access_token_nonce,
+     refresh_token_ciphertext, refresh_token_nonce, key_version, updated_at)
+  VALUES
+    (v_conn_id, p_access_ct, p_access_nonce, p_refresh_ct, p_refresh_nonce, p_key_version, now())
+  ON CONFLICT (connection_id) DO UPDATE
+    SET access_token_ciphertext  = EXCLUDED.access_token_ciphertext,
+        access_token_nonce       = EXCLUDED.access_token_nonce,
+        refresh_token_ciphertext = EXCLUDED.refresh_token_ciphertext,
+        refresh_token_nonce      = EXCLUDED.refresh_token_nonce,
+        key_version              = EXCLUDED.key_version,
+        updated_at               = now();
+
+  RETURN v_conn_id;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.store_google_connection(
+  uuid, text, text, text[], text, timestamptz, text, text, text, text, smallint
+) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.store_google_connection(
+  uuid, text, text, text[], text, timestamptz, text, text, text, text, smallint
+) TO service_role;
