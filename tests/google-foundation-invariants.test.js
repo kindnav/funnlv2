@@ -211,12 +211,21 @@ test('callback is POST-only (form_post); non-POST → 405 without processing', (
 })
 test('callback processes the form_post body, never GET query params (no URL-log re-entry)', () => {
   assert.ok(callback.includes('parseCallbackFormBody('), 'must parse the form body')
-  assert.ok(callback.includes('await req.text()'), 'must read the request body')
+  assert.ok(callback.includes('readBoundedStream(req.body'), 'must read the request body (bounded)')
   assert.ok(!/searchParams/.test(callback), 'no query-parameter reading remains')
   assert.ok(!/new URL\(req\.url\)/.test(callback), 'no request-URL parsing remains (no GET fallback)')
 })
 test('auth URL requests response_mode=form_post', () => {
   assert.ok(/response_mode:\s*'form_post'/.test(helpers))
+})
+test('callback redirects use 303 See Other (never 301/302/307/308)', () => {
+  const fn = callback.slice(callback.indexOf('function redirect('), callback.indexOf('function redirect(') + 220)
+  assert.ok(/status:\s*303/.test(fn), 'redirect helper must use 303')
+  assert.ok(!/status:\s*30[1278]/.test(fn), 'no 301/302/307/308')
+})
+test('callback uses a bounded streaming read, not an unbounded req.text()', () => {
+  assert.ok(callback.includes('readBoundedStream(req.body'), 'must use the bounded reader')
+  assert.ok(!/await req\.text\(\)/.test(callback), 'no unbounded req.text() body read')
 })
 test('callback + start set no-store / no-referrer / nosniff security headers', () => {
   for (const [name, src] of [['callback', callback], ['start', startSrc]]) {

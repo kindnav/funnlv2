@@ -24,6 +24,7 @@ import {
   resolveReturnOrigin,
   isValidConfiguredCallbackUrl,
   parseCallbackFormBody,
+  readBoundedStream,
   CALLBACK_MAX_BODY_BYTES,
   CANONICAL_ERROR_REDIRECT,
   GOOGLE_TOKEN_ENDPOINT,
@@ -43,8 +44,12 @@ const securityHeaders = {
   'X-Content-Type-Options': 'nosniff',
 }
 
+// 303 See Other: after the form_post POST, unambiguously instruct the browser to
+// perform a GET at the Location. This guarantees the OAuth form body (code/state)
+// is never re-sent to the Settings URL (unlike 307/308, which preserve method +
+// body, or 302, whose method conversion is not guaranteed). Never use 301/302/307/308.
 function redirect(location: string): Response {
-  return new Response(null, { status: 302, headers: { ...securityHeaders, Location: location } })
+  return new Response(null, { status: 303, headers: { ...securityHeaders, Location: location } })
 }
 
 async function boundedFetch(url: string, init: RequestInit): Promise<Response> {
@@ -82,19 +87,23 @@ Deno.serve(async (req) => {
   let safeErrorRedirect = CANONICAL_ERROR_REDIRECT
 
   try {
-    // Reject oversized bodies early (Content-Length when present).
-    const declaredLen = Number(req.headers.get('content-length') ?? '')
-    if (Number.isFinite(declaredLen) && declaredLen > CALLBACK_MAX_BODY_BYTES) {
-      console.error('google-oauth-callback body_too_large')
+    // Bounded streaming read: a HARD 8 KB cap enforced by a strict Content-Length
+    // pre-check AND an incremental byte counter that cancels the stream the moment
+    // the total exceeds the limit — so a missing, invalid, or dishonest
+    // Content-Length cannot defeat the cap. Body contents are never logged.
+    const bounded = await readBoundedStream(req.body, {
+      contentLength: req.headers.get('content-length'),
+      maxBytes:      CALLBACK_MAX_BODY_BYTES,
+    })
+    if (!bounded.ok) {
+      console.error('google-oauth-callback bad_request', bounded.reason)
       return redirect(safeErrorRedirect)
     }
 
-    // Parse ONLY state/code/error from the form-urlencoded body. Rejects
-    // unsupported content types, oversized/malformed bodies, duplicate
-    // security-sensitive params, and missing required params. Submitted values
-    // are never logged or echoed.
-    const rawBody = await req.text()
-    const parsed = parseCallbackFormBody(rawBody, req.headers.get('content-type'))
+    // Parse ONLY state/code/error from the bounded form-urlencoded body. Rejects
+    // unsupported content types, malformed encoding, duplicate security-sensitive
+    // params, and missing required params. Submitted values are never logged/echoed.
+    const parsed = parseCallbackFormBody(bounded.text, req.headers.get('content-type'))
     if (!parsed.ok) {
       console.error('google-oauth-callback bad_request', parsed.reason)
       return redirect(safeErrorRedirect)

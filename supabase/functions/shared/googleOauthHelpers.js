@@ -184,6 +184,76 @@ export function buildGoogleAuthUrl({ clientId, redirectUri, state, codeChallenge
 // A code+state OAuth form body is tiny; cap well below any platform limit.
 export const CALLBACK_MAX_BODY_BYTES = 8192
 
+/**
+ * Reads a request body stream with a HARD byte cap, so the limit is a real
+ * resource limit rather than a Content-Length promise. Web-Streams based (works
+ * in Deno + Node 18+); injectable for tests.
+ *
+ * Behaviour:
+ *   - Strict Content-Length pre-check when present: a non-integer or negative
+ *     value → 'invalid_content_length'; a value > maxBytes → 'body_too_large'
+ *     (rejected before reading the body).
+ *   - Missing stream → 'missing_body'.
+ *   - Reads incrementally; the running total is checked BEFORE keeping a chunk, so
+ *     once the total exceeds maxBytes the stream is cancelled and rejected
+ *     ('body_too_large'). Never buffers more than the allowed body plus the single
+ *     current incoming chunk.
+ *   - Any read error → 'stream_error' (stream cancelled).
+ *   - Accepted bytes are decoded as UTF-8 with a fail-closed decoder; invalid
+ *     UTF-8 → 'invalid_encoding'.
+ *   - Never logs or returns body contents beyond the decoded text itself.
+ *
+ * @param {ReadableStream<Uint8Array>|null|undefined} stream — req.body
+ * @param {{ contentLength?: string|null, maxBytes?: number }} [opts]
+ * @returns {Promise<{ ok: true, text: string }
+ *          | { ok: false, reason: 'invalid_content_length'|'body_too_large'|'missing_body'|'stream_error'|'invalid_encoding' }>}
+ */
+export async function readBoundedStream(stream, opts = {}) {
+  const maxBytes = opts.maxBytes ?? CALLBACK_MAX_BODY_BYTES
+  const contentLength = opts.contentLength
+
+  // Strict Content-Length pre-check (when the header is present and non-empty).
+  if (contentLength !== null && contentLength !== undefined && contentLength !== '') {
+    const declared = Number(contentLength)
+    if (!Number.isInteger(declared) || declared < 0) return { ok: false, reason: 'invalid_content_length' }
+    if (declared > maxBytes) return { ok: false, reason: 'body_too_large' }
+  }
+
+  if (!stream) return { ok: false, reason: 'missing_body' }
+
+  const reader = stream.getReader()
+  const chunks = []
+  let total = 0
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (value && value.byteLength) {
+        total += value.byteLength
+        if (total > maxBytes) {                 // over-limit: drop chunk, cancel, reject
+          try { await reader.cancel() } catch { /* ignore */ }
+          return { ok: false, reason: 'body_too_large' }
+        }
+        chunks.push(value)
+      }
+    }
+  } catch {
+    try { await reader.cancel() } catch { /* ignore */ }
+    return { ok: false, reason: 'stream_error' }
+  }
+
+  const buf = new Uint8Array(total)
+  let off = 0
+  for (const c of chunks) { buf.set(c, off); off += c.byteLength }
+
+  try {
+    const text = new TextDecoder('utf-8', { fatal: true }).decode(buf)
+    return { ok: true, text }
+  } catch {
+    return { ok: false, reason: 'invalid_encoding' }
+  }
+}
+
 // x-www-form-urlencoded decode: '+' is a space, then percent-decode. Throws on
 // invalid percent-encoding (caught by the caller → malformed_encoding).
 function decodeFormComponent(s) {
