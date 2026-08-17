@@ -27,7 +27,28 @@ import {
   staleOauthStateCutoffIso,
   EXPECTED_GOOGLE_CALLBACK_URL,
   isValidConfiguredCallbackUrl,
+  parseCallbackFormBody,
+  readBoundedStream,
+  CALLBACK_MAX_BODY_BYTES,
 } from '../supabase/functions/shared/googleOauthHelpers.js'
+
+const FORM_CT = 'application/x-www-form-urlencoded'
+const enc = (s) => new TextEncoder().encode(s)
+// Build a ReadableStream that emits the given chunks (strings or Uint8Arrays).
+function streamFrom(chunks) {
+  return new ReadableStream({
+    start(c) { for (const ch of chunks) c.enqueue(ch instanceof Uint8Array ? ch : enc(ch)); c.close() },
+  })
+}
+// A stream that throws if any read is attempted (proves we never read it).
+function failIfReadStream() {
+  return new ReadableStream({ pull() { throw new Error('should-not-read') } })
+}
+// A stream that errors partway through reading.
+function erroringStream() {
+  let n = 0
+  return new ReadableStream({ pull(c) { if (n++ === 0) c.enqueue(enc('state=a')); else throw new Error('boom') } })
+}
 
 let passed = 0, failed = 0
 async function test(name, fn) {
@@ -134,8 +155,116 @@ await test('offline access + re-consent + account selection + S256; no gmail', (
   assert.strictEqual(u.searchParams.get('code_challenge'), 'CH')
   assert.strictEqual(u.searchParams.get('state'), 'ST')
   assert.strictEqual(u.searchParams.get('response_type'), 'code')
+  assert.strictEqual(u.searchParams.get('include_granted_scopes'), 'true')
   assert.ok(u.searchParams.get('scope').includes('calendar.events.readonly'))
   assert.ok(!/gmail/i.test(url), 'no gmail scope in the URL')
+})
+await test('auth URL sets response_mode=form_post exactly once', () => {
+  const url = buildGoogleAuthUrl({ clientId: 'CID', redirectUri: 'https://cb/x', state: 'ST', codeChallenge: 'CH' })
+  const u = new URL(url)
+  assert.strictEqual(u.searchParams.get('response_mode'), 'form_post')
+  assert.strictEqual(u.searchParams.getAll('response_mode').length, 1)
+})
+
+// ── parseCallbackFormBody (response_mode=form_post transport) ──────────────────
+console.log('\nparseCallbackFormBody')
+await test('valid form body extracts code + state (charset param allowed)', () => {
+  const r = parseCallbackFormBody('state=abc123&code=xyz789', `${FORM_CT}; charset=UTF-8`)
+  assert.ok(r.ok); assert.strictEqual(r.state, 'abc123'); assert.strictEqual(r.code, 'xyz789'); assert.strictEqual(r.error, null)
+})
+await test('access_denied form POST → ok with error, code null (existing denial path)', () => {
+  const r = parseCallbackFormBody('state=abc&error=access_denied', FORM_CT)
+  assert.ok(r.ok); assert.strictEqual(r.error, 'access_denied'); assert.strictEqual(r.code, null)
+})
+await test('unrelated Google fields are ignored', () => {
+  const r = parseCallbackFormBody('state=s&code=c&scope=https://www.googleapis.com/auth/calendar.events.readonly&authuser=0&hd=x&prompt=consent', FORM_CT)
+  assert.ok(r.ok); assert.strictEqual(r.state, 's'); assert.strictEqual(r.code, 'c')
+})
+await test('missing state is rejected', () => {
+  assert.deepStrictEqual(parseCallbackFormBody('code=xyz', FORM_CT), { ok: false, reason: 'missing_state' })
+})
+await test('missing code without an OAuth error is rejected', () => {
+  assert.deepStrictEqual(parseCallbackFormBody('state=abc', FORM_CT), { ok: false, reason: 'missing_code' })
+})
+await test('duplicate state/code/error are rejected (no last-wins)', () => {
+  assert.strictEqual(parseCallbackFormBody('state=a&state=b&code=c', FORM_CT).reason, 'duplicate_parameter')
+  assert.strictEqual(parseCallbackFormBody('state=a&code=c&code=d', FORM_CT).reason, 'duplicate_parameter')
+  assert.strictEqual(parseCallbackFormBody('state=a&error=x&error=y', FORM_CT).reason, 'duplicate_parameter')
+})
+await test('invalid percent-encoding is rejected safely', () => {
+  assert.strictEqual(parseCallbackFormBody('state=%ZZ&code=c', FORM_CT).reason, 'malformed_encoding')
+  assert.strictEqual(parseCallbackFormBody('state=%&code=c', FORM_CT).reason, 'malformed_encoding')
+})
+await test('oversized body is rejected', () => {
+  const big = 'state=' + 'a'.repeat(CALLBACK_MAX_BODY_BYTES) + '&code=c'
+  assert.strictEqual(parseCallbackFormBody(big, FORM_CT).reason, 'body_too_large')
+})
+await test('JSON and multipart content types are rejected', () => {
+  assert.strictEqual(parseCallbackFormBody('{"state":"a","code":"c"}', 'application/json').reason, 'unsupported_content_type')
+  assert.strictEqual(parseCallbackFormBody('state=a&code=c', 'multipart/form-data; boundary=xyz').reason, 'unsupported_content_type')
+  assert.strictEqual(parseCallbackFormBody('state=a&code=c', null).reason, 'unsupported_content_type')
+})
+await test('non-string body is rejected', () => {
+  assert.strictEqual(parseCallbackFormBody(undefined, FORM_CT).reason, 'invalid_body')
+})
+await test("'+' decodes to space in field values", () => {
+  const r = parseCallbackFormBody('state=a+b&code=c', FORM_CT)
+  assert.ok(r.ok); assert.strictEqual(r.state, 'a b')
+})
+
+// ── readBoundedStream (hard 8 KB streaming cap) ───────────────────────────────
+console.log('\nreadBoundedStream')
+await test('CALLBACK_MAX_BODY_BYTES is 8 KB', () => {
+  assert.strictEqual(CALLBACK_MAX_BODY_BYTES, 8192)
+})
+await test('small streamed body succeeds; text feeds the pure parser', async () => {
+  const r = await readBoundedStream(streamFrom(['state=abc&code=xyz']), { contentLength: '17' })
+  assert.ok(r.ok); assert.strictEqual(r.text, 'state=abc&code=xyz')
+  const p = parseCallbackFormBody(r.text, FORM_CT)
+  assert.ok(p.ok && p.state === 'abc' && p.code === 'xyz')
+})
+await test('body split across multiple chunks succeeds', async () => {
+  const r = await readBoundedStream(streamFrom(['state=', 'ab', 'c&co', 'de=xyz']), { contentLength: null })
+  assert.ok(r.ok); assert.strictEqual(r.text, 'state=abc&code=xyz')
+})
+await test('chunked body exceeding 8 KB is rejected even WITHOUT Content-Length', async () => {
+  const chunks = Array.from({ length: 10 }, () => 'a'.repeat(1000)) // 10 KB across chunks
+  const r = await readBoundedStream(streamFrom(chunks), { contentLength: null })
+  assert.deepStrictEqual(r, { ok: false, reason: 'body_too_large' })
+})
+await test('oversized declared Content-Length is rejected BEFORE reading the body', async () => {
+  // failIfReadStream throws if read; a body_too_large result proves it was not read.
+  const r = await readBoundedStream(failIfReadStream(), { contentLength: String(CALLBACK_MAX_BODY_BYTES + 1) })
+  assert.deepStrictEqual(r, { ok: false, reason: 'body_too_large' })
+})
+await test('invalid / negative Content-Length is rejected', async () => {
+  assert.strictEqual((await readBoundedStream(failIfReadStream(), { contentLength: 'abc' })).reason, 'invalid_content_length')
+  assert.strictEqual((await readBoundedStream(failIfReadStream(), { contentLength: '-5' })).reason, 'invalid_content_length')
+  assert.strictEqual((await readBoundedStream(failIfReadStream(), { contentLength: '3.5' })).reason, 'invalid_content_length')
+})
+await test('missing body is rejected safely', async () => {
+  assert.deepStrictEqual(await readBoundedStream(null, {}), { ok: false, reason: 'missing_body' })
+  assert.deepStrictEqual(await readBoundedStream(undefined, {}), { ok: false, reason: 'missing_body' })
+})
+await test('stream read failure is controlled (stream_error)', async () => {
+  const r = await readBoundedStream(erroringStream(), { contentLength: null })
+  assert.deepStrictEqual(r, { ok: false, reason: 'stream_error' })
+})
+await test('invalid UTF-8 is rejected (fail-closed decode)', async () => {
+  const bad = new Uint8Array([0x73, 0xff, 0xfe]) // 's' + invalid UTF-8 bytes
+  const r = await readBoundedStream(streamFrom([bad]), { contentLength: '3' })
+  assert.deepStrictEqual(r, { ok: false, reason: 'invalid_encoding' })
+})
+await test('a body exactly at the limit is accepted; one byte over is rejected', async () => {
+  const atLimit = 'x'.repeat(CALLBACK_MAX_BODY_BYTES)
+  assert.ok((await readBoundedStream(streamFrom([atLimit]), { contentLength: String(CALLBACK_MAX_BODY_BYTES) })).ok)
+  const over = 'x'.repeat(CALLBACK_MAX_BODY_BYTES + 1)
+  assert.strictEqual((await readBoundedStream(streamFrom([over]), { contentLength: null })).reason, 'body_too_large')
+})
+await test('failure results never carry body text', async () => {
+  const r = await readBoundedStream(streamFrom([new Uint8Array([0xff])]), { contentLength: '1' })
+  assert.strictEqual(r.ok, false)
+  assert.ok(!('text' in r), 'failure result must not include body text')
 })
 
 // ── Granted-scope validation ──────────────────────────────────────────────────

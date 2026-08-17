@@ -154,6 +154,10 @@ export function buildGoogleAuthUrl({ clientId, redirectUri, state, codeChallenge
     client_id:             clientId,
     redirect_uri:          redirectUri,
     response_type:         'code',
+    // form_post delivers `code`/`state` in an application/x-www-form-urlencoded
+    // POST body instead of URL query parameters, so the one-time authorization
+    // code and state never appear in infrastructure request-URL logs.
+    response_mode:         'form_post',
     scope:                 scopes.join(' '),
     access_type:           'offline',                // web-server flow → refresh token
     // 'consent' forces re-consent so a refresh token is re-issued even for a
@@ -167,6 +171,145 @@ export function buildGoogleAuthUrl({ clientId, redirectUri, state, codeChallenge
     code_challenge_method: 'S256',
   })
   return `${GOOGLE_AUTH_ENDPOINT}?${params.toString()}`
+}
+
+// ── OAuth callback form_post body parsing ─────────────────────────────────────
+//
+// Google delivers the callback via `response_mode=form_post`: a cross-site
+// application/x-www-form-urlencoded POST. This pure parser reads ONLY the three
+// controlled fields (state, code, error), rejects anything malformed/oversized/
+// duplicated, and never surfaces submitted values. Kept pure + injectable so it
+// is fully unit-testable without a Deno request.
+
+// A code+state OAuth form body is tiny; cap well below any platform limit.
+export const CALLBACK_MAX_BODY_BYTES = 8192
+
+/**
+ * Reads a request body stream with a HARD byte cap, so the limit is a real
+ * resource limit rather than a Content-Length promise. Web-Streams based (works
+ * in Deno + Node 18+); injectable for tests.
+ *
+ * Behaviour:
+ *   - Strict Content-Length pre-check when present: a non-integer or negative
+ *     value → 'invalid_content_length'; a value > maxBytes → 'body_too_large'
+ *     (rejected before reading the body).
+ *   - Missing stream → 'missing_body'.
+ *   - Reads incrementally; the running total is checked BEFORE keeping a chunk, so
+ *     once the total exceeds maxBytes the stream is cancelled and rejected
+ *     ('body_too_large'). Never buffers more than the allowed body plus the single
+ *     current incoming chunk.
+ *   - Any read error → 'stream_error' (stream cancelled).
+ *   - Accepted bytes are decoded as UTF-8 with a fail-closed decoder; invalid
+ *     UTF-8 → 'invalid_encoding'.
+ *   - Never logs or returns body contents beyond the decoded text itself.
+ *
+ * @param {ReadableStream<Uint8Array>|null|undefined} stream — req.body
+ * @param {{ contentLength?: string|null, maxBytes?: number }} [opts]
+ * @returns {Promise<{ ok: true, text: string }
+ *          | { ok: false, reason: 'invalid_content_length'|'body_too_large'|'missing_body'|'stream_error'|'invalid_encoding' }>}
+ */
+export async function readBoundedStream(stream, opts = {}) {
+  const maxBytes = opts.maxBytes ?? CALLBACK_MAX_BODY_BYTES
+  const contentLength = opts.contentLength
+
+  // Strict Content-Length pre-check (when the header is present and non-empty).
+  if (contentLength !== null && contentLength !== undefined && contentLength !== '') {
+    const declared = Number(contentLength)
+    if (!Number.isInteger(declared) || declared < 0) return { ok: false, reason: 'invalid_content_length' }
+    if (declared > maxBytes) return { ok: false, reason: 'body_too_large' }
+  }
+
+  if (!stream) return { ok: false, reason: 'missing_body' }
+
+  const reader = stream.getReader()
+  const chunks = []
+  let total = 0
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (value && value.byteLength) {
+        total += value.byteLength
+        if (total > maxBytes) {                 // over-limit: drop chunk, cancel, reject
+          try { await reader.cancel() } catch { /* ignore */ }
+          return { ok: false, reason: 'body_too_large' }
+        }
+        chunks.push(value)
+      }
+    }
+  } catch {
+    try { await reader.cancel() } catch { /* ignore */ }
+    return { ok: false, reason: 'stream_error' }
+  }
+
+  const buf = new Uint8Array(total)
+  let off = 0
+  for (const c of chunks) { buf.set(c, off); off += c.byteLength }
+
+  try {
+    const text = new TextDecoder('utf-8', { fatal: true }).decode(buf)
+    return { ok: true, text }
+  } catch {
+    return { ok: false, reason: 'invalid_encoding' }
+  }
+}
+
+// x-www-form-urlencoded decode: '+' is a space, then percent-decode. Throws on
+// invalid percent-encoding (caught by the caller → malformed_encoding).
+function decodeFormComponent(s) {
+  return decodeURIComponent(s.replace(/\+/g, ' '))
+}
+
+/**
+ * Parses a Google form_post callback body. Returns only { state, code, error };
+ * unrelated Google fields (scope, authuser, hd, prompt, …) are ignored.
+ *
+ * @param {unknown} rawBody — the raw request body text
+ * @param {unknown} contentType — the Content-Type header value
+ * @param {{ maxBytes?: number }} [opts]
+ * @returns {{ ok: true, state: string, code: string|null, error: string|null }
+ *          | { ok: false, reason: 'unsupported_content_type'|'invalid_body'|'body_too_large'
+ *                                 |'malformed_encoding'|'duplicate_parameter'|'missing_state'|'missing_code' }}
+ */
+export function parseCallbackFormBody(rawBody, contentType, opts = {}) {
+  const maxBytes = opts.maxBytes ?? CALLBACK_MAX_BODY_BYTES
+
+  // Content-Type must be exactly application/x-www-form-urlencoded (charset param
+  // allowed). JSON and multipart are rejected.
+  const ct = String(contentType ?? '').split(';')[0].trim().toLowerCase()
+  if (ct !== 'application/x-www-form-urlencoded') return { ok: false, reason: 'unsupported_content_type' }
+  if (typeof rawBody !== 'string') return { ok: false, reason: 'invalid_body' }
+  if (new TextEncoder().encode(rawBody).length > maxBytes) return { ok: false, reason: 'body_too_large' }
+
+  const seen = { state: 0, code: 0, error: 0 }
+  const values = {}
+  for (const pair of rawBody.split('&')) {
+    if (pair === '') continue
+    const eq = pair.indexOf('=')
+    const rawKey = eq === -1 ? pair : pair.slice(0, eq)
+    const rawVal = eq === -1 ? '' : pair.slice(eq + 1)
+    let key, val
+    try {
+      key = decodeFormComponent(rawKey)
+      val = decodeFormComponent(rawVal)
+    } catch {
+      return { ok: false, reason: 'malformed_encoding' }
+    }
+    if (key === 'state' || key === 'code' || key === 'error') {
+      seen[key] += 1
+      if (seen[key] > 1) return { ok: false, reason: 'duplicate_parameter' }  // no last-wins
+      values[key] = val
+    }
+    // all other fields ignored
+  }
+
+  const state = values.state
+  const code  = values.code
+  const error = values.error
+  if (!state) return { ok: false, reason: 'missing_state' }
+  // Google always returns either a code (success) or an error (e.g. access_denied).
+  if (!error && !code) return { ok: false, reason: 'missing_code' }
+  return { ok: true, state, code: code ?? null, error: error ?? null }
 }
 
 // ── Granted-scope validation ──────────────────────────────────────────────────

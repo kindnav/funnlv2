@@ -23,6 +23,9 @@ import {
   buildSettingsRedirect,
   resolveReturnOrigin,
   isValidConfiguredCallbackUrl,
+  parseCallbackFormBody,
+  readBoundedStream,
+  CALLBACK_MAX_BODY_BYTES,
   CANONICAL_ERROR_REDIRECT,
   GOOGLE_TOKEN_ENDPOINT,
   GOOGLE_USERINFO_ENDPOINT,
@@ -41,8 +44,12 @@ const securityHeaders = {
   'X-Content-Type-Options': 'nosniff',
 }
 
+// 303 See Other: after the form_post POST, unambiguously instruct the browser to
+// perform a GET at the Location. This guarantees the OAuth form body (code/state)
+// is never re-sent to the Settings URL (unlike 307/308, which preserve method +
+// body, or 302, whose method conversion is not guaranteed). Never use 301/302/307/308.
 function redirect(location: string): Response {
-  return new Response(null, { status: 302, headers: { ...securityHeaders, Location: location } })
+  return new Response(null, { status: 303, headers: { ...securityHeaders, Location: location } })
 }
 
 async function boundedFetch(url: string, init: RequestInit): Promise<Response> {
@@ -64,9 +71,14 @@ async function revokeToken(token: string): Promise<void> {
 }
 
 Deno.serve(async (req) => {
-  // Google's redirect is a top-level GET navigation. Any other method is rejected
-  // WITHOUT processing a state or code.
-  if (req.method !== 'GET') {
+  // Google delivers the callback via response_mode=form_post: a cross-site
+  // application/x-www-form-urlencoded POST. ONLY POST is processed; every other
+  // method (GET/PUT/PATCH/DELETE/…) is rejected WITHOUT reading a body or a query.
+  // There is no GET-query fallback, so the one-time code/state can never re-enter
+  // request-URL logs. Google's form_post is a top-level navigation POST (no CORS
+  // preflight); the single-use state + PKCE remain the authoritative protections,
+  // so no CORS/Origin validation is required here.
+  if (req.method !== 'POST') {
     return new Response('Method not allowed', { status: 405, headers: securityHeaders })
   }
 
@@ -75,16 +87,30 @@ Deno.serve(async (req) => {
   let safeErrorRedirect = CANONICAL_ERROR_REDIRECT
 
   try {
-    const url = new URL(req.url)
-    const code        = url.searchParams.get('code')
-    const state       = url.searchParams.get('state')
-    const googleError = url.searchParams.get('error')  // e.g. access_denied
-
-    // With no state we can never trust a browser-supplied origin.
-    if (!state) {
-      console.error('google-oauth-callback missing_state')
+    // Bounded streaming read: a HARD 8 KB cap enforced by a strict Content-Length
+    // pre-check AND an incremental byte counter that cancels the stream the moment
+    // the total exceeds the limit — so a missing, invalid, or dishonest
+    // Content-Length cannot defeat the cap. Body contents are never logged.
+    const bounded = await readBoundedStream(req.body, {
+      contentLength: req.headers.get('content-length'),
+      maxBytes:      CALLBACK_MAX_BODY_BYTES,
+    })
+    if (!bounded.ok) {
+      console.error('google-oauth-callback bad_request', bounded.reason)
       return redirect(safeErrorRedirect)
     }
+
+    // Parse ONLY state/code/error from the bounded form-urlencoded body. Rejects
+    // unsupported content types, malformed encoding, duplicate security-sensitive
+    // params, and missing required params. Submitted values are never logged/echoed.
+    const parsed = parseCallbackFormBody(bounded.text, req.headers.get('content-type'))
+    if (!parsed.ok) {
+      console.error('google-oauth-callback bad_request', parsed.reason)
+      return redirect(safeErrorRedirect)
+    }
+    const code        = parsed.code
+    const state       = parsed.state        // guaranteed present by the parser
+    const googleError = parsed.error        // e.g. access_denied
 
     const admin = createClient(
       Deno.env.get('SUPABASE_URL') ?? '',
