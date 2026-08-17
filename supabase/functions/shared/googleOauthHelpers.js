@@ -27,6 +27,34 @@ export const GOOGLE_TOKEN_ENDPOINT  = 'https://oauth2.googleapis.com/token'
 export const GOOGLE_REVOKE_ENDPOINT = 'https://oauth2.googleapis.com/revoke'
 export const GOOGLE_USERINFO_ENDPOINT = 'https://openidconnect.googleapis.com/v1/userinfo'
 
+// ── Branded OAuth callback URL ────────────────────────────────────────────────
+//
+// The Google redirect_uri is a BRANDED, first-party URL on the production domain.
+// REGISTER THIS URL IN GOOGLE CLOUD as the authorized redirect URI:
+//
+//   https://www.getfunnl.com/api/google-oauth-callback
+//
+// Vercel rewrites that path to the Supabase Edge Function internally (see
+// vercel.json). The Supabase Functions URL is ONLY the internal rewrite
+// destination — DO NOT register the Supabase URL with Google. GOOGLE_OAUTH_CALLBACK_URL
+// (Edge secret) must be set to exactly the branded URL below; both the start and
+// callback functions fail closed unless it matches exactly.
+export const EXPECTED_GOOGLE_CALLBACK_URL = 'https://www.getfunnl.com/api/google-oauth-callback'
+
+/**
+ * True only when the configured GOOGLE_OAUTH_CALLBACK_URL is EXACTLY the branded
+ * callback URL. Strict equality intentionally rejects the direct Supabase URL,
+ * the apex domain, http, explicit ports, credentials/userinfo, query strings,
+ * fragments, a trailing slash, and look-alike domains. Callers must fail closed
+ * when this returns false and must NOT log the rejected value.
+ *
+ * @param {unknown} rawCallbackUrl — GOOGLE_OAUTH_CALLBACK_URL env value
+ * @returns {boolean}
+ */
+export function isValidConfiguredCallbackUrl(rawCallbackUrl) {
+  return rawCallbackUrl === EXPECTED_GOOGLE_CALLBACK_URL
+}
+
 // ── Return-origin allowlist ───────────────────────────────────────────────────
 // Production apex + www, plus the Funnl team-scoped Vercel preview pattern. Only
 // the funnlv2 team can deploy hosts ending in -funnlv2.vercel.app, so an arbitrary
