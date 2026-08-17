@@ -25,6 +25,8 @@ import {
   resolveRefreshRequirement,
   shouldRevokeNewTokenOnFailure,
   staleOauthStateCutoffIso,
+  EXPECTED_GOOGLE_CALLBACK_URL,
+  isValidConfiguredCallbackUrl,
 } from '../supabase/functions/shared/googleOauthHelpers.js'
 
 let passed = 0, failed = 0
@@ -219,6 +221,35 @@ await test('revoke for new/different account; PRESERVE for same account with wor
   assert.strictEqual(shouldRevokeNewTokenOnFailure(false, true), true)   // different sub
   assert.strictEqual(shouldRevokeNewTokenOnFailure(true, false), true)   // same sub, no working pair
   assert.strictEqual(shouldRevokeNewTokenOnFailure(true, true), false)   // same sub + working pair → don't kill grant
+})
+
+// ── Branded callback URL validation ───────────────────────────────────────────
+console.log('\nisValidConfiguredCallbackUrl')
+await test('the expected callback is the branded www URL', () => {
+  assert.strictEqual(EXPECTED_GOOGLE_CALLBACK_URL, 'https://www.getfunnl.com/api/google-oauth-callback')
+})
+await test('exact branded URL accepted', () => {
+  assert.strictEqual(isValidConfiguredCallbackUrl('https://www.getfunnl.com/api/google-oauth-callback'), true)
+})
+await test('the direct Supabase URL is REJECTED (internal rewrite destination only)', () => {
+  assert.strictEqual(isValidConfiguredCallbackUrl('https://jzybxhvgnksrwxfivdwt.supabase.co/functions/v1/google-oauth-callback'), false)
+})
+await test('malformed alternatives are all rejected', () => {
+  for (const v of [
+    'https://getfunnl.com/api/google-oauth-callback',                        // apex
+    'http://www.getfunnl.com/api/google-oauth-callback',                     // http
+    'https://www.getfunnl.com:443/api/google-oauth-callback',               // explicit port
+    'https://user:pass@www.getfunnl.com/api/google-oauth-callback',         // credentials
+    'https://www.getfunnl.com/api/google-oauth-callback?x=1',               // query string
+    'https://www.getfunnl.com/api/google-oauth-callback#frag',              // fragment
+    'https://www.getfunnl.com/api/google-oauth-callback/',                  // trailing slash
+    'https://www.getfunnl.com.evil.com/api/google-oauth-callback',         // look-alike
+    'https://wwwXgetfunnl.com/api/google-oauth-callback',                   // look-alike
+    ' https://www.getfunnl.com/api/google-oauth-callback',                  // whitespace
+    '', null, undefined, 42,
+  ]) {
+    assert.strictEqual(isValidConfiguredCallbackUrl(v), false, `expected reject for ${JSON.stringify(v)}`)
+  }
 })
 
 // ── Stale state cutoff ────────────────────────────────────────────────────────

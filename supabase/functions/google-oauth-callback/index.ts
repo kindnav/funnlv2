@@ -22,6 +22,7 @@ import {
   sha256Hex,
   buildSettingsRedirect,
   resolveReturnOrigin,
+  isValidConfiguredCallbackUrl,
   CANONICAL_ERROR_REDIRECT,
   GOOGLE_TOKEN_ENDPOINT,
   GOOGLE_USERINFO_ENDPOINT,
@@ -123,12 +124,16 @@ Deno.serve(async (req) => {
     }
 
     // ── Server config ───────────────────────────────────────────────────────
+    // GOOGLE_OAUTH_CALLBACK_URL must equal the BRANDED www callback exactly (the
+    // redirect_uri registered in Google Cloud and sent on the token exchange).
+    // Fail closed otherwise. The direct Supabase Functions URL is ONLY the internal
+    // Vercel rewrite destination — never registered with Google. Never log the value.
     const clientId     = Deno.env.get('GOOGLE_CLIENT_ID') ?? ''
     const clientSecret = Deno.env.get('GOOGLE_CLIENT_SECRET') ?? ''
     const callbackUrl  = Deno.env.get('GOOGLE_OAUTH_CALLBACK_URL') ?? ''
     const keyB64       = Deno.env.get('GOOGLE_TOKEN_ENCRYPTION_KEY_V1') ?? ''
-    if (!clientId || !clientSecret || !callbackUrl || !keyB64) {
-      console.error('google-oauth-callback config_missing')
+    if (!clientId || !clientSecret || !keyB64 || !isValidConfiguredCallbackUrl(callbackUrl)) {
+      console.error('google-oauth-callback config_invalid')
       return redirect(safeErrorRedirect)
     }
     const key = await importKeyFromBase64(keyB64)

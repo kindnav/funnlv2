@@ -19,6 +19,7 @@ import {
   pkceChallengeFromVerifier,
   buildGoogleAuthUrl,
   staleOauthStateCutoffIso,
+  isValidConfiguredCallbackUrl,
 } from '../shared/googleOauthHelpers.js'
 
 const corsHeaders = {
@@ -76,11 +77,15 @@ Deno.serve(async (req) => {
     if (!returnOrigin) return json({ error: 'invalid_return_origin' }, 400)
 
     // ── Server config ───────────────────────────────────────────────────────
+    // GOOGLE_OAUTH_CALLBACK_URL must equal the BRANDED www callback exactly (the
+    // URL registered in Google Cloud). Fail closed otherwise. The direct Supabase
+    // Functions URL is ONLY the internal Vercel rewrite destination — it must NOT
+    // be registered with Google or set here. Never log the rejected value.
     const clientId    = Deno.env.get('GOOGLE_CLIENT_ID') ?? ''
     const callbackUrl = Deno.env.get('GOOGLE_OAUTH_CALLBACK_URL') ?? ''
     const keyB64      = Deno.env.get('GOOGLE_TOKEN_ENCRYPTION_KEY_V1') ?? ''
-    if (!clientId || !callbackUrl || !keyB64) {
-      console.error('google-oauth-start config_missing')
+    if (!clientId || !keyB64 || !isValidConfiguredCallbackUrl(callbackUrl)) {
+      console.error('google-oauth-start config_invalid')
       return json({ error: 'config_missing' }, 503)
     }
 
