@@ -23,6 +23,8 @@ import {
   buildSettingsRedirect,
   resolveReturnOrigin,
   isValidConfiguredCallbackUrl,
+  parseCallbackFormBody,
+  CALLBACK_MAX_BODY_BYTES,
   CANONICAL_ERROR_REDIRECT,
   GOOGLE_TOKEN_ENDPOINT,
   GOOGLE_USERINFO_ENDPOINT,
@@ -64,9 +66,14 @@ async function revokeToken(token: string): Promise<void> {
 }
 
 Deno.serve(async (req) => {
-  // Google's redirect is a top-level GET navigation. Any other method is rejected
-  // WITHOUT processing a state or code.
-  if (req.method !== 'GET') {
+  // Google delivers the callback via response_mode=form_post: a cross-site
+  // application/x-www-form-urlencoded POST. ONLY POST is processed; every other
+  // method (GET/PUT/PATCH/DELETE/…) is rejected WITHOUT reading a body or a query.
+  // There is no GET-query fallback, so the one-time code/state can never re-enter
+  // request-URL logs. Google's form_post is a top-level navigation POST (no CORS
+  // preflight); the single-use state + PKCE remain the authoritative protections,
+  // so no CORS/Origin validation is required here.
+  if (req.method !== 'POST') {
     return new Response('Method not allowed', { status: 405, headers: securityHeaders })
   }
 
@@ -75,16 +82,26 @@ Deno.serve(async (req) => {
   let safeErrorRedirect = CANONICAL_ERROR_REDIRECT
 
   try {
-    const url = new URL(req.url)
-    const code        = url.searchParams.get('code')
-    const state       = url.searchParams.get('state')
-    const googleError = url.searchParams.get('error')  // e.g. access_denied
-
-    // With no state we can never trust a browser-supplied origin.
-    if (!state) {
-      console.error('google-oauth-callback missing_state')
+    // Reject oversized bodies early (Content-Length when present).
+    const declaredLen = Number(req.headers.get('content-length') ?? '')
+    if (Number.isFinite(declaredLen) && declaredLen > CALLBACK_MAX_BODY_BYTES) {
+      console.error('google-oauth-callback body_too_large')
       return redirect(safeErrorRedirect)
     }
+
+    // Parse ONLY state/code/error from the form-urlencoded body. Rejects
+    // unsupported content types, oversized/malformed bodies, duplicate
+    // security-sensitive params, and missing required params. Submitted values
+    // are never logged or echoed.
+    const rawBody = await req.text()
+    const parsed = parseCallbackFormBody(rawBody, req.headers.get('content-type'))
+    if (!parsed.ok) {
+      console.error('google-oauth-callback bad_request', parsed.reason)
+      return redirect(safeErrorRedirect)
+    }
+    const code        = parsed.code
+    const state       = parsed.state        // guaranteed present by the parser
+    const googleError = parsed.error        // e.g. access_denied
 
     const admin = createClient(
       Deno.env.get('SUPABASE_URL') ?? '',

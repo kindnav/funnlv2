@@ -205,8 +205,18 @@ test('callback does NOT revoke on an unresolved lookup failure', () => {
 })
 
 console.log('\nOAuth security headers + method')
-test('callback rejects non-GET without processing', () => {
-  assert.ok(/req\.method !== 'GET'[\s\S]*?status: 405/.test(callback))
+test('callback is POST-only (form_post); non-POST → 405 without processing', () => {
+  assert.ok(/req\.method !== 'POST'[\s\S]*?status: 405/.test(callback), 'must reject non-POST with 405')
+  assert.ok(!/req\.method !== 'GET'/.test(callback), 'must NOT gate on GET anymore')
+})
+test('callback processes the form_post body, never GET query params (no URL-log re-entry)', () => {
+  assert.ok(callback.includes('parseCallbackFormBody('), 'must parse the form body')
+  assert.ok(callback.includes('await req.text()'), 'must read the request body')
+  assert.ok(!/searchParams/.test(callback), 'no query-parameter reading remains')
+  assert.ok(!/new URL\(req\.url\)/.test(callback), 'no request-URL parsing remains (no GET fallback)')
+})
+test('auth URL requests response_mode=form_post', () => {
+  assert.ok(/response_mode:\s*'form_post'/.test(helpers))
 })
 test('callback + start set no-store / no-referrer / nosniff security headers', () => {
   for (const [name, src] of [['callback', callback], ['start', startSrc]]) {

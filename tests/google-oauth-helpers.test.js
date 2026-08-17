@@ -27,7 +27,11 @@ import {
   staleOauthStateCutoffIso,
   EXPECTED_GOOGLE_CALLBACK_URL,
   isValidConfiguredCallbackUrl,
+  parseCallbackFormBody,
+  CALLBACK_MAX_BODY_BYTES,
 } from '../supabase/functions/shared/googleOauthHelpers.js'
+
+const FORM_CT = 'application/x-www-form-urlencoded'
 
 let passed = 0, failed = 0
 async function test(name, fn) {
@@ -134,8 +138,61 @@ await test('offline access + re-consent + account selection + S256; no gmail', (
   assert.strictEqual(u.searchParams.get('code_challenge'), 'CH')
   assert.strictEqual(u.searchParams.get('state'), 'ST')
   assert.strictEqual(u.searchParams.get('response_type'), 'code')
+  assert.strictEqual(u.searchParams.get('include_granted_scopes'), 'true')
   assert.ok(u.searchParams.get('scope').includes('calendar.events.readonly'))
   assert.ok(!/gmail/i.test(url), 'no gmail scope in the URL')
+})
+await test('auth URL sets response_mode=form_post exactly once', () => {
+  const url = buildGoogleAuthUrl({ clientId: 'CID', redirectUri: 'https://cb/x', state: 'ST', codeChallenge: 'CH' })
+  const u = new URL(url)
+  assert.strictEqual(u.searchParams.get('response_mode'), 'form_post')
+  assert.strictEqual(u.searchParams.getAll('response_mode').length, 1)
+})
+
+// ── parseCallbackFormBody (response_mode=form_post transport) ──────────────────
+console.log('\nparseCallbackFormBody')
+await test('valid form body extracts code + state (charset param allowed)', () => {
+  const r = parseCallbackFormBody('state=abc123&code=xyz789', `${FORM_CT}; charset=UTF-8`)
+  assert.ok(r.ok); assert.strictEqual(r.state, 'abc123'); assert.strictEqual(r.code, 'xyz789'); assert.strictEqual(r.error, null)
+})
+await test('access_denied form POST → ok with error, code null (existing denial path)', () => {
+  const r = parseCallbackFormBody('state=abc&error=access_denied', FORM_CT)
+  assert.ok(r.ok); assert.strictEqual(r.error, 'access_denied'); assert.strictEqual(r.code, null)
+})
+await test('unrelated Google fields are ignored', () => {
+  const r = parseCallbackFormBody('state=s&code=c&scope=https://www.googleapis.com/auth/calendar.events.readonly&authuser=0&hd=x&prompt=consent', FORM_CT)
+  assert.ok(r.ok); assert.strictEqual(r.state, 's'); assert.strictEqual(r.code, 'c')
+})
+await test('missing state is rejected', () => {
+  assert.deepStrictEqual(parseCallbackFormBody('code=xyz', FORM_CT), { ok: false, reason: 'missing_state' })
+})
+await test('missing code without an OAuth error is rejected', () => {
+  assert.deepStrictEqual(parseCallbackFormBody('state=abc', FORM_CT), { ok: false, reason: 'missing_code' })
+})
+await test('duplicate state/code/error are rejected (no last-wins)', () => {
+  assert.strictEqual(parseCallbackFormBody('state=a&state=b&code=c', FORM_CT).reason, 'duplicate_parameter')
+  assert.strictEqual(parseCallbackFormBody('state=a&code=c&code=d', FORM_CT).reason, 'duplicate_parameter')
+  assert.strictEqual(parseCallbackFormBody('state=a&error=x&error=y', FORM_CT).reason, 'duplicate_parameter')
+})
+await test('invalid percent-encoding is rejected safely', () => {
+  assert.strictEqual(parseCallbackFormBody('state=%ZZ&code=c', FORM_CT).reason, 'malformed_encoding')
+  assert.strictEqual(parseCallbackFormBody('state=%&code=c', FORM_CT).reason, 'malformed_encoding')
+})
+await test('oversized body is rejected', () => {
+  const big = 'state=' + 'a'.repeat(CALLBACK_MAX_BODY_BYTES) + '&code=c'
+  assert.strictEqual(parseCallbackFormBody(big, FORM_CT).reason, 'body_too_large')
+})
+await test('JSON and multipart content types are rejected', () => {
+  assert.strictEqual(parseCallbackFormBody('{"state":"a","code":"c"}', 'application/json').reason, 'unsupported_content_type')
+  assert.strictEqual(parseCallbackFormBody('state=a&code=c', 'multipart/form-data; boundary=xyz').reason, 'unsupported_content_type')
+  assert.strictEqual(parseCallbackFormBody('state=a&code=c', null).reason, 'unsupported_content_type')
+})
+await test('non-string body is rejected', () => {
+  assert.strictEqual(parseCallbackFormBody(undefined, FORM_CT).reason, 'invalid_body')
+})
+await test("'+' decodes to space in field values", () => {
+  const r = parseCallbackFormBody('state=a+b&code=c', FORM_CT)
+  assert.ok(r.ok); assert.strictEqual(r.state, 'a b')
 })
 
 // ── Granted-scope validation ──────────────────────────────────────────────────
