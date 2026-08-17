@@ -6,6 +6,7 @@ import {
   classifyGoogleConnection,
   parseGoogleReturnParam,
   hasCalendarScope,
+  CALENDAR_CONNECTION_ENABLED,
 } from '../lib/googleConnection'
 
 // Inner content of the Settings "Connected accounts" card. Phase 0A: Google
@@ -48,8 +49,11 @@ export default function GoogleConnectionCard() {
     }
   }
 
-  // On mount: surface the server-set ?google= banner (then clean the URL) and load status.
+  // On mount: surface the server-set ?google= banner (then clean the URL) and load
+  // status. When the rollout flag is disabled this is a no-op — no banner, no fetch —
+  // so a stray ?google= param never produces a misleading connected/error banner.
   useEffect(() => {
+    if (!CALENDAR_CONNECTION_ENABLED) return
     const result = parseGoogleReturnParam(location.search)
     if (result) {
       setBanner(result)
@@ -61,6 +65,8 @@ export default function GoogleConnectionCard() {
   }, [])
 
   async function handleConnect() {
+    // Defensive: never invoke the OAuth start function when the flag is disabled.
+    if (!CALENDAR_CONNECTION_ENABLED) return
     if (connecting) return
     setConnecting(true)
     setConnectError('')
@@ -83,6 +89,8 @@ export default function GoogleConnectionCard() {
   }
 
   async function handleDisconnect() {
+    // Defensive: never invoke the OAuth disconnect function when the flag is disabled.
+    if (!CALENDAR_CONNECTION_ENABLED) return
     if (disconnecting) return
     setDisconnecting(true)
     setDisconnectError('')
@@ -105,6 +113,10 @@ export default function GoogleConnectionCard() {
       }
     }
   }
+
+  // Defensive: render nothing when the rollout flag is disabled (Settings also
+  // gates this card, so normally it is never mounted while disabled).
+  if (!CALENDAR_CONNECTION_ENABLED) return null
 
   const state = classifyGoogleConnection({ loading, error: fetchError, connection })
   const emberBtn =
