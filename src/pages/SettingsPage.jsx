@@ -21,6 +21,7 @@ import {
   THEME_ORDER,
 } from '../lib/settingsLifecycle'
 import ProComingSoon from '../components/ProComingSoon'
+import GoogleConnectionCard from '../components/GoogleConnectionCard'
 
 // ── Shared style tokens ─────────────────────────────────────────────────────
 const SECTION_LABEL =
@@ -476,6 +477,12 @@ function SettingsPage() {
               <ProComingSoon size="sm" />
             </div>
           )}
+        </div>
+
+        {/* ── Connected accounts ─────────────────────────────────────────── */}
+        <div className={`${CARD} mb-[14px]`}>
+          <span className={SECTION_LABEL}>Connected accounts</span>
+          <GoogleConnectionCard />
         </div>
 
         {/* ── Appearance ─────────────────────────────────────────────────── */}
