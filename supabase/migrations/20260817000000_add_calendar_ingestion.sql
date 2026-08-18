@@ -26,6 +26,17 @@
 --   - source_fingerprint is a server-generated SHA-256 dedup key and is NEVER
 --     granted to authenticated (would leak the provider identity it hashes).
 --   - accept/dismiss RPCs are DEFERRED to Phase B (they belong with the review UI).
+--     The Phase B accept_interaction_candidate RPC contract (documented here so the
+--     schema invariants above are unambiguous — NOT implemented in Phase A):
+--       * pending                              -> create the interaction, store its id,
+--                                                 set status='accepted'.
+--       * accepted, interaction_id NOT NULL    -> idempotently return that interaction_id
+--                                                 (no second interaction created).
+--       * accepted, interaction_id IS NULL     -> the created interaction was later
+--                                                 DELETED by the user; return a controlled
+--                                                 `interaction_previously_deleted` result and
+--                                                 NEVER recreate the interaction.
+--       * dismissed / invalidated              -> controlled conflict; never accept.
 --   - One group event occurrence may map to MANY contact candidates: uniqueness is
 --     UNIQUE(user_id, source_fingerprint) on candidates; the event_refs index is
 --     NON-UNIQUE so several refs can share one (connection, event, occurrence).
@@ -70,11 +81,17 @@ CREATE TABLE public.interaction_candidates (
     CHECK (source_last_state IN ('active', 'cancelled', 'deleted')),
   CONSTRAINT interaction_candidates_notes_len
     CHECK (proposed_notes IS NULL OR char_length(proposed_notes) <= 200),
-  -- Enforce the Phase B acceptance invariant NOW: an accepted candidate must carry
-  -- its created interaction. Phase A only ever writes 'pending' rows (interaction_id
-  -- NULL), which satisfy this, so adding it now is safe and forward-correct.
-  CONSTRAINT interaction_candidates_accepted_requires_interaction
-    CHECK (status <> 'accepted' OR interaction_id IS NOT NULL),
+  -- Interaction-link invariant. Only an ACCEPTED candidate may hold an
+  -- interaction_id; pending/dismissed/invalidated must have interaction_id IS NULL.
+  -- ACCEPTED is allowed to have interaction_id NULL: that is the tombstone state
+  -- reached when the user later DELETES the created interaction through normal Funnl
+  -- behavior. The interaction FK is ON DELETE SET NULL, so that deletion succeeds and
+  -- leaves accepted + NULL. The Calendar event stays de-duplicated (the candidate row
+  -- and its source_fingerprint persist), and the interaction is NEVER auto-recreated.
+  -- NOTE: we deliberately do NOT require accepted => interaction_id NOT NULL, because
+  -- that would make ON DELETE SET NULL abort the user's interaction deletion.
+  CONSTRAINT interaction_candidates_interaction_link_check
+    CHECK (status = 'accepted' OR interaction_id IS NULL),
   CONSTRAINT interaction_candidates_fingerprint_unique
     UNIQUE (user_id, source_fingerprint)
 );
@@ -441,7 +458,15 @@ BEGIN
     RAISE EXCEPTION 'invalid_notes_length';
   END IF;
 
-  -- Run-ID fencing: the supplied run must currently own an unexpired lease.
+  -- Run-ID fencing WITH a row lock (this is the FIRST lock taken, establishing a
+  -- consistent lock order). FOR SHARE is the smallest lock that conflicts with the
+  -- FOR-NO-KEY-UPDATE row lock taken by the UPDATE in claim/renew/release. Holding
+  -- it from validation through the candidate + event-ref writes to COMMIT means a
+  -- concurrent claim/reclaim/renew/release for this (connection, calendar) BLOCKS
+  -- until this transaction finishes — so a stalled worker whose lease expired mid-
+  -- flight cannot have its run silently reclaimed and then overwrite newer data.
+  -- Multiple concurrent upserts for the SAME still-valid run share the lock (batch
+  -- throughput) and write distinct candidates (distinct fingerprints).
   SELECT 1 INTO v_lease
   FROM public.google_calendar_sync_state
   WHERE connection_id   = p_connection_id
@@ -449,7 +474,8 @@ BEGIN
     AND sync_run_id     = p_run_id
     AND sync_status     = 'running'
     AND sync_lease_until IS NOT NULL
-    AND sync_lease_until > now();
+    AND sync_lease_until > now()
+  FOR SHARE;
   IF NOT FOUND THEN
     RAISE EXCEPTION 'stale_or_unowned_run';
   END IF;
@@ -570,13 +596,18 @@ BEGIN
   IF p_refresh_ct = '' OR p_refresh_nonce = '' THEN
     RAISE EXCEPTION 'invalid_refresh_pair';
   END IF;
-  -- A refreshed token must carry a key version and a concrete expiry. The
-  -- connections.token_expires_at column is nullable, so without this guard a NULL
-  -- expiry would mark the connection 'active' with no/indefinite expiry.
-  IF p_key_version IS NULL THEN
-    RAISE EXCEPTION 'invalid_key_version';
+  -- Only key version 1 is supported today (GOOGLE_TOKEN_ENCRYPTION_KEY_V1 is the sole
+  -- encryption key). Reject null, zero, negative, and any unsupported version — not
+  -- merely null — so an unknown key_version can never be persisted.
+  IF p_key_version IS NULL OR p_key_version <> 1 THEN
+    RAISE EXCEPTION 'unsupported_key_version';
   END IF;
-  IF p_token_expires_at IS NULL THEN
+  -- A freshly refreshed Google access token must expire strictly in the future.
+  -- Google access tokens have ~1h lifetime, so a strictly-future check needs no
+  -- clock-skew tolerance; a NULL or non-future expiry indicates a caller bug and must
+  -- not mark the connection 'active' (connections.token_expires_at is nullable, so
+  -- this guard is the only thing preventing a no/indefinite-expiry active connection).
+  IF p_token_expires_at IS NULL OR p_token_expires_at <= now() THEN
     RAISE EXCEPTION 'invalid_token_expiry';
   END IF;
 

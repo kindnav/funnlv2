@@ -103,8 +103,18 @@ test('candidate status + source_last_state enums', () => {
 test('proposed_notes capped at 200 chars', () => {
   assert.ok(has(/char_length\(proposed_notes\) <= 200/))
 })
-test('accepted-requires-interaction CHECK present (Phase B invariant, safe now)', () => {
-  assert.ok(has(/status <> 'accepted' OR interaction_id IS NOT NULL/))
+test('interaction-link CHECK allows accepted+NULL tombstone, forbids link on non-accepted', () => {
+  // Correct invariant: only accepted rows may hold an interaction_id; accepted+NULL is
+  // the "interaction later deleted" tombstone. Must NOT require accepted => NOT NULL
+  // (that would make ON DELETE SET NULL abort the user's interaction deletion).
+  assert.ok(has(/CHECK \(status = 'accepted' OR interaction_id IS NULL\)/), 'expected accepted-OR-null link check')
+  assert.ok(!has(/status <> 'accepted' OR interaction_id IS NOT NULL/), 'old accepted-requires-interaction check must be gone')
+})
+test('interaction_id FK is ON DELETE SET NULL (deletion leaves accepted tombstone)', () => {
+  assert.ok(has(/interaction_id[\s\S]*?REFERENCES public\.interactions\(id\) ON DELETE SET NULL/))
+})
+test('Phase B accept contract documents accepted+NULL = interaction_previously_deleted', () => {
+  assert.ok(/interaction_previously_deleted/.test(MIGRATION), 'accept contract must document the deleted-interaction result')
 })
 test('candidate uniqueness is (user_id, source_fingerprint)', () => {
   assert.ok(has(/UNIQUE \(user_id, source_fingerprint\)/))
@@ -242,9 +252,30 @@ test('upsert_calendar_candidate is run-ID fenced against stale runs', () => {
   const body = MIGRATION.match(/FUNCTION public\.upsert_calendar_candidate[\s\S]*?\$\$;/)[0]
   assert.ok(/sync_run_id\s*=\s*p_run_id/.test(body))
   assert.ok(/sync_lease_until > now\(\)/.test(body))
+  assert.ok(/sync_status\s*=\s*'running'/.test(body))
   assert.ok(/stale_or_unowned_run/.test(body))
   assert.ok(/connection_ownership_mismatch/.test(body))
   assert.ok(/contact_ownership_mismatch/.test(body))
+})
+test('upsert run-fence takes a row lock (FOR SHARE) that conflicts with claim/renew/release UPDATE', () => {
+  const codeBody = stripSql(MIGRATION).match(/FUNCTION public\.upsert_calendar_candidate[\s\S]*?\$\$;/)[0]
+  // The run-fence SELECT on sync_state must carry a locking clause.
+  assert.ok(/FROM public\.google_calendar_sync_state[\s\S]*?FOR SHARE/.test(codeBody), 'run-fence must lock the sync_state row')
+})
+test('sync-state lock is acquired BEFORE candidate/event_ref writes (consistent lock order)', () => {
+  const codeBody = stripSql(MIGRATION).match(/FUNCTION public\.upsert_calendar_candidate[\s\S]*?\$\$;/)[0]
+  const lockIdx = codeBody.indexOf('FOR SHARE')
+  const candInsertIdx = codeBody.indexOf('INSERT INTO public.interaction_candidates')
+  const refInsertIdx = codeBody.indexOf('INSERT INTO public.google_calendar_event_refs')
+  assert.ok(lockIdx > -1, 'FOR SHARE lock present')
+  assert.ok(lockIdx < candInsertIdx, 'lock must precede candidate INSERT')
+  assert.ok(lockIdx < refInsertIdx, 'lock must precede event_ref INSERT')
+})
+test('candidate + event_ref writes remain one transaction (single plpgsql body, no COMMIT)', () => {
+  const codeBody = stripSql(MIGRATION).match(/FUNCTION public\.upsert_calendar_candidate[\s\S]*?\$\$;/)[0]
+  assert.ok(!/COMMIT|ROLLBACK|BEGIN TRANSACTION|START TRANSACTION/i.test(codeBody), 'no explicit txn control — one implicit transaction')
+  assert.ok(/INSERT INTO public\.interaction_candidates/.test(codeBody))
+  assert.ok(/INSERT INTO public\.google_calendar_event_refs/.test(codeBody))
 })
 test('upsert never resurrects a non-pending candidate', () => {
   const body = MIGRATION.match(/FUNCTION public\.upsert_calendar_candidate[\s\S]*?\$\$;/)[0]
@@ -261,14 +292,20 @@ test('token RPC: access pair + both-or-null refresh + single CASE predicate + ac
   assert.ok(/token_row_missing/.test(body))
   assert.ok(/connection_row_missing/.test(body))
 })
-test('token RPC rejects null key_version and null token expiry (never marks active without a complete token)', () => {
+test('token RPC enforces key_version=1 and strictly-future expiry before activation', () => {
   const body = MIGRATION.match(/FUNCTION public\.store_refreshed_google_token[\s\S]*?\$\$;/)[0]
-  assert.ok(/p_key_version IS NULL[\s\S]*?invalid_key_version/.test(body), 'must reject null key_version')
-  assert.ok(/p_token_expires_at IS NULL[\s\S]*?invalid_token_expiry/.test(body), 'must reject null token expiry')
-  // Guards must precede the UPDATE that sets status = 'active'.
-  const expiryGuardIdx = body.indexOf('invalid_token_expiry')
+  // key_version must be exactly 1 (reject null / zero / negative / unsupported).
+  assert.ok(/p_key_version IS NULL OR p_key_version <> 1[\s\S]*?unsupported_key_version/.test(body), 'must require key_version = 1')
+  // expiry must be non-null AND strictly in the future.
+  assert.ok(/p_token_expires_at IS NULL OR p_token_expires_at <= now\(\)[\s\S]*?invalid_token_expiry/.test(body), 'must require future expiry')
+  // Both guards must precede the UPDATE that sets status = 'active'.
+  const keyIdx = body.indexOf('unsupported_key_version')
+  const expiryIdx = body.indexOf('invalid_token_expiry')
   const activeIdx = body.indexOf("status           = 'active'")
-  assert.ok(expiryGuardIdx > -1 && activeIdx > -1 && expiryGuardIdx < activeIdx, 'expiry guard must run before marking active')
+  assert.ok(keyIdx > -1 && expiryIdx > -1 && activeIdx > -1, 'guards + activation present')
+  assert.ok(keyIdx < activeIdx && expiryIdx < activeIdx, 'both guards must run before marking active')
+  // The pair/account/row-count protections are retained.
+  assert.ok(/invalid_access_pair/.test(body) && /token_row_missing/.test(body) && /connection_row_missing/.test(body))
 })
 test('mark_google_needs_reauth is account-guarded', () => {
   const body = MIGRATION.match(/FUNCTION public\.mark_google_needs_reauth[\s\S]*?\$\$;/)[0]
