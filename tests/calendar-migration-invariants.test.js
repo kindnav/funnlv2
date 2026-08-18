@@ -223,6 +223,14 @@ test('every RPC is SECURITY DEFINER with empty search_path', () => {
   assert.strictEqual((MIGRATION_CODE.match(/SECURITY DEFINER/g) || []).length, 6)
   assert.strictEqual((MIGRATION_CODE.match(/SET search_path = ''/g) || []).length, 6)
 })
+test('in-body gen_random_uuid() is schema-qualified (resolves under empty search_path)', () => {
+  // Table-column DEFAULTs may stay unqualified (resolved at CREATE TABLE time), but
+  // any in-body call inside a SET search_path='' function MUST be pg_catalog-qualified
+  // or it risks failing at runtime if only a pgcrypto copy exists in extensions.
+  const claim = MIGRATION_CODE.match(/FUNCTION public\.claim_calendar_sync_lease[\s\S]*?\$\$;/)[0]
+  assert.ok(/:=\s*pg_catalog\.gen_random_uuid\(\)/.test(claim), 'in-body gen_random_uuid must be pg_catalog-qualified')
+  assert.ok(!/:=\s*gen_random_uuid\(\)/.test(claim), 'no unqualified in-body gen_random_uuid()')
+})
 test('every RPC revokes EXECUTE from PUBLIC/anon/authenticated and grants service_role', () => {
   for (const r of RPCS) {
     assert.ok(new RegExp(`REVOKE ALL ON FUNCTION public\\.${r}\\(`).test(MIGRATION), `${r} EXECUTE not revoked`)
@@ -252,6 +260,15 @@ test('token RPC: access pair + both-or-null refresh + single CASE predicate + ac
   assert.ok(/FOR UPDATE/.test(body))
   assert.ok(/token_row_missing/.test(body))
   assert.ok(/connection_row_missing/.test(body))
+})
+test('token RPC rejects null key_version and null token expiry (never marks active without a complete token)', () => {
+  const body = MIGRATION.match(/FUNCTION public\.store_refreshed_google_token[\s\S]*?\$\$;/)[0]
+  assert.ok(/p_key_version IS NULL[\s\S]*?invalid_key_version/.test(body), 'must reject null key_version')
+  assert.ok(/p_token_expires_at IS NULL[\s\S]*?invalid_token_expiry/.test(body), 'must reject null token expiry')
+  // Guards must precede the UPDATE that sets status = 'active'.
+  const expiryGuardIdx = body.indexOf('invalid_token_expiry')
+  const activeIdx = body.indexOf("status           = 'active'")
+  assert.ok(expiryGuardIdx > -1 && activeIdx > -1 && expiryGuardIdx < activeIdx, 'expiry guard must run before marking active')
 })
 test('mark_google_needs_reauth is account-guarded', () => {
   const body = MIGRATION.match(/FUNCTION public\.mark_google_needs_reauth[\s\S]*?\$\$;/)[0]

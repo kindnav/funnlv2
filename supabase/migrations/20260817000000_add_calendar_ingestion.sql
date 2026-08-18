@@ -253,7 +253,10 @@ BEGIN
     RAISE EXCEPTION 'invalid_calendar_id';
   END IF;
 
-  v_run := gen_random_uuid();
+  -- Fully qualified: gen_random_uuid() is a pg_catalog built-in (PG13+). Qualifying
+  -- guarantees resolution under SET search_path = '' regardless of whether a
+  -- pgcrypto copy also exists in the extensions schema.
+  v_run := pg_catalog.gen_random_uuid();
 
   INSERT INTO public.google_calendar_sync_state
     (connection_id, calendar_id, sync_status, sync_lease_until, sync_run_id, updated_at)
@@ -566,6 +569,15 @@ BEGIN
   END IF;
   IF p_refresh_ct = '' OR p_refresh_nonce = '' THEN
     RAISE EXCEPTION 'invalid_refresh_pair';
+  END IF;
+  -- A refreshed token must carry a key version and a concrete expiry. The
+  -- connections.token_expires_at column is nullable, so without this guard a NULL
+  -- expiry would mark the connection 'active' with no/indefinite expiry.
+  IF p_key_version IS NULL THEN
+    RAISE EXCEPTION 'invalid_key_version';
+  END IF;
+  IF p_token_expires_at IS NULL THEN
+    RAISE EXCEPTION 'invalid_token_expiry';
   END IF;
 
   -- Account guard + row lock: refresh for account A must not touch reconnected B.
