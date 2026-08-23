@@ -390,6 +390,12 @@ deno_version = 2
 [functions.google-oauth-callback]
 verify_jwt = false
 
+# google-calendar-sync is JWT-authenticated: the platform verifies the Supabase JWT
+# and the handler ALSO calls auth.getUser(), deriving the user solely from the token.
+# Explicit for documentation; true is already the default.
+[functions.google-calendar-sync]
+verify_jwt = true
+
 # [edge_runtime.secrets]
 # secret_key = "env(SECRET_VALUE)"
 

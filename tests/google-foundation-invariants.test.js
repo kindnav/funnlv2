@@ -140,9 +140,11 @@ test('exactly three google_* tables defined in the migration', () => {
   const tables = [...migration.matchAll(/CREATE TABLE public\.(google_\w+)/g)].map(m => m[1]).sort()
   assert.deepStrictEqual(tables, ['google_connections', 'google_oauth_states', 'google_tokens'])
 })
-test('only the three google-oauth-* edge functions exist', () => {
+test('only the expected google-* edge functions exist', () => {
+  // Phase 0A added the three google-oauth-* functions; Phase C1 adds the JWT-gated
+  // google-calendar-sync engine. No other google-* function should exist.
   const fns = readdirSync(join(root, 'supabase/functions')).filter(n => n.startsWith('google'))
-  assert.deepStrictEqual(fns.sort(), ['google-oauth-callback', 'google-oauth-disconnect', 'google-oauth-start'])
+  assert.deepStrictEqual(fns.sort(), ['google-calendar-sync', 'google-oauth-callback', 'google-oauth-disconnect', 'google-oauth-start'])
 })
 
 // ── Atomic persistence RPC (hardening pass) ───────────────────────────────────
