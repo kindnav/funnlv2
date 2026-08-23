@@ -33,7 +33,6 @@ import {
 import {
   parseEventTiming,
   originalOccurrence,
-  deriveInteractionDate,
 } from './calendarTime.js'
 import {
   computeCandidateFingerprint,
@@ -58,11 +57,30 @@ export const GOOGLE_CALENDAR_EVENTS_ENDPOINT =
 // ── Small pure validators/builders ────────────────────────────────────────────
 
 const RFC3339_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/
-// Google page tokens are URL-safe token strings; reject anything else fail-closed.
-const PAGE_TOKEN_RE = /^[A-Za-z0-9_\-=.]+$/
+// A Google timed dateTime carries an explicit offset (Z or ±HH:MM); the DATE part
+// before 'T' is the event's offset-local calendar date. Used to derive the proposed
+// interaction date WITHOUT a UTC conversion that could shift the date.
+const RFC3339_OFFSET_RE = /^(\d{4}-\d{2}-\d{2})T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/
+// A Google page token is OPAQUE. It is percent-encoded by URLSearchParams, so a broad
+// charset is injection-safe; we only fail closed on whitespace/control chars/empties
+// and enforce a length bound (avoids an unnecessarily narrow regex rejecting valid tokens).
+const PAGE_TOKEN_RE = /^[\x21-\x7E]+$/
 
 export function isRfc3339Utc(s) {
   return typeof s === 'string' && RFC3339_RE.test(s)
+}
+
+/**
+ * The offset-local calendar date (YYYY-MM-DD) implied by a Google timed dateTime.
+ * For '2026-08-01T23:00:00-04:00' this is '2026-08-01' — the event's own local date,
+ * derived from its explicit offset WITHOUT a UTC conversion (which could shift it to
+ * the next/previous day). Returns null when no explicit offset is present (fail closed
+ * — the correct date cannot be determined).
+ */
+export function datePartOfRfc3339(dt) {
+  if (typeof dt !== 'string') return null
+  const m = RFC3339_OFFSET_RE.exec(dt)
+  return m ? m[1] : null
 }
 
 export function isValidPageToken(t) {
@@ -201,8 +219,14 @@ export async function buildOccurrencePlan(args) {
   const occ = originalOccurrence(event)
 
   // Cancelled / deleted: reconcile-only (invalidate pending for this occurrence).
-  // If the occurrence identity cannot be derived (e.g. a hard-deleted non-recurring
-  // event returning no start), we cannot key reconciliation — skip it in C1.
+  // If the occurrence identity cannot be derived we cannot key reconciliation — skip.
+  // NOTE (C1 safety): this scan is TIME-BOUNDED (timeMin/timeMax, no syncToken), so
+  // Google only returns events it can place in the window — which requires start /
+  // originalStartTime. A cancelled event that appears here therefore carries occurrence
+  // timing, making this branch effectively unreachable in C1. It fails closed by
+  // SKIPPING (never invalidating), so it can never invalidate the wrong candidate; the
+  // bare-cancellation / event-ID-only fallback is deferred to the incremental
+  // (syncToken) phase where cancellations can arrive without timing.
   if (event.status === 'cancelled') {
     if (!occ.ok) return { skip: true, reason: 'cancelled_no_occurrence' }
     return {
@@ -223,7 +247,16 @@ export async function buildOccurrencePlan(args) {
   const timing = parseEventTiming(event)
   if (!timing.ok) return { skip: true, reason: 'invalid_timing' }
 
-  const proposedDate = deriveInteractionDate(timing, fallbackTimeZone)
+  // Proposed interaction date: for all-day use the inclusive start date; for timed use
+  // the event's OFFSET-LOCAL date (from its RFC3339 offset), never a UTC conversion.
+  // Fail closed if a timed dateTime lacks an explicit offset (date undeterminable).
+  let proposedDate
+  if (timing.kind === 'allday') {
+    proposedDate = timing.startDate
+  } else {
+    proposedDate = datePartOfRfc3339(event?.start?.dateTime)
+    if (!proposedDate) return { skip: true, reason: 'undeterminable_date' }
+  }
   const notes = sanitizeSummary(event.summary)
   const icalUid = typeof event.iCalUID === 'string' && event.iCalUID.length > 0 ? event.iCalUID : null
   const occFields = occurrenceRefFields(occ.occurrence)
@@ -324,11 +357,20 @@ export async function runCalendarSync(deps) {
   }
   if (!runId) return resp(409, { error: 'sync_in_progress' })
 
+  // release() returns whether the release actually committed for THIS run. The Phase A
+  // release RPC is run-ID fenced, so it returns false when the lease was reclaimed by a
+  // newer run — in which case a "completed" claim would be untruthful. Error-path
+  // callers ignore the return (they already hold the primary error).
   let released = false
+  let releaseCommitted = false
   const release = async (status, errorCode, complete) => {
-    if (released) return
+    if (released) return releaseCommitted
     released = true
-    try { await deps.rpc.releaseLease(connId, runId, status, errorCode, complete) } catch { /* best-effort */ }
+    try {
+      const r = await deps.rpc.releaseLease(connId, runId, status, errorCode, complete)
+      releaseCommitted = (r === true)
+    } catch { releaseCommitted = false }
+    return releaseCommitted
   }
 
   // Refresh helper: returns { accessToken } | { needsReauth:true } | { transient:true } | { hardError }
@@ -410,6 +452,7 @@ export async function runCalendarSync(deps) {
     let invalidated = 0
     let skipped = 0
     let retried401 = false
+    const seenTokens = new Set()   // repeated page token ⇒ stop (controlled, incomplete)
 
     for (;;) {
       if (pages >= MAX_PAGES) { await release('error', 'max_pages_exceeded', false); return resp(200, incomplete()) }
@@ -490,9 +533,26 @@ export async function runCalendarSync(deps) {
 
       pageToken = parsed.nextPageToken
       if (!pageToken) break
+      // Google returning a token we have already followed indicates a broken/hostile
+      // pagination cursor; stop controlled+incomplete rather than loop (also bounded by MAX_PAGES).
+      if (seenTokens.has(pageToken)) { await release('error', 'repeated_page_token', false); return resp(200, incomplete()) }
+      seenTokens.add(pageToken)
     }
 
-    await release('idle', null, true)
+    // Completion is truthful only when nothing was skipped AND the run-ID-fenced release
+    // actually committed (a reclaimed lease returns false). A skipped (unparseable) event
+    // could leave a stale pending candidate un-reconciled, so it does not count as a
+    // fully-complete run.
+    const runComplete = (skipped === 0)
+    const releasedOk = await release('idle', null, runComplete)
+    if (!runComplete || !releasedOk) {
+      const code = !releasedOk ? 'release_unconfirmed' : 'completed_with_skips'
+      log({ event: 'calendar_sync', code, pages, events_seen: eventsSeen, candidates_written: candidatesWritten, candidates_invalidated: invalidated, events_skipped: skipped, duration_ms: deps.now().getTime() - t0 })
+      return resp(200, {
+        status: 'incomplete', pages, events_seen: eventsSeen,
+        candidates_written: candidatesWritten, candidates_invalidated: invalidated, events_skipped: skipped,
+      })
+    }
     const body = {
       status: 'completed', pages, events_seen: eventsSeen,
       candidates_written: candidatesWritten, candidates_invalidated: invalidated, events_skipped: skipped,

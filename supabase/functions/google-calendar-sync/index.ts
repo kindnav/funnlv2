@@ -23,13 +23,16 @@
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { importKeyFromBase64, encryptToken, decryptToken } from '../shared/googleTokenCrypto.js'
-import { GOOGLE_TOKEN_ENDPOINT } from '../shared/googleOauthHelpers.js'
+import { GOOGLE_TOKEN_ENDPOINT, readBoundedStream } from '../shared/googleOauthHelpers.js'
 import {
   runCalendarSync,
   CALENDAR_ID,
   LEASE_SECONDS,
   MAX_PAGE_BYTES,
 } from '../shared/calendarSyncEngine.js'
+
+// Small hard cap for token-endpoint responses (Google's are ~1 KB).
+const TOKEN_MAX_BODY_BYTES = 16_384
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -62,7 +65,10 @@ async function boundedFetch(url: string, init: RequestInit): Promise<Response> {
 
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders })
+  // Early method gate: reject non-POST before any privileged setup.
+  if (req.method !== 'POST') return json({ error: 'method_not_allowed' }, 405)
 
+  try {
   // Server config — fail closed if any secret is missing.
   const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? ''
   const anonKey = Deno.env.get('SUPABASE_ANON_KEY') ?? ''
@@ -154,19 +160,30 @@ Deno.serve(async (req: Request) => {
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: body.toString(),
       })
+      // Bounded, incremental read (small hard cap) — never buffer an unbounded token body.
+      const read = await readBoundedStream(res.body, {
+        maxBytes: TOKEN_MAX_BODY_BYTES,
+        contentLength: res.headers.get('content-length'),
+      })
       let parsed: unknown = null
-      try { parsed = await res.json() } catch { parsed = null }
+      if (read.ok) { try { parsed = JSON.parse(read.text) } catch { parsed = null } }
       return { status: res.status, json: parsed }
     },
 
     async fetchEventsPage({ accessToken, url }: { accessToken: string; url: string }) {
       const res = await boundedFetch(url, { method: 'GET', headers: { Authorization: `Bearer ${accessToken}` } })
-      if (res.status !== 200) return { status: res.status, json: null }
-      const text = await res.text()
-      if (text.length > MAX_PAGE_BYTES) return { status: 200, json: null, bytes: text.length }
+      if (res.status !== 200) { try { await res.body?.cancel() } catch { /* */ }; return { status: res.status, json: null } }
+      // Bounded, incremental streaming read: honors Content-Length pre-check, counts
+      // actual bytes, cancels the stream on cap, fails closed on stream/UTF-8 errors.
+      // Never uses res.text()/res.json() (which would buffer an unbounded body).
+      const read = await readBoundedStream(res.body, {
+        maxBytes: MAX_PAGE_BYTES,
+        contentLength: res.headers.get('content-length'),
+      })
+      if (!read.ok) return { status: 200, json: null }   // too-large / stream error / invalid UTF-8 → malformed
       let parsed: unknown = null
-      try { parsed = JSON.parse(text) } catch { parsed = null }
-      return { status: 200, json: parsed, bytes: text.length }
+      try { parsed = JSON.parse(read.text) } catch { parsed = null }
+      return { status: 200, json: parsed, bytes: read.text.length }
     },
 
     rpc: {
@@ -192,10 +209,11 @@ Deno.serve(async (req: Request) => {
     },
   }
 
-  try {
-    const { status, body } = await runCalendarSync(deps)
-    return json(body, status)
+  const { status, body } = await runCalendarSync(deps)
+  return json(body, status)
   } catch {
+    // Any uncontrolled failure (config/client/key setup or unexpected throw) → a single
+    // controlled 500. No stack trace or raw error ever reaches the response.
     console.error('google-calendar-sync internal_error')
     return json({ error: 'internal_error' }, 500)
   }

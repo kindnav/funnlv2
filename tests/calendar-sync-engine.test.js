@@ -8,6 +8,7 @@ import {
   GOOGLE_CALENDAR_EVENTS_ENDPOINT,
   isRfc3339Utc, isValidPageToken, buildEventsListUrl, parseEventsPage, sanitizeSummary,
   shouldRefreshToken, validateRefreshResponse, buildOccurrencePlan, runCalendarSync,
+  datePartOfRfc3339,
 } from '../supabase/functions/shared/calendarSyncEngine.js'
 
 let passed = 0, failed = 0
@@ -27,12 +28,24 @@ await test('isRfc3339Utc accepts our generated instants, rejects others', () => 
   assert.ok(!isRfc3339Utc('2026-08-23'))
   assert.ok(!isRfc3339Utc('2026-08-23T12:00:00+02:00'))
 })
-await test('isValidPageToken accepts URL-safe tokens, rejects junk', () => {
+await test('isValidPageToken accepts opaque tokens, rejects whitespace/control/empty', () => {
   assert.ok(isValidPageToken('CigKGjBpN...=='))
+  assert.ok(isValidPageToken('bad!token'))            // opaque: punctuation is fine (percent-encoded downstream)
+  assert.ok(isValidPageToken('a.b-c_d=e~f:g'))        // broad printable charset not rejected
   assert.ok(!isValidPageToken('has space'))
-  assert.ok(!isValidPageToken('bad!token'))
+  assert.ok(!isValidPageToken('tok\nnl'))             // control char rejected
   assert.ok(!isValidPageToken(''))
   assert.ok(!isValidPageToken(123))
+  assert.ok(!isValidPageToken('x'.repeat(5000)))      // length bound
+})
+await test('datePartOfRfc3339 preserves the OFFSET-local date (no UTC shift)', () => {
+  assert.strictEqual(datePartOfRfc3339('2026-08-01T23:00:00-04:00'), '2026-08-01') // UTC would be 08-02
+  assert.strictEqual(datePartOfRfc3339('2026-08-02T01:00:00+05:30'), '2026-08-02')
+  assert.strictEqual(datePartOfRfc3339('2026-08-01T15:00:00Z'), '2026-08-01')
+  assert.strictEqual(datePartOfRfc3339('2026-08-01T15:00:00.500Z'), '2026-08-01')
+  assert.strictEqual(datePartOfRfc3339('2026-08-01T15:00:00'), null)   // no offset → fail closed
+  assert.strictEqual(datePartOfRfc3339('not-a-date'), null)
+  assert.strictEqual(datePartOfRfc3339(null), null)
 })
 await test('buildEventsListUrl uses the FIXED C1 query and primary calendar', () => {
   const url = buildEventsListUrl({ timeMinIso: '2026-05-25T12:00:00.000Z', timeMaxIso: '2026-08-23T12:00:00.000Z', maxResults: 100, pageToken: null })
@@ -136,6 +149,18 @@ await test('ambiguous duplicate-email contact excluded → empty keep, reconcile
   assert.deepStrictEqual(p.keepFingerprints, [])
   assert.ok(p.reconcile)
 })
+await test('timed event with offset but no IANA zone → date from offset, not UTC', async () => {
+  // 23:00-04:00 on 08-01 is 03:00Z on 08-02; the correct interaction date is 08-01.
+  const ev = timedEvent({ start: { dateTime: '2026-08-01T23:00:00-04:00' }, end: { dateTime: '2026-08-01T23:30:00-04:00' } })
+  const p = await buildOccurrencePlan(planArgs(ev))
+  assert.strictEqual(p.candidates.length, 1)
+  assert.strictEqual(p.candidates[0].p_proposed_interaction_date, '2026-08-01')
+})
+await test('timed event with naive dateTime (no offset) → skip (undeterminable date)', async () => {
+  const ev = timedEvent({ start: { dateTime: '2026-08-01T15:00:00' }, end: { dateTime: '2026-08-01T16:00:00' } })
+  const p = await buildOccurrencePlan(planArgs(ev))
+  assert.ok(p.skip)
+})
 await test('all-day completed event → date occurrence + interaction date', async () => {
   const ev = { id: 'evt-ad', status: 'confirmed', summary: 'Conf', start: { date: '2026-08-01' }, end: { date: '2026-08-02' }, organizer: { email: 'me@student.edu' }, attendees: [{ email: 'priya@goldman.com', responseStatus: 'accepted' }] }
   const p = await buildOccurrencePlan(planArgs(ev))
@@ -215,7 +240,7 @@ function makeDeps(over = {}) {
     rpc: {
       claimLease: over.claimLease ?? (async () => { rec.claims++; return 'run-1' }),
       renewLease: over.renewLease ?? (async () => { rec.renews++; return true }),
-      releaseLease: async (c, r, status, err, complete) => { rec.releases.push({ status, err, complete }) },
+      releaseLease: async (c, r, status, err, complete) => { rec.releases.push({ status, err, complete }); return over.releaseLeaseResult !== undefined ? over.releaseLeaseResult : true },
       upsertCandidate: over.upsertCandidate ?? (async (a) => { rec.upserts.push(a); return 'cand' }),
       reconcileOccurrence: over.reconcileOccurrence ?? (async (a) => { rec.reconciles.push(a); return 0 }),
       storeRefreshedToken: over.storeRefreshedToken ?? (async (a) => { rec.stores.push(a); return true }),
@@ -357,6 +382,18 @@ await test('pagination preserves window; renews lease between pages', async () =
   assert.strictEqual(q1.get('pageToken'), null)
   assert.strictEqual(q2.get('pageToken'), 'TOK2')
 })
+await test('repeated page token → incomplete (no loop)', async () => {
+  const { deps, rec } = makeDeps({ fetchEventsPage: async () => ({ status: 200, json: { items: [], nextPageToken: 'SAMETOKEN' } }) })
+  const r = await runCalendarSync(deps)
+  assert.strictEqual(r.body.status, 'incomplete')
+  assert.ok(rec.urls.length <= 2)   // first page + one follow of SAMETOKEN, then repeat detected
+  assert.strictEqual(rec.releases[0].complete, false)
+})
+await test('final release failure (lease reclaimed → false) → incomplete, not completed', async () => {
+  const { deps } = makeDeps({ releaseLeaseResult: false })   // run-ID fence: 0 rows updated
+  const r = await runCalendarSync(deps)
+  assert.strictEqual(r.body.status, 'incomplete')
+})
 await test('MAX_PAGES cap → incomplete (released error)', async () => {
   const { deps, rec } = makeDeps({ fetchEventsPage: async () => ({ status: 200, json: { items: [], nextPageToken: 'MORE' } }) })
   const r = await runCalendarSync(deps)
@@ -364,12 +401,13 @@ await test('MAX_PAGES cap → incomplete (released error)', async () => {
   assert.ok(rec.urls.length <= MAX_PAGES)
   assert.strictEqual(rec.releases[0].complete, false)
 })
-await test('malformed single event is skipped, run still completes', async () => {
-  const { deps } = makeDeps({ fetchEventsPage: async () => ({ status: 200, json: { items: [{ status: 'confirmed', start: { dateTime: '2026-08-01T15:00:00Z' }, end: { dateTime: '2026-08-01T16:00:00Z' } }, timedEvent()] } }) })
+await test('malformed single event skipped → run is INCOMPLETE (honest), not completed', async () => {
+  const { deps, rec } = makeDeps({ fetchEventsPage: async () => ({ status: 200, json: { items: [{ status: 'confirmed', start: { dateTime: '2026-08-01T15:00:00Z' }, end: { dateTime: '2026-08-01T16:00:00Z' } }, timedEvent()] } }) })
   const r = await runCalendarSync(deps)
-  assert.strictEqual(r.body.status, 'completed')
+  assert.strictEqual(r.body.status, 'incomplete')   // a skipped/unparseable event cannot claim complete
   assert.strictEqual(r.body.events_skipped, 1)
   assert.strictEqual(r.body.candidates_written, 1)
+  assert.strictEqual(rec.releases[0].complete, false)   // completion metadata not advanced
 })
 await test('candidate write failure → incomplete, release error, no success', async () => {
   const { deps, rec } = makeDeps({ upsertCandidate: async () => { throw new Error('db') } })
