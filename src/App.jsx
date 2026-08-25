@@ -18,6 +18,8 @@ import MobileAppBar from './components/MobileAppBar'
 import CommandPalette from './components/CommandPalette'
 import GlobalAddContactController from './components/GlobalAddContactController'
 import SettingsPage from './pages/SettingsPage'
+import CalendarSuggestionsPage from './pages/CalendarSuggestionsPage'
+import { CALENDAR_INGESTION_ENABLED } from './lib/calendarIngestion'
 import { ProStatusProvider } from './lib/useProStatus'
 
 function App() {
@@ -86,6 +88,10 @@ function App() {
             <Route path="/contacts" element={<ContactsPage />} />
             <Route path="/contacts/:id" element={<ContactDetailPage />} />
             <Route path="/followups" element={<FollowUpsPage />} />
+            {/* Calendar review queue — only mounted when the ingestion flag is enabled. */}
+            {CALENDAR_INGESTION_ENABLED && (
+              <Route path="/calendar-suggestions" element={<CalendarSuggestionsPage />} />
+            )}
             <Route path="/ai" element={<FunnlAIPage />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="/privacy" element={<PrivacyPage />} />
