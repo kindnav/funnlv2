@@ -74,13 +74,10 @@ BEGIN
     RETURN jsonb_build_object('result', 'invalidated');
   END IF;
 
-  -- The candidate's contact must still belong to the caller.
-  PERFORM 1 FROM public.contacts WHERE id = v_cand.contact_id AND user_id = v_uid;
-  IF NOT FOUND THEN
-    RETURN jsonb_build_object('result', 'not_found');
-  END IF;
-
-  -- Resolve + validate the final interaction fields (overrides optional).
+  -- Resolve + validate the final interaction fields (overrides optional). Validation
+  -- runs before any write. The notes bound is 200 to match the candidate schema
+  -- (interaction_candidates_notes_len), so the frontend input, the candidate table,
+  -- and the accepted interaction all agree on the same limit.
   v_type := COALESCE(p_override_type, v_cand.proposed_type);
   IF v_type NOT IN ('Coffee chat', 'Email', 'Event', 'Call', 'Message', 'Other') THEN
     RETURN jsonb_build_object('result', 'invalid_type');
@@ -89,21 +86,43 @@ BEGIN
   IF v_date IS NULL THEN
     RETURN jsonb_build_object('result', 'invalid_date');
   END IF;
+  -- A NULL/omitted override keeps the proposed note; there is intentionally no way to
+  -- accept with an empty note (the proposed note is the point of the suggestion).
   v_notes := COALESCE(p_override_notes, v_cand.proposed_notes);
-  IF v_notes IS NOT NULL AND char_length(v_notes) > 2000 THEN
+  IF v_notes IS NOT NULL AND char_length(v_notes) > 200 THEN
     RETURN jsonb_build_object('result', 'invalid_notes');
   END IF;
 
-  -- Create the interaction and mark the candidate accepted in ONE transaction.
-  -- user_id is set explicitly (never taken from the caller) so the DEFINER context
-  -- cannot be tricked into writing another user's row.
-  INSERT INTO public.interactions (contact_id, user_id, type, interaction_date, notes)
-  VALUES (v_cand.contact_id, v_uid, v_type, v_date, v_notes)
-  RETURNING id INTO v_iid;
+  -- Ownership re-check + write, in ONE transaction. The contact is locked FOR KEY
+  -- SHARE so it cannot be deleted between this check and the INSERT. The EXCEPTION
+  -- block converts the rare concurrent-delete / lock-cycle outcomes into controlled
+  -- result codes instead of leaking a raw SQL error; the failed write is rolled back
+  -- atomically, so no partial interaction/candidate state can survive.
+  BEGIN
+    PERFORM 1 FROM public.contacts
+      WHERE id = v_cand.contact_id AND user_id = v_uid
+      FOR KEY SHARE;
+    IF NOT FOUND THEN
+      RETURN jsonb_build_object('result', 'not_found');
+    END IF;
 
-  UPDATE public.interaction_candidates
-    SET status = 'accepted', interaction_id = v_iid, updated_at = now()
-  WHERE id = p_candidate_id;
+    -- user_id is set explicitly (never taken from the caller) so the DEFINER context
+    -- cannot be tricked into writing another user's row.
+    INSERT INTO public.interactions (contact_id, user_id, type, interaction_date, notes)
+    VALUES (v_cand.contact_id, v_uid, v_type, v_date, v_notes)
+    RETURNING id INTO v_iid;
+
+    UPDATE public.interaction_candidates
+      SET status = 'accepted', interaction_id = v_iid, updated_at = now()
+    WHERE id = p_candidate_id;
+  EXCEPTION
+    WHEN foreign_key_violation THEN
+      -- Contact concurrently deleted; indistinguishable from "not yours".
+      RETURN jsonb_build_object('result', 'not_found');
+    WHEN deadlock_detected OR serialization_failure THEN
+      -- Transient lock cycle (e.g. concurrent contact delete). Safe to retry.
+      RETURN jsonb_build_object('result', 'conflict');
+  END;
 
   RETURN jsonb_build_object('result', 'accepted', 'interaction_id', v_iid);
 END;

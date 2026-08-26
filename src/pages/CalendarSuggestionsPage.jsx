@@ -4,8 +4,9 @@ import { getAvatarColor, getInitials } from '../lib/avatarUtils'
 import { track } from '../lib/analytics'
 import TopBar from '../components/TopBar'
 import {
-  CALENDAR_INGESTION_ENABLED, CANDIDATE_SELECT, INTERACTION_TYPES, REVIEW_PAGE_SIZE,
+  CALENDAR_INGESTION_ENABLED, CANDIDATE_SELECT, INTERACTION_TYPES, REVIEW_PAGE_SIZE, REVIEW_NOTES_MAX,
   validateOverrides, acceptResultOutcome, dismissResultOutcome, resultCode,
+  keysetFilter, cursorFrom, dedupeById, computeHasMore,
 } from '../lib/calendarReview'
 
 const CARD = 'bg-card border border-line-1 rounded-2xl p-[18px]'
@@ -30,6 +31,11 @@ function CandidateCard({ candidate, onResolved }) {
   const [busy, setBusy] = useState(false)              // single-flight guard for Accept/Dismiss
   const [confirmDismiss, setConfirmDismiss] = useState(false)
   const [error, setError] = useState('')
+  const confirmBtnRef = useRef(null)                   // move focus here when confirm opens
+
+  // When the inline dismiss confirmation opens, focus its primary button so keyboard
+  // focus is not lost as the Dismiss button unmounts. Escape cancels (handler below).
+  useEffect(() => { if (confirmDismiss) confirmBtnRef.current?.focus() }, [confirmDismiss])
 
   const edited = editing && (
     type !== candidate.proposed_type ||
@@ -120,7 +126,7 @@ function CandidateCard({ candidate, onResolved }) {
                        className="mt-1 w-full bg-input border border-line-2 rounded-lg px-2 py-[7px] text-[13px] text-hi" />
               </label>
               <label className="text-[11px] text-muted">Note
-                <textarea value={notes} onChange={(e) => setNotes(e.target.value)} disabled={busy} rows={2} maxLength={2000}
+                <textarea value={notes} onChange={(e) => setNotes(e.target.value)} disabled={busy} rows={2} maxLength={REVIEW_NOTES_MAX}
                           className="mt-1 w-full bg-input border border-line-2 rounded-lg px-2 py-[7px] text-[13px] text-hi resize-none" />
               </label>
             </div>
@@ -145,10 +151,10 @@ function CandidateCard({ candidate, onResolved }) {
               </button>
             </div>
           ) : (
-            <div className="mt-3">
+            <div className="mt-3" onKeyDown={(e) => { if (e.key === 'Escape' && !busy) setConfirmDismiss(false) }}>
               <p className="text-[12px] text-muted mb-2">Dismiss this suggestion? It won’t be suggested again.</p>
               <div className="flex items-center gap-2">
-                <button type="button" onClick={handleDismiss} disabled={busy}
+                <button ref={confirmBtnRef} type="button" onClick={handleDismiss} disabled={busy}
                         className="bg-danger text-surface text-[12px] font-bold px-[16px] py-[7px] rounded-[9px] disabled:opacity-40 hover:opacity-85 transition-opacity">
                   {busy ? 'Working…' : 'Yes, dismiss'}
                 </button>
@@ -168,34 +174,49 @@ function CandidateCard({ candidate, onResolved }) {
 export default function CalendarSuggestionsPage() {
   const [status, setStatus] = useState('loading')   // loading | error | ready
   const [items, setItems] = useState([])
-  const [offset, setOffset] = useState(0)
   const [hasMore, setHasMore] = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
   const [banner, setBanner] = useState('')
   const viewedRef = useRef(false)
+  const aliveRef = useRef(true)          // false after unmount → drop late responses
+  const cursorRef = useRef(null)         // keyset boundary: last row FETCHED (not last shown)
+  const initGenRef = useRef(0)           // generation guard so a stale (re)load can't win
+  const loadingMoreRef = useRef(false)   // synchronous single-flight for Load more
 
-  const fetchPage = useCallback(async (from) => {
-    // RLS scopes to the signed-in user; only safe columns + own contact are selected.
-    const { data, error } = await supabase
+  useEffect(() => () => { aliveRef.current = false }, [])
+
+  // One keyset page strictly after `cursor` (null = first page). RLS scopes to the
+  // signed-in user; only safe columns + own contact are selected. Deterministic order
+  // (date DESC, id DESC) so equal dates never reorder between fetches.
+  const fetchPage = useCallback(async (cursor) => {
+    let q = supabase
       .from('interaction_candidates')
       .select(CANDIDATE_SELECT)
       .eq('status', 'pending')
       .order('proposed_interaction_date', { ascending: false })
-      .range(from, from + REVIEW_PAGE_SIZE - 1)
+      .order('id', { ascending: false })
+      .limit(REVIEW_PAGE_SIZE)
+    const filter = keysetFilter(cursor)
+    if (filter) q = q.or(filter)
+    const { data, error } = await q
     if (error) throw error
     return data || []
   }, [])
 
   const loadInitial = useCallback(async () => {
+    const gen = ++initGenRef.current      // invalidate any in-flight load
+    loadingMoreRef.current = false
     setStatus('loading')
     try {
-      const rows = await fetchPage(0)
+      const rows = await fetchPage(null)
+      if (!aliveRef.current || gen !== initGenRef.current) return   // stale / unmounted
+      cursorRef.current = cursorFrom(rows)
       setItems(rows)
-      setOffset(rows.length)
-      setHasMore(rows.length === REVIEW_PAGE_SIZE)
+      setHasMore(computeHasMore(rows.length))
       setStatus('ready')
       if (!viewedRef.current) { viewedRef.current = true; track('calendar_review_viewed') }
     } catch {
+      if (!aliveRef.current || gen !== initGenRef.current) return
       setStatus('error')
     }
   }, [fetchPage])
@@ -205,19 +226,36 @@ export default function CalendarSuggestionsPage() {
     loadInitial()
   }, [loadInitial])
 
-  async function loadMore() {
-    if (loadingMore) return
+  const loadMore = useCallback(async () => {
+    if (loadingMoreRef.current) return        // synchronous single-flight
+    loadingMoreRef.current = true
+    const gen = initGenRef.current            // tie this page to the current load session
     setLoadingMore(true)
     try {
-      const rows = await fetchPage(offset)
-      setItems((prev) => [...prev, ...rows])
-      setOffset((o) => o + rows.length)
-      setHasMore(rows.length === REVIEW_PAGE_SIZE)
-    } catch { /* keep existing list; Load more can be retried */ }
-    setLoadingMore(false)
-  }
+      const rows = await fetchPage(cursorRef.current)
+      if (!aliveRef.current || gen !== initGenRef.current) return   // stale / reloaded / unmounted
+      if (rows.length > 0) cursorRef.current = cursorFrom(rows)
+      setItems((prev) => dedupeById(prev, rows))
+      setHasMore(computeHasMore(rows.length))
+    } catch {
+      /* keep existing list; Load more can be retried */
+    } finally {
+      if (aliveRef.current && gen === initGenRef.current) setLoadingMore(false)
+      loadingMoreRef.current = false
+    }
+  }, [fetchPage])
+
+  // If resolving rows drains the visible page while more remain beyond the cursor,
+  // pull the next page so the user never sees a false "all caught up".
+  useEffect(() => {
+    if (status === 'ready' && items.length === 0 && hasMore && !loadingMoreRef.current) {
+      loadMore()
+    }
+  }, [status, items.length, hasMore, loadMore])
 
   function handleResolved(id, message) {
+    // Only the rendered list shrinks; cursorRef is untouched, so Load more still
+    // continues from the correct boundary (no skip, no duplicate).
     setItems((prev) => prev.filter((c) => c.id !== id))
     setBanner(message)
   }
@@ -254,7 +292,11 @@ export default function CalendarSuggestionsPage() {
           </div>
         )}
 
-        {status === 'ready' && items.length === 0 && (
+        {status === 'ready' && items.length === 0 && hasMore && (
+          <div role="status" aria-live="polite" className="text-[13px] text-muted py-10 text-center">Loading more…</div>
+        )}
+
+        {status === 'ready' && items.length === 0 && !hasMore && (
           <div className="text-center py-14">
             <span className={SECTION_LABEL}>Calendar suggestions</span>
             <h2 className="font-display font-semibold text-[18px] text-hi mb-2">You’re all caught up</h2>

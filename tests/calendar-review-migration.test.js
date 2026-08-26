@@ -57,17 +57,24 @@ test('missing/foreign candidate returns the same not_found', () => {
   assert.ok(/IF NOT FOUND THEN[\s\S]*?'not_found'/.test(accept))
   assert.ok(/IF NOT FOUND THEN[\s\S]*?'not_found'/.test(dismiss))
 })
-test('accept: contact ownership re-checked; never accepts contact_id/user_id from caller', () => {
-  assert.ok(/FROM public\.contacts WHERE id = v_cand\.contact_id AND user_id = v_uid/.test(accept))
+test('accept: contact ownership re-checked (locked FOR KEY SHARE); never accepts contact_id/user_id from caller', () => {
+  assert.ok(/FROM public\.contacts\s+WHERE id = v_cand\.contact_id AND user_id = v_uid\s+FOR KEY SHARE/.test(accept))
   assert.ok(!/p_contact_id/.test(MIG_CODE))
   // interaction insert uses the candidate's contact + v_uid, never a caller value
   assert.ok(/INSERT INTO public\.interactions \(contact_id, user_id, type, interaction_date, notes\)[\s\S]*?VALUES \(v_cand\.contact_id, v_uid,/.test(accept))
 })
-test('accept: only pending+active source creates an interaction; type/date/notes validated', () => {
+test('accept: only pending+active source creates an interaction; type/date/notes validated at schema bound (200)', () => {
   assert.ok(/v_cand\.source_last_state <> 'active'[\s\S]*?'invalidated'/.test(accept))
   assert.ok(/v_type NOT IN \('Coffee chat', 'Email', 'Event', 'Call', 'Message', 'Other'\)[\s\S]*?'invalid_type'/.test(accept))
   assert.ok(/v_date IS NULL[\s\S]*?'invalid_date'/.test(accept))
-  assert.ok(/char_length\(v_notes\) > 2000[\s\S]*?'invalid_notes'/.test(accept))
+  assert.ok(/char_length\(v_notes\) > 200[\s\S]*?'invalid_notes'/.test(accept))
+  assert.ok(!/> 2000/.test(accept), 'stale 2000 bound must be gone')
+})
+test('accept: concurrent-delete / lock-cycle mapped to controlled codes, never a raw SQL error', () => {
+  // ownership lock + write are wrapped so FK/deadlock/serialization become result codes
+  assert.ok(/BEGIN[\s\S]*?EXCEPTION[\s\S]*?END;/.test(accept), 'mutation wrapped in an exception block')
+  assert.ok(/WHEN foreign_key_violation THEN[\s\S]*?'not_found'/.test(accept))
+  assert.ok(/WHEN deadlock_detected OR serialization_failure THEN[\s\S]*?'conflict'/.test(accept))
 })
 test('accept: state machine — accepted+id idempotent, accepted+NULL tombstone, dismissed/invalidated conflicts', () => {
   assert.ok(/status = 'accepted'[\s\S]*?interaction_id IS NOT NULL[\s\S]*?'already_accepted'/.test(accept))
