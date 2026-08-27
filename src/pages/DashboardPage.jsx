@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import ImportContactsModal from '../components/ImportContactsModal'
+import CalendarSuggestionsEntry from '../components/CalendarSuggestionsEntry'
 import TopBar from '../components/TopBar'
 import { getAvatarColor, getInitials } from '../lib/avatarUtils'
 import { track } from '../lib/analytics'
@@ -917,6 +918,10 @@ function DashboardPage() {
 
       {/* ── Body ─────────────────────────────────────────────────────────── */}
       <div className="px-[20px] md:px-[28px] py-[20px] space-y-[20px]">
+
+        {/* Calendar review entry — self-gated by the ingestion flag; renders only when
+            there are pending suggestions. */}
+        <CalendarSuggestionsEntry />
 
         {/* Collapsed reopen control — shown when strip was dismissed.
             Renders as a slim row so it doesn't displace layout. */}
