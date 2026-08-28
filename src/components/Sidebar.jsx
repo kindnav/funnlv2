@@ -12,6 +12,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
+import { settleQuery } from '../lib/supabaseResult'
 import { getAvatarColor, getInitials } from '../lib/avatarUtils'
 
 function getLocalToday() {
@@ -93,12 +94,11 @@ function NavRail() {
 
   const fetchProfile = useCallback(async (uid) => {
     if (!uid) return
-    const { data: p } = await supabase
-      .from('profiles')
-      .select('display_name')
-      .eq('id', uid)
-      .maybeSingle()
-      .catch(() => ({ data: null }))
+    // settleQuery: the builder is a thenable without .catch — calling .catch on it
+    // throws "catch is not a function". This resolves rejections to { data: null }.
+    const { data: p } = await settleQuery(
+      supabase.from('profiles').select('display_name').eq('id', uid).maybeSingle()
+    )
     setProfile(p)
   }, [])
 

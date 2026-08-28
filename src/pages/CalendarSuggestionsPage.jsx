@@ -8,6 +8,7 @@ import {
   validateOverrides, acceptResultOutcome, dismissResultOutcome, resultCode,
   keysetFilter, cursorFrom, dedupeById, computeHasMore,
 } from '../lib/calendarReview'
+import { dismissConfirmFocusTarget } from '../lib/dismissConfirmFocus'
 
 const CARD = 'bg-card border border-line-1 rounded-2xl p-[18px]'
 const SECTION_LABEL = 'block mb-[10px] font-mono text-[8.5px] font-semibold tracking-[1.5px] text-muted uppercase'
@@ -31,11 +32,31 @@ function CandidateCard({ candidate, onResolved }) {
   const [busy, setBusy] = useState(false)              // single-flight guard for Accept/Dismiss
   const [confirmDismiss, setConfirmDismiss] = useState(false)
   const [error, setError] = useState('')
-  const confirmBtnRef = useRef(null)                   // move focus here when confirm opens
+  const confirmBtnRef = useRef(null)                   // "Yes, dismiss" (focused when confirm opens)
+  const dismissBtnRef = useRef(null)                   // initiating "Dismiss" (focus restored here on cancel/escape)
+  const restoreFocusRef = useRef(false)                // true → restore focus to Dismiss after confirm closes
 
-  // When the inline dismiss confirmation opens, focus its primary button so keyboard
-  // focus is not lost as the Dismiss button unmounts. Escape cancels (handler below).
-  useEffect(() => { if (confirmDismiss) confirmBtnRef.current?.focus() }, [confirmDismiss])
+  // Focus management for the inline dismiss confirmation. Opening it moves focus to the
+  // primary button (so focus is not lost as the Dismiss button unmounts); cancelling it
+  // via Cancel OR Escape restores focus to the initiating Dismiss button (dismissConfirmFocusTarget:
+  // 'open'→'confirm', 'cancel'/'escape'→'dismiss') instead of dropping focus to <body>.
+  useEffect(() => {
+    let target = null
+    if (confirmDismiss) {
+      target = dismissConfirmFocusTarget('open')        // 'confirm'
+    } else if (restoreFocusRef.current) {
+      restoreFocusRef.current = false
+      target = dismissConfirmFocusTarget('cancel')      // 'dismiss' (same as 'escape')
+    }
+    if (target === 'confirm') confirmBtnRef.current?.focus()
+    else if (target === 'dismiss') dismissBtnRef.current?.focus()
+  }, [confirmDismiss])
+
+  // Close the confirmation and flag that focus must return to the Dismiss button.
+  function closeConfirm() {
+    restoreFocusRef.current = true
+    setConfirmDismiss(false)
+  }
 
   const edited = editing && (
     type !== candidate.proposed_type ||
@@ -141,7 +162,7 @@ function CandidateCard({ candidate, onResolved }) {
                       className="bg-hi text-surface text-[12px] font-bold px-[16px] py-[7px] rounded-[9px] disabled:opacity-40 hover:opacity-85 transition-opacity motion-reduce:transition-none">
                 {busy ? 'Working…' : 'Accept'}
               </button>
-              <button type="button" onClick={() => setConfirmDismiss(true)} disabled={busy}
+              <button ref={dismissBtnRef} type="button" onClick={() => setConfirmDismiss(true)} disabled={busy}
                       className="bg-elevated text-mid text-[12px] font-semibold px-[16px] py-[7px] rounded-[9px] disabled:opacity-40 hover:text-hi transition-colors">
                 Dismiss
               </button>
@@ -151,14 +172,14 @@ function CandidateCard({ candidate, onResolved }) {
               </button>
             </div>
           ) : (
-            <div className="mt-3" onKeyDown={(e) => { if (e.key === 'Escape' && !busy) setConfirmDismiss(false) }}>
+            <div className="mt-3" onKeyDown={(e) => { if (e.key === 'Escape' && !busy) closeConfirm() }}>
               <p className="text-[12px] text-muted mb-2">Dismiss this suggestion? It won’t be suggested again.</p>
               <div className="flex items-center gap-2">
                 <button ref={confirmBtnRef} type="button" onClick={handleDismiss} disabled={busy}
                         className="bg-danger text-surface text-[12px] font-bold px-[16px] py-[7px] rounded-[9px] disabled:opacity-40 hover:opacity-85 transition-opacity">
                   {busy ? 'Working…' : 'Yes, dismiss'}
                 </button>
-                <button type="button" onClick={() => setConfirmDismiss(false)} disabled={busy}
+                <button type="button" onClick={closeConfirm} disabled={busy}
                         className="bg-elevated text-mid text-[12px] font-semibold px-[16px] py-[7px] rounded-[9px] disabled:opacity-40 hover:text-hi transition-colors">
                   Cancel
                 </button>

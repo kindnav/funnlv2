@@ -126,4 +126,88 @@ await test('never throws when rpc() rejects — resolves to null', async () => {
   assert.strictEqual(result, null)
 })
 
+// ── PGRST303 transient-JWT refresh + retry (Preview console-error fix) ─────────
+// PGRST303 = validly-signed but temporally-invalid JWT (expired / iat-future /
+// nbf-future). Root cause: a stale access token reaches PostgREST at app mount.
+// The fix refreshes the session and retries ONCE — resolving it, not suppressing.
+
+// Client whose rpc() returns queued results in order, counting calls, and whose
+// auth.refreshSession() returns a configurable result while counting calls.
+function makeRefreshClient(rpcResults, refreshResult = { error: null }) {
+  const state = { rpcCalls: 0, refreshCalls: 0 }
+  const client = {
+    rpc() {
+      const r = rpcResults[Math.min(state.rpcCalls, rpcResults.length - 1)]
+      state.rpcCalls++
+      return Promise.resolve(r)
+    },
+    auth: {
+      refreshSession() {
+        state.refreshCalls++
+        return Promise.resolve(refreshResult)
+      },
+    },
+  }
+  return { client, state }
+}
+
+for (const code of ['PGRST303', 'PGRST301']) {
+  await test(`${code}: refreshes session and retries once, returning fresh data`, async () => {
+    const { client, state } = makeRefreshClient([
+      { data: null, error: { code, message: 'jwt temporal' } },
+      { data: { ...VALID_STATUS, can_use_pro: true, permanent_pro: true }, error: null },
+    ])
+    const result = await _getProAccessStatusWith(client)
+    assert.strictEqual(result.can_use_pro, true)
+    assert.strictEqual(state.refreshCalls, 1)   // refreshed exactly once
+    assert.strictEqual(state.rpcCalls, 2)       // initial + one retry
+  })
+}
+
+await test('PGRST303: retry runs at most once (still failing → null)', async () => {
+  const { client, state } = makeRefreshClient([
+    { data: null, error: { code: 'PGRST303', message: 'expired' } },
+    { data: null, error: { code: 'PGRST303', message: 'expired' } },
+  ])
+  const result = await _getProAccessStatusWith(client)
+  assert.strictEqual(result, null)
+  assert.strictEqual(state.refreshCalls, 1)
+  assert.strictEqual(state.rpcCalls, 2)         // never more than initial + one retry
+})
+
+await test('PGRST303: when refreshSession fails, does not retry and returns null', async () => {
+  const { client, state } = makeRefreshClient(
+    [{ data: null, error: { code: 'PGRST303', message: 'expired' } }],
+    { error: { message: 'no refresh token' } },
+  )
+  const result = await _getProAccessStatusWith(client)
+  assert.strictEqual(result, null)
+  assert.strictEqual(state.refreshCalls, 1)
+  assert.strictEqual(state.rpcCalls, 1)         // no retry after a failed refresh
+})
+
+await test('non-refreshable error (42501) never triggers a session refresh', async () => {
+  const { client, state } = makeRefreshClient([
+    { data: null, error: { code: '42501', message: 'permission denied' } },
+  ])
+  const result = await _getProAccessStatusWith(client)
+  assert.strictEqual(result, null)
+  assert.strictEqual(state.refreshCalls, 0)     // permission errors are not transient
+  assert.strictEqual(state.rpcCalls, 1)
+})
+
+await test('success on first call never triggers a refresh', async () => {
+  const { client, state } = makeRefreshClient([{ data: VALID_STATUS, error: null }])
+  const result = await _getProAccessStatusWith(client)
+  assert.deepStrictEqual(result, VALID_STATUS)
+  assert.strictEqual(state.refreshCalls, 0)
+  assert.strictEqual(state.rpcCalls, 1)
+})
+
+await test('PGRST303 without an auth.refreshSession client falls through to null (backward compatible)', async () => {
+  const client = makeRpcClient(null, { code: 'PGRST303', message: 'expired' })
+  const result = await _getProAccessStatusWith(client)
+  assert.strictEqual(result, null)
+})
+
 console.log('All pro-access-status tests passed.')
