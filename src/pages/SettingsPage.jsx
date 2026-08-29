@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
+import { settleQuery } from '../lib/supabaseResult'
 import { getTheme, setTheme } from '../lib/theme'
 import { useProStatus, useProRefresh } from '../lib/useProStatus'
 import { classifyProStatus } from '../lib/pro-ui-status'
@@ -123,18 +124,18 @@ function SettingsPage() {
         currentUidRef.current = capturedUid
         setUser(u)
         if (u) {
+          // settleQuery: Supabase builders are thenables without .catch (calling
+          // .catch on them throws "catch is not a function"). These resolve
+          // rejections to the benign fallbacks instead.
           const [profileResult, countResult] = await Promise.all([
-            supabase
-              .from('profiles')
-              .select('display_name')
-              .eq('id', u.id)
-              .maybeSingle()
-              .catch(() => ({ data: null })),
-            supabase
-              .from('contacts')
-              .select('id', { count: 'exact', head: true })
-              .eq('user_id', u.id)
-              .catch(() => ({ count: 0 })),
+            settleQuery(
+              supabase.from('profiles').select('display_name').eq('id', u.id).maybeSingle(),
+              { data: null },
+            ),
+            settleQuery(
+              supabase.from('contacts').select('id', { count: 'exact', head: true }).eq('user_id', u.id),
+              { count: 0 },
+            ),
           ])
           if (!mountedRef.current || accountGenRef.current !== capturedGen) return
           if (profileResult.data) {
@@ -200,11 +201,10 @@ function SettingsPage() {
     async function refreshCount() {
       if (!user?.id) return
       const capturedGen = accountGenRef.current
-      const { count } = await supabase
-        .from('contacts')
-        .select('id', { count: 'exact', head: true })
-        .eq('user_id', user.id)
-        .catch(() => ({ count: null }))
+      const { count } = await settleQuery(
+        supabase.from('contacts').select('id', { count: 'exact', head: true }).eq('user_id', user.id),
+        { count: null },
+      )
       if (!mountedRef.current || accountGenRef.current !== capturedGen) return
       if (count !== null) setContactCount(count)
     }
