@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback, useMemo } from 'react'
 import { useSearchParams, useNavigate, useLocation } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import ImportContactsModal from '../components/ImportContactsModal'
+import InteractionSourceBadge from '../components/InteractionSourceBadge'
 import TopBar from '../components/TopBar'
 import { getAvatarColor, getInitials } from '../lib/avatarUtils'
 import {
@@ -156,6 +157,7 @@ function DirectoryRow({ entry, expanded, onToggleExpand, onDeleteRequest }) {
         {lastInteraction && (
           <div className="hidden md:flex items-center gap-1.5 flex-none">
             <span className="text-[11px] font-mono text-lower">{lastInteraction.type}</span>
+            <InteractionSourceBadge source={lastInteraction.source} />
             <span className="text-[11.5px] text-low">{formatRelativeDate(lastInteraction.interaction_date)}</span>
           </div>
         )}
@@ -485,7 +487,7 @@ function ContactsPage() {
     const [contactsRes, interactionsRes] = await Promise.all([
       supabase.from('contacts').select('*').order('created_at', { ascending: false }),
       supabase.from('interactions')
-        .select('id, contact_id, interaction_date, type, notes, follow_up_date, outreach_status')
+        .select('id, contact_id, interaction_date, type, source, notes, follow_up_date, outreach_status')
         .order('interaction_date', { ascending: false }),
     ])
 

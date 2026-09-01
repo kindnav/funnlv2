@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useParams, Link, useLocation, useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { getAvatarColor, getInitials } from '../lib/avatarUtils'
+import InteractionSourceBadge from '../components/InteractionSourceBadge'
 import { track } from '../lib/analytics'
 import { CONTACT_AI_ENABLED, snoozeOptionToDate } from '../lib/contactDirectoryUtils'
 import { effectiveOutreachStatus } from '../lib/contactFormUtils'
@@ -945,6 +946,7 @@ function ContactDetailPage() {
                               <div className="flex items-center gap-2 flex-wrap min-w-0">
                                 <span className="text-[13.5px] font-bold text-hi">{interaction.type || 'Interaction'}</span>
                                 {interaction.outreach_status && <OutreachStatusBadge status={interaction.outreach_status} />}
+                                <InteractionSourceBadge source={interaction.source} />
                               </div>
                               <div className="flex items-center gap-3 flex-none">
                                 <span className="text-[11.5px] text-low">{relativeDate(interaction.interaction_date)}</span>
