@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import ImportContactsModal from '../components/ImportContactsModal'
-import CalendarSuggestionsEntry from '../components/CalendarSuggestionsEntry'
+import SuggestionsEntry from '../components/SuggestionsEntry'
+import InteractionSourceBadge from '../components/InteractionSourceBadge'
 import TopBar from '../components/TopBar'
 import { getAvatarColor, getInitials } from '../lib/avatarUtils'
 import { track } from '../lib/analytics'
@@ -154,6 +155,7 @@ function ActivityRow({ item, today, isLast }) {
         >
           {item.type}
         </span>
+        <InteractionSourceBadge source={item.source} />
         {item.hasNotes && (
           <span
             className="text-[10px] font-mono px-[5px] py-[2px] rounded-[4px]"
@@ -558,7 +560,7 @@ function DashboardPage() {
     ] = await Promise.all([
       supabase.from('contacts').select('id, name, tags, company, role, created_at'),
       // notes is required for buildRecentActivity hasNotes field
-      supabase.from('interactions').select('id, contact_id, interaction_date, type, outreach_status, follow_up_date, notes, created_at'),
+      supabase.from('interactions').select('id, contact_id, interaction_date, type, source, outreach_status, follow_up_date, notes, created_at'),
       resolvedUid
         ? supabase.from('profiles')
             .select('activation_five_contacts_at, activation_first_interaction_at, activation_first_followup_at, activation_completed_at, display_name')
@@ -921,7 +923,7 @@ function DashboardPage() {
 
         {/* Calendar review entry — self-gated by the ingestion flag; renders only when
             there are pending suggestions. */}
-        <CalendarSuggestionsEntry />
+        <SuggestionsEntry />
 
         {/* Collapsed reopen control — shown when strip was dismissed.
             Renders as a slim row so it doesn't displace layout. */}
@@ -1102,9 +1104,12 @@ function DashboardPage() {
                           <p className="text-[12.5px] font-semibold truncate" style={{ color: 'var(--color-hi)' }}>
                             {name}
                           </p>
-                          <p className="text-[11px] truncate" style={{ color: 'var(--color-muted)' }}>
-                            {ixn.type}
-                          </p>
+                          <div className="flex items-center gap-1.5 min-w-0">
+                            <p className="text-[11px] truncate" style={{ color: 'var(--color-muted)' }}>
+                              {ixn.type}
+                            </p>
+                            <InteractionSourceBadge source={ixn.source} />
+                          </div>
                         </div>
                         <span
                           className="text-[10px] font-mono flex-none whitespace-nowrap"

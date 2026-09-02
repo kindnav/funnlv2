@@ -238,6 +238,7 @@ export function buildRecentActivity(contacts, interactions, contactMap) {
         contactId: i.contact_id,
         contactName: contactMap[i.contact_id]?.name || 'Unknown',
         type: i.type,
+        source: i.source,
         outreachStatus: i.outreach_status,
         hasNotes: !!i.notes?.trim(),
       })),

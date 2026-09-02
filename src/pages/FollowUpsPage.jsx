@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { getAvatarColor, getInitials } from '../lib/avatarUtils'
+import InteractionSourceBadge from '../components/InteractionSourceBadge'
 import { track } from '../lib/analytics'
 import TopBar from '../components/TopBar'
 import ContactPickerModal from '../components/ContactPickerModal'
@@ -301,6 +302,7 @@ function OpenFollowUpRow({ item, today, isSaving, rowError: rowErr, popoverOpenI
               <span className="text-[12px] font-mono" style={{ color: 'var(--color-low)' }}>
                 {item.type}
               </span>
+              <InteractionSourceBadge source={item.source} />
               <span className="text-[11px]" style={{ color: 'var(--color-lower)' }}>·</span>
               <span className="text-[12px] font-mono" style={{ color: 'var(--color-low)' }}>
                 {item.interaction_date}
@@ -533,6 +535,7 @@ function AwaitingRow({ item, today, isSaving, rowError: rowErr, popoverOpenId, p
               <span className="text-[12px] font-mono" style={{ color: 'var(--color-low)' }}>
                 {item.type}
               </span>
+              <InteractionSourceBadge source={item.source} />
               <span className="text-[11px]" style={{ color: 'var(--color-lower)' }}>·</span>
               <span className="text-[12px] font-mono" style={{ color: 'var(--color-low)' }}>
                 {item.interaction_date}
@@ -704,6 +707,7 @@ function CompletedRow({ item, today, isSaving, rowError: rowErr, onUndo, isLast 
               <span className="text-[12px] font-mono" style={{ color: 'var(--color-lower)' }}>
                 {item.type}
               </span>
+              <InteractionSourceBadge source={item.source} />
               <span className="text-[11px]" style={{ color: 'var(--color-lower)' }}>·</span>
               <span className="text-[12px] font-mono" style={{ color: 'var(--color-lower)' }}>
                 {whenLbl}{methodLbl ? ` · ${methodLbl}` : ''}
@@ -826,7 +830,7 @@ export default function FollowUpsPage() {
     const { data, error } = await supabase
       .from('interactions')
       .select([
-        'id', 'contact_id', 'type', 'interaction_date', 'notes',
+        'id', 'contact_id', 'type', 'interaction_date', 'notes', 'source',
         'follow_up_date', 'outreach_status', 'created_at',
         'follow_up_completed_at', 'follow_up_previous_date', 'follow_up_completion_method',
         'contacts ( id, name, company, role )',
