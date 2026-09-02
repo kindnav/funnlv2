@@ -10,8 +10,8 @@ import { fileURLToPath } from 'url'
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const MIG_FILE = readdirSync(join(ROOT, 'supabase/migrations')).find(f => /add_calendar_candidate_review_rpcs\.sql$/.test(f))
 const MIG = readFileSync(join(ROOT, 'supabase/migrations', MIG_FILE), 'utf8')
-const PAGE = readFileSync(join(ROOT, 'src/pages/CalendarSuggestionsPage.jsx'), 'utf8')
-const ENTRY = readFileSync(join(ROOT, 'src/components/CalendarSuggestionsEntry.jsx'), 'utf8')
+const PAGE = readFileSync(join(ROOT, 'src/pages/SuggestionsPage.jsx'), 'utf8')
+const ENTRY = readFileSync(join(ROOT, 'src/components/SuggestionsEntry.jsx'), 'utf8')
 const LIB = readFileSync(join(ROOT, 'src/lib/calendarReview.js'), 'utf8')
 
 function stripSql(s) { return s.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/--[^\n]*/g, ' ') }

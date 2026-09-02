@@ -18,7 +18,7 @@ import MobileAppBar from './components/MobileAppBar'
 import CommandPalette from './components/CommandPalette'
 import GlobalAddContactController from './components/GlobalAddContactController'
 import SettingsPage from './pages/SettingsPage'
-import CalendarSuggestionsPage from './pages/CalendarSuggestionsPage'
+import SuggestionsPage from './pages/SuggestionsPage'
 import { CALENDAR_INGESTION_ENABLED } from './lib/calendarIngestion'
 import { ProStatusProvider } from './lib/useProStatus'
 
@@ -88,9 +88,14 @@ function App() {
             <Route path="/contacts" element={<ContactsPage />} />
             <Route path="/contacts/:id" element={<ContactDetailPage />} />
             <Route path="/followups" element={<FollowUpsPage />} />
-            {/* Calendar review queue — only mounted when the ingestion flag is enabled. */}
+            {/* Source-neutral Suggestions queue — only mounted when the ingestion flag is
+                enabled. /calendar-suggestions is preserved as a redirect so existing
+                bookmarks keep working (client-side navigation keeps the session). */}
             {CALENDAR_INGESTION_ENABLED && (
-              <Route path="/calendar-suggestions" element={<CalendarSuggestionsPage />} />
+              <Route path="/suggestions" element={<SuggestionsPage />} />
+            )}
+            {CALENDAR_INGESTION_ENABLED && (
+              <Route path="/calendar-suggestions" element={<Navigate to="/suggestions" replace />} />
             )}
             <Route path="/ai" element={<FunnlAIPage />} />
             <Route path="/settings" element={<SettingsPage />} />

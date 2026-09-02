@@ -20,7 +20,7 @@ export const REVIEW_NOTES_MAX = 200
 // display fields. Provider ids, fingerprints, user_id, interaction_id, refs, and raw
 // event data are NEVER selected (and are not granted to authenticated anyway).
 export const CANDIDATE_SELECT =
-  'id, proposed_type, proposed_interaction_date, proposed_notes, created_at, contacts(name, company, role)'
+  'id, source, proposed_type, proposed_interaction_date, proposed_notes, created_at, contacts(name, company, role)'
 
 /**
  * Client-side validation of reviewed overrides before calling accept. Mirrors the

@@ -9,6 +9,7 @@ import {
   keysetFilter, cursorFrom, dedupeById, computeHasMore,
 } from '../lib/calendarReview'
 import { dismissConfirmFocusTarget } from '../lib/dismissConfirmFocus'
+import InteractionSourceBadge from '../components/InteractionSourceBadge'
 
 const CARD = 'bg-card border border-line-1 rounded-2xl p-[18px]'
 const SECTION_LABEL = 'block mb-[10px] font-mono text-[8.5px] font-semibold tracking-[1.5px] text-muted uppercase'
@@ -128,6 +129,7 @@ function CandidateCard({ candidate, onResolved }) {
             <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px]">
               <span className="font-mono text-[10px] px-2 py-[3px] rounded-full bg-elevated text-tag">{type}</span>
               <span className="text-muted">{formatDate(date)}</span>
+              <InteractionSourceBadge source={candidate.source} />
             </div>
           )}
           {!editing && candidate.proposed_notes && (
@@ -192,7 +194,7 @@ function CandidateCard({ candidate, onResolved }) {
   )
 }
 
-export default function CalendarSuggestionsPage() {
+export default function SuggestionsPage() {
   const [status, setStatus] = useState('loading')   // loading | error | ready
   const [items, setItems] = useState([])
   const [hasMore, setHasMore] = useState(false)
@@ -286,10 +288,10 @@ export default function CalendarSuggestionsPage() {
 
   return (
     <div className="flex flex-col h-full">
-      <TopBar title="Calendar suggestions" searchPlaceholder="Find, log, or ask anything…" onSearchClick={() => {}} />
+      <TopBar title="Suggestions" searchPlaceholder="Find, log, or ask anything…" onSearchClick={() => {}} />
       <div className="flex-1 px-4 py-5 md:px-6 md:py-6 max-w-3xl mx-auto w-full">
         <p className="text-[13px] text-muted mb-4">
-          Review people you met on your calendar and add them as interactions. Accepting creates one
+          Review people from your connected sources and add them as interactions. Accepting creates one
           interaction; dismissing hides the suggestion.
         </p>
 
@@ -319,10 +321,10 @@ export default function CalendarSuggestionsPage() {
 
         {status === 'ready' && items.length === 0 && !hasMore && (
           <div className="text-center py-14">
-            <span className={SECTION_LABEL}>Calendar suggestions</span>
+            <span className={SECTION_LABEL}>Suggestions</span>
             <h2 className="font-display font-semibold text-[18px] text-hi mb-2">You’re all caught up</h2>
             <p className="text-[14px] text-muted max-w-xs mx-auto leading-relaxed">
-              No calendar suggestions to review right now.
+              No suggestions to review right now.
             </p>
           </div>
         )}
