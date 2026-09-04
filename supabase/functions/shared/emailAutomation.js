@@ -20,6 +20,13 @@ import { parseSingleAddress } from './emailAddress.js'
 const NONHUMAN_LOCAL_RE =
   /^(no[-_]?reply|do[-_]?not[-_]?reply|donotreply|mailer-daemon|postmaster|bounce|bounces|notification|notifications|automated|auto[-_]?reply|mailer)($|[._+-])/
 
+// A domain LABEL that, on its own, marks an automated origin (e.g. bounce@bounces.example,
+// hi@no-reply.example). Kept tight to strong tokens to avoid rejecting legitimate company
+// subdomains; matched per-label so "reply.company.com" (a human alias) is NOT caught.
+const NONHUMAN_DOMAIN_LABEL = new Set([
+  'no-reply', 'noreply', 'donotreply', 'do-not-reply', 'bounce', 'bounces', 'mailer-daemon',
+])
+
 // Well-known automated calendar-notification senders (exact, normalized).
 const CALENDAR_NOTIFICATION_SENDERS = new Set([
   'calendar-notification@google.com',
@@ -66,6 +73,8 @@ export function nonHumanReason(msg) {
     const at = from.indexOf('@')
     const local = at > 0 ? from.slice(0, at) : from
     if (NONHUMAN_LOCAL_RE.test(local)) return 'no_reply_sender'
+    const domain = at > 0 ? from.slice(at + 1) : ''
+    if (domain && domain.split('.').some((label) => NONHUMAN_DOMAIN_LABEL.has(label))) return 'no_reply_sender'
   }
 
   const subj = normSubject(msg.subject)

@@ -39,11 +39,18 @@ test('Auto-Submitted != no', () => {
 test('X-Auto-Response-Suppress present', () => {
   assert.strictEqual(nonHumanReason(withAuto({ hasAutoResponseSuppress: true })), 'auto_response_suppress')
 })
-test('no-reply / mailer-daemon sender', () => {
+test('no-reply / mailer-daemon sender (local part)', () => {
   assert.strictEqual(nonHumanReason({ ...base, fromAddress: 'no-reply@example.com' }), 'no_reply_sender')
   assert.strictEqual(nonHumanReason({ ...base, fromAddress: 'noreply@example.com' }), 'no_reply_sender')
   assert.strictEqual(nonHumanReason({ ...base, fromAddress: 'mailer-daemon@example.com' }), 'no_reply_sender')
   assert.strictEqual(nonHumanReason({ ...base, fromAddress: 'notifications@example.com' }), 'no_reply_sender')
+})
+test('no-reply / bounce domain label (per-label, does not over-match human aliases)', () => {
+  assert.strictEqual(nonHumanReason({ ...base, fromAddress: 'hi@no-reply.example.com' }), 'no_reply_sender')
+  assert.strictEqual(nonHumanReason({ ...base, fromAddress: 'x@bounces.example.com' }), 'no_reply_sender')
+  // "reply" / "notify" as a company subdomain label is NOT treated as automated.
+  assert.strictEqual(nonHumanReason({ ...base, fromAddress: 'jordan@reply.example.com' }), null)
+  assert.strictEqual(nonHumanReason({ ...base, fromAddress: 'jordan@team.example.com' }), null)
 })
 test('calendar notification sender or invitation subject', () => {
   assert.strictEqual(nonHumanReason({ ...base, fromAddress: 'calendar-notification@google.com' }), 'calendar_notification')

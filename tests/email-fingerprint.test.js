@@ -4,6 +4,7 @@
 import assert from 'assert'
 import {
   FINGERPRINT_VERSION, FINGERPRINT_HEX_LEN, lengthPrefixedField, fingerprintInput, computeEmailFingerprint,
+  computeFingerprintSet, MAX_KEYRING_KEYS,
 } from '../supabase/functions/shared/emailFingerprint.js'
 
 let passed = 0, failed = 0
@@ -75,6 +76,46 @@ console.log('\nvalidation / fail-closed')
 await test('bad key bytes / subtle rejected', async () => {
   await assert.rejects(() => computeEmailFingerprint(base, { keyBytes: new Uint8Array(0), keyVersion: 1 }), /invalid_hmac_key/)
   await assert.rejects(() => computeEmailFingerprint(base, { keyBytes: 'nope', keyVersion: 1 }), /invalid_hmac_key/)
+})
+
+console.log('\nkey-ring dedup (rotation without duplicate candidates)')
+await test('write = current-key fingerprint; lookups cover current + accepted prior keys', async () => {
+  const set = await computeFingerprintSet(base, {
+    current: { keyBytes: KEY_B, keyVersion: 2 },
+    accepted: [{ keyBytes: KEY_A, keyVersion: 1 }],
+  })
+  const cur = await computeEmailFingerprint(base, { keyBytes: KEY_B, keyVersion: 2 })
+  const prior = await computeEmailFingerprint(base, { keyBytes: KEY_A, keyVersion: 1 })
+  assert.strictEqual(set.writeFingerprint, cur)
+  assert.strictEqual(set.writeKeyVersion, 2)
+  assert.strictEqual(set.lookupFingerprints.length, 2)
+  assert.deepStrictEqual(set.lookupFingerprints, [
+    { keyVersion: 2, fingerprint: cur },
+    { keyVersion: 1, fingerprint: prior },
+  ])
+  // The pre-rotation fingerprint is discoverable via the lookup set, so no duplicate is inserted.
+  assert.ok(set.lookupFingerprints.some((l) => l.fingerprint === prior))
+})
+await test('single current key -> one lookup equal to the write fingerprint', async () => {
+  const set = await computeFingerprintSet(base, { current: { keyBytes: KEY_A, keyVersion: 1 } })
+  assert.strictEqual(set.lookupFingerprints.length, 1)
+  assert.strictEqual(set.lookupFingerprints[0].fingerprint, set.writeFingerprint)
+})
+await test('duplicate key version across the ring is rejected', async () => {
+  await assert.rejects(() => computeFingerprintSet(base, {
+    current: { keyBytes: KEY_B, keyVersion: 1 },
+    accepted: [{ keyBytes: KEY_A, keyVersion: 1 }],
+  }), /duplicate_key_version/)
+})
+await test('unbounded key ring is rejected', async () => {
+  const accepted = Array.from({ length: MAX_KEYRING_KEYS }, (_, i) => ({ keyBytes: KEY_A, keyVersion: i + 2 }))
+  await assert.rejects(() => computeFingerprintSet(base, { current: { keyBytes: KEY_B, keyVersion: 1 }, accepted }), /keyring_too_large/)
+})
+await test('invalid ring entries fail closed', async () => {
+  await assert.rejects(() => computeFingerprintSet(base, {}), /invalid_keyring_current/)
+  await assert.rejects(() => computeFingerprintSet(base, { current: { keyBytes: new Uint8Array(0), keyVersion: 1 } }), /invalid_hmac_key/)
+  await assert.rejects(() => computeFingerprintSet(base, { current: { keyBytes: KEY_A, keyVersion: 0 } }), /invalid_key_version/)
+  await assert.rejects(() => computeFingerprintSet(base, { current: { keyBytes: KEY_A, keyVersion: 1 }, accepted: 'nope' }), /invalid_keyring_accepted/)
 })
 
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed\n`)

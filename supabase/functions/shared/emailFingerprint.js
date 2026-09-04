@@ -76,3 +76,48 @@ export async function computeEmailFingerprint(fields, deps = {}) {
   const mac = await subtle.sign('HMAC', key, encoder.encode(input))
   return [...new Uint8Array(mac)].map((b) => b.toString(16).padStart(2, '0')).join('')
 }
+
+// Bounded key ring — one current write key plus a small set of accepted prior read keys.
+export const MAX_KEYRING_KEYS = 5
+
+/**
+ * Produce the write fingerprint (under the CURRENT key) and the lookup fingerprints (under
+ * the current key AND every accepted prior key) for one candidate. The DB layer must, in a
+ * single transaction guarded by the source_fingerprint UNIQUE constraint, check whether ANY
+ * lookupFingerprint already exists for this user before inserting under writeFingerprint —
+ * so a key rotation never produces a duplicate candidate for the same historical episode.
+ * Terminal historical fingerprints are NEVER rewritten merely because a key rotated: this
+ * helper only computes values; it does not mutate storage.
+ *
+ * @param {Record<string,unknown>} fields
+ * @param {{ current: { keyBytes: Uint8Array, keyVersion: number },
+ *           accepted?: Array<{ keyBytes: Uint8Array, keyVersion: number }>,
+ *           subtle?: SubtleCrypto }} keyRing
+ * @returns {Promise<{ writeFingerprint: string, writeKeyVersion: number,
+ *                     lookupFingerprints: Array<{ keyVersion: number, fingerprint: string }> }>}
+ */
+export async function computeFingerprintSet(fields, keyRing = {}) {
+  const { current, accepted = [], subtle } = keyRing
+  if (!current || typeof current !== 'object') throw new Error('invalid_keyring_current')
+  if (!Array.isArray(accepted)) throw new Error('invalid_keyring_accepted')
+  const ring = [current, ...accepted]
+  if (ring.length > MAX_KEYRING_KEYS) throw new Error('keyring_too_large')
+  const seenVersions = new Set()
+  for (const k of ring) {
+    if (!k || typeof k !== 'object') throw new Error('invalid_keyring_key')
+    if (!Number.isInteger(k.keyVersion) || k.keyVersion < 1) throw new Error('invalid_key_version')
+    if (seenVersions.has(k.keyVersion)) throw new Error('duplicate_key_version')
+    seenVersions.add(k.keyVersion)
+    if (!(k.keyBytes instanceof Uint8Array) || k.keyBytes.length === 0) throw new Error('invalid_hmac_key')
+  }
+  const lookupFingerprints = []
+  for (const k of ring) {
+    const fingerprint = await computeEmailFingerprint(fields, { subtle, keyBytes: k.keyBytes, keyVersion: k.keyVersion })
+    lookupFingerprints.push({ keyVersion: k.keyVersion, fingerprint })
+  }
+  return {
+    writeFingerprint: lookupFingerprints[0].fingerprint,
+    writeKeyVersion: current.keyVersion,
+    lookupFingerprints,
+  }
+}
