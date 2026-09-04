@@ -1,0 +1,342 @@
+// Phase E1 — deterministic email-conversation classifier.
+//
+// Pure, cross-runtime. No I/O, no network, no DB, no secrets, no logging. Consumes only
+// NormalizedMessage objects (metadata) and a caller-owned contact list; produces
+// controlled structural outcomes plus aggregate counts. NEVER returns an address,
+// subject text, provider id, or header value in any outcome code or count.
+//
+// Pipeline: validate → group by conversation key → per-conversation completeness +
+// bulk/participant gates → build human-message episodes (7-day gap) →
+// per-(episode, contact) qualification → 'eligible' candidate data (fingerprint inputs +
+// sanitized subject preview + UTC instant + optional validated-timezone local date).
+//
+// COMPLETENESS TRUTHFULNESS: intentional filtering (bulk, one_way, cc_only, ...) is a
+// NORMAL completed outcome and does NOT make a run incomplete. A conversation that
+// contains any malformed/undeterminable/oversized message, or a structurally malformed
+// recipient list, is INCOMPLETE and MUST NOT emit an 'eligible' candidate from its
+// remaining subset — it emits 'incomplete_conversation' instead. Malformed messages that
+// cannot be attributed to a conversation (missing/untrusted key, tainted shape) make the
+// WHOLE run incomplete and suppress eligibility for every conversation in the batch.
+//
+// DATE SAFETY: the classifier NEVER derives a user-facing calendar date by slicing a UTC
+// instant (that shifts an evening email into the wrong day for North American zones — the
+// same class of bug corrected in Calendar). It returns the raw UTC instant always, and a
+// local calendar date ONLY when the caller supplies a validated IANA timeZone. It never
+// uses the runtime machine timezone and never silently defaults to UTC for a local date.
+
+import { classifyNormalizedMessage, MAX_KEY_LEN } from './emailProviderContract.js'
+import { parseSingleAddress, parseAddressList, matchContactByEmail, normalizeEmail } from './emailAddress.js'
+import { isBulkOrList, nonHumanReason } from './emailAutomation.js'
+
+export const OUTCOME_CODES = Object.freeze([
+  'eligible', 'one_way', 'cc_only', 'ambiguous_contact', 'no_contact_match',
+  'active_conversation', 'bulk_or_list', 'participant_cap', 'insufficient_human_messages',
+  'automation_only', 'incomplete_conversation', 'malformed_message', 'undeterminable_date',
+  'missing_conversation_key',
+])
+
+export const DEFAULTS = Object.freeze({
+  participantCap: 10,
+  quietMs: 24 * 60 * 60 * 1000,           // 24h
+  episodeGapMs: 7 * 24 * 60 * 60 * 1000,  // 7 days (strictly > splits)
+  subjectPreviewMax: 160,
+  maxMessages: 5000,                      // bounded input; fail closed above (before any work)
+  maxConversations: 5000,                 // bounded distinct conversation keys
+  maxContacts: 20000,                     // bounded contact list (matcher is O(contacts) per address)
+  maxEpisodesPerConversation: 500,        // bounded episodes; conversation → incomplete above
+  timeZone: null,                         // validated IANA tz from a later provider/account layer; null => no local date derived
+})
+
+// Zero-width / bidi / general-format characters are REMOVED outright (a-b must not become
+// "a b"): zero-width+bidi (200B-200F), bidi embed/override (202A-202E), word-joiner/invisible/
+// isolates (2060-206F), BOM/ZWNBSP (FEFF). Control characters (C0 0000-001F, DEL+C1 007F-009F)
+// are turned into a space (they are separators); NBSP (00A0) and other Unicode spaces then
+// collapse via \s+.
+const SUBJECT_REMOVE_RE = new RegExp("[\\u200B-\\u200F\\u202A-\\u202E\\u2060-\\u206F\\uFEFF]", 'g')
+// eslint-disable-next-line no-control-regex -- intentional: strip C0/C1/DEL control chars (Unicode-escaped)
+const SUBJECT_CONTROL_RE = new RegExp("[\\u0000-\\u001F\\u007F-\\u009F]", 'g')
+
+/**
+ * Sanitize a subject into a bounded preview: strip control/bidi/zero-width chars, collapse
+ * whitespace (incl. NBSP), trim, surrogate-safe cap. Only ever called AFTER an
+ * episode/contact is eligible. Never logged, fingerprinted, or persisted pre-qualification.
+ * @param {unknown} raw
+ * @param {number} max
+ * @returns {string}
+ */
+export function sanitizeSubjectPreview(raw, max = DEFAULTS.subjectPreviewMax) {
+  if (typeof raw !== 'string' || raw.length === 0) return ''
+  const stripped = raw.replace(SUBJECT_REMOVE_RE, '').replace(SUBJECT_CONTROL_RE, ' ').replace(/\s+/g, ' ').trim()
+  if (stripped.length <= max) return stripped
+  let cut = stripped.slice(0, max)
+  // Never cut through a surrogate pair (would leave a lone high surrogate).
+  const lastCode = cut.charCodeAt(cut.length - 1)
+  if (lastCode >= 0xD800 && lastCode <= 0xDBFF) cut = cut.slice(0, -1)
+  return cut
+}
+
+/**
+ * Derive a local calendar date (YYYY-MM-DD) for a UTC instant in an explicit IANA time
+ * zone. Deterministic across Node and Deno (both ship full ICU). Fails closed to null on
+ * a missing/invalid zone or instant — NEVER falls back to UTC or the machine timezone.
+ * @param {string} iso   UTC instant
+ * @param {unknown} timeZone  IANA zone id (e.g. 'America/Chicago')
+ * @returns {string|null}
+ */
+export function localDateInZone(iso, timeZone) {
+  if (typeof iso !== 'string' || typeof timeZone !== 'string' || timeZone.length === 0) return null
+  const t = Date.parse(iso)
+  if (!Number.isFinite(t)) return null
+  let parts
+  try {
+    parts = new Intl.DateTimeFormat('en-US', {
+      timeZone, year: 'numeric', month: '2-digit', day: '2-digit',
+    }).formatToParts(new Date(t))
+  } catch { return null } // invalid IANA zone → fail closed
+  const y = parts.find((p) => p.type === 'year')?.value
+  const m = parts.find((p) => p.type === 'month')?.value
+  const d = parts.find((p) => p.type === 'day')?.value
+  if (!y || !m || !d) return null
+  return `${y}-${m}-${d}`
+}
+
+function tsMs(iso) { return Date.parse(iso) }
+
+// The conversation key of a structurally-suspect message, ONLY when it is safe to trust.
+// (bad_timestamp / bad message-key still have a validated conversation key; tainted shapes
+// — not_object, prototype_pollution, prohibited_content, bad_provider — do not.)
+function safeConvKey(msg) {
+  if (!msg || typeof msg !== 'object') return null
+  const k = msg.providerConversationKey
+  return (typeof k === 'string' && k.length > 0 && k.length <= MAX_KEY_LEN) ? k : null
+}
+
+// Per-message structural triage → { code, convKey }. code null when usable. convKey is the
+// attributable conversation key for an unusable message, or null when it cannot be
+// attributed (→ whole-run incompleteness).
+function structuralTriage(msg) {
+  const code = classifyNormalizedMessage(msg)
+  if (code === null) return { code: null, convKey: msg.providerConversationKey }
+  if (code === 'bad_timestamp') return { code: 'undeterminable_date', convKey: safeConvKey(msg) }
+  if (code === 'bad_key') {
+    const ck = safeConvKey(msg)
+    return ck ? { code: 'malformed_message', convKey: ck } : { code: 'missing_conversation_key', convKey: null }
+  }
+  // not_object / prototype_pollution / prohibited_content / bad_provider → untrusted shape.
+  return { code: 'malformed_message', convKey: null }
+}
+
+// Deterministic order: numeric UTC instant, then provider message key. String comparison of
+// timestamps is UNSAFE (optional fractional seconds; Z vs +00:00), so sort on the parsed
+// instant.
+function sortMessages(a, b) {
+  const ta = tsMs(a.timestampIso)
+  const tb = tsMs(b.timestampIso)
+  if (ta !== tb) return ta < tb ? -1 : 1
+  if (a.providerMessageKey < b.providerMessageKey) return -1
+  if (a.providerMessageKey > b.providerMessageKey) return 1
+  return 0
+}
+
+// Split sorted human messages into episodes on a strictly > episodeGapMs gap.
+function buildEpisodes(sortedHuman, episodeGapMs) {
+  const episodes = []
+  let current = []
+  let prevTs = null
+  for (const m of sortedHuman) {
+    const t = tsMs(m.timestampIso)
+    if (prevTs !== null && (t - prevTs) > episodeGapMs) {
+      episodes.push(current)
+      current = []
+    }
+    current.push(m)
+    prevTs = t
+  }
+  if (current.length) episodes.push(current)
+  return episodes
+}
+
+/**
+ * Classify a batch of normalized messages into contact-episode outcomes.
+ * @param {{
+ *   messages: import('./emailProviderContract.js').NormalizedMessage[],
+ *   contacts: Array<{id:string,user_id:string,email:string}>,
+ *   ownedAddresses: string[],   // verified user mailbox address(es); MVP = the connected provider address
+ *   userId: string,
+ *   accountNamespace: string,   // connection/account namespace for fingerprint isolation
+ *   now: number,                // epoch ms
+ *   config?: Partial<typeof DEFAULTS>,
+ * }} args
+ * @returns {{ results: Array<object>, counts: object, complete: boolean }}
+ */
+export function classifyEmailMessages(args) {
+  const cfg = { ...DEFAULTS, ...(args && args.config) }
+  const results = []
+  const byOutcome = Object.fromEntries(OUTCOME_CODES.map((c) => [c, 0]))
+  const emit = (r) => { results.push(r); byOutcome[r.outcome] += 1 }
+
+  const messages = Array.isArray(args?.messages) ? args.messages : []
+  const contacts = Array.isArray(args?.contacts) ? args.contacts : []
+  const userId = args?.userId
+  const accountNamespace = args?.accountNamespace
+  const now = Number.isFinite(args?.now) ? args.now : NaN
+  const owned = new Set((Array.isArray(args?.ownedAddresses) ? args.ownedAddresses : []).map(normalizeEmail).filter(Boolean))
+
+  const emptyCounts = () => ({ conversations: 0, validMessages: 0, malformedMessages: 0, byOutcome, eligible: 0 })
+
+  // Fail closed on unusable orchestration inputs and DoS bounds — before any work.
+  if (!Number.isFinite(now) || typeof userId !== 'string' || typeof accountNamespace !== 'string' ||
+      accountNamespace.length === 0 || messages.length > cfg.maxMessages || contacts.length > cfg.maxContacts) {
+    return { results, counts: emptyCounts(), complete: false }
+  }
+
+  // 1) Structural triage + grouping by conversation key. Track incompleteness.
+  const byConv = new Map()
+  const incompleteConvKeys = new Set()   // conversations with an attributable malformed message
+  let runHadUnattributable = false        // a malformed message we could not attribute → whole run incomplete
+  let validMessages = 0
+  let malformedMessages = 0
+  for (const msg of messages) {
+    const { code, convKey } = structuralTriage(msg)
+    if (code) {
+      malformedMessages += 1
+      byOutcome[code] += 1
+      if (convKey) incompleteConvKeys.add(convKey)
+      else runHadUnattributable = true
+      continue
+    }
+    validMessages += 1
+    if (!byConv.has(convKey)) byConv.set(convKey, [])
+    byConv.get(convKey).push(msg)
+  }
+
+  // Bounded distinct conversations — fail closed before the per-conversation loop.
+  if (byConv.size > cfg.maxConversations) {
+    return { results, counts: { ...emptyCounts(), validMessages, malformedMessages }, complete: false }
+  }
+
+  // 2) Per conversation.
+  for (const [conversationKey, convMsgs] of byConv) {
+    // Parse each message's addresses once; capture structural recipient-list malformity.
+    const parsed = new Map()
+    let addressMalformed = false
+    for (const m of convMsgs) {
+      const to = parseAddressList(m.toAddresses.join(','))
+      const cc = parseAddressList(m.ccAddresses.join(','))
+      if (to.hadMalformed || cc.hadMalformed) addressMalformed = true
+      parsed.set(m, {
+        from: parseSingleAddress(m.fromAddress),
+        to: new Set(to.addresses),
+        cc: new Set(cc.addresses),
+      })
+    }
+
+    // A conversation that is incomplete for ANY reason must not emit an eligible candidate.
+    if (runHadUnattributable || incompleteConvKeys.has(conversationKey) || addressMalformed) {
+      emit({ conversationKey, outcome: 'incomplete_conversation' })
+      continue
+    }
+
+    // Strong bulk/list evidence anywhere → hard reject the whole conversation.
+    if (convMsgs.some((m) => isBulkOrList(m))) { emit({ conversationKey, outcome: 'bulk_or_list' }); continue }
+
+    // External participant cap across the conversation.
+    const participants = new Set()
+    for (const m of convMsgs) {
+      const p = parsed.get(m)
+      if (p.from && !owned.has(p.from)) participants.add(p.from)
+      for (const a of p.to) if (!owned.has(a)) participants.add(a)
+      for (const a of p.cc) if (!owned.has(a)) participants.add(a)
+    }
+    if (participants.size > cfg.participantCap) { emit({ conversationKey, outcome: 'participant_cap' }); continue }
+
+    const human = convMsgs.filter((m) => nonHumanReason(m) === null)
+    if (human.length === 0) { emit({ conversationKey, outcome: 'automation_only' }); continue }
+
+    const sortedHuman = human.slice().sort(sortMessages)
+    const episodes = buildEpisodes(sortedHuman, cfg.episodeGapMs)
+    if (episodes.length > cfg.maxEpisodesPerConversation) {
+      emit({ conversationKey, outcome: 'incomplete_conversation' }); continue
+    }
+
+    episodes.forEach((episode, episodeIndex) => {
+      // Candidate external addresses appearing in this episode's human messages.
+      const addrSet = new Set()
+      for (const m of episode) {
+        const p = parsed.get(m)
+        if (p.from && !owned.has(p.from)) addrSet.add(p.from)
+        for (const a of p.to) if (!owned.has(a)) addrSet.add(a)
+        for (const a of p.cc) if (!owned.has(a)) addrSet.add(a)
+      }
+      const seenContacts = new Set()
+      for (const addr of addrSet) {
+        const match = matchContactByEmail(addr, contacts, userId)
+        if (match === 'no_contact_match') continue
+        if (match === 'ambiguous_contact') { emit({ conversationKey, episodeIndex, outcome: 'ambiguous_contact' }); continue }
+        if (seenContacts.has(match.contactId)) continue
+        seenContacts.add(match.contactId)
+        emit(evaluateContactEpisode({ conversationKey, episodeIndex, episode, parsed, addr, contactId: match.contactId, owned, now, cfg, accountNamespace }))
+      }
+    })
+  }
+
+  // Conversations that had ONLY malformed (attributable) messages still count as incomplete.
+  for (const key of incompleteConvKeys) {
+    if (!byConv.has(key)) emit({ conversationKey: key, outcome: 'incomplete_conversation' })
+  }
+
+  const eligible = byOutcome.eligible
+  const complete = malformedMessages === 0 && byOutcome.incomplete_conversation === 0
+  return {
+    results,
+    counts: { conversations: byConv.size, validMessages, malformedMessages, byOutcome, eligible },
+    complete,
+  }
+}
+
+// Per-(episode, contact) qualification. Returns a single controlled-outcome result.
+function evaluateContactEpisode({ conversationKey, episodeIndex, episode, parsed, addr, contactId, owned, now, cfg, accountNamespace }) {
+  const base = { conversationKey, episodeIndex, contactId }
+
+  const inbound = episode.filter((m) => parsed.get(m).from === addr)
+  const outboundTo = episode.filter((m) => {
+    const p = parsed.get(m)
+    return !!p.from && owned.has(p.from) && p.to.has(addr) // CC-only outbound never qualifies
+  })
+  const inCcSomewhere = episode.some((m) => parsed.get(m).cc.has(addr))
+
+  if (inbound.length === 0 && outboundTo.length === 0) {
+    return { ...base, outcome: inCcSomewhere ? 'cc_only' : 'no_contact_match' }
+  }
+  if (inbound.length === 0 || outboundTo.length === 0) return { ...base, outcome: 'one_way' }
+
+  // Qualifying human messages for this contact (dedup by message key).
+  const keys = new Set()
+  const qualifying = []
+  for (const m of [...inbound, ...outboundTo]) {
+    if (!keys.has(m.providerMessageKey)) { keys.add(m.providerMessageKey); qualifying.push(m) }
+  }
+  if (qualifying.length < 2) return { ...base, outcome: 'insufficient_human_messages' }
+
+  // Quiet period: episode's latest human message must be >= quietMs old.
+  const latestEpisodeTs = Math.max(...episode.map((m) => tsMs(m.timestampIso)))
+  if (!Number.isFinite(latestEpisodeTs)) return { ...base, outcome: 'undeterminable_date' }
+  if ((now - latestEpisodeTs) < cfg.quietMs) return { ...base, outcome: 'active_conversation' }
+
+  // Eligible. Suggested instant = latest qualifying human message; boundary = episode's first human message.
+  const latestQualifying = qualifying.reduce((a, b) => (tsMs(b.timestampIso) > tsMs(a.timestampIso) ? b : a))
+  const firstMessageKey = episode[0].providerMessageKey
+  const provider = episode[0].provider
+  return {
+    ...base,
+    outcome: 'eligible',
+    eligible: {
+      proposedType: 'Email',
+      proposedInstant: latestQualifying.timestampIso,                        // UTC instant — always
+      proposedLocalDate: localDateInZone(latestQualifying.timestampIso, cfg.timeZone), // null unless validated tz supplied
+      firstMessageKey,
+      subjectPreview: sanitizeSubjectPreview(latestQualifying.subject, cfg.subjectPreviewMax),
+      fingerprintFields: { provider, accountNamespace, contactId, conversationKey, firstMessageKey },
+    },
+  }
+}
