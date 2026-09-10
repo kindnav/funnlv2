@@ -19,10 +19,7 @@ import { fileURLToPath } from 'url'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = join(__dirname, '..')
 const MIG = readFileSync(join(ROOT, 'supabase/migrations/20260907000000_add_gmail_transport_foundation.sql'), 'utf8')
-// NOTE (PR-A split): this suite is intentionally MIGRATION-ONLY and self-contained — it
-// reads no application source. The adapter scope-guard assertion (that
-// shared/gmailTransport.js makes no network call and wires no live Gmail scope) ships in
-// PR-B alongside the adapter it guards, so it cannot be dropped.
+const ADAPTER = readFileSync(join(ROOT, 'supabase/functions/shared/gmailTransport.js'), 'utf8')
 
 function stripSql(sql) {
   return sql.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/--[^\n]*/g, ' ')
@@ -212,6 +209,13 @@ test('migration adds NO Edge Function / scheduler / webhook / UI / secret / live
 })
 test('migration is marked NOT DEPLOYED / NOT APPLIED', () => {
   assert.ok(/NOT DEPLOYED|NOT APPLIED/.test(MIG))
+})
+
+console.log('\nadapter scope guard (no network / no live scope wired)')
+test('adapter has no fetch/network and does not self-wire a live scope request', () => {
+  assert.ok(!/\bfetch\(|XMLHttpRequest|Deno\.serve|createClient/.test(ADAPTER), 'adapter makes no network call')
+  // Scope constants exist for the future phase but are not requested by any builder.
+  assert.ok(/GMAIL_METADATA_SCOPE/.test(ADAPTER) && /DORMANT/.test(ADAPTER))
 })
 
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed\n`)
