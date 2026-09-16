@@ -251,6 +251,52 @@ test('the documented callback limitation is recorded honestly (not silently rewr
   // and the callback really still has them (pre-branch, Calendar path untouched by design)
   assert.ok(/await tokenRes\.json\(\)/.test(CALLBACK) && /await userinfoRes\.json\(\)/.test(CALLBACK))
 })
+console.log('\nbrowser CORS: gmail-oauth-start is browser-invocable; the worker is not')
+test('gmail-oauth-start answers OPTIONS FIRST, before the dormancy gate, auth, env, DB, or provider', () => {
+  const code = stripJs(START)
+  const serve = code.slice(code.indexOf('Deno.serve('))
+  const firstStmt = serve.slice(serve.indexOf('{') + 1).trim().split('\n')[0].trim()
+  assert.ok(/^if \(req\.method === 'OPTIONS'\) return new Response\('ok', \{ headers: corsHeaders \}\)\s*$/.test(firstStmt),
+    `first statement must be the preflight response, got: ${firstStmt}`)
+  const opt = serve.indexOf("req.method === 'OPTIONS'")
+  for (const later of ['GMAIL_INTEGRATION_ENABLED', 'auth.getUser', 'createClient(', 'google_oauth_states', 'buildGmailAuthUrl', 'Deno.env.get']) {
+    assert.ok(opt < serve.indexOf(later), `${later} must come after the preflight return`)
+  }
+})
+test('gmail-oauth-start preflight headers: * origin and at least authorization, apikey, content-type, x-client-info', () => {
+  const block = START.match(/const corsHeaders = \{[\s\S]*?\n\}/)[0]
+  assert.ok(/'Access-Control-Allow-Origin':\s*'\*'/.test(block))
+  const allow = block.match(/'Access-Control-Allow-Headers':\s*'([^']+)'/)[1].split(',').map((h) => h.trim().toLowerCase())
+  for (const h of ['authorization', 'apikey', 'content-type', 'x-client-info']) assert.ok(allow.includes(h), `must allow ${h}`)
+})
+test('gmail-oauth-start puts the CORS headers on EVERY response (single json() builder merges corsHeaders)', () => {
+  const code = stripJs(START)
+  assert.ok(/function json\(body: unknown, status: number\): Response \{[\s\S]*?headers: \{ \.\.\.corsHeaders, \.\.\.securityHeaders,/.test(code))
+  // every non-preflight response goes through json(); no bare `new Response(` besides the preflight
+  const bare = (code.match(/new Response\(/g) || []).length
+  assert.strictEqual(bare, 2, 'exactly two: the preflight and the json() builder')
+  for (const status of ['503', '401', '400', '500', '200']) assert.ok(new RegExp(`json\([^)]*, ${status}\)`).test(code), `status ${status} via json()`)
+})
+test('gmail-oauth-start CORS block is identical to the established google-oauth-start pattern', () => {
+  const cal = read('supabase/functions/google-oauth-start/index.ts')
+  const a = START.match(/const corsHeaders = \{[\s\S]*?\n\}/)[0]
+  const b = cal.match(/const corsHeaders = \{[\s\S]*?\n\}/)[0]
+  assert.strictEqual(a, b)
+  assert.ok(/if \(req\.method === 'OPTIONS'\) return new Response\('ok', \{ headers: corsHeaders \}\)/.test(cal), 'same preflight line')
+})
+test('gmail-sync-worker stays non-browser-callable: OPTIONS -> 405, no access-control header, JWT grants nothing', () => {
+  assert.deepStrictEqual(authorizeWorkerRequest({ method: 'OPTIONS', authorization: null, configuredSecret: SECRET }),
+    { ok: false, status: 405, code: 'method_not_allowed' })
+  assert.deepStrictEqual(authorizeWorkerRequest({ method: 'OPTIONS', authorization: `Bearer ${SECRET}`, configuredSecret: SECRET }),
+    { ok: false, status: 405, code: 'method_not_allowed' }, 'even with the right secret a preflight is refused')
+  const code = stripJs(WORKER)
+  assert.ok(!/corsHeaders|Access-Control/.test(code), 'no CORS headers anywhere in the worker')
+  assert.ok(!/req\.method === 'OPTIONS'/.test(code), 'no dedicated preflight branch')
+  const jwtish = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoiYXV0aGVudGljYXRlZCJ9.sig'
+  assert.deepStrictEqual(authorizeWorkerRequest({ method: 'POST', authorization: `Bearer ${jwtish}`, configuredSecret: SECRET }),
+    { ok: false, status: 401, code: 'unauthorized' })
+})
+
 test('no secret value is hard-coded in any E2B shell', () => {
   for (const [name, src] of [['worker', WORKER], ['start', START]]) {
     assert.ok(!/sk-[A-Za-z0-9]{8}|AIza[A-Za-z0-9]{10}|-----BEGIN/.test(src), `${name} has no literal credential`)
