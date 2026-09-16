@@ -32,6 +32,14 @@ import {
   GOOGLE_REVOKE_ENDPOINT,
 } from '../shared/googleOauthHelpers.js'
 import { finalizeGoogleConnection } from '../shared/googleConnect.js'
+// E2B: the shared callback branches on the state row's integration_type. The Calendar path
+// below is unchanged; 'gmail' delegates to the separate capability-aware finalizer.
+import {
+  finalizeGmailCapability,
+  GMAIL_INTEGRATION_TYPE,
+  buildGmailSettingsRedirect,
+  GMAIL_CANONICAL_ERROR_REDIRECT,
+} from '../shared/gmailOauth.js'
 
 const GOOGLE_FETCH_TIMEOUT_MS = 10_000
 
@@ -129,7 +137,7 @@ Deno.serve(async (req) => {
       .eq('state_hash', stateHash)
       .is('consumed_at', null)
       .gt('expires_at', nowIso)
-      .select('user_id, pkce_verifier_ciphertext, pkce_verifier_nonce, return_origin')
+      .select('user_id, pkce_verifier_ciphertext, pkce_verifier_nonce, return_origin, integration_type')
       .maybeSingle()
 
     if (consumeError || !stateRow) {
@@ -137,11 +145,14 @@ Deno.serve(async (req) => {
       return redirect(safeErrorRedirect)  // canonical — no trusted origin
     }
 
-    // We now have a validated origin for all subsequent redirects.
+    // We now have a validated origin for all subsequent redirects. From here on we also
+    // know WHICH integration the user started, so an error lands on the matching banner
+    // (a failed Gmail consent must never surface as a Calendar error, or vice versa).
     const validatedOrigin = resolveReturnOrigin(stateRow.return_origin)
-    safeErrorRedirect = validatedOrigin
-      ? buildSettingsRedirect(validatedOrigin, 'error')
-      : CANONICAL_ERROR_REDIRECT
+    const isGmailFlow = stateRow.integration_type === GMAIL_INTEGRATION_TYPE
+    safeErrorRedirect = isGmailFlow
+      ? (validatedOrigin ? buildGmailSettingsRedirect(validatedOrigin, 'error') : GMAIL_CANONICAL_ERROR_REDIRECT)
+      : (validatedOrigin ? buildSettingsRedirect(validatedOrigin, 'error') : CANONICAL_ERROR_REDIRECT)
 
     // Google returned an error (e.g. access_denied) or no code → error to origin.
     if (googleError || !code) {
@@ -249,7 +260,47 @@ Deno.serve(async (req) => {
       existingRefreshRow = data ?? null
     }
 
-    // ── Delegate the decision + ATOMIC persistence ──────────────────────────
+    // ── E2B: Gmail capability branch ────────────────────────────────────────
+    // A state row minted by gmail-oauth-start carries integration_type = 'gmail'. It is
+    // finalized by the capability-aware path, which verifies the returned Google `sub`
+    // against the existing connection, preserves the stored refresh token, and writes ONLY
+    // the Gmail capability row. The Calendar branch below is entirely unchanged.
+    if (isGmailFlow) {
+      const gmailResult = await finalizeGmailCapability({
+        exchange: {
+          accessToken,
+          refreshToken: tokenData.refresh_token ?? null,
+          expiresIn:    tokenData.expires_in ?? null,
+          scope:        tokenData.scope ?? '',
+        },
+        identity,
+        userId: stateRow.user_id,
+        existingConnection: existingConnection ?? null,
+        existingRefreshRow,
+        encryptAccess:  (t: string) => encryptToken(t, key),
+        encryptRefresh: (t: string) => encryptToken(t, key),
+        store: async (args: Record<string, unknown>) => {
+          const { data, error } = await admin.rpc('store_google_connection', args)
+          if (error) throw new Error('store_failed')
+          return data as string
+        },
+        upsertCapability: async (args: Record<string, unknown>) => {
+          const { data, error } = await admin.rpc('upsert_google_capability', args)
+          if (error) throw new Error('capability_failed')
+          return data as Record<string, unknown>
+        },
+        revoke: revokeToken,
+      })
+      if (!gmailResult.ok) {
+        console.error('google-oauth-callback gmail_finalize_rejected', gmailResult.reason)
+        return redirect(safeErrorRedirect)   // already the gmail error target
+      }
+      return redirect(
+        validatedOrigin ? buildGmailSettingsRedirect(validatedOrigin, 'connected') : GMAIL_CANONICAL_ERROR_REDIRECT,
+      )
+    }
+
+    // ── Delegate the decision + ATOMIC persistence (Calendar — UNCHANGED) ───
     const result = await finalizeGoogleConnection({
       exchange: {
         accessToken,
