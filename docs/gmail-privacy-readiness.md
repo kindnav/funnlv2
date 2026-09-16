@@ -49,11 +49,31 @@ coarse label; provider identifiers never reach the browser.
   forces client-side date filtering over a broader history-based fetch — weaker bounding and
   more processing. Owner + legal decide the tradeoff. This is recorded, not decided here.
 
+## Disconnect: what Funnl can and cannot withdraw (E2B finding)
+A user disconnecting Gmail in Settings runs `disconnect_my_gmail()`, which disables only the
+Gmail capability, erases every **pending** Gmail suggestion together with its retained
+subject, and drops the Gmail cursor. Accepted interactions, the Calendar capability, and the
+stored Google authorization are untouched.
+
+**Funnl cannot withdraw the Gmail grant on Google's side.** Google issues **one**
+authorization per account covering every granted scope, and offers no per-scope revocation;
+revoking it would also break a working Calendar connection. So Funnl stops reading mail
+immediately and locally, while the grant itself remains listed in the user's Google Account
+until they remove it there. The disconnect dialog states this plainly and points the user at
+their Google Account third-party access page.
+
+**This must appear in the published policy** — it is the difference between "we stopped
+reading your mail" and "Google no longer authorizes us", and users will read the Google
+account page, not our code.
+
 ## Blockers before production Gmail access (all must clear)
-1. Privacy Policy rewritten (draft below) and approved by legal.
+1. Privacy Policy rewritten (draft below) and approved by legal — including the disconnect
+   limitation above.
 2. Google OAuth verification completed for the chosen scope.
 3. CASA assessment completed if `gmail.readonly` is used and required.
-4. Capability-aware OAuth + Settings UI shipped behind a rollout flag (later phase).
+4. ~~Capability-aware OAuth + Settings UI shipped behind a rollout flag (later phase).~~
+   **Built in E2B** (`docs/phase-e2b-gmail-oauth-worker.md`) — unapplied migration,
+   undeployed functions, flag off. Still needs the deliberate rollout in that doc's §8 (PR split & order) and the human gates in §9.
 5. One authorized test-mailbox validation of accuracy + privacy before broad enablement.
 
 ---
@@ -65,6 +85,13 @@ coarse label; provider identifiers never reach the browser.
 > you already track. **Funnl does not read the body, attachments, or full content of your
 > emails, and does not store them.** Suggestions are shown to you for review; Funnl never
 > creates a record, sends email, or changes your mailbox on its own. A suggestion's subject
-> line is kept only until you act on it or for at most 30 days, then deleted. You can
-> disconnect Gmail at any time in Settings. [Legal to reconcile with Google API Services
+> line is kept only until you act on it or for at most 30 days, then deleted. Funnl does not
+> keep Gmail message or thread identifiers; matching uses one-way keyed fingerprints.
+>
+> **Disconnecting.** You can disconnect Gmail at any time in Settings. Funnl stops reading
+> your mail immediately and deletes every Gmail suggestion you have not acted on, along with
+> the subject lines it was holding. Because Google issues a single authorization for your
+> whole Google account, Funnl cannot withdraw Gmail access on Google's side without also
+> disconnecting Google Calendar; to remove it there as well, visit the third-party access
+> page of your Google Account. [Legal to reconcile with Google API Services
 > User Data Policy, Limited Use requirements, and the Microsoft equivalent before Outlook.]

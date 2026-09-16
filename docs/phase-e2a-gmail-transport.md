@@ -52,7 +52,9 @@ The `q` is **constructed** from the bounded window (`after:<epoch> -in:chats`), 
   actionable relationships), while never attempting a full-mailbox ingest. Owner may
   tune; it is a single documented constant.
 - **Incremental sync (History API).** After the initial import completes, subsequent
-  runs use `users.history.list?startHistoryId=<cursor>&historyTypes=messageAdded` (paged via
+  runs use `users.history.list?startHistoryId=<cursor>&historyTypes=messageAdded&historyTypes=messageDeleted&historyTypes=labelAdded&historyTypes=labelRemoved`
+  (**E2B correction:** the API filters to the listed types, so the E2A-era single
+  `messageAdded` type would have dropped every deletion/label record) (paged via
   `pageToken`). The durable `history_id` cursor advances **atomically with a complete run
   only** (`release_gmail_sync_lease` advances it iff `p_run_complete AND p_history_id IS NOT NULL`).
   **E2A processes `messageAdded` only, which is sufficient for E2A's create/refresh-only
