@@ -396,6 +396,24 @@ verify_jwt = false
 [functions.google-calendar-sync]
 verify_jwt = true
 
+# ── E2B: Gmail (DORMANT) ──────────────────────────────────────────────────────
+# gmail-oauth-start is JWT-authenticated exactly like google-oauth-start: the platform
+# verifies the Supabase JWT and the handler ALSO calls auth.getUser(). It additionally
+# refuses to run at all unless the server-side GMAIL_INTEGRATION_ENABLED secret is the
+# exact string 'true', so a Gmail consent is impossible until a human enables it.
+[functions.gmail-oauth-start]
+verify_jwt = true
+
+# gmail-sync-worker is PRIVATE and NOT user-callable. Platform JWT verification is
+# intentionally disabled for this private worker endpoint because user JWTs grant no
+# authority. The endpoint instead requires a separate high-entropy worker secret
+# (GMAIL_WORKER_SECRET, >= 32 chars), compares it in constant time inside the handler
+# (authorizeWorkerRequest), exposes no CORS path, and calls only service-role RPCs.
+# Without that secret the endpoint answers 503 worker_not_configured, and no scheduler/Cron
+# invokes it, so it cannot run until a human configures it.
+[functions.gmail-sync-worker]
+verify_jwt = false
+
 # [edge_runtime.secrets]
 # secret_key = "env(SECRET_VALUE)"
 

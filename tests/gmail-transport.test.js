@@ -6,6 +6,7 @@ import assert from 'assert'
 import {
   normalizeGmailMessage, normalizeGmailBatch, partitionForClassifier,
   buildInitialListRequest, buildHistoryRequest, buildGetMetadataRequest,
+  buildGetThreadRequest, buildGetProfileRequest, HISTORY_TYPES,
   initialWindowStartEpochSec, checkRunCaps, internalDateToIso,
   normalizeAutoSubmitted, normalizePrecedence, resolveAutoSubmitted, resolvePrecedence,
   folderHintFromLabels, grantedScopesIncludeGmail,
@@ -247,9 +248,28 @@ test('buildGetMetadataRequest requests ONLY format=metadata + allowlist headers'
 test('buildHistoryRequest requires a numeric server history id', () => {
   const req = buildHistoryRequest({ startHistoryId: '123456' })
   assert.strictEqual(req.query.startHistoryId, '123456')
-  assert.strictEqual(req.query.historyTypes, 'messageAdded')
+  // E2B correction: users.history.list FILTERS to the requested types, so all four must be
+  // requested or deletions / TRASH / SPAM changes are never delivered to the worker.
+  assert.deepStrictEqual(req.query.historyTypes, ['messageAdded', 'messageDeleted', 'labelAdded', 'labelRemoved'])
+  assert.deepStrictEqual([...HISTORY_TYPES], ['messageAdded', 'messageDeleted', 'labelAdded', 'labelRemoved'])
+  assert.notStrictEqual(req.query.historyTypes, HISTORY_TYPES, 'a copy, so callers cannot mutate the constant')
   assert.throws(() => buildHistoryRequest({ startHistoryId: 'abc' }), /invalid_history_id/)
   assert.throws(() => buildHistoryRequest({ startHistoryId: '' }), /invalid_history_id/)
+})
+test('buildGetThreadRequest is format=minimal only (ids + labels, never headers/payload)', () => {
+  const req = buildGetThreadRequest({ threadId: 'thr_1-A' })
+  assert.deepStrictEqual(req.query, { format: 'minimal' })
+  assert.match(req.path, /\/threads\/thr_1-A$/)
+  for (const bad of ['', 'a/b', 'x?y', 'x'.repeat(1025), 5, null]) {
+    assert.throws(() => buildGetThreadRequest({ threadId: bad }), /invalid_thread_id|invalid_params/)
+  }
+  assert.throws(() => buildGetThreadRequest({ threadId: 't', q: 'x' }), /forbidden_request_param/)
+})
+test('buildGetProfileRequest carries no parameters at all', () => {
+  const req = buildGetProfileRequest()
+  assert.strictEqual(req.method, 'GET')
+  assert.strictEqual(req.path, '/gmail/v1/users/me/profile')
+  assert.deepStrictEqual(req.query, {})
 })
 test('builders reject caller-controlled operational params', () => {
   for (const bad of [

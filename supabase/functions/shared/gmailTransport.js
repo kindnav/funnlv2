@@ -37,6 +37,8 @@ export const MAX_CONVERSATIONS = 1000        // distinct threads per run
 export const MAX_RESPONSE_BYTES = 5_000_000  // 5 MB per page response; over → thread(s) incomplete
 export const PAGE_TOKEN_MAX_LEN = 4096
 export const HISTORY_ID_MAX_LEN = 256
+// Every history type users.history.list can emit. Requesting a subset FILTERS the response.
+export const HISTORY_TYPES = Object.freeze(['messageAdded', 'messageDeleted', 'labelAdded', 'labelRemoved'])
 export const SUBJECT_INPUT_MAX = 998         // matches emailProviderContract MAX_SUBJECT_INPUT
 
 // ── Metadata header allowlist (exact set E1 needs; everything else discarded) ─────
@@ -379,11 +381,46 @@ export function buildHistoryRequest(p) {
   if (!validPageToken(p.pageToken)) throw new Error('invalid_page_token')
   const query = {
     startHistoryId: p.startHistoryId,
-    historyTypes: 'messageAdded',
+    // ALL four history types. Google's users.history.list FILTERS to the listed types, so
+    // requesting only messageAdded (the pre-E2B value) silently drops every messageDeleted /
+    // labelAdded / labelRemoved record — which would make deletion and TRASH/SPAM
+    // reconciliation structurally impossible. The array is serialized as a repeated
+    // `historyTypes=` parameter by the caller.
+    historyTypes: HISTORY_TYPES.slice(),
     maxResults: String(boundedMaxResults(p.maxResults)),
   }
   if (p.pageToken) query.pageToken = p.pageToken
   return { method: 'GET', path: '/gmail/v1/users/me/history', query }
+}
+
+/**
+ * Minimal thread listing: ONLY message ids + labelIds, no headers, no payload. Used by the
+ * incremental run to learn which messages of a changed thread still exist, so the whole
+ * thread (not just today's delta) is re-classified and removals are reconciled against the
+ * thread's REMAINING messages. format=minimal never returns headers or payload.
+ * @param {{ threadId: string }} p
+ */
+export function buildGetThreadRequest(p) {
+  assertNoForbiddenKeys(p)
+  if (typeof p.threadId !== 'string' || p.threadId.length === 0 || p.threadId.length > 1024 ||
+      !/^[A-Za-z0-9_-]+$/.test(p.threadId)) {
+    throw new Error('invalid_thread_id')
+  }
+  return {
+    method: 'GET',
+    path: `/gmail/v1/users/me/threads/${p.threadId}`,
+    query: { format: 'minimal' },
+  }
+}
+
+/**
+ * Mailbox profile: the ONLY field the worker reads is `historyId`, captured BEFORE a bounded
+ * initial import so it is a truthful lower bound for the next incremental run (anything that
+ * changes after this point is delivered by users.history.list). The response also carries the
+ * mailbox address; it is never retained or logged.
+ */
+export function buildGetProfileRequest() {
+  return { method: 'GET', path: '/gmail/v1/users/me/profile', query: {} }
 }
 
 /**
