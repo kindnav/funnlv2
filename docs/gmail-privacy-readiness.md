@@ -67,8 +67,11 @@ reading your mail" and "Google no longer authorizes us", and users will read the
 account page, not our code.
 
 ## Blockers before production Gmail access (all must clear)
-1. Privacy Policy rewritten (draft below) and approved by legal — including the disconnect
-   limitation above.
+1. Privacy Policy rewritten and approved by legal — including the disconnect limitation
+   above. **Drafted and implemented in `src/pages/PrivacyPage.jsx` (branch
+   `docs/gmail-human-gates`, tests in `tests/privacy-policy-gmail.test.js`); awaiting owner/legal
+   review before merge.** The verification packet lives in
+   `docs/gmail-google-verification-packet.md`.
 2. Google OAuth verification completed for the chosen scope.
 3. CASA assessment completed if `gmail.readonly` is used and required.
 4. ~~Capability-aware OAuth + Settings UI shipped behind a rollout flag (later phase).~~
@@ -78,7 +81,7 @@ account page, not our code.
 
 ---
 
-## UNSHIPPED policy draft — FOR LEGAL REVIEW (do not publish as-is)
+## Earlier policy sketch (superseded by the implemented draft in `src/pages/PrivacyPage.jsx`; kept for legal comparison)
 > **Google Gmail (optional connection).** If you choose to connect Gmail, Funnl reads
 > **only message metadata** — sender, recipients, date, subject line, and a small set of
 > headers used to recognize automated and bulk mail — to suggest interactions with contacts
