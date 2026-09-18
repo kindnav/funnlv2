@@ -1,11 +1,14 @@
-// Source-invariant tests for the Gmail pilot retention blockers:
+// Source-invariant tests for Gmail retention cleanup PR-A:
 //   * 20260918000000_add_gmail_retention_cleanup.sql  (atomic whole-Google cleanup RPC,
 //     bounded index-backed expiry, partial index)
-//   * 20260918000100_schedule_gmail_context_expiry.sql (pg_cron job — held back until
-//     the final rollout step)
-//   * shared/googleCleanup.js + its two Edge callers
 //   * the tombstone-retention decision (minimal terminal candidate + one-way HMAC
 //     fingerprint persist until contact/account deletion; nothing else survives)
+//
+// SCOPE NOTE: this suite covers ONLY the files shipped in PR-A. The assertions for the
+// later phases — the pg_cron migration (20260918000100, held back to the final rollout
+// step) and shared/googleCleanup.js + its two Edge callers (PR-B) — are packaged with
+// those files when their PRs are prepared; the complete combined suite lives on the
+// local staging branch until then.
 //
 // HONESTY NOTE: these are STATIC SOURCE-SCAN assertions over SQL/JS/TS text. They do
 // not execute PostgreSQL. Runtime behavior (atomicity, ownership, grants, RLS, cascades,
@@ -26,22 +29,16 @@ const stripSql = (s) => s.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/--[^\n]*/g,
 const stripJs = (s) => s.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' ')
 
 const RET_MIG = read('supabase/migrations/20260918000000_add_gmail_retention_cleanup.sql')
-const CRON_MIG = read('supabase/migrations/20260918000100_schedule_gmail_context_expiry.sql')
 const CAL_MIG = read('supabase/migrations/20260817000000_add_calendar_ingestion.sql')
 const E2A_MIG = read('supabase/migrations/20260907000000_add_gmail_transport_foundation.sql')
 const E2B_MIG = read('supabase/migrations/20260910000000_add_gmail_worker_primitives.sql')
 const RET = stripSql(RET_MIG)
-const CRON = stripSql(CRON_MIG)
-const CLEANUP_JS = read('supabase/functions/shared/googleCleanup.js')
-const CLEANUP = stripJs(CLEANUP_JS)
-const DISCONNECT = stripJs(read('supabase/functions/google-oauth-disconnect/index.ts'))
-const DELETE_ACCOUNT = stripJs(read('supabase/functions/delete-account/index.ts'))
 const GMAIL_WORKER = stripJs(read('supabase/functions/shared/gmailWorker.js'))
 const POLICY = read('src/pages/PrivacyPage.jsx')
 const ALL_MIGS = ['20260817000000_add_calendar_ingestion.sql', '20260823074250_add_calendar_reconciliation.sql',
   '20260825002308_add_calendar_candidate_review_rpcs.sql', '20260829002747_add_interaction_source.sql',
   '20260907000000_add_gmail_transport_foundation.sql', '20260910000000_add_gmail_worker_primitives.sql',
-  '20260918000000_add_gmail_retention_cleanup.sql', '20260918000100_schedule_gmail_context_expiry.sql']
+  '20260918000000_add_gmail_retention_cleanup.sql']
   .map((f) => stripSql(read('supabase/migrations/' + f))).join('\n')
 
 let passed = 0, failed = 0
@@ -118,30 +115,9 @@ test('the partial index matches the expiry predicate and order', () => {
   assert.ok(/CREATE INDEX IF NOT EXISTS interaction_candidates_pending_context_expiry_idx\s+ON public\.interaction_candidates \(context_expires_at, id\)\s+WHERE status = 'pending' AND context_expires_at IS NOT NULL/.test(RET))
 })
 test('no runtime code calls the expiry (it is scheduler-only); the worker never calls it', () => {
-  for (const p of ['supabase/functions/gmail-sync-worker/index.ts', 'supabase/functions/shared/gmailWorker.js', 'supabase/functions/google-calendar-sync/index.ts', 'supabase/functions/google-oauth-callback/index.ts', 'supabase/functions/shared/googleCleanup.js']) {
+  for (const p of ['supabase/functions/gmail-sync-worker/index.ts', 'supabase/functions/shared/gmailWorker.js', 'supabase/functions/google-calendar-sync/index.ts', 'supabase/functions/google-oauth-callback/index.ts']) {
     assert.ok(!/expire_pending_email_context/.test(read(p)), `${p} must not call the expiry`)
   }
-})
-
-// ─────────────────────────────────────────────────────────────────────────────
-console.log('\nscheduler migration (local, held back)')
-test('pg_cron direct SQL: extension IF NOT EXISTS, one uniquely named job, idempotent re-schedule', () => {
-  assert.ok(/CREATE EXTENSION IF NOT EXISTS pg_cron;/.test(CRON))
-  assert.strictEqual((CRON.match(/cron\.schedule\(/g) || []).length, 1)
-  assert.ok(/SELECT jobid FROM cron\.job WHERE jobname = 'funnl_expire_pending_email_context'/.test(CRON))
-  assert.ok(/PERFORM cron\.unschedule\(v_jobid\)/.test(CRON), 'existing job with the same name is unscheduled first')
-  assert.ok(/cron\.schedule\(\s*'funnl_expire_pending_email_context',\s*'23 4 \* \* \*',/.test(CRON), 'daily, off-peak minute')
-  assert.ok(/SELECT public\.expire_pending_email_context\(500\);/.test(CRON), 'bounded batch of 500')
-})
-test('the job command stores no secret, no HTTP call, no key, and nothing else', () => {
-  assert.ok(!/pg_net|net\.http|http_post|service_role|SUPABASE_|Bearer|apikey|secret|token/i.test(CRON))
-  assert.ok(!/CREATE ROLE|ALTER ROLE|GRANT .* TO (anon|authenticated)/i.test(CRON))
-  const cmd = CRON.match(/\$job\$([\s\S]*?)\$job\$/)[1].trim()
-  assert.strictEqual(cmd, 'SELECT public.expire_pending_email_context(500);')
-})
-test('the scheduler is a separate, later migration than the retention primitives', () => {
-  assert.ok('20260918000100' > '20260918000000')
-  assert.ok(!/run_google_local_cleanup|CREATE FUNCTION|CREATE INDEX|ALTER TABLE/.test(CRON))
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -176,38 +152,6 @@ test('idempotent + controlled result: returns counts only', () => {
   assert.ok(!/RAISE EXCEPTION/.test(b), 'nothing to clean is not an error')
 })
 
-// ─────────────────────────────────────────────────────────────────────────────
-console.log('\nshared helper + Edge callers')
-test('googleCleanup.js calls the RPC by name with p_user_id and issues NO client-side deletes', () => {
-  assert.ok(/GOOGLE_LOCAL_CLEANUP_RPC = 'run_google_local_cleanup'/.test(CLEANUP))
-  assert.ok(/admin\.rpc\(GOOGLE_LOCAL_CLEANUP_RPC, \{ p_user_id: userId \}\)/.test(CLEANUP))
-  assert.ok(!/\.delete\(\)/.test(CLEANUP), 'no independent client deletes remain')
-  assert.ok(!/\.from\('interaction_candidates'\)/.test(CLEANUP), 'the helper never touches candidates directly')
-})
-test('revoke failure can never block local cleanup (try/catch around revoke; RPC after it, unconditional)', () => {
-  const revokeIdx = CLEANUP.indexOf('await revoke(token)')
-  const rpcIdx = CLEANUP.indexOf('admin.rpc(GOOGLE_LOCAL_CLEANUP_RPC')
-  assert.ok(revokeIdx >= 0 && rpcIdx > revokeIdx)
-  assert.ok(/try \{[\s\S]*?await revoke\(token\)[\s\S]*?\} catch \{/.test(CLEANUP))
-})
-test('helper fails closed on rpc error / non-cleaned result / thrown transport error', () => {
-  assert.ok(/if \(error \|\| !data \|\| data\.result !== 'cleaned'\)/.test(CLEANUP))
-  assert.ok(/catch \{\s*localCleanupError = true/.test(CLEANUP))
-})
-test('google-oauth-disconnect returns a controlled 500 only on localCleanupError; delete-account keeps best-effort semantics', () => {
-  assert.ok(/const \{ localCleanupError \} = await runGoogleLocalCleanup\(/.test(DISCONNECT))
-  assert.ok(/if \(localCleanupError\) \{[\s\S]*?internal_error[\s\S]*?500/.test(DISCONNECT))
-  assert.ok(!/gmail_candidates_invalidated|gmailCandidatesInvalidated/.test(DISCONNECT), 'no count leaks to the browser')
-  assert.ok(/await runGoogleLocalCleanup\(\{ admin: adminClient, userId, resolveToken, revoke \}\)/.test(DELETE_ACCOUNT))
-  assert.ok(/catch \{[\s\S]*?google_cleanup_skipped/.test(DELETE_ACCOUNT), 'delete-account never blocks on Google cleanup')
-})
-test('userId reaches the helper only from auth.getUser() (never from a request body)', () => {
-  for (const [name, src] of [['disconnect', DISCONNECT], ['delete-account', DELETE_ACCOUNT]]) {
-    assert.ok(/await supabaseUser\.auth\.getUser\(\)/.test(src), `${name} verifies the JWT`)
-    assert.ok(/userId: user\.id|cleanupGoogle\(admin, user\.id\)/.test(src), `${name} passes the verified id`)
-    assert.ok(!/req\.json\(\)|body\.user_id|userId: body/.test(src), `${name} takes no client user id`)
-  }
-})
 test('Gmail-only disconnect (disconnect_my_gmail) is unchanged and remains the user-callable path', () => {
   const b = fnBody(stripSql(E2B_MIG), 'disconnect_my_gmail')
   assert.ok(/auth\.uid\(\)/.test(b) && /AND product\s+= 'gmail'/.test(b) && /DELETE FROM public\.gmail_sync_state/.test(b))
@@ -278,10 +222,10 @@ test('the worker still never persists provider ids/headers (tombstone content ca
 
 // ─────────────────────────────────────────────────────────────────────────────
 console.log('\nconsistency with the published Privacy Policy')
-test('policy still makes NO 30-day promise (the scheduler is local-only, unapplied)', () => {
+test('policy still makes NO 30-day promise (no expiry scheduler is applied in Production)', () => {
   assert.ok(!/30 days/.test(POLICY))
 })
-test('KNOWN CONTRADICTION pinned (publication blocker for the Edge/shared rollout): the published policy still says pending Gmail suggestions survive whole-Google disconnect; the new RPC erases them', () => {
+test('KNOWN CONTRADICTION pinned (publication blocker for PR-B, not PR-A: nothing calls the RPC yet): the published policy still says pending Gmail suggestions survive whole-Google disconnect; the new RPC erases them', () => {
   // The published sentence for the whole-Google disconnect path (live since 2026-09-18).
   assert.ok(/deletes the stored Google tokens and the Google connection from Funnl, together with the connection's capability, cursor, and reference records/.test(POLICY))
   // The exact sentence the owner must revise BEFORE run_google_local_cleanup reaches Production.
