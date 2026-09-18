@@ -52,7 +52,11 @@ test('the header list is exactly the committed allowlist', () => {
   assert.ok(/metadata-only format/.test(POLICY) && /format: 'metadata'/.test(TRANSPORT))
 })
 test('transient processing of ids, timestamps, labels, cursors, and mailbox address is disclosed', () => {
-  for (const w of ['Gmail message and conversation identifiers', 'message timestamps', 'inbox, sent mail, spam, or trash', "Gmail's history and page cursors", 'the address of the connected mailbox', 'transient processing']) assert.ok(POLICY.includes(w), w)
+  for (const w of ['Gmail message and conversation identifiers', 'message timestamps', 'inbox, sent mail, spam, or trash', 'the page cursors Gmail uses within that single check', 'the address of the connected mailbox', 'transient processing']) assert.ok(POLICY.includes(w), w)
+  // persisted history cursor vs transient page cursors are distinguished explicitly
+  assert.ok(/the only position marker Funnl keeps between checks is the history cursor/.test(POLICY))
+  assert.ok(/a persisted Gmail history cursor \(Gmail's own position marker for your mailbox, not a message\)[^<]*different from the page cursors above, which live only for one check/.test(POLICY))
+  assert.ok(/history_id/.test(E2A_MIG) && !/page_token|pageToken/.test(E2A_MIG + E2B_MIG), 'page cursors are never persisted')
   assert.ok(/internalDate/.test(TRANSPORT) && /'SENT'|'INBOX'/.test(TRANSPORT) && /SCOPE_EXIT_LABELS = Object\.freeze\(\['TRASH', 'SPAM'\]\)/.test(HISTORY))
   assert.ok(/gmailAddress:\s+data\.google_email/.test(read('supabase/functions/gmail-sync-worker/index.ts')))
 })
@@ -83,7 +87,7 @@ test('90 days is the INITIAL import only; History thereafter; runs are bounded',
 
 console.log('\npersisted data and retention — every claim is enforced by code, and unenforced maxima are NOT published')
 test('persisted categories are named: tokens, capability status, cursor/state, fingerprint+key version, provenance, subject, accepted fields', () => {
-  for (const w of ['encrypted at rest with AES-256-GCM', 'the status of your Gmail connection', 'an internal Gmail history cursor, plus timestamps, retry state, and short result codes', 'the fact that it came from Gmail', 'shortened to at most 160 characters', 'HMAC-SHA256, with the version of the key used']) assert.ok(POLICY.includes(w), w)
+  for (const w of ['encrypted at rest with AES-256-GCM', 'the status of your Gmail connection', 'a persisted Gmail history cursor', 'plus timestamps, retry state, and short result codes', 'the fact that it came from Gmail', 'shortened to at most 160 characters', 'HMAC-SHA256, with the version of the key used']) assert.ok(POLICY.includes(w), w)
   assert.ok(/AES-GCM/.test(CRYPTO) && /32-byte \(256-bit\)/.test(CRYPTO))
   assert.ok(/history_id/.test(E2A_MIG) && /retry_count/.test(E2A_MIG) && /last_result_code/.test(E2A_MIG))
   assert.ok(/key_version/.test(E2A_MIG) && /HMAC-SHA256/.test(FINGERPRINT))
@@ -152,7 +156,9 @@ test('the broad "never sent to Anthropic, PostHog, Resend" claim is gone', () =>
 
 console.log('\ndisconnect and deletion — two distinct paths')
 test('Gmail-specific disconnect: capability off, sync state deleted, pending invalidated + subjects cleared, Calendar intact', () => {
-  assert.ok(/turns off the Gmail connection, deletes Funnl's Gmail synchronization state and history cursor, and removes every Gmail suggestion you have not acted on together with its subject line/.test(POLICY))
+  assert.ok(/turns off the Gmail connection, deletes Funnl's Gmail synchronization state and persisted history cursor, and removes every pending Gmail suggestion from your Suggestions and erases its subject line/.test(POLICY))
+  assert.ok(/the minimal record and its fingerprint remain so the conversation is not suggested again/.test(POLICY), 'tombstone + fingerprint retention on Gmail disconnect is explicit')
+  assert.ok(!/DELETE FROM public\.interaction_candidates/.test(fnBody(E2B_MIG, 'disconnect_my_gmail')), 'disconnect invalidates, never deletes candidate rows')
   assert.ok(/Google Calendar is not affected/.test(POLICY))
   const body = fnBody(E2B_MIG, 'disconnect_my_gmail')
   assert.ok(/AND product\s+= 'gmail'/.test(body) && /DELETE FROM public\.gmail_sync_state/.test(body) && /status\s+= 'invalidated'/.test(body) && !/google_tokens|GOOGLE_REVOKE/.test(body))
