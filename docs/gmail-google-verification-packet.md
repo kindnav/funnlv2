@@ -159,22 +159,30 @@ account — see §8.
 > tracks as contacts, and then **suggests** that conversation as an interaction the user can
 > accept or dismiss. Funnl never reads message bodies, snippets, attachments, or raw messages,
 > never sends mail, and never modifies the mailbox. Every message is requested with
-> `format=metadata` and an explicit `metadataHeaders` allowlist; any response carrying body
-> data is rejected by the server. Only the sanitized subject line (≤160 characters) of a
-> qualifying pending suggestion is retained, for at most 30 days, and it is deleted on accept,
-> dismiss, removal, disconnect, or expiry. No message or thread identifiers are stored; dedup
-> uses a keyed HMAC fingerprint. The feature is prominent in the product's Settings and
-> Suggestions screens, and the user can disconnect at any time.
+> `format=metadata` and an explicit `metadataHeaders` allowlist; Gmail's `snippet` field is
+> never read, and any response carrying body data is rejected by the server. Only the
+> sanitized subject line (≤160 characters) of a qualifying pending suggestion is retained, and
+> it is deleted on accept, dismiss, removal from the mailbox, Gmail disconnect, or account
+> deletion. Raw message and thread identifiers are not persisted in suggestions or reference
+> records; dedup uses a keyed HMAC-SHA256 fingerprint, and incremental sync keeps only Gmail's
+> opaque history cursor. The feature is prominent in the product's Settings and Suggestions
+> screens, and the user can disconnect at any time.
 
 ### Why a narrower scope is insufficient (confirmed against Google's reference docs)
-- `gmail.metadata` is **also a restricted scope** (same verification and CASA obligations), so
-  it does not reduce review burden.
-- The initial import must be **bounded**: Funnl lists only messages from roughly the last 90
-  days using a server-constructed `q=after:<epoch> -in:chats` query. Google's
-  `users.messages.list` reference states the `q` parameter "cannot be used when accessing the
-  api using the gmail.metadata scope". Without `q`, a metadata-scope client would have to page
-  through the entire mailbox history to find recent mail — more data, not less, and exactly the
-  unbounded read Funnl is designed to avoid.
+- `gmail.metadata` is **also a restricted scope** (same restricted-scope verification and
+  security-assessment obligations), so choosing it would not reduce review burden.
+- Google's `users.messages.list` reference states the `q` parameter "cannot be used when
+  accessing the api using the gmail.metadata scope".
+- Funnl bounds its **initial discovery** with a server-constructed `after:<epoch>` query
+  (`q=after:<epoch> -in:chats`) so the first import covers roughly the previous 90 days and
+  nothing older. Without `q`, Funnl could not enforce that same server-side bound: it would
+  have to page through the mailbox's message list (which is ordered newest-first and is
+  paginated, but carries no date filter) and might need to walk an arbitrarily large mailbox
+  before reaching the relevant date boundary. Funnl intentionally refuses to perform an
+  unbounded mailbox scan — its worker stops at fixed page/message/conversation/byte limits and
+  treats a capped run as incomplete rather than continuing.
+- Therefore `gmail.readonly` is required for Funnl's bounded Suggestions workflow, and Funnl
+  uses it only in metadata format with an explicit header allowlist.
 - `gmail.labels` (non-sensitive) exposes labels only, no headers — it cannot identify a
   conversation. Add-on scopes (`gmail.addons.*`) apply only inside a Gmail add-on, which Funnl is
   not.
@@ -228,33 +236,54 @@ with one of that account's contacts.
 
 - **User-facing, prominent feature:** headers are used only to produce Suggestions in the
   Suggestions screen and the Settings card; no other use exists in code.
-- **No transfer:** Gmail data is processed on Funnl's Supabase Edge Functions and stored in
-  Funnl's Supabase database; it is never sent to Anthropic (AI features read only accepted
-  interactions, which carry only the user's note), PostHog (behavior events carry a provider
-  label only), Resend, or any advertiser/broker.
+- **Service providers only:** Gmail-derived data is processed by Funnl's Supabase Edge
+  Functions and stored in Funnl's Supabase database. Pending suggestions, retained subject
+  previews, raw headers, identifiers, and tokens are never sent to Anthropic; an *accepted*
+  suggestion becomes an ordinary interaction (type, date, user-written note, contact link) which
+  the user may later send to Anthropic by using Funnl AI, under the existing AI disclosure.
+  PostHog receives the account identifier/email and controlled usage events (a provider label
+  only), never mailbox content or identifiers. Resend receives the account email for
+  transactional mail only. Nothing goes to advertisers, brokers, or resellers.
 - **No human reading** except with the user's explicit permission for support, for security
   investigation, or where the law requires it (policy language).
 - **No ads / lending / credit** uses.
 - **Disclosure:** the Privacy Policy's Gmail section and the Limited Use paragraph (drafted in
   this branch) state all of the above in the user's own terms.
 
-## 9. Data retention and deletion — exact behavior
+## 9. Data retention and deletion — source-backed table
 
-| Data | Where | Retention | Deleted when |
-|---|---|---|---|
-| Google tokens (access/refresh) | `google_tokens`, AES-256-GCM | while connected | Calendar disconnect, account deletion (revoke best-effort + delete) |
-| Gmail capability row | `google_connection_capabilities` | while connected | `disconnect_my_gmail` (disabled), Calendar disconnect / account deletion (cascade) |
-| Sync cursor + lease | `gmail_sync_state` (service-role only) | while connected | `disconnect_my_gmail` (deleted), cascade |
-| Suggestion (contact, date, type, source) | `interaction_candidates` | until acted on / expiry | accept → interaction; dismiss/invalidate; account deletion |
-| Retained subject (≤160 chars) | `interaction_candidates.retained_subject` | ≤ 30 days | accept, dismiss, invalidation (deleted/TRASH/SPAM), Gmail disconnect, 30-day expiry job |
-| HMAC fingerprint | `interaction_candidates` / `email_candidate_refs` | dedup tombstone | cascade on connection/account deletion |
-| Message/thread/history identifiers | **not stored** | — | — |
-| Bodies, snippets, attachments, HTML, raw MIME | **never requested** | — | — |
+Legend — *Browser*: readable by the signed-in user's browser (RLS + column grants). *Providers*:
+third-party services that can receive it. "Not enforced" = the code stores an intent but no
+scheduled job runs it; the public policy therefore does **not** publish that maximum.
 
-Known gap to close before pilot (backend follow-up, not a policy claim): if a user disconnects
-**Google Calendar** (which removes the whole Google connection), pending Gmail suggestions keep
-their subject line until acted on or the 30-day expiry; `disconnect_my_gmail` erases them
-immediately. The policy is worded so both paths are truthful ("whichever comes first").
+| Item | Processed / stored | Retention (actual) | Deleted by | Browser | Providers |
+|---|---|---|---|---|---|
+| Google access + refresh tokens | stored, AES-256-GCM (`google_tokens`) | while the Google connection exists | Calendar/Google disconnect, account deletion (`googleCleanup`: best-effort revoke + delete; FK cascade) | never | Google (used server-side); Supabase (storage) |
+| Gmail capability row | stored (`google_connection_capabilities`) | while connected | `disconnect_my_gmail` (set `disabled`), connection deletion / account deletion (cascade) | 7 status columns only | Supabase |
+| Gmail history cursor, lease, retry state, result codes | stored (`gmail_sync_state`, service-role only) | while connected | `disconnect_my_gmail` (row deleted), cascade | never | Supabase |
+| Raw Gmail message / thread ids | **processed only** (worker memory during a run) | duration of one run | end of run | never | Supabase Edge runtime (transient) |
+| Message timestamps, labels, mailbox address, history/page cursors, other response fields | processed; mailbox address also stored on the connection (`google_email`) | transient / while connected | end of run / connection deletion | mailbox address shown on the Settings card | Supabase |
+| HMAC-SHA256 fingerprint + key version | stored (`interaction_candidates.source_fingerprint`, `email_candidate_refs`) | **lifetime of the candidate row** — no purge of terminal candidates exists | contact deletion or account deletion (FK cascade) | fingerprint column not granted to `authenticated` | Supabase |
+| Retained subject preview (≤160 chars) | stored (`interaction_candidates.retained_subject`) | while the suggestion is pending; `context_expires_at` = +30 days is **recorded but not enforced** (`expire_pending_email_context` has no scheduler yet) | accept, dismiss, invalidation (deleted/TRASH/SPAM), `disconnect_my_gmail`, account deletion. **Not** cleared by the whole-Google/Calendar disconnect | yes (granted column, pending only) | Supabase; never Anthropic/PostHog/Resend |
+| Pending suggestion (contact, date, type, source) | stored | until acted on | accept → interaction; dismiss; invalidation; contact/account deletion | yes | Supabase |
+| Accepted / dismissed / invalidated candidate tombstone | stored (status row, subject NULL) | **lifetime of the contact/account** | contact deletion, account deletion | yes (status) | Supabase |
+| Accepted interaction (type, date, user note, contact, `source='gmail'`) | stored (`interactions`) | until the user deletes it / contact / account | user action, cascade | yes | Supabase; **Anthropic when the user invokes Funnl AI** (type/date/note; never subject/ids/tokens); PostHog gets only `interaction_logged` behavior events |
+| OAuth state rows (hash, encrypted PKCE, origin, integration) | stored (`google_oauth_states`) | 10-minute validity; consumed on use; stale rows swept on the next start call (>24 h) | consumption + best-effort sweep, account deletion | never | Supabase |
+| Logs / controlled diagnostic codes | emitted by Edge Functions (codes and counts only) | per Supabase's function-log retention | Supabase retention | never | Supabase (logs); PostHog for frontend `$exception` diagnostics per the existing disclosure |
+| Bodies, snippets, HTML, attachments, raw MIME, non-allowlisted headers | **never requested / discarded** (snippet may arrive in the response and is never read) | — | — | — | — |
+
+### Mandatory backend corrections before the one-account Gmail pilot (not done in this branch)
+1. **Whole-Google/Calendar disconnect must clear pending Gmail subjects.** `runGoogleLocalCleanup`
+   deletes the connection (cascading capability, cursor, and reference rows) but never touches
+   `interaction_candidates.retained_subject`. Until fixed, the policy discloses that this path
+   leaves subjects until accept/dismiss/account deletion. Fix: a separately reviewed forward
+   migration or an explicit invalidation step in the disconnect function.
+2. **Schedule `expire_pending_email_context`.** The 30-day `context_expires_at` is stored but no
+   job runs the expiry. Until a scheduler (or a worker-run hook) calls it, no 30-day maximum may
+   be published. Owner/backend decision: pg_cron vs. worker-invoked vs. drop the promise.
+3. **Owner/legal decision on tombstone retention.** Fingerprints and terminal candidate rows
+   persist for the life of the contact/account by design (dedup). Either accept and keep the
+   disclosure as written, or add a retention purge and a published maximum.
 
 ## 10. CASA / security assessment — status and next owner action
 
@@ -301,5 +330,7 @@ immediately. The policy is worded so both paths are truthful ("whichever comes f
 - [x] Limited Use, retention, and deletion explanations (§8–9)
 - [x] Privacy Policy revision implemented in `src/pages/PrivacyPage.jsx` with tests
   (`tests/privacy-policy-gmail.test.js`) — **requires owner/legal review before merge/publish**
+- [ ] Owner/backend: the three mandatory items in §9 (whole-Google disconnect subject cleanup,
+  expiry scheduler, tombstone retention decision) before the mailbox pilot
 - [ ] Not possible for Claude: anything requiring the Google account, the Search Console, a
   paid lab, uploading a video, or publishing the policy
