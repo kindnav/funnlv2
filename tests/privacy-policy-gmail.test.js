@@ -194,8 +194,24 @@ test('Limited Use statement with the authoritative link and every required discl
     assert.ok(POLICY.includes(w), w)
   }
 })
+test('shared Google authorization: whole-Google disconnect/deletion removes it; Gmail-only disconnect keeps it', () => {
+  assert.ok(!/Disconnecting, or deleting your account, removes this authorization from Funnl/.test(POLICY), 'old overbroad sentence removed')
+  assert.ok(/Disconnecting the entire Google connection[^<]*or deleting your account removes this authorization from Funnl/.test(POLICY))
+  assert.ok(/Disconnecting Gmail alone disables Gmail processing but retains the shared Google authorization if Google Calendar remains connected/.test(POLICY))
+  // implementation: disconnect_my_gmail never touches the connection or tokens; the Google cleanup deletes them
+  const body = fnBody(E2B_MIG, 'disconnect_my_gmail')
+  assert.ok(!/google_tokens|DELETE FROM public\.google_connections|UPDATE public\.google_connections/.test(body))
+  assert.ok(/\.from\('google_connections'\)[\s\S]*?\.delete\(\)/.test(CLEANUP) || /\.delete\(\)/.test(CLEANUP))
+})
+test('collection statement is scoped, not absolute', () => {
+  assert.ok(!/does not collect data about you beyond what you explicitly enter or explicitly connect/.test(POLICY), 'old absolute removed')
+  assert.ok(/Funnl does not access Google Calendar or Gmail unless you explicitly connect them/.test(POLICY))
+  assert.ok(/processes the limited account, usage, diagnostic, cookie, and hosting information described in this policy/.test(POLICY))
+  for (const w of ['Account information', 'diagnostic error report', 'Cookies and local storage', 'Standard server logs']) assert.ok(POLICY.includes(w), `policy actually discloses: ${w}`)
+})
 test('effective date and contact', () => {
-  assert.ok(/Last updated: September 2026/.test(POLICY))
+  assert.ok(/Last updated: September 18, 2026/.test(POLICY))
+  assert.ok(!/Last updated: September 2026</.test(POLICY))
   assert.ok((POLICY.match(/navbir12345@gmail\.com/g) || []).length >= 3)
 })
 

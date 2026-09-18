@@ -36,7 +36,7 @@ function PrivacyPage() {
             <span className="font-display font-bold text-[20px] text-hi">Funnl</span>
           </div>
           <h1 className="font-display text-[32px] font-bold text-hi tracking-[-0.5px] mb-3">Privacy Policy</h1>
-          <p className="text-[14px] text-low">Last updated: September 2026</p>
+          <p className="text-[14px] text-low">Last updated: September 18, 2026</p>
           <div className="mt-4 px-4 py-3 bg-elevated border border-line-1 rounded-xl">
             <p className="text-[13.5px] text-muted leading-relaxed">
               This policy explains, in plain language, what Funnl collects, how it is used, who processes it, and how to remove it.
@@ -55,12 +55,12 @@ function PrivacyPage() {
           <ul className="list-disc pl-5 space-y-1.5">
             <li><strong className="text-hi font-semibold">Account information</strong> — your email address and your sign-in credentials. Authentication is managed by Supabase Auth; Funnl never stores your password in plain text.</li>
             <li><strong className="text-hi font-semibold">Your network data</strong> — the contacts, interactions, and notes you choose to log inside Funnl. You control what goes in, and you can delete it at any time.</li>
-            <li><strong className="text-hi font-semibold">Connected-account authorization</strong> — if you connect Google Calendar or Gmail, Funnl stores the authorization (access tokens) Google issues so Funnl's servers can read the data you connected. These tokens are encrypted and are accessible only to Funnl's servers, never in your browser. Funnl never stores your Google password. Disconnecting, or deleting your account, removes this authorization from Funnl.</li>
+            <li><strong className="text-hi font-semibold">Connected-account authorization</strong> — if you connect Google Calendar or Gmail, Funnl stores the authorization (access tokens) Google issues so Funnl's servers can read the data you connected. These tokens are encrypted and are accessible only to Funnl's servers, never in your browser. Funnl never stores your Google password. Disconnecting the entire Google connection (from the Google Calendar card in Settings) or deleting your account removes this authorization from Funnl. Disconnecting Gmail alone disables Gmail processing but retains the shared Google authorization if Google Calendar remains connected; see the Gmail section below.</li>
             <li><strong className="text-hi font-semibold">Suggestions</strong> — if you connect a source such as Google Calendar or Gmail, Funnl may create a suggested interaction for you to review. A suggestion records which contact it is about, the date, the source it came from, and a short label so you can recognize it: a calendar event's title, or — for Gmail — a shortened subject line while the suggestion is pending (see the Gmail section below). Nothing is added to your network until you accept a suggestion.</li>
             <li><strong className="text-hi font-semibold">Connection bookkeeping</strong> — for a connected source, Funnl keeps the status of the connection, the position it has reached in that source (for Gmail, an internal history cursor), timestamps, retry state, and short result codes so background checks can resume safely. These records are used only by Funnl's servers.</li>
           </ul>
           <p>
-            Funnl does not collect data about you beyond what you explicitly enter or explicitly connect. Funnl does not read your LinkedIn. Funnl does not read your Gmail unless you explicitly connect it, and even then it reads only message headers, never the contents of your emails (described in the Gmail section below). If you choose to connect Google Calendar (described below), Funnl can read your calendar events on a read-only basis to help you log networking interactions — and only after you explicitly connect it. You can disconnect either source at any time.
+            Funnl does not access Google Calendar or Gmail unless you explicitly connect them. Funnl also processes the limited account, usage, diagnostic, cookie, and hosting information described in this policy. Funnl does not read your LinkedIn. Funnl does not read your Gmail unless you explicitly connect it, and even then it reads only message headers, never the contents of your emails (described in the Gmail section below). If you choose to connect Google Calendar (described below), Funnl can read your calendar events on a read-only basis to help you log networking interactions — and only after you explicitly connect it. You can disconnect either source at any time.
           </p>
         </Section>
 
