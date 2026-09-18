@@ -28,9 +28,11 @@ provider responses are **never stored**. Provenance is a one-way **HMAC** finger
 coarse label; provider identifiers never reach the browser.
 
 ## Retention & erasure
-- Pending suggestion context (the sanitized subject) is retained at most **30 days**
-  (`expire_pending_email_context`) and is erased immediately on **accept, dismiss, or
-  invalidate**, leaving only a minimal HMAC tombstone for deduplication.
+- Pending suggestion context (the sanitized subject) carries a 30-day `context_expires_at`
+  and is erased immediately on **accept, dismiss, invalidate, Gmail disconnect, or account
+  deletion**, leaving only a minimal HMAC tombstone for deduplication. **The expiry job
+  (`expire_pending_email_context`) is not yet scheduled, so the 30-day maximum is design intent,
+  not enforced behavior, and the public policy does not publish it.**
 - An accepted interaction contains **only the user-reviewed note** — it never inherits raw
   provider content.
 - Suggestions are review-only: background sync **never** auto-creates an interaction, edits
@@ -67,18 +69,27 @@ reading your mail" and "Google no longer authorizes us", and users will read the
 account page, not our code.
 
 ## Blockers before production Gmail access (all must clear)
-1. Privacy Policy rewritten (draft below) and approved by legal — including the disconnect
-   limitation above.
+1. Privacy Policy rewritten and approved by legal — including the disconnect limitation
+   above. **Drafted and implemented in `src/pages/PrivacyPage.jsx` (branch
+   `docs/gmail-human-gates`, tests in `tests/privacy-policy-gmail.test.js`); awaiting owner/legal
+   review before merge.** The verification packet lives in
+   `docs/gmail-google-verification-packet.md`.
 2. Google OAuth verification completed for the chosen scope.
 3. CASA assessment completed if `gmail.readonly` is used and required.
 4. ~~Capability-aware OAuth + Settings UI shipped behind a rollout flag (later phase).~~
    **Built in E2B** (`docs/phase-e2b-gmail-oauth-worker.md`) — unapplied migration,
    undeployed functions, flag off. Still needs the deliberate rollout in that doc's §8 (PR split & order) and the human gates in §9.
-5. One authorized test-mailbox validation of accuracy + privacy before broad enablement.
+5. **Backend corrections before the mailbox pilot** (found in the policy audit; see the
+   verification packet §9): (a) the whole-Google/Calendar disconnect does not clear pending
+   Gmail `retained_subject` values — `disconnect_my_gmail` does, the shared cleanup does not;
+   (b) `expire_pending_email_context` has no scheduler, so the 30-day subject maximum is not
+   enforced and is not published; (c) fingerprints/terminal candidate rows persist for the
+   contact/account lifetime — owner/legal decision.
+6. One authorized test-mailbox validation of accuracy + privacy before broad enablement.
 
 ---
 
-## UNSHIPPED policy draft — FOR LEGAL REVIEW (do not publish as-is)
+## Earlier policy sketch (superseded by the implemented draft in `src/pages/PrivacyPage.jsx`; kept for legal comparison)
 > **Google Gmail (optional connection).** If you choose to connect Gmail, Funnl reads
 > **only message metadata** — sender, recipients, date, subject line, and a small set of
 > headers used to recognize automated and bulk mail — to suggest interactions with contacts
