@@ -73,11 +73,13 @@ Deno.serve(async (req) => {
   }
 })
 
-// Best-effort: revoke the user's Google authorization and delete local Google rows
+// Best-effort: revoke the user's Google authorization and run the atomic local
+// Google cleanup (pending Gmail context erased, oauth states + connection deleted)
 // BEFORE account deletion, via the shared runGoogleLocalCleanup helper. Every step
 // is best-effort — a Google network failure can never block Funnl account deletion,
-// and the auth-user deletion later also cascades any remaining Google rows (safe +
-// idempotent). Never logs Google identity, email, or token data.
+// and the auth-user deletion later also cascades any remaining Google rows and every
+// candidate tombstone/fingerprint (safe + idempotent). Never logs Google identity,
+// email, or token data.
 async function cleanupGoogle(adminClient, userId) {
   try {
     const keyB64 = Deno.env.get('GOOGLE_TOKEN_ENCRYPTION_KEY_V1') ?? ''
