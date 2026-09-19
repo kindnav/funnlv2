@@ -30,6 +30,7 @@ const E2A_MIG = read('supabase/migrations/20260907000000_add_gmail_transport_fou
 const E2B_MIG = read('supabase/migrations/20260910000000_add_gmail_worker_primitives.sql')
 const CAL_MIG = read('supabase/migrations/20260817000000_add_calendar_ingestion.sql')
 const CLEANUP = read('supabase/functions/shared/googleCleanup.js')
+const RET_MIG = read('supabase/migrations/20260918000000_add_gmail_retention_cleanup.sql')  // applied in Production 2026-09-19
 const ANALYTICS = read('src/lib/analytics.js')
 const AI_CHAT = read('supabase/functions/ai-chat/index.ts')
 const fnBody = (sql, name) => { const i = sql.indexOf(`FUNCTION public.${name}`); const b = sql.slice(i); return b.slice(0, b.indexOf('$$;')) }
@@ -154,6 +155,32 @@ test('the broad "never sent to Anthropic, PostHog, Resend" claim is gone', () =>
   assert.ok(!/Gmail data is never sent to Anthropic, PostHog, Resend/.test(POLICY))
 })
 
+// Whole-Google local cleanup: two reviewed contracts satisfy the published disclosure that the
+// Google connection and its state are removed. Evaluated on comment-stripped code so prose in
+// comments can never satisfy (or break) a contract check.
+//   direct-delete (currently deployed): the helper itself deletes google_oauth_states + google_connections
+//   atomic RPC (reviewed PR-B):          the helper calls run_google_local_cleanup(p_user_id) and issues no client deletes
+const CLEANUP_CODE = CLEANUP.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' ')
+const usesDirectDeleteContract =
+  /\.from\('google_oauth_states'\)[\s\S]*?\.delete\(\)/.test(CLEANUP_CODE) &&
+  /\.from\('google_connections'\)[\s\S]*?\.delete\(\)/.test(CLEANUP_CODE) &&
+  !/\.rpc\(/.test(CLEANUP_CODE)
+const usesAtomicCleanupRpcContract =
+  /run_google_local_cleanup/.test(CLEANUP_CODE) &&
+  /\.rpc\([^)]*\{\s*p_user_id:\s*userId\s*\}\s*\)/.test(CLEANUP_CODE) &&
+  !/\.delete\(\)/.test(CLEANUP_CODE)
+// Under BOTH contracts the JavaScript helper never edits candidate rows itself; under the RPC
+// contract the database function owns candidate cleanup.
+const helperNeverEditsCandidates =
+  !/interaction_candidates|retained_subject|context_expires_at|source_fingerprint/.test(CLEANUP_CODE)
+
+console.log('\nwhole-Google local cleanup contract')
+test('googleCleanup.js implements exactly one reviewed local-cleanup contract and never edits candidate rows directly', () => {
+  assert.ok(usesDirectDeleteContract || usesAtomicCleanupRpcContract, 'the helper must implement a reviewed local-cleanup contract (direct delete or atomic RPC)')
+  assert.ok(!(usesDirectDeleteContract && usesAtomicCleanupRpcContract), 'exactly one contract, never a mix')
+  assert.ok(helperNeverEditsCandidates, 'the JS helper never edits interaction_candidates / retained_subject / context_expires_at / source_fingerprint directly')
+})
+
 console.log('\ndisconnect and deletion — two distinct paths')
 test('Gmail-specific disconnect: capability off, sync state deleted, pending invalidated + subjects cleared, Calendar intact', () => {
   assert.ok(/turns off the Gmail connection, deletes Funnl's Gmail synchronization state and persisted history cursor, and removes every pending Gmail suggestion from your Suggestions and erases its subject line/.test(POLICY))
@@ -167,7 +194,7 @@ test('whole-Google/Calendar disconnect: connection removed, cascade, Gmail ended
   assert.ok(/together with the connection's capability, cursor, and reference records/.test(POLICY))
   assert.ok(/this also ends any Gmail connection you had made/.test(POLICY))
   assert.ok(/Pending Gmail suggestions are not removed by this path; their retained subject line stays until you accept or dismiss them or delete your account/.test(POLICY))
-  assert.ok(/\.delete\(\)/.test(CLEANUP) && !/interaction_candidates|retained_subject/.test(CLEANUP), 'cleanup touches no candidate rows')
+  assert.ok((usesDirectDeleteContract || usesAtomicCleanupRpcContract) && helperNeverEditsCandidates, 'cleanup touches no candidate rows')
   assert.ok((E2A_MIG.match(/REFERENCES public\.google_connections\(id, user_id\) ON DELETE CASCADE/g) || []).length >= 3)
 })
 test('the combined-authorization warning is disclosed in both directions', () => {
@@ -201,7 +228,10 @@ test('shared Google authorization: whole-Google disconnect/deletion removes it; 
   // implementation: disconnect_my_gmail never touches the connection or tokens; the Google cleanup deletes them
   const body = fnBody(E2B_MIG, 'disconnect_my_gmail')
   assert.ok(!/google_tokens|DELETE FROM public\.google_connections|UPDATE public\.google_connections/.test(body))
-  assert.ok(/\.from\('google_connections'\)[\s\S]*?\.delete\(\)/.test(CLEANUP) || /\.delete\(\)/.test(CLEANUP))
+  // The whole-Google path deletes the connection either through the currently deployed client delete
+  // or, after PR-B, through the applied RPC — both remove the shared authorization.
+  assert.ok(/\.from\('google_connections'\)[\s\S]*?\.delete\(\)/.test(CLEANUP) || /run_google_local_cleanup/.test(CLEANUP))
+  assert.ok(/DELETE FROM public\.google_connections WHERE user_id = p_user_id/.test(fnBody(RET_MIG, 'run_google_local_cleanup')))
 })
 test('collection statement is scoped, not absolute', () => {
   assert.ok(!/does not collect data about you beyond what you explicitly enter or explicitly connect/.test(POLICY), 'old absolute removed')
