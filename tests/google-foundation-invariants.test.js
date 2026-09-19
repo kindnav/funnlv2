@@ -244,9 +244,10 @@ test('callback guards token + userinfo .json() parsing', () => {
   assert.ok(/identity = await userinfoRes\.json\(\)[\s\S]*?catch[\s\S]*?userinfo_json_malformed/.test(callback))
 })
 
-console.log('\ndisconnect requires both local deletions')
-test('disconnect returns 500 when either local deletion errors', () => {
-  assert.ok(/oauthStateDeleteError \|\| connectionDeleteError[\s\S]*?internal_error[\s\S]*?500/.test(disconnectSrc))
+console.log('\ndisconnect requires the atomic local cleanup to succeed')
+test('disconnect returns 500 when the atomic local cleanup RPC errors', () => {
+  assert.ok(/if \(localCleanupError\)[\s\S]*?internal_error[\s\S]*?500/.test(disconnectSrc))
+  assert.ok(!/oauthStateDeleteError|connectionDeleteError/.test(disconnectSrc), 'the two-call contract is gone')
 })
 
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed\n`)
