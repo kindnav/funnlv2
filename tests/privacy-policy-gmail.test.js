@@ -30,6 +30,7 @@ const E2A_MIG = read('supabase/migrations/20260907000000_add_gmail_transport_fou
 const E2B_MIG = read('supabase/migrations/20260910000000_add_gmail_worker_primitives.sql')
 const CAL_MIG = read('supabase/migrations/20260817000000_add_calendar_ingestion.sql')
 const CLEANUP = read('supabase/functions/shared/googleCleanup.js')
+const RET_MIG = read('supabase/migrations/20260918000000_add_gmail_retention_cleanup.sql')  // applied in Production 2026-09-19
 const ANALYTICS = read('src/lib/analytics.js')
 const AI_CHAT = read('supabase/functions/ai-chat/index.ts')
 const fnBody = (sql, name) => { const i = sql.indexOf(`FUNCTION public.${name}`); const b = sql.slice(i); return b.slice(0, b.indexOf('$$;')) }
@@ -230,6 +231,7 @@ test('shared Google authorization: whole-Google disconnect/deletion removes it; 
   // The whole-Google path deletes the connection either through the currently deployed client delete
   // or, after PR-B, through the applied RPC — both remove the shared authorization.
   assert.ok(/\.from\('google_connections'\)[\s\S]*?\.delete\(\)/.test(CLEANUP) || /run_google_local_cleanup/.test(CLEANUP))
+  assert.ok(/DELETE FROM public\.google_connections WHERE user_id = p_user_id/.test(fnBody(RET_MIG, 'run_google_local_cleanup')))
 })
 test('collection statement is scoped, not absolute', () => {
   assert.ok(!/does not collect data about you beyond what you explicitly enter or explicitly connect/.test(POLICY), 'old absolute removed')
