@@ -30,6 +30,7 @@ const E2A_MIG = read('supabase/migrations/20260907000000_add_gmail_transport_fou
 const E2B_MIG = read('supabase/migrations/20260910000000_add_gmail_worker_primitives.sql')
 const CAL_MIG = read('supabase/migrations/20260817000000_add_calendar_ingestion.sql')
 const CLEANUP = read('supabase/functions/shared/googleCleanup.js')
+const RET_MIG = read('supabase/migrations/20260918000000_add_gmail_retention_cleanup.sql')  // applied in Production 2026-09-19
 const ANALYTICS = read('src/lib/analytics.js')
 const AI_CHAT = read('supabase/functions/ai-chat/index.ts')
 const fnBody = (sql, name) => { const i = sql.indexOf(`FUNCTION public.${name}`); const b = sql.slice(i); return b.slice(0, b.indexOf('$$;')) }
@@ -109,12 +110,14 @@ test('the 30-day subject maximum is NOT published because no scheduler runs the 
     .filter((p) => existsSync(join(ROOT, p)) && /expire_pending_email_context/.test(read(p)))
   assert.deepStrictEqual(callers, [], 'if a caller appears, the policy may publish the maximum — update this test deliberately')
 })
-test('subject erasure triggers are exactly: accept, dismiss, invalidation, Gmail disconnect, account deletion', () => {
-  assert.ok(/deleted when you accept or dismiss the suggestion, when Funnl learns the email was deleted or moved to spam or trash, when you disconnect Gmail from Settings, or when you delete your account/.test(POLICY))
+test('subject erasure triggers are exactly: accept, dismiss, invalidation, Gmail disconnect, whole-Google (Calendar) disconnect, account deletion', () => {
+  assert.ok(/deleted when you accept or dismiss the suggestion, when Funnl learns the email was deleted or moved to spam or trash, when you disconnect Gmail from Settings, when you disconnect Google Calendar \(which ends the whole Google connection\), or when you delete your account/.test(POLICY))
+  assert.ok(!/when you disconnect Gmail from Settings, or when you delete your account/.test(POLICY), 'the old five-trigger list (no whole-Google path) is gone')
   assert.ok(/retained_subject\s*=\s*NULL/.test(fnBody(E2A_MIG, 'accept_interaction_candidate')))
   assert.ok(/retained_subject\s*=\s*NULL/.test(fnBody(E2A_MIG, 'dismiss_interaction_candidate')))
   assert.ok(/retained_subject\s*=\s*NULL/.test(fnBody(E2B_MIG, 'invalidate_email_candidates_by_fingerprint')))
   assert.ok(/retained_subject\s*=\s*NULL/.test(fnBody(E2B_MIG, 'disconnect_my_gmail')))
+  assert.ok(/retained_subject\s*=\s*NULL/.test(fnBody(RET_MIG, 'run_google_local_cleanup')), 'the whole-Google cleanup RPC erases the subject')
   assert.ok(/REFERENCES auth\.users\(id\)\s+ON DELETE CASCADE/.test(CAL_MIG), 'candidates cascade on account deletion')
 })
 test('accepted suggestion carries only type/date/note; fingerprints persist until contact/account deletion (disclosed plainly)', () => {
@@ -163,17 +166,37 @@ test('Gmail-specific disconnect: capability off, sync state deleted, pending inv
   const body = fnBody(E2B_MIG, 'disconnect_my_gmail')
   assert.ok(/AND product\s+= 'gmail'/.test(body) && /DELETE FROM public\.gmail_sync_state/.test(body) && /status\s+= 'invalidated'/.test(body) && !/google_tokens|GOOGLE_REVOKE/.test(body))
 })
-test('whole-Google/Calendar disconnect: connection removed, cascade, Gmail ended, subjects NOT cleared by that path', () => {
+test('whole-Google/Calendar disconnect: connection removed, cascade, Gmail ended, pending Gmail context ERASED, tombstone kept', () => {
   assert.ok(/together with the connection's capability, cursor, and reference records/.test(POLICY))
   assert.ok(/this also ends any Gmail connection you had made/.test(POLICY))
-  assert.ok(/Pending Gmail suggestions are not removed by this path; their retained subject line stays until you accept or dismiss them or delete your account/.test(POLICY))
-  assert.ok(/\.delete\(\)/.test(CLEANUP) && !/interaction_candidates|retained_subject/.test(CLEANUP), 'cleanup touches no candidate rows')
+  // The old (pre-correction) sentence must never come back.
+  assert.ok(!/Pending Gmail suggestions are not removed by this path/.test(POLICY), 'old wording removed')
+  assert.ok(!/their retained subject line stays until you accept or dismiss them/.test(POLICY), 'old wording removed')
+  // The corrected disclosure: removed from active Suggestions, subject + context erased, tombstone + fingerprint retained.
+  assert.ok(/Funnl removes pending Gmail suggestions from your active Suggestions and erases their retained subject lines and context/.test(POLICY))
+  assert.ok(/The minimal terminal suggestion record and its one-way fingerprint remain only to prevent the same conversation from being suggested again, and are deleted when you delete the related contact or your account/.test(POLICY))
+  assert.ok(!/fingerprint (is|are) deleted (during|on|at) disconnect/i.test(POLICY), 'must not claim the fingerprint is deleted by disconnect')
+  // Pinned to the APPLIED database primitive (migration 20260918000000): invalidate pending Gmail only,
+  // NULL both context fields, never touch the fingerprint or delete the row, then delete states + connection.
+  const rpc = fnBody(RET_MIG, 'run_google_local_cleanup')
+  assert.ok(/SET status\s*=\s*'invalidated'/.test(rpc) && /retained_subject\s*=\s*NULL/.test(rpc) && /context_expires_at\s*=\s*NULL/.test(rpc))
+  assert.ok(/WHERE user_id = p_user_id\s+AND source\s*=\s*'gmail'\s+AND status\s*=\s*'pending'/.test(rpc), 'pending Gmail rows of that user only')
+  assert.ok(!/DELETE FROM public\.interaction_candidates/.test(rpc) && !/source_fingerprint\s*=/.test(rpc), 'tombstone + fingerprint preserved')
+  assert.ok(/DELETE FROM public\.google_oauth_states WHERE user_id = p_user_id/.test(rpc) && /DELETE FROM public\.google_connections WHERE user_id = p_user_id/.test(rpc))
   assert.ok((E2A_MIG.match(/REFERENCES public\.google_connections\(id, user_id\) ON DELETE CASCADE/g) || []).length >= 3)
+  // UI: only pending candidates are shown, so an invalidated one disappears from active Suggestions.
+  assert.ok(/\.eq\('status', 'pending'\)/.test(read('src/pages/SuggestionsPage.jsx')))
+  // PUBLICATION GATE (not a deployment claim): this wording may be PUBLISHED only once the deployed
+  // whole-Google cleanup path calls run_google_local_cleanup (PR-B). This test pins the text to the
+  // database primitive; it does not assert that the Edge helper already calls it.
 })
-test('the combined-authorization warning is disclosed in both directions', () => {
+test('the combined-authorization warning is disclosed in both directions; both disconnect paths erase context and keep only the tombstone', () => {
   assert.ok(/cannot withdraw Gmail access on Google's side without also disconnecting Google Calendar/.test(POLICY))
   assert.ok(/Google Account's third-party access page/.test(POLICY))
   assert.ok(/Disconnecting Google Calendar in Funnl, or deleting your account, revokes the combined authorization and removes both connections/.test(POLICY))
+  assert.ok(/Whichever way Gmail ends[^<]*pending Gmail suggestions are removed from your Suggestions and their subject lines and context are erased, and only the minimal terminal record and fingerprint remain until you delete the related contact or your account/.test(POLICY))
+  // Gmail-only path: Calendar and the shared authorization stay.
+  assert.ok(/Interactions you already accepted stay, and Google Calendar is not affected/.test(POLICY))
 })
 
 console.log('\ngeneral policy corrections')
@@ -201,7 +224,10 @@ test('shared Google authorization: whole-Google disconnect/deletion removes it; 
   // implementation: disconnect_my_gmail never touches the connection or tokens; the Google cleanup deletes them
   const body = fnBody(E2B_MIG, 'disconnect_my_gmail')
   assert.ok(!/google_tokens|DELETE FROM public\.google_connections|UPDATE public\.google_connections/.test(body))
-  assert.ok(/\.from\('google_connections'\)[\s\S]*?\.delete\(\)/.test(CLEANUP) || /\.delete\(\)/.test(CLEANUP))
+  // The whole-Google path deletes the connection either through the currently deployed client delete
+  // or, after PR-B, through the applied RPC — both remove the shared authorization.
+  assert.ok(/\.from\('google_connections'\)[\s\S]*?\.delete\(\)/.test(CLEANUP) || /run_google_local_cleanup/.test(CLEANUP))
+  assert.ok(/DELETE FROM public\.google_connections WHERE user_id = p_user_id/.test(fnBody(RET_MIG, 'run_google_local_cleanup')))
 })
 test('collection statement is scoped, not absolute', () => {
   assert.ok(!/does not collect data about you beyond what you explicitly enter or explicitly connect/.test(POLICY), 'old absolute removed')
@@ -210,6 +236,8 @@ test('collection statement is scoped, not absolute', () => {
   for (const w of ['Account information', 'diagnostic error report', 'Cookies and local storage', 'Standard server logs']) assert.ok(POLICY.includes(w), `policy actually discloses: ${w}`)
 })
 test('effective date and contact', () => {
+  // MANDATORY ROLLOUT GATE: the displayed date is changed in a separate just-in-time commit immediately
+  // before the corrected policy is actually merged/published. It stays September 18, 2026 until then.
   assert.ok(/Last updated: September 18, 2026/.test(POLICY))
   assert.ok(!/Last updated: September 2026</.test(POLICY))
   assert.ok((POLICY.match(/navbir12345@gmail\.com/g) || []).length >= 3)

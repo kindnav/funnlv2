@@ -225,16 +225,17 @@ console.log('\nconsistency with the published Privacy Policy')
 test('policy still makes NO 30-day promise (no expiry scheduler is applied in Production)', () => {
   assert.ok(!/30 days/.test(POLICY))
 })
-test('KNOWN CONTRADICTION pinned (publication blocker for PR-B, not PR-A: nothing calls the RPC yet): the published policy still says pending Gmail suggestions survive whole-Google disconnect; the new RPC erases them', () => {
-  // The published sentence for the whole-Google disconnect path (live since 2026-09-18).
+test('policy wording for whole-Google disconnect now matches run_google_local_cleanup (PUBLICATION GATE: publish only after PR-B deploys the caller)', () => {
   assert.ok(/deletes the stored Google tokens and the Google connection from Funnl, together with the connection's capability, cursor, and reference records/.test(POLICY))
-  // The exact sentence the owner must revise BEFORE run_google_local_cleanup reaches Production.
-  // This test deliberately pins the CURRENT published wording so that (a) nobody silently
-  // edits the public policy in a backend branch and (b) updating the policy forces a
-  // deliberate update here. When the policy is revised, flip this assertion.
-  assert.ok(/Pending Gmail suggestions are not removed by this path; their retained subject line stays until you accept or dismiss them or delete your account/.test(POLICY),
-    'policy wording changed — re-verify it now matches run_google_local_cleanup and update this test deliberately')
-  assert.ok(/SET status\s*=\s*'invalidated'/.test(fnBody(RET, 'run_google_local_cleanup')), 'the RPC does remove them (more protective than the published sentence)')
+  // The pre-correction sentence must never return.
+  assert.ok(!/Pending Gmail suggestions are not removed by this path/.test(POLICY), 'old wording removed')
+  // Corrected wording (prepared on docs/gmail-whole-google-disconnect-erasure): erased on that path,
+  // tombstone + fingerprint retained until contact/account deletion.
+  assert.ok(/Funnl removes pending Gmail suggestions from your active Suggestions and erases their retained subject lines and context/.test(POLICY))
+  assert.ok(/The minimal terminal suggestion record and its one-way fingerprint remain only to prevent the same conversation from being suggested again, and are deleted when you delete the related contact or your account/.test(POLICY))
+  assert.ok(/SET status\s*=\s*'invalidated'/.test(fnBody(RET, 'run_google_local_cleanup')), 'the applied RPC does exactly that')
+  // Not asserted here: that the deployed Edge helper already calls the RPC. Until PR-B is deployed the
+  // corrected text must stay unpublished (the live system would erase LESS than the text promises).
 })
 test('policy fingerprint-retention sentence matches the decision (until contact or account deletion)', () => {
   assert.ok(/its record \(without the subject line\) and its fingerprint remain so the conversation is not suggested again\. They are deleted when you delete the contact they concern or delete your account/.test(POLICY))
