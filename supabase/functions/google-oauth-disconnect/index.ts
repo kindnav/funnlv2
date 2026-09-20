@@ -1,8 +1,9 @@
 // google-oauth-disconnect — JWT-authenticated. Best-effort revokes the user's
-// Google authorization, then ALWAYS deletes all local Google state (tokens,
-// oauth states, connection) for that user via the shared runGoogleLocalCleanup
-// helper. A failure to reach Google must never block local deletion. Only
-// controlled status/error codes are logged.
+// Google authorization, then ALWAYS runs the atomic local cleanup for that user via
+// the shared runGoogleLocalCleanup helper (one service-only RPC: pending Gmail
+// suggestions invalidated with their retained subjects erased, oauth states deleted,
+// connection deleted with its cascades). A failure to reach Google must never block
+// local cleanup. Only controlled status/error codes are logged.
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { importKeyFromBase64, decryptToken } from '../shared/googleTokenCrypto.js'
@@ -76,18 +77,19 @@ Deno.serve(async (req) => {
     )
 
     const resolveToken = await makeResolveToken()
-    const { oauthStateDeleteError, connectionDeleteError } = await runGoogleLocalCleanup({
+    const { localCleanupError } = await runGoogleLocalCleanup({
       admin,
       userId: user.id,
       resolveToken,
       revoke,
     })
 
-    // Success only when BOTH local deletions succeeded. Remote revocation is
+    // Success only when the atomic local cleanup succeeded. Remote revocation is
     // best-effort and never affects this result. A local failure → controlled 500
-    // so the user can retry; no raw database details are returned.
-    if (oauthStateDeleteError || connectionDeleteError) {
-      console.error('google-oauth-disconnect local_delete_failed')
+    // so the user can retry (the RPC is idempotent); no raw database details are
+    // returned and no count is exposed to the browser.
+    if (localCleanupError) {
+      console.error('google-oauth-disconnect local_cleanup_failed')
       return json({ error: 'internal_error' }, 500)
     }
     return json({ success: true }, 200)
