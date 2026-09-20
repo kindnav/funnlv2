@@ -262,9 +262,9 @@ test('collection statement is scoped, not absolute', () => {
   for (const w of ['Account information', 'diagnostic error report', 'Cookies and local storage', 'Standard server logs']) assert.ok(POLICY.includes(w), `policy actually discloses: ${w}`)
 })
 test('effective date and contact', () => {
-  // MANDATORY ROLLOUT GATE: the displayed date is changed in a separate just-in-time commit immediately
-  // before the corrected policy is actually merged/published. It stays September 18, 2026 until then.
-  assert.ok(/Last updated: September 18, 2026/.test(POLICY))
+  // Publication date set just-in-time (2026-09-20) once both corrected cleanup callers were deployed;
+  // the previous published version was dated September 18, 2026.
+  assert.ok(/Last updated: September 20, 2026/.test(POLICY))
   assert.ok(!/Last updated: September 2026</.test(POLICY))
   assert.ok((POLICY.match(/navbir12345@gmail\.com/g) || []).length >= 3)
 })
