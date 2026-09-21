@@ -50,6 +50,18 @@ GRANT SELECT ON fx TO authenticated, anon;   -- fixture lookup only; the blocks 
 -- fingerprint helper: 64 hex chars from a label
 CREATE TEMP TABLE fp AS SELECT 'x'::text AS label, repeat('0', 64)::text AS hex WHERE false;
 CREATE OR REPLACE FUNCTION pg_temp.fpx(label text) RETURNS text LANGUAGE sql IMMUTABLE AS $$ SELECT encode(sha256(label::bytea), 'hex') $$;
+-- helper: mint a fresh Outlook state for a user with a consent version
+CREATE OR REPLACE FUNCTION pg_temp.mint_state(p_uid uuid, p_label text, p_version text, p_expires interval DEFAULT interval '10 minutes')
+RETURNS text LANGUAGE plpgsql AS $$
+DECLARE h text := pg_temp.fpx('state:' || p_label);
+BEGIN
+  INSERT INTO public.microsoft_oauth_states (state_hash, user_id, pkce_verifier_ciphertext, pkce_verifier_nonce, return_origin, integration_type, consented_at, consent_policy_version, expires_at)
+    VALUES (h, p_uid, 'c', 'n', 'https://www.getfunnl.com', 'outlook',
+            LEAST(now() - interval '1 second', now() + p_expires - interval '1 second'),   -- consent always precedes expiry
+            p_version, now() + p_expires);
+  RETURN h;
+END $$;
+
 
 DO $$
 DECLARE r record; v_contact uuid; v_gconn uuid; v_mconn uuid; v_res jsonb;
@@ -84,14 +96,15 @@ BEGIN
     INSERT INTO public.interaction_candidates (user_id, contact_id, source, source_fingerprint, proposed_type, proposed_interaction_date, proposed_notes, status, interaction_id)
       VALUES (r.uid, v_contact, 'gmail', pg_temp.fpx('g_acc' || r.u), 'Email', current_date, 'gmail accepted', 'accepted', v_ig) RETURNING id INTO v_ga;
 
-    -- Microsoft connection through the RPC (service-role contract)
-    v_res := public.store_microsoft_connection(r.uid, 'msacct-' || sfx, 'consumers', 'personal', 'ol-' || sfx || '@example.invalid',
-               ARRAY['Mail.Read','offline_access','openid','email'], 'active', now(), 'privacy-2026-09-20',
-               now() + interval '1 hour', 'act', 'an', 'rct', 'rn', 1::smallint);
-    ASSERT v_res ->> 'result' = 'stored', 'store_microsoft_connection failed: ' || v_res::text;
+    -- Microsoft connection through the STATE-BOUND finalization RPC (service-role contract):
+    -- the consent evidence lives on the single-use state minted after the disclosure.
+    PERFORM pg_temp.mint_state(r.uid, 'fixture-' || r.u, 'disclosure-v1');
+    v_res := public.finalize_microsoft_connection(pg_temp.fpx('state:fixture-' || r.u), r.uid, 'msacct-' || sfx, 'consumers', 'personal', 'ol-' || sfx || '@example.invalid',
+               ARRAY['Mail.Read','offline_access','openid','email'], now() + interval '1 hour', 'act', 'an', 'rct', 'rn', 1::smallint);
+    ASSERT v_res ->> 'result' = 'stored', 'finalize_microsoft_connection failed: ' || v_res::text;
     v_mconn := (v_res ->> 'connection_id')::uuid;
-    INSERT INTO public.microsoft_oauth_states (state_hash, user_id, pkce_verifier_ciphertext, pkce_verifier_nonce, return_origin, expires_at)
-      VALUES (pg_temp.fpx('state' || r.u), r.uid, 'c', 'n', 'https://www.getfunnl.com', now() + interval '10 minutes');
+    -- a second, still-pending state (disconnect/cleanup must delete it)
+    PERFORM pg_temp.mint_state(r.uid, 'pending-' || r.u, 'disclosure-v1');
 
     -- Outlook interaction candidates (existing contact) + refs
     INSERT INTO public.interaction_candidates (user_id, contact_id, source, source_fingerprint, proposed_type, proposed_interaction_date, proposed_notes, retained_subject, context_expires_at, status,
@@ -272,18 +285,217 @@ BEGIN
   ASSERT ok, 'second connection per user accepted';
 END $$;
 
--- different-account reconnect is refused by the RPC
+-- ── 1b. Consent binding, state lifecycle, permission contract (service-role RPC) ──
 DO $$
-DECLARE u1 uuid := (SELECT uid FROM fx WHERE u = 'U1'); v jsonb;
+DECLARE u1 uuid := (SELECT uid FROM fx WHERE u = 'U1'); u2 uuid := (SELECT uid FROM fx WHERE u = 'U2');
+        m1 uuid := (SELECT mconn FROM fx WHERE u = 'U1'); v jsonb; h text; ok boolean; before_conn record; v_raw text;
 BEGIN
-  v := public.store_microsoft_connection(u1, 'someone-else', 'consumers', 'personal', 'other@example.invalid', ARRAY['Mail.Read'], 'active', now(), 'v', NULL, NULL, NULL, 'r', 'n', 1::smallint);
+  -- consent evidence on the connection came from the consumed fixture state (version pinned by fixture)
+  ASSERT (SELECT consent_policy_version FROM public.microsoft_connections WHERE user_id = u1) = 'disclosure-v1', 'consent version not copied from state';
+  ASSERT (SELECT consented_at FROM public.microsoft_connections WHERE user_id = u1) = (SELECT consented_at FROM public.microsoft_oauth_states WHERE state_hash = pg_temp.fpx('state:fixture-U1')), 'consented_at not copied from state';
+  ASSERT (SELECT consumed_at IS NOT NULL FROM public.microsoft_oauth_states WHERE state_hash = pg_temp.fpx('state:fixture-U1')), 'fixture state not consumed';
+  ASSERT (SELECT scopes FROM public.microsoft_connections WHERE user_id = u1) = ARRAY['Mail.Read','offline_access','openid','email'], 'scopes not normalized: ' || (SELECT scopes::text FROM public.microsoft_connections WHERE user_id = u1);
+
+  -- REPLAY: the consumed state cannot finalize again (and changes nothing)
+  SELECT * INTO before_conn FROM public.microsoft_connections WHERE user_id = u1;
+  v := public.finalize_microsoft_connection(pg_temp.fpx('state:fixture-U1'), NULL, 'msacct-u1', 'consumers', 'personal', 'ol-u1@example.invalid', ARRAY['Mail.Read','offline_access'], NULL, NULL, NULL, 'replay-r', 'replay-n', 1::smallint);
+  ASSERT v ->> 'result' = 'state_consumed', 'replay accepted: ' || v::text;
+  ASSERT (SELECT refresh_token_ciphertext FROM public.microsoft_tokens WHERE user_id = u1) <> 'replay-r', 'replay rotated the token';
+  ASSERT (SELECT updated_at FROM public.microsoft_connections WHERE user_id = u1) = before_conn.updated_at, 'replay touched the connection';
+
+  -- UNKNOWN / WRONG-INTEGRATION: a Google (gmail) state hash is not an Outlook state
+  v := public.finalize_microsoft_connection(repeat('1', 64), NULL, 'msacct-u1', 'consumers', 'personal', 'ol-u1@example.invalid', ARRAY['Mail.Read'], NULL, NULL, NULL, 'r', 'n', 1::smallint);
+  ASSERT v ->> 'result' = 'unknown_state', 'google state accepted as outlook: ' || v::text;
+  v := public.finalize_microsoft_connection('not-a-hash', NULL, 'msacct-u1', 'consumers', 'personal', 'ol-u1@example.invalid', ARRAY['Mail.Read'], NULL, NULL, NULL, 'r', 'n', 1::smallint);
+  ASSERT v ->> 'result' = 'invalid_state', 'malformed hash accepted';
+
+  -- EXPIRED state
+  h := pg_temp.mint_state(u1, 'expired-U1', 'disclosure-v2', interval '-1 minute');
+  v := public.finalize_microsoft_connection(h, NULL, 'msacct-u1', 'consumers', 'personal', 'ol-u1@example.invalid', ARRAY['Mail.Read','offline_access'], NULL, NULL, NULL, 'r', 'n', 1::smallint);
+  ASSERT v ->> 'result' = 'state_expired', 'expired state accepted: ' || v::text;
+  ASSERT (SELECT consumed_at IS NULL FROM public.microsoft_oauth_states WHERE state_hash = h), 'expired state consumed';
+  ASSERT (SELECT consent_policy_version FROM public.microsoft_connections WHERE user_id = u1) = 'disclosure-v1', 'expired state changed consent';
+
+  -- WRONG USER: the caller expected U2 but the state belongs to U1
+  h := pg_temp.mint_state(u1, 'wronguser-U1', 'disclosure-v2');
+  v := public.finalize_microsoft_connection(h, u2, 'msacct-u1', 'consumers', 'personal', 'ol-u1@example.invalid', ARRAY['Mail.Read','offline_access'], NULL, NULL, NULL, 'r', 'n', 1::smallint);
+  ASSERT v ->> 'result' = 'state_user_mismatch', 'wrong-user state accepted: ' || v::text;
+  ASSERT (SELECT consumed_at IS NULL FROM public.microsoft_oauth_states WHERE state_hash = h), 'mismatched state consumed';
+  ASSERT (SELECT count(*) FROM public.microsoft_connections WHERE user_id = u2 AND ms_account_id = 'msacct-u1') = 0, 'connection created for the wrong user';
+
+  -- PERMISSION CONTRACT: missing Mail.Read, forbidden scopes (state stays unconsumed each time)
+  v := public.finalize_microsoft_connection(h, NULL, 'msacct-u1', 'consumers', 'personal', 'ol-u1@example.invalid', ARRAY['offline_access','openid'], NULL, NULL, NULL, 'r', 'n', 1::smallint);
+  ASSERT v ->> 'result' = 'missing_mail_read', 'no Mail.Read accepted: ' || v::text;
+  v := public.finalize_microsoft_connection(h, NULL, 'msacct-u1', 'consumers', 'personal', 'ol-u1@example.invalid', ARRAY['Mail.ReadBasic','offline_access'], NULL, NULL, NULL, 'r', 'n', 1::smallint);
+  ASSERT v ->> 'result' = 'forbidden_scope', 'ReadBasic-only accepted (must be forbidden, not silently narrowed): ' || v::text;
+  FOREACH v_raw IN ARRAY ARRAY['Mail.ReadWrite', 'Mail.Send', 'MailboxSettings.ReadWrite', 'Files.Read', 'Files.Read.All', 'Contacts.ReadWrite',
+                               'Calendars.ReadWrite', 'https://graph.microsoft.com/.default', '.default', 'Mail.Read.All', 'Mail.ReadBasic.All', 'User.Read', 'Mail.Read.Shared'] LOOP
+    v := public.finalize_microsoft_connection(h, NULL, 'msacct-u1', 'consumers', 'personal', 'ol-u1@example.invalid', ARRAY['Mail.Read', 'offline_access', v_raw], NULL, NULL, NULL, 'r', 'n', 1::smallint);
+    ASSERT v ->> 'result' = 'forbidden_scope', v_raw || ' accepted: ' || v::text;
+  END LOOP;
+  v := public.finalize_microsoft_connection(h, NULL, 'msacct-u1', 'consumers', 'personal', 'ol-u1@example.invalid', ARRAY[]::text[], NULL, NULL, NULL, 'r', 'n', 1::smallint);
+  ASSERT v ->> 'result' = 'missing_mail_read', 'empty scopes accepted';
+  v := public.finalize_microsoft_connection(h, NULL, 'msacct-u1', 'consumers', 'personal', 'ol-u1@example.invalid', ARRAY['Mail.Read', NULL], NULL, NULL, NULL, 'r', 'n', 1::smallint);
+  ASSERT v ->> 'result' = 'invalid_scopes', 'null scope accepted';
+  ASSERT (SELECT consumed_at IS NULL FROM public.microsoft_oauth_states WHERE state_hash = h), 'refused finalization consumed the state';
+  ASSERT (SELECT consent_policy_version FROM public.microsoft_connections WHERE user_id = u1) = 'disclosure-v1', 'refused finalization changed consent';
+
+  -- DIFFERENT ACCOUNT refused (state still valid)
+  v := public.finalize_microsoft_connection(h, NULL, 'someone-else', 'consumers', 'personal', 'other@example.invalid', ARRAY['Mail.Read','offline_access'], NULL, NULL, NULL, 'r', 'n', 1::smallint);
   ASSERT v ->> 'result' = 'different_account', 'account swap allowed: ' || v::text;
-  v := public.store_microsoft_connection(u1, 'msacct-u1', 'consumers', 'personal', 'ol-u1@example.invalid', ARRAY['Mail.Read'], 'active', now(), 'v', NULL, NULL, NULL, 'r2', 'n2', 1::smallint);
-  ASSERT v ->> 'result' = 'stored', 'same-account reconnect failed';
-  ASSERT (SELECT refresh_token_ciphertext FROM public.microsoft_tokens WHERE user_id = u1) = 'r2', 'refresh token not rotated';
+  ASSERT (SELECT consumed_at IS NULL FROM public.microsoft_oauth_states WHERE state_hash = h), 'different-account attempt consumed the state';
+
+  -- REAUTHORIZATION with a NEW state carrying a NEW disclosure version + documented
+  -- equivalent spellings (resource-prefixed, mixed case, duplicates) → normalized
+  v := public.finalize_microsoft_connection(h, u1, 'msacct-u1', 'consumers', 'personal', 'ol-u1@example.invalid',
+         ARRAY['https://graph.microsoft.com/Mail.Read', 'MAIL.READ', ' offline_access ', 'OpenID', 'email', 'profile'], now() + interval '1 hour', 'a2', 'an2', 'r2', 'n2', 2::smallint);
+  ASSERT v ->> 'result' = 'stored' AND (v ->> 'connection_id')::uuid = m1, 'reauth failed: ' || v::text;
+  ASSERT (SELECT consent_policy_version FROM public.microsoft_connections WHERE user_id = u1) = 'disclosure-v2', 'reauth did not adopt the new state version';
+  ASSERT (SELECT consented_at FROM public.microsoft_connections WHERE user_id = u1) = (SELECT consented_at FROM public.microsoft_oauth_states WHERE state_hash = h), 'reauth consented_at not from the new state';
+  ASSERT (SELECT scopes FROM public.microsoft_connections WHERE user_id = u1) = ARRAY['Mail.Read','offline_access','openid','email','profile'], 'reauth scopes not normalized: ' || (SELECT scopes::text FROM public.microsoft_connections WHERE user_id = u1);
+  ASSERT (SELECT refresh_token_ciphertext = 'r2' AND key_version = 2 FROM public.microsoft_tokens WHERE user_id = u1), 'refresh token not rotated';
   ASSERT (SELECT count(*) FROM public.microsoft_connections WHERE user_id = u1) = 1, 'connection duplicated';
-  v := public.update_microsoft_connection_state((SELECT mconn FROM fx WHERE u = 'U1'), (SELECT uid FROM fx WHERE u = 'U2'), 'needs_reauth', true, 'invalid_grant');
+  ASSERT (SELECT consumed_at IS NOT NULL FROM public.microsoft_oauth_states WHERE state_hash = h), 'successful finalization did not consume';
+  v := public.finalize_microsoft_connection(h, u1, 'msacct-u1', 'consumers', 'personal', 'ol-u1@example.invalid', ARRAY['Mail.Read'], NULL, NULL, NULL, 'r3', 'n3', 1::smallint);
+  ASSERT v ->> 'result' = 'state_consumed', 'second finalization of the same state succeeded';
+  ASSERT (SELECT refresh_token_ciphertext FROM public.microsoft_tokens WHERE user_id = u1) = 'r2', 'replay after reauth rotated the token';
+
+  -- the connection CHECK refuses broader scopes even from a direct service write
+  ok := false;
+  BEGIN
+    UPDATE public.microsoft_connections SET scopes = ARRAY['Mail.Read', 'Mail.ReadWrite'] WHERE user_id = u1;
+  EXCEPTION WHEN check_violation THEN ok := true; END;
+  ASSERT ok, 'CHECK accepted Mail.ReadWrite';
+  ok := false;
+  BEGIN
+    UPDATE public.microsoft_connections SET scopes = ARRAY['offline_access'] WHERE user_id = u1;
+  EXCEPTION WHEN check_violation THEN ok := true; END;
+  ASSERT ok, 'CHECK accepted an active connection without Mail.Read';
+  ok := false;
+  BEGIN
+    INSERT INTO public.microsoft_oauth_states (state_hash, user_id, pkce_verifier_ciphertext, pkce_verifier_nonce, return_origin, consented_at, consent_policy_version, expires_at)
+      VALUES (pg_temp.fpx('nover'), u1, 'c', 'n', 'https://www.getfunnl.com', now(), '', now() + interval '1 minute');
+  EXCEPTION WHEN check_violation THEN ok := true; END;
+  ASSERT ok, 'empty consent version accepted';
+  ok := false;
+  BEGIN
+    INSERT INTO public.microsoft_oauth_states (state_hash, user_id, pkce_verifier_ciphertext, pkce_verifier_nonce, return_origin, expires_at)
+      VALUES (pg_temp.fpx('noconsent'), u1, 'c', 'n', 'https://www.getfunnl.com', now() + interval '1 minute');
+  EXCEPTION WHEN not_null_violation THEN ok := true; END;
+  ASSERT ok, 'state without consent accepted';
+
+  -- cross-user state update still refused
+  v := public.update_microsoft_connection_state(m1, u2, 'needs_reauth', true, 'invalid_grant');
   ASSERT v ->> 'result' = 'owner_mismatch', 'cross-user state update allowed';
+END $$;
+
+-- FAILED FINALIZATION after the writes started: forced token-insert failure → the whole
+-- call rolls back: no connection change, state NOT consumed (atomic contract).
+CREATE OR REPLACE FUNCTION pg_temp.force_token_fail() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN IF NEW.refresh_token_ciphertext = 'FORCE_FAIL' THEN RAISE EXCEPTION 'forced'; END IF; RETURN NEW; END $$;
+CREATE TRIGGER rt_force_token_fail BEFORE INSERT OR UPDATE ON public.microsoft_tokens FOR EACH ROW EXECUTE FUNCTION pg_temp.force_token_fail();
+DO $$
+DECLARE u2 uuid := (SELECT uid FROM fx WHERE u = 'U2'); h text; failed boolean := false; before_ver text;
+BEGIN
+  h := pg_temp.mint_state(u2, 'fail-U2', 'disclosure-v9');
+  SELECT consent_policy_version INTO before_ver FROM public.microsoft_connections WHERE user_id = u2;
+  BEGIN
+    PERFORM public.finalize_microsoft_connection(h, u2, 'msacct-u2', 'consumers', 'personal', 'ol-u2@example.invalid', ARRAY['Mail.Read','offline_access'], NULL, NULL, NULL, 'FORCE_FAIL', 'n', 1::smallint);
+  EXCEPTION WHEN OTHERS THEN failed := true; END;
+  ASSERT failed, 'forced token failure did not raise';
+  ASSERT (SELECT consumed_at IS NULL FROM public.microsoft_oauth_states WHERE state_hash = h), 'FAILED FINALIZATION CONSUMED THE STATE';
+  ASSERT (SELECT consent_policy_version FROM public.microsoft_connections WHERE user_id = u2) = before_ver, 'FAILED FINALIZATION CHANGED CONSENT';
+  ASSERT (SELECT refresh_token_ciphertext FROM public.microsoft_tokens WHERE user_id = u2) <> 'FORCE_FAIL', 'token written despite failure';
+END $$;
+DROP TRIGGER rt_force_token_fail ON public.microsoft_tokens;
+
+-- ── 1c. Explicit grant matrix (catalog truth via has_*_privilege) ─────────────
+-- Supabase projects no longer auto-expose public tables to the Data API; every grant
+-- below must be explicit and nothing may rely on default privileges.
+DO $$
+DECLARE t text; c text; f text; ok boolean;
+        sensitive_tables text[] := ARRAY['microsoft_tokens', 'microsoft_oauth_states', 'outlook_sync_state', 'outlook_candidate_refs'];
+        all_tables text[] := ARRAY['microsoft_connections', 'microsoft_tokens', 'microsoft_oauth_states', 'outlook_sync_state', 'outlook_candidate_refs', 'new_contact_candidates'];
+        conn_hidden text[] := ARRAY['id', 'user_id', 'ms_account_id', 'ms_tenant_id', 'token_expires_at'];
+        conn_visible text[] := ARRAY['account_type', 'ms_email', 'scopes', 'status', 'needs_reauth', 'consented_at', 'consent_policy_version', 'last_result_code', 'last_success_at', 'connected_at', 'updated_at'];
+        ncc_hidden text[] := ARRAY['user_id', 'person_fingerprint', 'episode_fingerprint', 'key_version', 'context_expires_at'];
+        ncc_visible text[] := ARRAY['id', 'source', 'status', 'proposed_email', 'proposed_name', 'proposed_name_evidence', 'proposed_name_confidence', 'proposed_company', 'proposed_company_evidence', 'proposed_company_confidence', 'proposed_role', 'proposed_role_evidence', 'proposed_role_confidence', 'proposed_how_met', 'proposed_how_met_evidence', 'proposed_how_met_confidence', 'proposed_linkedin_url', 'proposed_linkedin_url_evidence', 'proposed_linkedin_url_confidence', 'draft_summary', 'draft_follow_up', 'proposed_interaction_date', 'proposed_type', 'retained_subject', 'extraction_status', 'deferred_until', 'accepted_contact_id', 'accepted_interaction_id', 'created_at', 'updated_at'];
+        ic_new text[] := ARRAY['draft_summary', 'draft_follow_up', 'summary_evidence', 'extraction_status', 'deferred_until'];
+        service_fns text[] := ARRAY['finalize_microsoft_connection', 'update_microsoft_connection_state', 'reserve_due_outlook_connection', 'renew_outlook_sync_lease', 'release_outlook_sync_lease', 'invalidate_outlook_candidates_by_fingerprint', 'run_microsoft_local_cleanup', 'expire_pending_outlook_context'];
+        user_fns text[] := ARRAY['accept_new_contact_candidate', 'dismiss_new_contact_candidate', 'defer_candidate', 'disconnect_my_outlook'];
+BEGIN
+  -- anon: nothing, anywhere
+  FOREACH t IN ARRAY all_tables LOOP
+    FOR c IN SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = t LOOP
+      ASSERT NOT has_column_privilege('anon', 'public.' || t, c, 'SELECT'), 'anon can read ' || t || '.' || c;
+    END LOOP;
+    ASSERT NOT has_table_privilege('anon', 'public.' || t, 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER'), 'anon has table privilege on ' || t;
+  END LOOP;
+  -- authenticated: sensitive tables fully closed (every privilege, every column)
+  FOREACH t IN ARRAY sensitive_tables LOOP
+    ASSERT NOT has_table_privilege('authenticated', 'public.' || t, 'SELECT, INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER'), 'authenticated has privilege on ' || t;
+    FOR c IN SELECT column_name FROM information_schema.columns WHERE table_schema = 'public' AND table_name = t LOOP
+      ASSERT NOT has_column_privilege('authenticated', 'public.' || t, c, 'SELECT, INSERT, UPDATE, REFERENCES'), 'authenticated column privilege ' || t || '.' || c;
+    END LOOP;
+  END LOOP;
+  -- authenticated: no write privilege on the review tables (all writes via RPC)
+  FOREACH t IN ARRAY ARRAY['microsoft_connections', 'new_contact_candidates', 'interaction_candidates'] LOOP
+    ASSERT NOT has_table_privilege('authenticated', 'public.' || t, 'INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER'), 'authenticated can write ' || t;
+    ASSERT NOT has_table_privilege('authenticated', 'public.' || t, 'SELECT'), 'authenticated has whole-table SELECT on ' || t || ' (must be column-level)';
+  END LOOP;
+  -- authenticated: exact review-safe columns
+  FOREACH c IN ARRAY conn_hidden LOOP
+    ASSERT NOT has_column_privilege('authenticated', 'public.microsoft_connections', c, 'SELECT'), 'connections leaks ' || c;
+  END LOOP;
+  FOREACH c IN ARRAY conn_visible LOOP
+    ASSERT has_column_privilege('authenticated', 'public.microsoft_connections', c, 'SELECT'), 'connections hides ' || c;
+  END LOOP;
+  FOREACH c IN ARRAY ncc_hidden LOOP
+    ASSERT NOT has_column_privilege('authenticated', 'public.new_contact_candidates', c, 'SELECT'), 'candidates leak ' || c;
+  END LOOP;
+  FOREACH c IN ARRAY ncc_visible LOOP
+    ASSERT has_column_privilege('authenticated', 'public.new_contact_candidates', c, 'SELECT'), 'candidates hide ' || c;
+  END LOOP;
+  FOREACH c IN ARRAY ic_new LOOP
+    ASSERT has_column_privilege('authenticated', 'public.interaction_candidates', c, 'SELECT'), 'interaction_candidates hides ' || c;
+  END LOOP;
+  ASSERT NOT has_column_privilege('authenticated', 'public.interaction_candidates', 'source_fingerprint', 'SELECT'), 'interaction_candidates leaks source_fingerprint';
+  ASSERT NOT has_column_privilege('authenticated', 'public.interaction_candidates', 'context_expires_at', 'SELECT'), 'interaction_candidates leaks context_expires_at';
+  -- service_role: full table privileges (future callers), owner untouched
+  FOREACH t IN ARRAY all_tables LOOP
+    ASSERT has_table_privilege('service_role', 'public.' || t, 'SELECT, INSERT, UPDATE, DELETE'), 'service_role lacks privileges on ' || t;
+    ASSERT (SELECT tableowner FROM pg_tables WHERE schemaname = 'public' AND tablename = t) = 'postgres', t || ' owner';
+    ASSERT (SELECT rowsecurity FROM pg_tables WHERE schemaname = 'public' AND tablename = t), t || ' RLS off';
+  END LOOP;
+  -- functions: exactly one signature each; PUBLIC/anon never; roles as intended
+  FOREACH f IN ARRAY service_fns || user_fns || ARRAY['accept_interaction_candidate', 'dismiss_interaction_candidate'] LOOP
+    ASSERT (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = f) = 1, f || ' overloads';
+    ASSERT (SELECT pg_get_userbyid(proowner) = 'postgres' AND prosecdef AND proconfig = ARRAY['search_path=""']
+            FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = f), f || ' owner/secdef/search_path';
+    ASSERT NOT has_function_privilege('anon', (SELECT p.oid FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = f), 'EXECUTE'), 'anon can execute ' || f;
+    ASSERT (SELECT NOT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace, LATERAL aclexplode(p.proacl) a
+                                WHERE n.nspname = 'public' AND p.proname = f AND a.grantee = 0)), 'PUBLIC can execute ' || f;
+  END LOOP;
+  FOREACH f IN ARRAY service_fns LOOP
+    ASSERT has_function_privilege('service_role', (SELECT p.oid FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = f), 'EXECUTE'), 'service_role cannot execute ' || f;
+    ASSERT NOT has_function_privilege('authenticated', (SELECT p.oid FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = f), 'EXECUTE'), 'authenticated can execute ' || f;
+  END LOOP;
+  FOREACH f IN ARRAY user_fns LOOP
+    ASSERT has_function_privilege('authenticated', (SELECT p.oid FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = f), 'EXECUTE'), 'authenticated cannot execute ' || f;
+    ASSERT NOT has_function_privilege('service_role', (SELECT p.oid FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = f), 'EXECUTE'), 'service_role can execute user function ' || f;
+  END LOOP;
+  -- the two recreated review RPCs keep their pre-existing ACL exactly (authenticated + service_role, never PUBLIC/anon)
+  FOREACH f IN ARRAY ARRAY['accept_interaction_candidate', 'dismiss_interaction_candidate'] LOOP
+    ASSERT (SELECT proacl::text FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = 'public' AND p.proname = f)
+           = '{postgres=X/postgres,authenticated=X/postgres,service_role=X/postgres}', f || ' ACL drifted: ' || (SELECT proacl::text FROM pg_proc WHERE proname = f);
+  END LOOP;
+  -- no obsolete finalization contract survives
+  ASSERT (SELECT count(*) FROM pg_proc WHERE proname = 'store_microsoft_connection') = 0, 'obsolete store_microsoft_connection present';
+  -- no reliance on default privileges: the new tables' ACLs are explicit (present) and name no anon/PUBLIC grant
+  FOREACH t IN ARRAY all_tables LOOP
+    ASSERT (SELECT relacl IS NOT NULL FROM pg_class WHERE oid = ('public.' || t)::regclass), t || ' has no explicit ACL';
+    ASSERT (SELECT NOT EXISTS (SELECT 1 FROM pg_class c, LATERAL aclexplode(c.relacl) a WHERE c.oid = ('public.' || t)::regclass AND (a.grantee = 0 OR a.grantee = 'anon'::regrole))), t || ' grants PUBLIC/anon';
+  END LOOP;
 END $$;
 
 -- ── 2. Role denials + two-user isolation ──────────────────────────────────────

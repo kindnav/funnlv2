@@ -32,6 +32,10 @@
 --     DO use the established ciphertext + nonce + key_version pattern.
 --   * Nothing is saved automatically: every contact / interaction requires explicit
 --     user approval through the authenticated RPCs below.
+--   * CONSENT BINDING: the just-in-time Outlook disclosure (which names the AI provider
+--     and its standard retention) is accepted BEFORE the Microsoft redirect; the
+--     accepted version + timestamp ride on the single-use OAuth state and are copied to
+--     the connection by finalize_microsoft_connection — never caller-supplied.
 --   * Account deletion cascades ALL Outlook state (every table hangs off auth.users
 --     with ON DELETE CASCADE); run_microsoft_local_cleanup() exists for callers.
 --   * Provider-derived pending draft context expires after 30 days (context_expires_at
@@ -67,11 +71,11 @@ CREATE TABLE public.microsoft_connections (
   ms_tenant_id           text,                   -- tenant id for work/school; NULL or 'consumers' for personal
   account_type           text        NOT NULL,   -- 'personal' | 'work'
   ms_email               text        NOT NULL,   -- connected address (display only)
-  scopes                 text[]      NOT NULL,   -- granted delegated scopes as returned by Microsoft
+  scopes                 text[]      NOT NULL,   -- NORMALIZED delegated scopes (canonical allowlist below), never raw
   status                 text        NOT NULL DEFAULT 'active',
   needs_reauth           boolean     NOT NULL DEFAULT false,
-  consented_at           timestamptz NOT NULL,   -- just-in-time Outlook consent acknowledgment
-  consent_policy_version text        NOT NULL,   -- Privacy Policy version acknowledged
+  consented_at           timestamptz NOT NULL,   -- copied from the consumed OAuth state (never caller-supplied)
+  consent_policy_version text        NOT NULL,   -- disclosure version accepted before the redirect (from the state)
   last_result_code       text,                   -- controlled code only (no provider detail)
   last_success_at        timestamptz,
   token_expires_at       timestamptz,            -- access-token expiry (advisory)
@@ -83,8 +87,20 @@ CREATE TABLE public.microsoft_connections (
   CONSTRAINT microsoft_connections_account_id_len     CHECK (char_length(ms_account_id) BETWEEN 1 AND 256),
   CONSTRAINT microsoft_connections_tenant_id_len      CHECK (ms_tenant_id IS NULL OR char_length(ms_tenant_id) BETWEEN 1 AND 256),
   CONSTRAINT microsoft_connections_email_len          CHECK (char_length(ms_email) BETWEEN 3 AND 320),
-  CONSTRAINT microsoft_connections_policy_version_len CHECK (char_length(consent_policy_version) BETWEEN 1 AND 40),
+  CONSTRAINT microsoft_connections_policy_version_len
+    CHECK (char_length(consent_policy_version) BETWEEN 1 AND 40 AND consent_policy_version !~ '[[:cntrl:][:space:]]'),
   CONSTRAINT microsoft_connections_result_code_len    CHECK (last_result_code IS NULL OR char_length(last_result_code) <= 100),
+  -- PERMISSION CONTRACT: only the canonical, normalized delegated scopes may be stored
+  -- (Mail.Read + the minimal identity/offline scopes). Any read-write, send, settings,
+  -- files, contacts, calendar, .default or application-only mail scope is refused by
+  -- the finalization RPC before it reaches this CHECK, and this CHECK refuses it again.
+  -- An ACTIVE Outlook connection must hold Mail.Read. NOTE: $select minimization in
+  -- the worker never narrows the authority Mail.Read grants; the policy discloses it.
+  CONSTRAINT microsoft_connections_scopes_allowlist
+    CHECK (pg_catalog.array_length(scopes, 1) BETWEEN 1 AND 8
+           AND scopes <@ ARRAY['Mail.Read', 'offline_access', 'openid', 'email', 'profile']::text[]),
+  CONSTRAINT microsoft_connections_active_requires_mail_read
+    CHECK (status <> 'active' OR 'Mail.Read' = ANY (scopes)),
   -- MVP cardinality: at most one connected Microsoft account per Funnl user.
   CONSTRAINT microsoft_connections_user_unique UNIQUE (user_id),
   -- Composite target for dependent tables' (connection_id, user_id) foreign keys.
@@ -161,6 +177,13 @@ CREATE TABLE public.microsoft_oauth_states (
   key_version              smallint    NOT NULL DEFAULT 1,
   return_origin            text        NOT NULL,          -- server-validated https origin
   integration_type         text        NOT NULL DEFAULT 'outlook',
+  -- CONSENT BINDING: the just-in-time Outlook disclosure the user accepted immediately
+  -- before this state was minted (and before the Microsoft redirect). Only a timestamp
+  -- and a bounded version identifier are stored — never the disclosure text. The
+  -- finalization RPC copies these onto the connection from THIS row; a caller can
+  -- never supply or replace consent evidence.
+  consented_at             timestamptz NOT NULL,
+  consent_policy_version   text        NOT NULL,
   expires_at               timestamptz NOT NULL,
   consumed_at              timestamptz,
   created_at               timestamptz NOT NULL DEFAULT now(),
@@ -168,7 +191,10 @@ CREATE TABLE public.microsoft_oauth_states (
   CONSTRAINT microsoft_oauth_states_state_hash_shape  CHECK (state_hash ~ '^[0-9a-f]{64}$'),
   CONSTRAINT microsoft_oauth_states_integration_check CHECK (integration_type IN ('outlook')),
   CONSTRAINT microsoft_oauth_states_return_origin_https CHECK (return_origin LIKE 'https://%'),
-  CONSTRAINT microsoft_oauth_states_key_version_pos   CHECK (key_version >= 1)
+  CONSTRAINT microsoft_oauth_states_key_version_pos   CHECK (key_version >= 1),
+  CONSTRAINT microsoft_oauth_states_policy_version_len
+    CHECK (char_length(consent_policy_version) BETWEEN 1 AND 40 AND consent_policy_version !~ '[[:cntrl:][:space:]]'),
+  CONSTRAINT microsoft_oauth_states_consent_before_expiry CHECK (consented_at <= expires_at)
 );
 
 CREATE INDEX microsoft_oauth_states_expires_idx ON public.microsoft_oauth_states (expires_at);
@@ -536,26 +562,39 @@ GRANT ALL  ON TABLE public.outlook_candidate_refs TO service_role;
 --  SERVICE-ROLE RPCs (worker / callback)
 -- ══════════════════════════════════════════════════════════════════════════════
 
--- ── RPC 1a: store_microsoft_connection — atomic connection + encrypted tokens ──
--- Mirrors store_google_connection. Tokens arrive ALREADY ENCRYPTED. One transaction:
--- the connection can never exist without its refresh token. Ownership is the
--- server-verified p_user_id (the callback derives it from the consumed OAuth state).
-CREATE FUNCTION public.store_microsoft_connection(
-  p_user_id                uuid,
-  p_ms_account_id          text,
-  p_ms_tenant_id           text,
-  p_account_type           text,
-  p_ms_email               text,
-  p_scopes                 text[],
-  p_status                 text,
-  p_consented_at           timestamptz,
-  p_consent_policy_version text,
-  p_token_expires_at       timestamptz,
-  p_access_ct              text,
-  p_access_nonce           text,
-  p_refresh_ct             text,
-  p_refresh_nonce          text,
-  p_key_version            smallint
+-- ── RPC 1a: finalize_microsoft_connection — state-bound, atomic finalization ──
+-- Called by the future OAuth callback (service_role) with the SHA-256 hex of the raw
+-- state Microsoft returned. In ONE transaction it:
+--   1. locks the matching single-use Outlook state row and refuses it when unknown,
+--      already consumed (replay), expired, or (optionally) owned by a different user
+--      than the caller expected — every refusal is a controlled code;
+--   2. derives user_id, consented_at and consent_policy_version FROM THAT ROW — the
+--      consent evidence attached to the connection is exactly what the user accepted
+--      immediately before the redirect; the caller cannot supply or replace it;
+--   3. normalizes the granted scopes (documented equivalent spellings such as the
+--      https://graph.microsoft.com/ resource prefix or different casing) and refuses
+--      activation unless the set is exactly within the canonical allowlist and
+--      contains Mail.Read (missing_mail_read / forbidden_scope);
+--   4. enforces the same-account rule for an existing connection;
+--   5. upserts the connection (status 'active') and the encrypted tokens;
+--   6. marks the state consumed.
+-- A failure anywhere raises/returns before the consumption UPDATE, so a state is never
+-- consumed with an incomplete connection and a connection is never left "consented"
+-- by a failed attempt. Tokens arrive ALREADY ENCRYPTED (ciphertext + nonce).
+CREATE FUNCTION public.finalize_microsoft_connection(
+  p_state_hash         text,
+  p_expected_user_id   uuid,       -- optional cross-check (e.g. the signed-in session); NULL = trust the state
+  p_ms_account_id      text,
+  p_ms_tenant_id       text,
+  p_account_type       text,
+  p_ms_email           text,
+  p_scopes             text[],     -- raw granted scopes as returned by Microsoft (normalized here)
+  p_token_expires_at   timestamptz,
+  p_access_ct          text,
+  p_access_nonce       text,
+  p_refresh_ct         text,
+  p_refresh_nonce      text,
+  p_key_version        smallint
 )
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -563,53 +602,112 @@ SECURITY DEFINER
 SET search_path = ''
 AS $$
 DECLARE
-  v_conn_id  uuid;
-  v_existing text;
+  v_state     public.microsoft_oauth_states%ROWTYPE;
+  v_uid       uuid;
+  v_existing  text;
+  v_conn_id   uuid;
+  v_raw       text;
+  v_norm      text;
+  v_scopes    text[] := ARRAY[]::text[];
+  v_n         integer;
 BEGIN
-  IF p_user_id IS NULL THEN RETURN jsonb_build_object('result', 'invalid_user'); END IF;
+  -- 1. Locate and lock the single-use state (Outlook only).
+  IF p_state_hash IS NULL OR p_state_hash !~ '^[0-9a-f]{64}$' THEN
+    RETURN jsonb_build_object('result', 'invalid_state');
+  END IF;
+  SELECT * INTO v_state
+  FROM public.microsoft_oauth_states
+  WHERE state_hash = p_state_hash AND integration_type = 'outlook'
+  FOR UPDATE;
+  IF NOT FOUND THEN RETURN jsonb_build_object('result', 'unknown_state'); END IF;
+  IF v_state.consumed_at IS NOT NULL THEN RETURN jsonb_build_object('result', 'state_consumed'); END IF;
+  IF v_state.expires_at <= now() THEN RETURN jsonb_build_object('result', 'state_expired'); END IF;
+  IF p_expected_user_id IS NOT NULL AND p_expected_user_id <> v_state.user_id THEN
+    RETURN jsonb_build_object('result', 'state_user_mismatch');
+  END IF;
+  IF v_state.consented_at IS NULL OR v_state.consent_policy_version IS NULL THEN
+    RETURN jsonb_build_object('result', 'consent_missing');
+  END IF;
+  v_uid := v_state.user_id;
+
+  -- 2. Provider identity + token material.
+  IF p_ms_account_id IS NULL OR char_length(p_ms_account_id) NOT BETWEEN 1 AND 256 THEN
+    RETURN jsonb_build_object('result', 'invalid_account');
+  END IF;
   IF p_account_type IS NULL OR p_account_type NOT IN ('personal', 'work') THEN
     RETURN jsonb_build_object('result', 'invalid_account_type');
   END IF;
-  IF p_status IS NULL OR p_status NOT IN ('active', 'needs_reauth', 'revoked', 'disabled') THEN
-    RETURN jsonb_build_object('result', 'invalid_status');
-  END IF;
-  IF p_consented_at IS NULL OR p_consent_policy_version IS NULL THEN
-    RETURN jsonb_build_object('result', 'consent_required');
+  IF p_ms_email IS NULL OR char_length(p_ms_email) NOT BETWEEN 3 AND 320 THEN
+    RETURN jsonb_build_object('result', 'invalid_email');
   END IF;
   IF p_refresh_ct IS NULL OR p_refresh_nonce IS NULL THEN
     RETURN jsonb_build_object('result', 'refresh_token_required');
   END IF;
 
-  -- Same-account rule: an existing connection may only be refreshed by the SAME
-  -- Microsoft account. A different account must disconnect first (never silent swap).
+  -- 3. Scope normalization + permission contract.
+  IF p_scopes IS NULL OR pg_catalog.array_length(p_scopes, 1) IS NULL THEN
+    RETURN jsonb_build_object('result', 'missing_mail_read');
+  END IF;
+  IF pg_catalog.array_length(p_scopes, 1) > 16 THEN
+    RETURN jsonb_build_object('result', 'invalid_scopes');
+  END IF;
+  FOREACH v_raw IN ARRAY p_scopes LOOP
+    IF v_raw IS NULL THEN RETURN jsonb_build_object('result', 'invalid_scopes'); END IF;
+    v_norm := pg_catalog.lower(pg_catalog.btrim(v_raw));
+    IF char_length(v_norm) = 0 OR char_length(v_norm) > 200 THEN
+      RETURN jsonb_build_object('result', 'invalid_scopes');
+    END IF;
+    -- Documented equivalent spelling: the Graph resource URI prefix.
+    IF v_norm LIKE 'https://graph.microsoft.com/%' THEN
+      v_norm := pg_catalog.substr(v_norm, char_length('https://graph.microsoft.com/') + 1);
+    END IF;
+    v_norm := CASE v_norm
+      WHEN 'mail.read'      THEN 'Mail.Read'
+      WHEN 'offline_access' THEN 'offline_access'
+      WHEN 'openid'         THEN 'openid'
+      WHEN 'email'          THEN 'email'
+      WHEN 'profile'        THEN 'profile'
+      ELSE NULL END;
+    -- Anything outside the canonical allowlist (Mail.ReadWrite*, Mail.Send*, Mail.ReadBasic,
+    -- MailboxSettings.*, Files.*, Contacts.*, Calendars.*, .default, *.All, User.Read, …)
+    -- refuses activation. Broader permissions are never stored "as granted".
+    IF v_norm IS NULL THEN RETURN jsonb_build_object('result', 'forbidden_scope'); END IF;
+    IF NOT (v_norm = ANY (v_scopes)) THEN v_scopes := pg_catalog.array_append(v_scopes, v_norm); END IF;
+  END LOOP;
+  IF NOT ('Mail.Read' = ANY (v_scopes)) THEN
+    RETURN jsonb_build_object('result', 'missing_mail_read');
+  END IF;
+
+  -- 4. Same-account rule: an existing connection may only be refreshed by the SAME
+  --    Microsoft account. A different account must disconnect first (never silent swap).
   SELECT c.ms_account_id INTO v_existing
   FROM public.microsoft_connections c
-  WHERE c.user_id = p_user_id
+  WHERE c.user_id = v_uid
   FOR UPDATE;
   IF v_existing IS NOT NULL AND v_existing <> p_ms_account_id THEN
     RETURN jsonb_build_object('result', 'different_account');
   END IF;
 
+  -- 5. Connection + tokens (consent evidence copied from the state row).
   INSERT INTO public.microsoft_connections
     (user_id, ms_account_id, ms_tenant_id, account_type, ms_email, scopes, status,
      needs_reauth, consented_at, consent_policy_version, last_result_code,
      last_success_at, token_expires_at, updated_at)
   VALUES
-    (p_user_id, p_ms_account_id, p_ms_tenant_id, p_account_type, p_ms_email, p_scopes, p_status,
-     false, p_consented_at, p_consent_policy_version, 'connected',
-     CASE WHEN p_status = 'active' THEN now() ELSE NULL END, p_token_expires_at, now())
+    (v_uid, p_ms_account_id, p_ms_tenant_id, p_account_type, p_ms_email, v_scopes, 'active',
+     false, v_state.consented_at, v_state.consent_policy_version, 'connected',
+     now(), p_token_expires_at, now())
   ON CONFLICT (user_id) DO UPDATE
     SET ms_tenant_id           = EXCLUDED.ms_tenant_id,
         account_type           = EXCLUDED.account_type,
         ms_email               = EXCLUDED.ms_email,
         scopes                 = EXCLUDED.scopes,
-        status                 = EXCLUDED.status,
+        status                 = 'active',
         needs_reauth           = false,
         consented_at           = EXCLUDED.consented_at,
         consent_policy_version = EXCLUDED.consent_policy_version,
         last_result_code       = 'reconnected',
-        last_success_at        = CASE WHEN EXCLUDED.status = 'active' THEN now()
-                                      ELSE public.microsoft_connections.last_success_at END,
+        last_success_at        = now(),
         token_expires_at       = EXCLUDED.token_expires_at,
         updated_at             = now()
   RETURNING id INTO v_conn_id;
@@ -618,7 +716,7 @@ BEGIN
     (connection_id, user_id, access_token_ciphertext, access_token_nonce,
      refresh_token_ciphertext, refresh_token_nonce, key_version, token_expires_at, updated_at)
   VALUES
-    (v_conn_id, p_user_id, p_access_ct, p_access_nonce, p_refresh_ct, p_refresh_nonce,
+    (v_conn_id, v_uid, p_access_ct, p_access_nonce, p_refresh_ct, p_refresh_nonce,
      COALESCE(p_key_version, 1), p_token_expires_at, now())
   ON CONFLICT (connection_id) DO UPDATE
     SET access_token_ciphertext  = EXCLUDED.access_token_ciphertext,
@@ -629,15 +727,24 @@ BEGIN
         token_expires_at         = EXCLUDED.token_expires_at,
         updated_at               = now();
 
+  -- 6. Consume the state ONLY now (same transaction as the writes above).
+  UPDATE public.microsoft_oauth_states
+    SET consumed_at = now()
+  WHERE id = v_state.id AND consumed_at IS NULL;
+  GET DIAGNOSTICS v_n = ROW_COUNT;
+  IF v_n <> 1 THEN
+    RAISE EXCEPTION 'state_consume_failed';   -- rolls back the connection/token writes
+  END IF;
+
   RETURN jsonb_build_object('result', 'stored', 'connection_id', v_conn_id);
 END;
 $$;
 
-REVOKE ALL ON FUNCTION public.store_microsoft_connection(
-  uuid, text, text, text, text, text[], text, timestamptz, text, timestamptz, text, text, text, text, smallint
+REVOKE ALL ON FUNCTION public.finalize_microsoft_connection(
+  text, uuid, text, text, text, text, text[], timestamptz, text, text, text, text, smallint
 ) FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.store_microsoft_connection(
-  uuid, text, text, text, text, text[], text, timestamptz, text, timestamptz, text, text, text, text, smallint
+GRANT EXECUTE ON FUNCTION public.finalize_microsoft_connection(
+  text, uuid, text, text, text, text, text[], timestamptz, text, text, text, text, smallint
 ) TO service_role;
 
 

@@ -5,9 +5,11 @@
 // ownership / composite-FK / RLS / grant model, the SECURITY DEFINER hygiene, the
 // field bounds and lifecycle invariants, the terminal-erasure sets, the atomic
 // add-both acceptance, the lease fencing, the complete-run-only cursor rule, the
-// bounded SKIP LOCKED expiry, the absence of Cron / provider calls / raw content, and
-// that Gmail + Calendar behavior is unchanged (accept/dismiss differ from 20260907 ONLY
-// by the additive erasure lines).
+// bounded SKIP LOCKED expiry, the consent binding to the single-use OAuth state, the
+// Microsoft permission contract (canonical scope allowlist), the accept-RPC argument
+// ownership, the absence of Cron / provider calls / raw content, and that Gmail +
+// Calendar behavior is unchanged (accept/dismiss differ from 20260907 ONLY by the
+// additive erasure lines).
 //
 // Runtime behavior (real RPC calls as authenticated/service_role, two-user isolation,
 // cross-user FK rejection, lease lifecycle, atomic add-both incl. a forced interaction
@@ -63,7 +65,7 @@ function tableSection(name) {
 const NEW_TABLES = ['microsoft_connections', 'microsoft_tokens', 'microsoft_oauth_states',
   'outlook_sync_state', 'new_contact_candidates', 'outlook_candidate_refs']
 const NEW_FUNCTIONS = {
-  store_microsoft_connection: 'uuid, text, text, text, text, text[], text, timestamptz, text, timestamptz, text, text, text, text, smallint',
+  finalize_microsoft_connection: 'text, uuid, text, text, text, text, text[], timestamptz, text, text, text, text, smallint',
   update_microsoft_connection_state: 'uuid, uuid, text, boolean, text',
   reserve_due_outlook_connection: 'integer, integer',
   renew_outlook_sync_lease: 'uuid, uuid, integer',
@@ -76,7 +78,7 @@ const NEW_FUNCTIONS = {
   run_microsoft_local_cleanup: 'uuid',
   expire_pending_outlook_context: 'integer',
 }
-const SERVICE_ONLY = ['store_microsoft_connection', 'update_microsoft_connection_state', 'reserve_due_outlook_connection',
+const SERVICE_ONLY = ['finalize_microsoft_connection', 'update_microsoft_connection_state', 'reserve_due_outlook_connection',
   'renew_outlook_sync_lease', 'release_outlook_sync_lease', 'invalidate_outlook_candidates_by_fingerprint',
   'run_microsoft_local_cleanup', 'expire_pending_outlook_context']
 const USER_ONLY = ['accept_new_contact_candidate', 'dismiss_new_contact_candidate', 'defer_candidate', 'disconnect_my_outlook']
@@ -429,12 +431,18 @@ test('no Cron, no pg_net, no extension, no scheduler, no DML on user rows, no se
   assert.ok(!/vault\.|secret_key|client_secret|VITE_|feature_flag/i.test(CODE))
 })
 test('no Anthropic / Graph / HTTP call and no provider-retention claim in the SQL', () => {
-  // Code (comment-stripped) may not name any provider; the header's "NO Graph or Anthropic call" disclaimer is the only mention.
-  assert.ok(!/anthropic|graph\.microsoft|login\.microsoftonline|net\.http|http_post|http_get/i.test(CODE))
+  // Code (comment-stripped) may not call any provider; the header's "NO Graph or Anthropic call" disclaimer is the only
+  // Anthropic mention, and the Graph resource URI appears only as the scope-prefix normalization literal (LIKE / substr).
+  assert.ok(!/anthropic|login\.microsoftonline|net\.http|http_post|http_get|pg_net|extensions\.http/i.test(CODE))
   assert.strictEqual((SQL.match(/anthropic/gi) || []).length, 1, 'only the header disclaimer mentions the provider')
+  const graphLines = CODE.split('\n').filter(l => /graph\.microsoft\.com/.test(l))
+  assert.deepStrictEqual(graphLines.map(l => l.trim()), [
+    "IF v_norm LIKE 'https://graph.microsoft.com/%' THEN",
+    "v_norm := pg_catalog.substr(v_norm, char_length('https://graph.microsoft.com/') + 1);",
+  ])
   assert.ok(!/zero data retention|\bZDR\b|retention period|retains? (your|the) (data|content)/i.test(SQL))
   const urls = [...SQL.matchAll(/https?:\/\/[^\s']+/g)].map(m => m[0])
-  assert.ok(urls.length > 0 && urls.every(u => u === 'https://%' || u.startsWith('https://(www\\.)?linkedin\\.com/in/')), `unexpected URL: ${urls.join(' ')}`)
+  assert.ok(urls.length > 0 && urls.every(u => u === 'https://%' || u.startsWith('https://(www\\.)?linkedin\\.com/in/') || u.startsWith('https://graph.microsoft.com/')), `unexpected URL: ${urls.join(' ')}`)
 })
 test('no real email addresses or PII in the migration (only pattern text)', () => {
   assert.ok(!/@(gmail|outlook|hotmail|yahoo|icloud|example\.com)/i.test(SQL))
@@ -442,6 +450,8 @@ test('no real email addresses or PII in the migration (only pattern text)', () =
 })
 test('runtime SQL companion covers the required scenarios and uses only example.invalid fixtures', () => {
   for (const s of ['Zero Outlook rows after a clean apply', 'CROSS-USER', 'anon', 'two-user isolation', 'ADD BOTH (atomic)', 'ADD CONTACT ONLY',
+    'Consent binding, state lifecycle, permission contract', 'REPLAY', 'UNKNOWN / WRONG-INTEGRATION', 'EXPIRED state', 'WRONG USER',
+    'PERMISSION CONTRACT', 'REAUTHORIZATION with a NEW state', 'FAILED FINALIZATION', 'Explicit grant matrix', 'has_column_privilege', 'has_function_privilege',
     'duplicate email refused', 'forced interaction failure', 'NO orphan contact', 'Dismiss / defer / idempotency', 'Lease lifecycle', 'stale run cannot renew',
     'INCOMPLETE release: cursor held', 'COMPLETE release: cursors advance', 'Bounded expiry', 'Outlook disconnect', 'run_microsoft_local_cleanup', 'account deletion',
     'Teardown']) {
@@ -454,6 +464,81 @@ test('runtime SQL companion covers the required scenarios and uses only example.
 test('PR-A file scope: this migration, this suite, and the runtime SQL only (no function, src, config or policy change)', () => {
   // The suite cannot see git; it pins that the migration does not reference Edge Function or frontend artifacts.
   assert.ok(!/supabase\/functions|src\/|PrivacyPage|config\.toml|vercel\.json/.test(SQL))
+})
+
+// ── Consent binding, permission contract, accept-argument ownership ───────────
+console.log('\nconsent binding to the OAuth state')
+test('microsoft_oauth_states carries NOT NULL consented_at + bounded consent_policy_version, consent precedes expiry, single-use, PKCE-bound, outlook-only', () => {
+  const d = tableDdl('microsoft_oauth_states')
+  assert.ok(/consented_at\s+timestamptz NOT NULL/.test(d) && /consent_policy_version\s+text\s+NOT NULL/.test(d))
+  assert.ok(/microsoft_oauth_states_policy_version_len\s+CHECK \(char_length\(consent_policy_version\) BETWEEN 1 AND 40 AND consent_policy_version !~ '\[\[:cntrl:\]\[:space:\]\]'\)/.test(d))
+  assert.ok(/microsoft_oauth_states_consent_before_expiry CHECK \(consented_at <= expires_at\)/.test(d))
+  assert.ok(/state_hash\s+text\s+NOT NULL UNIQUE/.test(d) && /consumed_at\s+timestamptz,/.test(d) && /expires_at\s+timestamptz NOT NULL/.test(d))
+  assert.ok(/pkce_verifier_ciphertext text\s+NOT NULL/.test(d) && /pkce_verifier_nonce\s+text\s+NOT NULL/.test(d))
+  assert.ok(/user_id\s+uuid\s+NOT NULL REFERENCES auth\.users\(id\) ON DELETE CASCADE/.test(d))
+  assert.ok(!/consent_text|disclosure_text|policy_text/.test(SQL), 'no raw consent text column')
+})
+test('finalize_microsoft_connection derives user, consent timestamp and version from the locked state — never from arguments', () => {
+  const b = fnBody('finalize_microsoft_connection')
+  const params = b.slice(0, b.indexOf('RETURNS')).match(/p_\w+/g)
+  assert.deepStrictEqual(params, ['p_state_hash', 'p_expected_user_id', 'p_ms_account_id', 'p_ms_tenant_id', 'p_account_type', 'p_ms_email', 'p_scopes',
+    'p_token_expires_at', 'p_access_ct', 'p_access_nonce', 'p_refresh_ct', 'p_refresh_nonce', 'p_key_version'])
+  assert.ok(!/p_user_id|p_consented_at|p_consent_policy_version|p_status/.test(b), 'no caller-supplied ownership, consent or status')
+  assert.ok(/WHERE state_hash = p_state_hash AND integration_type = 'outlook'\s+FOR UPDATE/.test(b), 'state locked, outlook only')
+  assert.ok(/IF NOT FOUND THEN RETURN jsonb_build_object\('result', 'unknown_state'\)/.test(b))
+  assert.ok(/IF v_state\.consumed_at IS NOT NULL THEN RETURN jsonb_build_object\('result', 'state_consumed'\)/.test(b), 'replay refused')
+  assert.ok(/IF v_state\.expires_at <= now\(\) THEN RETURN jsonb_build_object\('result', 'state_expired'\)/.test(b))
+  assert.ok(/IF p_expected_user_id IS NOT NULL AND p_expected_user_id <> v_state\.user_id THEN\s+RETURN jsonb_build_object\('result', 'state_user_mismatch'\)/.test(b))
+  assert.ok(/v_uid := v_state\.user_id;/.test(b))
+  assert.ok(/\(v_uid, p_ms_account_id, p_ms_tenant_id, p_account_type, p_ms_email, v_scopes, 'active',\s+false, v_state\.consented_at, v_state\.consent_policy_version, 'connected',/.test(b), 'consent copied from the state row')
+  assert.ok(/consented_at\s+= EXCLUDED\.consented_at,\s+consent_policy_version = EXCLUDED\.consent_policy_version,/.test(b), 'reauth adopts the new state version')
+})
+test('state consumption happens only after the connection + token writes, in the same transaction, and a consume failure rolls everything back', () => {
+  const b = fnBody('finalize_microsoft_connection')
+  const conn = b.indexOf('INSERT INTO public.microsoft_connections'), tok = b.indexOf('INSERT INTO public.microsoft_tokens'), consume = b.indexOf('SET consumed_at = now()')
+  assert.ok(conn !== -1 && tok !== -1 && consume !== -1 && conn < tok && tok < consume)
+  assert.ok(/WHERE id = v_state\.id AND consumed_at IS NULL;\s+GET DIAGNOSTICS v_n = ROW_COUNT;\s+IF v_n <> 1 THEN\s+RAISE EXCEPTION 'state_consume_failed'/.test(b))
+  assert.ok(!/EXCEPTION\s+WHEN/.test(b), 'no exception handler swallows a failed write (the whole call rolls back)')
+  const firstWrite = b.indexOf('INSERT INTO')
+  for (const code of ['invalid_state', 'unknown_state', 'state_consumed', 'state_expired', 'state_user_mismatch', 'consent_missing', 'invalid_account', 'invalid_account_type',
+    'invalid_email', 'refresh_token_required', 'missing_mail_read', 'invalid_scopes', 'forbidden_scope', 'different_account']) {
+    assert.ok(b.indexOf(`'${code}'`) !== -1 && b.indexOf(`'${code}'`) < firstWrite, `${code} decided before any write`)
+  }
+})
+
+console.log('\nMicrosoft permission contract')
+test('connections store only the canonical normalized scope allowlist; an active connection requires Mail.Read', () => {
+  const d = tableDdl('microsoft_connections')
+  assert.ok(/microsoft_connections_scopes_allowlist\s+CHECK \(pg_catalog\.array_length\(scopes, 1\) BETWEEN 1 AND 8\s+AND scopes <@ ARRAY\['Mail\.Read', 'offline_access', 'openid', 'email', 'profile'\]::text\[\]\)/.test(d))
+  assert.ok(/microsoft_connections_active_requires_mail_read\s+CHECK \(status <> 'active' OR 'Mail\.Read' = ANY \(scopes\)\)/.test(d))
+  assert.ok(!/ReadWrite|Mail\.Send|MailboxSettings|Files\.|Contacts\.|Calendars\.|\.default|\.All\b|ReadBasic/.test(d.replace(/--.*/g, '')), 'no broader scope named in the DDL')
+})
+test('finalization normalizes documented equivalent spellings and refuses everything outside the allowlist', () => {
+  const b = fnBody('finalize_microsoft_connection')
+  assert.ok(/v_norm := pg_catalog\.lower\(pg_catalog\.btrim\(v_raw\)\)/.test(b), 'trim + lowercase')
+  assert.ok(/IF v_norm LIKE 'https:\/\/graph\.microsoft\.com\/%' THEN\s+v_norm := pg_catalog\.substr\(v_norm, char_length\('https:\/\/graph\.microsoft\.com\/'\) \+ 1\)/.test(b), 'resource-prefix normalization')
+  const cases = [...b.matchAll(/WHEN '([a-z_.]+)'\s+THEN '([A-Za-z_.]+)'/g)].map(m => [m[1], m[2]])
+  assert.deepStrictEqual(cases, [['mail.read', 'Mail.Read'], ['offline_access', 'offline_access'], ['openid', 'openid'], ['email', 'email'], ['profile', 'profile']])
+  assert.ok(/ELSE NULL END;/.test(b) && /IF v_norm IS NULL THEN RETURN jsonb_build_object\('result', 'forbidden_scope'\)/.test(b), 'unknown → forbidden_scope')
+  assert.ok(/IF NOT \('Mail\.Read' = ANY \(v_scopes\)\) THEN\s+RETURN jsonb_build_object\('result', 'missing_mail_read'\)/.test(b))
+  assert.ok(/array_length\(p_scopes, 1\) > 16/.test(b) && /char_length\(v_norm\) > 200/.test(b), 'bounded input')
+  assert.ok(!/SQLERRM|error_description|error_message/.test(b), 'no provider/db error text')
+})
+
+console.log('\naccept RPC argument ownership')
+test('accept_new_contact_candidate accepts only user-editable values + the add-both choice; ownership, status, source, fingerprints, expiry, ids and evidence are never caller-controlled', () => {
+  const b = fnBody('accept_new_contact_candidate')
+  const params = b.slice(0, b.indexOf('RETURNS')).match(/p_\w+/g)
+  assert.deepStrictEqual(params, ['p_candidate_id', 'p_name', 'p_company', 'p_role', 'p_how_met', 'p_linkedin_url', 'p_tags', 'p_relationship_type', 'p_relationship_note',
+    'p_create_interaction', 'p_interaction_type', 'p_interaction_date', 'p_interaction_notes', 'p_follow_up_date'])
+  for (const forbidden of ['p_user_id', 'p_email', 'p_status', 'p_source', 'p_fingerprint', 'p_person_fingerprint', 'p_episode_fingerprint', 'p_key_version',
+    'p_context_expires_at', 'p_accepted_contact_id', 'p_accepted_interaction_id', 'p_ms_', 'p_evidence', 'p_confidence', 'p_extraction_status']) {
+    assert.ok(!b.includes(forbidden), `${forbidden} must not be an argument`)
+  }
+  // Email decision: NOT editable at acceptance — the locked candidate value (Microsoft envelope metadata) is used.
+  assert.ok(/v_email := pg_catalog\.lower\(pg_catalog\.btrim\(v_cand\.proposed_email\)\)/.test(b))
+  assert.ok(/INSERT INTO public\.contacts\s+\(user_id, name, company, role, how_met, email, linkedin_url, tags, relationship_type, relationship_note\)\s+VALUES\s+\(v_uid, v_name, p_company, p_role, p_how_met, v_email, p_linkedin_url, p_tags, p_relationship_type, p_relationship_note\)/.test(b))
+  assert.ok(/status = 'accepted',\s+accepted_contact_id = v_cid,\s+accepted_interaction_id = v_iid,/.test(b), 'status and ids set by the RPC only')
 })
 
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed\n`)
