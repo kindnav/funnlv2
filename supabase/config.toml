@@ -396,6 +396,14 @@ verify_jwt = false
 [functions.google-calendar-sync]
 verify_jwt = true
 
+# delete-account is called from the browser through supabase.functions.invoke, which
+# sends the user's session JWT in Authorization (the project key travels separately in
+# apikey). The platform check validates that user JWT before the handler runs
+# (defense-in-depth); the handler ALSO calls auth.getUser() and derives the account to
+# delete solely from the verified user.id. Explicit for documentation; true is the default.
+[functions.delete-account]
+verify_jwt = true
+
 # ── E2B: Gmail (DORMANT) ──────────────────────────────────────────────────────
 # gmail-oauth-start is JWT-authenticated exactly like google-oauth-start: the platform
 # verifies the Supabase JWT and the handler ALSO calls auth.getUser(). It additionally
