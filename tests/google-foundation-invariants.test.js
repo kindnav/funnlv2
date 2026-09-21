@@ -5,6 +5,8 @@
 //   - google_oauth_states has RLS on and no client policy
 //   - one Google connection per user (unique user_id)
 //   - the callback function is verify_jwt=false; start/disconnect are not
+//   - delete-account is explicitly verify_jwt=true (browser calls carry the user's
+//     session JWT) and the handler ALSO authorizes via auth.getUser() before deleting
 //   - NO scope creep: no Gmail scope/API, no event fetching, no scheduler, no
 //     Pub/Sub, no interaction candidates/source links, no auto-log, no AI here.
 //
@@ -92,6 +94,105 @@ test('callback is verify_jwt=false', () => {
 test('start and disconnect are NOT set to verify_jwt=false', () => {
   assert.ok(!/\[functions\.google-oauth-start\]/.test(config))
   assert.ok(!/\[functions\.google-oauth-disconnect\]/.test(config))
+})
+
+// ── delete-account: platform JWT verification + handler-side authorization ────
+// delete-account is invoked from the browser through supabase.functions.invoke,
+// which sends the user's session JWT in Authorization. verify_jwt = true keeps the
+// platform check in front of the handler; the handler's own auth.getUser() is the
+// second, mandatory layer. Pin both, plus the ordering that makes deletion safe.
+console.log('\ndelete-account authentication')
+const deleteAccountSrc = read('supabase/functions/delete-account/index.ts')
+const FUNCTION_JWT_SETTINGS = {
+  'google-oauth-callback': 'false',
+  'google-calendar-sync': 'true',
+  'delete-account': 'true',
+  'gmail-oauth-start': 'true',
+  'gmail-sync-worker': 'false',
+}
+// Non-comment, non-blank settings lines of one [functions.<name>] section.
+function functionSectionSettings(name) {
+  const header = `[functions.${name}]`
+  const start = config.indexOf(header)
+  assert.ok(start !== -1, `missing ${header}`)
+  const rest = config.slice(start + header.length)
+  const next = rest.search(/^\[/m)
+  return rest.slice(0, next === -1 ? undefined : next)
+    .split(/\r?\n/).map(l => l.trim()).filter(l => l && !l.startsWith('#'))
+}
+const functionHeaders = () => (config.match(/^\[functions\.[^\]]+\]\s*$/gm) || []).map(h => h.trim())
+
+test('config.toml declares exactly one [functions.delete-account] section', () => {
+  const n = functionHeaders().filter(h => h === '[functions.delete-account]').length
+  assert.strictEqual(n, 1, `found ${n} sections`)
+})
+test('the delete-account section has exactly one setting: verify_jwt = true', () => {
+  assert.deepStrictEqual(functionSectionSettings('delete-account'), ['verify_jwt = true'])
+})
+test('config.toml has no duplicate [functions.*] section header', () => {
+  const names = functionHeaders()
+  assert.strictEqual(new Set(names).size, names.length, `duplicates among ${names.join(', ')}`)
+})
+test('every per-function verify_jwt setting is pinned (no other function sections exist)', () => {
+  const names = functionHeaders().map(h => h.slice('[functions.'.length, -1)).sort()
+  assert.deepStrictEqual(names, Object.keys(FUNCTION_JWT_SETTINGS).sort())
+  for (const [name, value] of Object.entries(FUNCTION_JWT_SETTINGS)) {
+    assert.deepStrictEqual(functionSectionSettings(name), [`verify_jwt = ${value}`], `${name} must be verify_jwt = ${value}`)
+  }
+})
+test('handler reads the Authorization header and rejects its absence with 401', () => {
+  assert.ok(deleteAccountSrc.includes("req.headers.get('Authorization')"))
+  assert.ok(/if \(!authHeader\)[\s\S]*?status: 401/.test(deleteAccountSrc))
+})
+test('handler calls auth.getUser() and rejects failure with 401', () => {
+  assert.ok(/await supabaseUser\.auth\.getUser\(\)/.test(deleteAccountSrc))
+  assert.ok(/if \(authError \|\| !user\)[\s\S]*?status: 401/.test(deleteAccountSrc))
+})
+test('authentication precedes admin construction, cleanupGoogle, contact deletion, and deleteUser', () => {
+  const at = (needle) => { const i = deleteAccountSrc.indexOf(needle); assert.ok(i !== -1, `missing ${needle}`); return i }
+  const headerGuard = at('if (!authHeader)')
+  const getUser = at('.auth.getUser()')
+  const authGuard = at('if (authError || !user)')
+  const adminClient = at('const admin = createClient(')
+  const cleanup = at('await cleanupGoogle(admin, user.id)')
+  const contacts = at(".from('contacts')")
+  const deleteUser = at('.auth.admin.deleteUser(user.id)')
+  assert.ok(headerGuard < getUser && getUser < authGuard, 'header guard → getUser → auth guard')
+  assert.ok(authGuard < adminClient, 'admin client is constructed only after authentication')
+  assert.ok(adminClient < cleanup && cleanup < contacts && contacts < deleteUser, 'admin → cleanup → contacts → deleteUser')
+  // The user-scoped client exists only to verify the caller; it never deletes.
+  assert.ok(!/supabaseUser\.(from|rpc)\(/.test(deleteAccountSrc), 'user-scoped client performs no data operations')
+})
+test('every destructive operation is scoped from the verified user.id', () => {
+  assert.ok(/\.from\('contacts'\)\s*\.delete\(\)\s*\.eq\('user_id', user\.id\)/.test(deleteAccountSrc))
+  assert.ok(/cleanupGoogle\(admin, user\.id\)/.test(deleteAccountSrc))
+  assert.ok(/\.auth\.admin\.deleteUser\(user\.id\)/.test(deleteAccountSrc))
+  assert.ok(!/deleteUser\((?!user\.id\))/.test(deleteAccountSrc), 'deleteUser only ever receives user.id')
+  assert.ok(!/cleanupGoogle\(admin, (?!user\.id\))/.test(deleteAccountSrc), 'cleanupGoogle only ever receives user.id')
+  assert.ok(!/\.delete\(\)(?![\s\S]{0,40}\.eq\('user_id', user\.id\))/.test(deleteAccountSrc), 'every delete is user_id-scoped')
+})
+test('no identity is accepted from body, query, custom headers, user_metadata, or app_metadata', () => {
+  assert.ok(!/req\.json\(\)|req\.text\(\)|req\.formData\(\)|req\.body|req\.arrayBuffer\(\)/.test(deleteAccountSrc), 'no request body read')
+  assert.ok(!/searchParams|new URL\(req\.url\)|req\.url/.test(deleteAccountSrc), 'no query-parameter read')
+  const headerReads = deleteAccountSrc.match(/req\.headers\.get\([^)]*\)/g) || []
+  assert.deepStrictEqual(headerReads, ["req.headers.get('Authorization')"], 'only the Authorization header is read')
+  assert.ok(!/user_metadata|app_metadata/.test(deleteAccountSrc), 'no metadata-derived identity')
+  assert.ok(!/\b(body|params|query)\s*[.[]\s*['"]?user_?id/i.test(deleteAccountSrc), 'no request-supplied user id')
+})
+test('the success response is unreachable until cleanup, contact deletion, and deleteUser complete', () => {
+  const success = deleteAccountSrc.indexOf('success: true')
+  assert.ok(success !== -1)
+  const idx = (n) => deleteAccountSrc.indexOf(n)
+  assert.ok(idx('await cleanupGoogle(admin, user.id)') < success)
+  assert.ok(idx(".from('contacts')") < success && idx('if (contactsErr) throw') < success, 'contacts delete + error check before success')
+  assert.ok(idx('.auth.admin.deleteUser(user.id)') < success && idx('if (deleteErr) throw') < success, 'deleteUser + error check before success')
+  assert.strictEqual((deleteAccountSrc.match(/success: true/g) || []).length, 1, 'exactly one success path')
+  assert.ok(/if \(deleteErr\) throw[\s\S]*?success: true/.test(deleteAccountSrc))
+})
+test('CORS preflight and error contract are unchanged', () => {
+  assert.ok(/if \(req\.method === 'OPTIONS'\)[\s\S]*?return new Response\('ok', \{ headers: corsHeaders \}\)/.test(deleteAccountSrc))
+  assert.ok(/'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type'/.test(deleteAccountSrc))
+  assert.ok(/catch \(err\)[\s\S]*?status: 500/.test(deleteAccountSrc))
 })
 
 // ── No scope creep across all Google function/shared/lib files ────────────────
