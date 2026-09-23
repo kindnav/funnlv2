@@ -203,6 +203,61 @@ test('the sanitizer documents the three-part header boundary explicitly', () => 
   assert.ok(!/the transport never requests them/i.test(doc), 'stale claim must not return')
 })
 
+test('the normalizeGraphMessage JSDoc describes the real `extra` contract', () => {
+  const src = read('supabase/functions/shared/outlookMessageNormalize.js')
+  const i = src.indexOf('export function normalizeGraphMessage')
+  const doc = src.slice(src.lastIndexOf('/**', i), i)
+  assert.ok(doc.length > 0, 'JSDoc located')
+  for (const key of ['displayNames', 'automationFactsComplete', 'folder']) {
+    assert.ok(doc.includes(key), `JSDoc must describe ${key}`)
+  }
+  // The two stale claims must never return, in any phrasing.
+  assert.ok(!/draft flag/i.test(doc), 'JSDoc must not claim `extra` carries a draft flag')
+  assert.ok(!/\bthe internetMessageId\b/i.test(doc) && !/and the internetMessageId/i.test(doc),
+    'JSDoc must not claim `extra` carries internetMessageId')
+  // And it must say so positively, so a reader is not left guessing.
+  assert.ok(/neither draft state nor `?internetMessageId`?/i.test(doc),
+    'JSDoc must state that neither is carried')
+  assert.ok(/is_draft/.test(doc), 'and name the code a draft actually returns')
+  assert.ok(!/raw header/i.test(doc) || /no raw header is ever carried/i.test(doc),
+    'JSDoc must not imply raw headers are returned in `extra`')
+})
+
+test('the successful `extra` object returns exactly the three reviewed keys', () => {
+  const code = exec(read('supabase/functions/shared/outlookMessageNormalize.js'))
+  const i = code.indexOf('    extra: {')
+  assert.ok(i !== -1, 'success-path extra literal located')
+  const block = code.slice(i, code.indexOf('\n  }\n', i))
+  const keys = [...block.matchAll(/^\s{6}(\w+)\s*[,:]/gm)].map((m) => m[1])
+  assert.deepStrictEqual(keys.sort(), ['automationFactsComplete', 'displayNames', 'folder'],
+    `extra must carry exactly the three reviewed keys, saw ${keys}`)
+  for (const forbidden of ['internetMessageId', 'isDraft', 'draft', 'internetMessageHeaders']) {
+    assert.ok(!block.includes(forbidden), `extra must not carry ${forbidden}`)
+  }
+})
+
+test('a draft fails closed with is_draft and never yields a successful normalization', () => {
+  const code = exec(read('supabase/functions/shared/outlookMessageNormalize.js'))
+  assert.ok(/if \(raw\.isDraft === true\) return \{ ok: false, code: 'is_draft' \}/.test(code),
+    'the draft guard returns ok:false with the documented code')
+  // The guard must precede the success return, otherwise a draft could slip through.
+  assert.ok(code.indexOf("code: 'is_draft'") < code.indexOf('    extra: {'),
+    'the draft guard runs before the success path')
+})
+
+test('internetMessageId is absent from every projection, output and contract', () => {
+  const t = read('supabase/functions/shared/outlookGraphTransport.js')
+  for (const name of ['DISCOVERY_SELECT', 'CONTENT_SELECT']) {
+    const arr = new RegExp(`${name} = Object\\.freeze\\(\\[([\\s\\S]*?)\\]\\)`).exec(t)[1]
+    assert.ok(!arr.includes('internetMessageId'), `${name} must not select internetMessageId`)
+  }
+  // Absent from ALL executable module code (fingerprints, drafts, Anthropic request).
+  for (const m of MODULES) {
+    assert.ok(!exec(m.src).includes('internetMessageId'),
+      `${m.name} executable code must not reference internetMessageId`)
+  }
+})
+
 test('header facts are booleans and small enums only — no raw name/value can travel', () => {
   const norm = read('supabase/functions/shared/outlookMessageNormalize.js')
   // The classifier returns a fixed key set; nothing derived from a header VALUE other

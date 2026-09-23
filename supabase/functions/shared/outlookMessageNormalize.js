@@ -192,9 +192,18 @@ export function readRemoval(raw) {
  *
  * `message` is a strict E1 NormalizedMessage (metadata only — it carries no content
  * and is validated by classifyNormalizedMessage before it is returned).
- * `extra` carries Outlook-only facts that E1 has no field for: per-address display
- * names (needed for a `provider_metadata` name proposal), whether the automation
- * header collection was actually returned, the draft flag, and the internetMessageId.
+ *
+ * `extra` carries Outlook-only facts that E1 has no field for, and exactly three:
+ *   * `displayNames`            per-address display names, used for a
+ *                               `provider_metadata` name proposal;
+ *   * `automationFactsComplete` whether automation headers have been ASSESSED (always
+ *                               false at discovery — see applyAutomationFacts). It is
+ *                               a boolean only: no raw header is ever carried here;
+ *   * `folder`                  the discovery folder, 'inbox' or 'sentitems'.
+ *
+ * It carries neither draft state nor `internetMessageId`: a draft is rejected with
+ * code `is_draft` before any successful result is returned, and `internetMessageId` is
+ * selected by no projection and retained nowhere.
  */
 export function normalizeGraphMessage(raw, folder) {
   if (!isPlainObject(raw)) return { ok: false, code: 'not_object' }
