@@ -114,6 +114,95 @@ test('the raw header collection is confined to one classification call site', ()
     'the other hands it straight to the classifier')
 })
 
+test('internetMessageHeaders is requested ONLY in CONTENT_SELECT, never in discovery', () => {
+  const t = read('supabase/functions/shared/outlookGraphTransport.js')
+  const discovery = /DISCOVERY_SELECT = Object\.freeze\(\[([\s\S]*?)\]\)/.exec(t)[1]
+  const content = /CONTENT_SELECT = Object\.freeze\(\[([\s\S]*?)\]\)/.exec(t)[1]
+  assert.ok(!discovery.includes('internetMessageHeaders'), 'discovery must not request headers')
+  assert.ok(content.includes("'internetMessageHeaders',"), 'the content read is where they are requested')
+  // And no OTHER select/query anywhere asks for them.
+  const selects = [...t.matchAll(/\$select=\$\{(\w+)\.join/g)].map((m) => m[1])
+  assert.deepStrictEqual([...new Set(selects)].sort(), ['CONTENT_SELECT', 'DISCOVERY_SELECT'],
+    'only these two projections exist')
+})
+
+test('the raw header collection is consumed only by the transport classifier call', () => {
+  const t = exec(read('supabase/functions/shared/outlookGraphTransport.js'))
+  const consumers = t.split('\n').filter((l) => /json\.internetMessageHeaders|raw\.internetMessageHeaders/.test(l))
+  assert.deepStrictEqual(consumers.map((l) => l.trim()),
+    ['const automation = automationFactsFromHeaders(json.internetMessageHeaders)'],
+    'exactly one consumer, and it hands the collection straight to the classifier')
+  // No other module reads a header collection off a payload at all.
+  for (const m of MODULES.filter((x) => x.name !== 'outlookGraphTransport.js')) {
+    assert.ok(!/\.internetMessageHeaders/.test(exec(m.src)),
+      `${m.name} must not read a header collection`)
+  }
+})
+
+test('the sanitizer neither accepts nor references internetMessageHeaders', () => {
+  const s = MODULES.find((m) => m.name === 'outlookContentSanitizer.js')
+  assert.ok(!exec(s.src).includes('internetMessageHeaders'),
+    'sanitizer executable code must never reference the header collection')
+  // Its only content input is the documented body/subject shape.
+  const sig = /export function sanitizeMessageContent\(input\)/.test(s.src)
+  assert.ok(sig, 'single-object input signature')
+  for (const field of ['bodyContentType', 'bodyContent', 'uniqueBodyContentType', 'uniqueBodyContent', 'subject']) {
+    assert.ok(s.src.includes(`input.${field}`), `sanitizer reads input.${field}`)
+  }
+  const reads = [...exec(s.src).matchAll(/input\.(\w+)/g)].map((m) => m[1])
+  assert.deepStrictEqual([...new Set(reads)].sort(),
+    ['bodyContent', 'bodyContentType', 'subject', 'uniqueBodyContent', 'uniqueBodyContentType'],
+    'and reads nothing else off its input')
+})
+
+test('no file claims the transport never requests message headers', () => {
+  // The transport DOES request them, on the per-message GET. A bare "never requests
+  // headers" claim is false; the only truthful form is qualified to delta/discovery.
+  //
+  // Comments wrap across lines and can use a pronoun ("...headers are not inputs /
+  // the transport never requests them"), so the text is FLATTENED first and matched
+  // over a window - a line-by-line scan would miss exactly that phrasing.
+  for (const f of [...MODULES, ...SUITES]) {
+    const flat = f.src
+      .split('\n')
+      .map((l) => l.replace(/^\s*(\/\/|\*)\s?/, ''))
+      .join(' ')
+      .replace(/\s+/g, ' ')
+    const patterns = [
+      /never\s+requests?\s+(them|those|these|it|headers?|message headers?)/gi,
+      /(?:headers?)[\s\S]{0,80}?\bnever\s+requested\b/gi,
+      /\bdoes\s+not\s+request\s+(them|those|these|headers?)/gi,
+    ]
+    for (const re of patterns) {
+      for (const m of flat.matchAll(re)) {
+        const window = flat.slice(Math.max(0, m.index - 220), m.index + 220)
+        // Truthful only when scoped to delta/discovery, or when it is plainly about
+        // something other than headers.
+        const qualified = /delta|discovery/i.test(window)
+        const aboutHeaders = /header/i.test(window)
+        assert.ok(qualified || !aboutHeaders,
+          `${f.name}: unqualified "never requests headers" claim near: ...${window.slice(150, 330)}...`)
+      }
+    }
+  }
+})
+
+test('the sanitizer documents the three-part header boundary explicitly', () => {
+  const doc = MODULES.find((m) => m.name === 'outlookContentSanitizer.js').src
+  const intro = doc.slice(0, doc.indexOf('export const MAX_INPUT_CHARS'))
+  // 1. the transport fetches and classifies them
+  assert.ok(/per-message GET/i.test(intro) && /CONTENT_SELECT/.test(intro),
+    'says where headers ARE fetched')
+  assert.ok(/automationFactsFromHeaders/.test(intro) && /DISCARDS|discards/.test(intro),
+    'says they are reduced to facts and discarded')
+  // 2. the sanitizer does not receive them
+  assert.ok(/never passed into this sanitizer/i.test(intro), 'says the sanitizer never receives them')
+  // 3. no persistence or logging of them
+  assert.ok(/database, storage, a file, or a log/i.test(intro), 'says they never reach storage or logs')
+  // And the stale claim is gone.
+  assert.ok(!/the transport never requests them/i.test(doc), 'stale claim must not return')
+})
+
 test('header facts are booleans and small enums only — no raw name/value can travel', () => {
   const norm = read('supabase/functions/shared/outlookMessageNormalize.js')
   // The classifier returns a fixed key set; nothing derived from a header VALUE other

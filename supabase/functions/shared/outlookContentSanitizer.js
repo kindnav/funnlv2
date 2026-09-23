@@ -11,10 +11,23 @@
 // stated explicitly rather than inferred.
 //
 // ── WHAT IT NEVER TOUCHES ─────────────────────────────────────────────────────
-// Attachments, inline attachment payloads, raw MIME, and message headers are not
-// inputs here and have no code path: the transport never requests them (see
-// CONTENT_SELECT in outlookGraphTransport.js), and this function's signature accepts
-// only the two body projections and the subject.
+// Attachments, inline attachment payloads and raw MIME are never inputs to this
+// sanitizer and have no code path here: nothing requests them, and this function's
+// signature accepts only the two body projections and the subject
+// (`bodyContentType`/`bodyContent`, `uniqueBodyContentType`/`uniqueBodyContent`,
+// `subject`).
+//
+// Microsoft message headers are a different case, and the distinction matters:
+//   * They ARE fetched - by the transport's single bounded per-message GET, which
+//     selects `internetMessageHeaders` alongside the body (see CONTENT_SELECT in
+//     outlookGraphTransport.js). That is deliberate: automation/bulk-list detection
+//     needs them, and fetching them there avoids a second round trip.
+//   * The transport immediately reduces the raw collection to the controlled
+//     automation facts (booleans and small enums) via `automationFactsFromHeaders`
+//     and DISCARDS the collection; it is never returned from `readMessageContent`.
+//   * Raw headers are therefore never passed into this sanitizer, and no header name
+//     or value can reach the Anthropic request, a fingerprint, a stored draft, the
+//     database, storage, a file, or a log.
 //
 // ── STORAGE / LOGGING INVARIANT ───────────────────────────────────────────────
 // The strings this module returns are MEMORY-ONLY working values. Nothing here writes
