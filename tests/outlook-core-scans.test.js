@@ -97,6 +97,63 @@ test('raw body / snippet / HTML / attachment keys never appear in a returned sha
   }
 })
 
+test('the raw header collection is confined to one classification call site', () => {
+  // `internetMessageHeaders` may be named in exactly two places: the CONTENT $select
+  // (to request it) and the single read that immediately reduces it to facts. Any
+  // other executable reference would be a new way for a raw header to travel.
+  const sites = []
+  for (const m of MODULES) {
+    for (const line of exec(m.src).split('\n')) {
+      if (line.includes('internetMessageHeaders')) sites.push(`${m.name}: ${line.trim()}`)
+    }
+  }
+  assert.strictEqual(sites.length, 2, `unexpected header references:\n${sites.join('\n')}`)
+  assert.ok(sites.some((s) => s.startsWith('outlookGraphTransport.js') && s.includes("'internetMessageHeaders',")),
+    'one is the CONTENT $select entry')
+  assert.ok(sites.some((s) => s.includes('automationFactsFromHeaders(json.internetMessageHeaders)')),
+    'the other hands it straight to the classifier')
+})
+
+test('header facts are booleans and small enums only — no raw name/value can travel', () => {
+  const norm = read('supabase/functions/shared/outlookMessageNormalize.js')
+  // The classifier returns a fixed key set; nothing derived from a header VALUE other
+  // than the allowlisted enums is constructed.
+  for (const k of ['autoSubmitted', 'precedence', 'hasListId', 'hasListUnsubscribe', 'hasAutoResponseSuppress']) {
+    assert.ok(norm.includes(k), `${k} is part of the fixed fact shape`)
+  }
+  // The only header names it looks for are the documented allowlist.
+  const looked = [...norm.matchAll(/valuesOf\('([a-z-]+)'\)|present\('([a-z-]+)'\)/g)]
+    .map((m) => m[1] || m[2])
+  assert.deepStrictEqual([...new Set(looked)].sort(),
+    ['auto-submitted', 'list-id', 'list-unsubscribe', 'precedence', 'x-auto-response-suppress'],
+    'exactly the automation allowlist, nothing else')
+})
+
+test('no header value can reach a fingerprint, a stored draft, or an Anthropic request', () => {
+  // Fingerprint inputs are a fixed five-slot contract with no header slot.
+  const fp = read('supabase/functions/shared/emailFingerprint.js')
+  assert.ok(fp.includes("'provider', 'accountNamespace', 'contactId', 'conversationKey', 'firstMessageKey'"),
+    'the fingerprint contract is fixed and header-free')
+  const participants = exec(read('supabase/functions/shared/outlookParticipants.js'))
+  assert.ok(!participants.includes('internetMessageHeaders') && !participants.includes('automation.facts'),
+    'matching never handles a header collection')
+
+  // The Anthropic request builder takes a fixed input shape with no header field.
+  const draft = exec(read('supabase/functions/shared/outlookDraftContract.js'))
+  for (const bad of ['internetMessageHeaders', 'headers:', 'autoSubmitted', 'precedence',
+    'hasListId', 'listUnsubscribe']) {
+    assert.ok(!draft.includes(bad), `the Anthropic contract must not carry ${bad}`)
+  }
+})
+
+test('the applied schema has no column that could hold a raw header or its facts', () => {
+  const ddl = MIGRATION.split('\n').filter((l) => !/^\s*--/.test(l)).join('\n')
+  for (const bad of ['internet_message_headers', 'headers', 'auto_submitted', 'precedence',
+    'list_id', 'list_unsubscribe']) {
+    assert.ok(!ddl.includes(bad), `schema must not define ${bad}`)
+  }
+})
+
 test('the applied schema has no column that could hold a raw body', () => {
   // A raw body could only be persisted if a column existed for it. None does.
   // SQL comments are stripped first: the migration's own prose says it stores no

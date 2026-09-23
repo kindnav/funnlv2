@@ -14,13 +14,24 @@
 // Only `/me/...` paths are reachable. See ALLOWED_PATH_RE and the test suite.
 //
 // ── TWO-STAGE MINIMIZATION (the core privacy property) ────────────────────────
-// Stage 1 (`buildFolderDeltaRequest`) reads ENVELOPE METADATA ONLY — no body, no
-// bodyPreview, no uniqueBody. Deterministic matching (outlookParticipants.js) runs on
-// that metadata alone.
-// Stage 2 (`buildMessageContentRequest`) is issued ONLY for the messages that already
-// qualified, and selects ONLY `id,body,uniqueBody`.
+// DISCOVERY (`buildFolderDeltaRequest` / `buildFollowLinkRequest`) exists only to learn
+// WHICH messages changed and to carry the opaque paging/delta state. It selects
+// envelope metadata only — no body, no bodyPreview, no uniqueBody, and no
+// internetMessageHeaders. Deterministic screening (outlookParticipants.js) runs on that
+// metadata alone and decides whether a bounded per-message read is warranted.
+//
+// CONTENT (`buildMessageContentRequest`) is issued ONLY for messages that survived
+// screening, and returns the content AND the automation headers in ONE request, so
+// there is never a second header-only round trip.
+//
 // So a mailbox message that is a newsletter, an automated notification, a CC-only
 // mention, or an exchange with nobody relevant NEVER has its body fetched at all.
+//
+// Headers are deliberately NOT requested on delta: Microsoft documents
+// `internetMessageHeaders` as a property selected on a message GET, and building the
+// automation-detection path on its surviving a delta projection would leave a provider
+// behaviour unverified until the first real mailbox run. It is read where it is
+// documented to work, and it is reduced to controlled booleans immediately.
 //
 // ── LOGGING INVARIANT ─────────────────────────────────────────────────────────
 // This module never calls console.*, never returns a provider response body on an
@@ -29,6 +40,10 @@
 // delta URLs are especially sensitive: their query strings carry opaque provider state
 // tokens ($skiptoken / $deltatoken), so they are treated as opaque secrets — validated,
 // passed through, never logged, never returned in a diagnostic.
+
+// The header classifier lives with the payload contract (outlookMessageNormalize.js);
+// that module imports nothing from here, so this direction introduces no cycle.
+import { automationFactsFromHeaders } from './outlookMessageNormalize.js'
 
 export const GRAPH_ORIGIN = 'https://graph.microsoft.com'
 export const GRAPH_HOST = 'graph.microsoft.com'
@@ -57,12 +72,17 @@ export const REQUEST_TIMEOUT_MS = 20_000   // per attempt
 export const MAX_FOLLOW_LINK_LEN = 8192    // nextLink/deltaLink ceiling
 
 // ── $select allowlists (nothing outside these is ever requested) ──────────────
-// Stage 1: envelope + the header facts needed to detect automation/bulk mail.
-// `body`, `bodyPreview` and `uniqueBody` are deliberately ABSENT.
-export const ENVELOPE_SELECT = Object.freeze([
+//
+// DISCOVERY (delta): the minimum needed to decide whether a bounded per-message read
+// is warranted — who the message is between, when, and whether it is a draft.
+// `body`, `bodyPreview`, `uniqueBody` AND `internetMessageHeaders` are deliberately
+// ABSENT. Microsoft documents internetMessageHeaders as a property you select on a
+// message GET; relying on it surviving a delta projection would make the whole
+// automation-detection path depend on unverified provider behaviour. It is fetched on
+// the per-message GET instead, where it is documented to work.
+export const DISCOVERY_SELECT = Object.freeze([
   'id',
   'conversationId',
-  'internetMessageId',
   'receivedDateTime',
   'sentDateTime',
   'isDraft',
@@ -71,12 +91,30 @@ export const ENVELOPE_SELECT = Object.freeze([
   'sender',
   'toRecipients',
   'ccRecipients',
-  'internetMessageHeaders',
 ])
 
-// Stage 2: content for an already-qualified message. `id` is kept only to re-bind the
-// response to the request; nothing else is re-requested.
-export const CONTENT_SELECT = Object.freeze(['id', 'body', 'uniqueBody'])
+// Back-compat alias: this projection is the message ENVELOPE, and the discovery stage
+// is the only place it is requested.
+export const ENVELOPE_SELECT = DISCOVERY_SELECT
+
+// CONTENT (per-message GET): one bounded read that returns the content AND the headers
+// together, so no second header-only round trip is ever needed. `conversationId` is
+// required by the episode fingerprint contract; `internetMessageId` is NOT used by any
+// contract and is therefore not requested.
+export const CONTENT_SELECT = Object.freeze([
+  'id',
+  'conversationId',
+  'receivedDateTime',
+  'sentDateTime',
+  'subject',
+  'from',
+  'sender',
+  'toRecipients',
+  'ccRecipients',
+  'uniqueBody',
+  'body',
+  'internetMessageHeaders',
+])
 
 // Exact Prefer header value that asks Graph for plain text. Graph echoes
 // `Preference-Applied: outlook.body-content-type="text"` when honored, and MAY still
@@ -88,8 +126,30 @@ export const PREFER_MAX_PAGE_SIZE = (n) => `odata.maxpagesize=${n}`
 export const GRAPH_CODES = Object.freeze([
   'ok', 'unauthorized', 'forbidden', 'not_found', 'throttled', 'server_error',
   'timeout', 'invalid_link', 'response_too_large', 'malformed_response',
-  'retry_exhausted', 'resync_required', 'bad_request', 'transport_failure',
+  'retry_exhausted', 'cursor_invalid', 'message_gone', 'unexpected_redirect',
+  'bad_request', 'transport_failure',
 ])
+
+// Graph error codes that mean the stored delta state can no longer be used. Compared
+// case-insensitively. A 400 can carry one of these, so the CODE is checked before the
+// status is interpreted.
+export const CURSOR_INVALID_ERROR_CODES = Object.freeze([
+  'syncstatenotfound', 'resyncrequired', 'syncstatenotsupported', 'synchronizationstateexpired',
+])
+
+/**
+ * True when a run must stop and NOT advance its stored delta cursor.
+ * This module never erases, rewrites or resets a cursor: that is a stateful decision
+ * belonging to the future worker, which must perform an explicitly bounded reset.
+ */
+export function isCursorInvalid(code) {
+  return code === 'cursor_invalid'
+}
+
+/** True when one message vanished mid-run; the run continues without it. */
+export function isSkippableMessageFailure(code) {
+  return code === 'message_gone'
+}
 
 function isPlainObject(v) {
   if (v === null || typeof v !== 'object' || Array.isArray(v)) return false
@@ -120,7 +180,7 @@ export function buildFolderDeltaRequest(p) {
   if (!GRAPH_FOLDERS.includes(p.folder)) throw new Error('invalid_folder')
   const size = boundedPageSize(p.pageSize)
   const url = `${GRAPH_BASE}/me/mailFolders/${p.folder}/messages/delta` +
-    `?$select=${ENVELOPE_SELECT.join(',')}`
+    `?$select=${DISCOVERY_SELECT.join(',')}`
   return {
     method: 'GET',
     url,
@@ -286,16 +346,52 @@ export function planRetry({ status, retryAfterHeader, attempt, elapsedRetryMs })
   return { retry: true, delayMs: wait }
 }
 
-/** Map an HTTP status to a controlled code. Never includes a provider message. */
-export function statusToCode(status) {
-  if (status === 401) return 'unauthorized'
-  if (status === 403) return 'forbidden'
-  if (status === 404) return 'not_found'
-  if (status === 410) return 'resync_required'   // expired deltaLink → full resync
+/**
+ * Map an HTTP status (and, when present, Graph's own error CODE) to a controlled
+ * result. Never includes a provider message, body, URL or identifier.
+ *
+ * Stage matters: a 404/410 on a per-message GET means that one message disappeared
+ * between discovery and the content read, which must NOT fail the whole run. The same
+ * status on a discovery request is about the delta state itself.
+ *
+ * @param {{ status:number, errorCode?:string|null, stage?:'envelope'|'content' }} p
+ */
+export function classifyFailure({ status, errorCode, stage }) {
+  // Graph can report unusable delta state with a 400 as well as a 410, so the error
+  // CODE is authoritative and is checked first.
+  if (typeof errorCode === 'string' &&
+      CURSOR_INVALID_ERROR_CODES.includes(errorCode.trim().toLowerCase())) {
+    return 'cursor_invalid'
+  }
+  if (status === 401) return 'unauthorized'          // token expired/revoked → reauth
+  if (status === 403) return 'forbidden'             // consent or permission missing
+  if (status === 404) return stage === 'content' ? 'message_gone' : 'not_found'
+  if (status === 410) return stage === 'content' ? 'message_gone' : 'cursor_invalid'
   if (status === 429) return 'throttled'
   if (status === 400) return 'bad_request'
+  if (typeof status === 'number' && status >= 300 && status < 400) return 'unexpected_redirect'
   if (typeof status === 'number' && status >= 500) return 'server_error'
   return 'transport_failure'
+}
+
+/** Status-only convenience wrapper (discovery stage, no provider error code). */
+export function statusToCode(status) {
+  return classifyFailure({ status, errorCode: null, stage: 'envelope' })
+}
+
+/**
+ * Pull ONLY Graph's controlled `error.code` token out of an error payload.
+ * The message, inner error, request id and every other field are discarded and never
+ * returned. A non-token value (too long, or containing anything but letters) is
+ * rejected so a provider string can never flow onward as a "code".
+ */
+export function readProviderErrorCode(json) {
+  if (!isPlainObject(json)) return null
+  const err = isPlainObject(json.error) ? json.error : null
+  if (!err) return null
+  const code = err.code
+  if (typeof code !== 'string' || code.length === 0 || code.length > 64) return null
+  return /^[A-Za-z_]+$/.test(code) ? code : null
 }
 
 // ── Executor (fetch-injected; no live caller in this phase) ───────────────────
@@ -342,6 +438,11 @@ export async function executeGraphRequest(p) {
           Accept: 'application/json',
           ...(request.headers || {}),
         },
+        // NEVER auto-follow a redirect. Graph can answer an expired delta cursor with a
+        // redirect to a full resynchronization; silently following it would turn a
+        // bounded incremental run into an unbounded full mailbox read. The `Location`
+        // header is deliberately never read, logged or returned.
+        redirect: 'manual',
         signal: makeTimeoutSignal(REQUEST_TIMEOUT_MS),
       })
     } catch (e) {
@@ -365,6 +466,19 @@ export async function executeGraphRequest(p) {
       return { ok: true, json, attempts }
     }
 
+    // Non-200. Read ONLY Graph's controlled error token so an expired delta cursor can
+    // be told apart from an ordinary bad request. Everything else in the payload —
+    // message, inner error, request id, Location — is discarded unread.
+    const errorCode = await readErrorCode(res)
+    const stage = request.stage === 'content' ? 'content' : 'envelope'
+    const code = classifyFailure({ status, errorCode, stage })
+
+    // Unusable delta state is never retried: retrying the same dead cursor cannot
+    // succeed. The run stops and the caller must NOT advance the cursor.
+    if (code === 'cursor_invalid' || !isRetryableStatus(status)) {
+      return { ok: false, code, attempts }
+    }
+
     const plan = planRetry({
       status,
       retryAfterHeader: readHeader(res, 'retry-after'),
@@ -386,6 +500,20 @@ function makeTimeoutSignal(ms) {
     }
   } catch { /* fall through */ }
   return undefined
+}
+
+/**
+ * Best-effort read of Graph's controlled error token from a failure response.
+ * Returns null on anything unusable. The payload is never retained or returned.
+ */
+async function readErrorCode(res) {
+  try {
+    if (!res || typeof res.json !== 'function') return null
+    const json = await res.json()
+    return readProviderErrorCode(json)
+  } catch {
+    return null
+  }
 }
 
 function readHeader(res, name) {
@@ -453,10 +581,18 @@ export function checkRunCaps({ pages, messages, contentFetches }) {
 }
 
 /**
- * Extract the body projections from a stage-2 content response, bounded and without
- * copying anything else out of the payload. Returns raw (unsanitized) text for
- * outlookContentSanitizer.js; the caller must sanitize before any further use and must
- * never persist or log the returned strings.
+ * Read a per-message CONTENT response: the two body projections AND the automation
+ * facts derived from `internetMessageHeaders`, in one pass.
+ *
+ * The raw header collection is consumed transiently and NEVER returned: only the
+ * allowlisted booleans/enums of the E1 AutomationFacts shape survive, so no header
+ * name/value pair can reach a log, a stored draft, a fingerprint or an Anthropic
+ * request. `automationComplete` says whether the collection was actually present, so
+ * an ABSENT collection can never be mistaken for "no automation".
+ *
+ * Body text is returned raw and unsanitized for outlookContentSanitizer.js; the caller
+ * must sanitize before any further use and must never persist or log it.
+ *
  * @param {unknown} json
  * @param {string} expectedMessageId
  */
@@ -479,12 +615,18 @@ export function readMessageContent(json, expectedMessageId) {
     return { ok: false, code: 'response_too_large' }
   }
   if (b.content.length === 0 && u.content.length === 0) return { ok: false, code: 'empty_content' }
+
+  // Headers are reduced to controlled facts HERE and the collection is dropped.
+  const automation = automationFactsFromHeaders(json.internetMessageHeaders)
+
   return {
     ok: true,
     bodyContentType: b.contentType,
     bodyContent: b.content,
     uniqueBodyContentType: u.contentType,
     uniqueBodyContent: u.content,
+    automation: automation.facts,
+    automationComplete: automation.complete,
   }
 }
 

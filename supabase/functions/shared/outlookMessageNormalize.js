@@ -6,11 +6,19 @@
 // no secrets, no Gmail/Calendar coupling (the Gmail adapter's header normalizers are
 // deliberately NOT imported — the two providers must stay independently changeable).
 //
-// PRIVACY INVARIANT: this module is fed STAGE-1 (envelope) responses only. It refuses
-// any payload that carries `body`, `bodyPreview` or `uniqueBody` — if those ever appear
-// here it means the stage-1 $select was widened by mistake, and that must fail closed
-// rather than silently flow onward. Raw header VALUES never survive: only allowlisted
-// booleans and small enums (the E1 AutomationFacts shape) are kept.
+// PRIVACY INVARIANT: `normalizeGraphMessage` is fed DISCOVERY (delta) items only. It
+// refuses any payload that carries `body`, `bodyPreview` or `uniqueBody` — if those
+// ever appear here it means the discovery $select was widened by mistake, and that must
+// fail closed rather than silently flow onward. Raw header VALUES never survive
+// anywhere in this module: only allowlisted booleans and small enums (the E1
+// AutomationFacts shape) are kept.
+//
+// HEADERS ARE NOT EXPECTED AT DISCOVERY. `internetMessageHeaders` is documented by
+// Microsoft as a property you select on a message GET, so the discovery projection does
+// not request it and this module does not require it. A discovery item therefore
+// normalizes with `automationFactsComplete: false`, which is a first-class state
+// meaning "automation could not be assessed" — never "no automation". The real facts
+// arrive with the per-message content read and are merged in by `applyAutomationFacts`.
 
 import { classifyNormalizedMessage } from './emailProviderContract.js'
 
@@ -18,6 +26,16 @@ export const MAX_RECIPIENTS_PER_MESSAGE = 200
 export const MAX_DISPLAY_NAME_LEN = 120
 export const MAX_SUBJECT_INPUT = 998
 export const MAX_HEADERS = 200
+
+// The automation state of a message that has only been DISCOVERED. `complete: false`
+// is a first-class value meaning "could not be assessed" - never "no automation".
+export const UNASSESSED_AUTOMATION = Object.freeze({
+  facts: Object.freeze({
+    autoSubmitted: null, precedence: null,
+    hasListId: false, hasListUnsubscribe: false, hasAutoResponseSuppress: false,
+  }),
+  complete: false,
+})
 
 // Present on a stage-1 payload ⇒ the caller asked for more than the envelope.
 export const CONTENT_KEYS = Object.freeze(['body', 'bodyPreview', 'uniqueBody'])
@@ -216,7 +234,12 @@ export function normalizeGraphMessage(raw, folder) {
     return { ok: false, code: 'oversized_header' }
   }
 
-  const automation = automationFactsFromHeaders(raw.internetMessageHeaders)
+  // Discovery NEVER assesses automation. The discovery projection does not request
+  // `internetMessageHeaders`, so this stage always emits the empty, explicitly
+  // UNASSESSED fact set. Reading headers opportunistically here would fork behaviour on
+  // provider whim: present -> assessed, absent -> not, with no way to tell from a test.
+  // The real facts are merged in by applyAutomationFacts after the per-message read.
+  const automation = UNASSESSED_AUTOMATION
 
   const message = {
     provider: 'outlook',
@@ -250,11 +273,53 @@ export function normalizeGraphMessage(raw, folder) {
     message,
     extra: {
       displayNames,
+      // False for every discovery item, because the discovery projection does not
+      // request headers. `applyAutomationFacts` flips this once the per-message read
+      // has actually returned the header collection.
       automationFactsComplete: automation.complete,
-      internetMessageId: typeof raw.internetMessageId === 'string' && raw.internetMessageId.length <= 1024
-        ? raw.internetMessageId : null,
       folder,
     },
+  }
+}
+
+/**
+ * Merge the automation facts obtained from the PER-MESSAGE content read into a message
+ * that was normalized from a discovery item, producing a new message/extra pair that
+ * can be re-evaluated with complete information.
+ *
+ * Takes only the already-classified facts — never a raw header collection — so there is
+ * no code path by which a header name/value could reach a caller of this function.
+ *
+ * Returns the pair unchanged when `complete` is false, so an unavailable or
+ * inconclusive header collection keeps the conservative state rather than being
+ * upgraded to "assessed".
+ *
+ * @param {object} message  E1 NormalizedMessage from normalizeGraphMessage.
+ * @param {object} extra    The matching `extra` record.
+ * @param {{facts:object, complete:boolean}} automation  From readMessageContent.
+ * @returns {{ message:object, extra:object }}
+ */
+export function applyAutomationFacts(message, extra, automation) {
+  if (!isPlainObject(message) || !isPlainObject(automation)) {
+    return { message, extra }
+  }
+  const complete = automation.complete === true
+  const facts = isPlainObject(automation.facts) ? automation.facts : null
+  if (!complete || !facts) {
+    return { message, extra: { ...(isPlainObject(extra) ? extra : {}), automationFactsComplete: false } }
+  }
+  return {
+    message: {
+      ...message,
+      automation: {
+        autoSubmitted: facts.autoSubmitted ?? null,
+        precedence: facts.precedence ?? null,
+        hasListId: facts.hasListId === true,
+        hasListUnsubscribe: facts.hasListUnsubscribe === true,
+        hasAutoResponseSuppress: facts.hasAutoResponseSuppress === true,
+      },
+    },
+    extra: { ...(isPlainObject(extra) ? extra : {}), automationFactsComplete: true },
   }
 }
 

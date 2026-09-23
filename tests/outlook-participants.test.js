@@ -10,7 +10,7 @@ import { fileURLToPath } from 'url'
 import { join, dirname } from 'path'
 import {
   normalizeGraphMessage, normalizeGraphPage, automationFactsFromHeaders,
-  graphDateToIso, readRemoval, CONTENT_KEYS,
+  graphDateToIso, readRemoval, CONTENT_KEYS, applyAutomationFacts,
 } from '../supabase/functions/shared/outlookMessageNormalize.js'
 import {
   buildSelfIdentitySet, indexContactsByEmail, splitParticipants, evaluateMessage,
@@ -53,7 +53,8 @@ function graphMsg(over = {}) {
     from: rcpt(DANA, 'Dana Swope'),
     toRecipients: [rcpt(USER, 'A Student')],
     ccRecipients: [],
-    internetMessageHeaders: [{ name: 'MIME-Version', value: '1.0' }],
+    // NOTE: no `internetMessageHeaders`, no `body`, no `uniqueBody`. A delta/discovery
+    // item carries none of them, and nothing downstream may require them.
     ...over,
   }
 }
@@ -66,6 +67,29 @@ function norm(raw, folder = 'inbox') {
   const r = normalizeGraphMessage(raw, folder)
   assert.ok(r.ok, `fixture must normalize: ${r.code}`)
   return r
+}
+
+// A discovery item ALWAYS has incomplete automation facts (headers are not in the
+// discovery projection). `assessed()` simulates the per-message content read having
+// supplied them, which is what the worker will do before a new-contact suggestion is
+// allowed. Tests about MATCHING use it so they are not silently testing the
+// automation-deferral rule instead.
+const CLEAN_FACTS = {
+  facts: {
+    autoSubmitted: null, precedence: null,
+    hasListId: false, hasListUnsubscribe: false, hasAutoResponseSuppress: false,
+  },
+  complete: true,
+}
+function assessed(raw, folder = 'inbox') {
+  const r = norm(raw, folder)
+  return applyAutomationFacts(r.message, r.extra, CLEAN_FACTS)
+}
+
+// Same, but with the facts Graph's per-message GET would yield for `headers`.
+function assessedWithHeaders(raw, headers, folder = 'inbox') {
+  const r = norm(raw, folder)
+  return applyAutomationFacts(r.message, r.extra, automationFactsFromHeaders(headers))
 }
 
 // ── Normalization ────────────────────────────────────────────────────────────
@@ -121,22 +145,36 @@ test('display names equal to the address are not treated as names', () => {
   assert.strictEqual(extra.displayNames[DANA], undefined)
 })
 
-test('automation facts are reduced to booleans and enums; raw header values never survive', () => {
+test('a DISCOVERY item is always unassessed, even if headers somehow appear on it', () => {
+  // Behaviour must not fork on provider whim: discovery never assesses automation.
   const { message, extra } = norm(graphMsg({
-    internetMessageHeaders: [
-      { name: 'List-Id', value: '<newsletter.contoso.example.invalid>' },
-      { name: 'Precedence', value: 'bulk' },
-      { name: 'Auto-Submitted', value: 'auto-generated; owner' },
-      { name: 'X-Auto-Response-Suppress', value: 'All' },
-    ],
+    internetMessageHeaders: [{ name: 'List-Id', value: '<newsletter.contoso.example.invalid>' }],
   }))
+  assert.strictEqual(extra.automationFactsComplete, false, 'discovery is never "assessed"')
   assert.deepStrictEqual(message.automation, {
+    autoSubmitted: null, precedence: null,
+    hasListId: false, hasListUnsubscribe: false, hasAutoResponseSuppress: false,
+  })
+  assert.ok(!JSON.stringify(message).includes('newsletter.contoso'),
+    'and no raw header value survives either way')
+})
+
+test('facts from the CONTENT read are reduced to booleans and enums, values discarded', () => {
+  const a = assessedWithHeaders(graphMsg(), [
+    { name: 'List-Id', value: '<newsletter.contoso.example.invalid>' },
+    { name: 'Precedence', value: 'bulk' },
+    { name: 'Auto-Submitted', value: 'auto-generated; owner' },
+    { name: 'X-Auto-Response-Suppress', value: 'All' },
+  ])
+  assert.deepStrictEqual(a.message.automation, {
     autoSubmitted: 'auto-generated', precedence: 'bulk',
     hasListId: true, hasListUnsubscribe: false, hasAutoResponseSuppress: true,
   })
-  assert.strictEqual(extra.automationFactsComplete, true)
-  assert.ok(!JSON.stringify(message).includes('newsletter.contoso'),
-    'raw header value must not survive normalization')
+  assert.strictEqual(a.extra.automationFactsComplete, true)
+  assert.ok(!JSON.stringify(a.message).includes('newsletter.contoso'),
+    'raw header value must not survive classification')
+  assert.ok(!JSON.stringify(a.message).includes('X-Auto-Response-Suppress'),
+    'nor any raw header name')
 })
 
 test('a duplicated benign header cannot mask a real automation header', () => {
@@ -207,17 +245,16 @@ test('a known contact matches case-insensitively but ONLY on the exact address',
 test('dots and plus-tags are NOT normalized away — a different address is a different person', () => {
   const variants = ['danaswope@contoso.example.invalid', 'dana.swope+jobs@contoso.example.invalid']
   for (const v of variants) {
-    const r = evaluateMessage({ message: norm(graphMsg({ from: rcpt(v) })).message, selfSet, contactIndex })
+    const a = assessed(graphMsg({ from: rcpt(v) }))
+    const r = evaluateMessage({ message: a.message, extra: a.extra, selfSet, contactIndex })
     assert.strictEqual(r.outcome, 'eligible')
     assert.strictEqual(r.contactId, null, `${v} must not match the stored contact`)
   }
 })
 
 test('a matching NAME with a different address never links to the contact', () => {
-  const r = evaluateMessage({
-    message: norm(graphMsg({ from: rcpt('dana.swope@other.example.invalid', 'Dana Swope') })).message,
-    selfSet, contactIndex,
-  })
+  const a = assessed(graphMsg({ from: rcpt('dana.swope@other.example.invalid', 'Dana Swope') }))
+  const r = evaluateMessage({ message: a.message, extra: a.extra, selfSet, contactIndex })
   assert.strictEqual(r.contactId, null, 'names must never drive a link')
 })
 
@@ -239,18 +276,20 @@ test('another user\'s contacts are never visible to this user\'s matching', () =
 // ── Automated senders ────────────────────────────────────────────────────────
 console.log('\nautomated sender exclusion')
 
-test('mailing lists and bulk mail are hard-excluded', () => {
+test('mailing lists and bulk mail are hard-excluded once the GET supplies headers', () => {
   for (const headers of [
     [{ name: 'List-Id', value: '<l.example.invalid>' }],
     [{ name: 'List-Unsubscribe', value: '<mailto:u@example.invalid>' }],
     [{ name: 'Precedence', value: 'bulk' }],
   ]) {
-    const r = evaluateMessage({ message: norm(graphMsg({ internetMessageHeaders: headers })).message, selfSet, contactIndex })
-    assert.deepStrictEqual(r, { outcome: 'excluded', code: 'bulk_or_list' })
+    const a = assessedWithHeaders(graphMsg(), headers)
+    const r = evaluateMessage({ message: a.message, extra: a.extra, selfSet, contactIndex })
+    assert.deepStrictEqual(r, { outcome: 'excluded', code: 'bulk_or_list' },
+      'a newsletter is rejected even though it came from a tracked address')
   }
 })
 
-test('no-reply, bounce and auto-response senders are excluded', () => {
+test('envelope-based sender rules work at DISCOVERY, with no headers available', () => {
   for (const addr of [
     'no-reply@contoso.example.invalid', 'noreply@contoso.example.invalid',
     'donotreply@contoso.example.invalid', 'mailer-daemon@contoso.example.invalid',
@@ -262,7 +301,7 @@ test('no-reply, bounce and auto-response senders are excluded', () => {
   }
 })
 
-test('out-of-office and delivery failures are excluded', () => {
+test('subject-based automation rules also work at DISCOVERY, with no headers', () => {
   for (const subject of [
     'Automatic reply: Coffee chat', 'Out of Office: back Monday',
     'Undeliverable: Coffee chat', 'Delivery Status Notification (Failure)',
@@ -273,7 +312,8 @@ test('out-of-office and delivery failures are excluded', () => {
 })
 
 test('a legitimate human address at a normal domain is NOT excluded', () => {
-  const r = evaluateMessage({ message: norm(graphMsg({ from: rcpt('reply.team@contoso.example.invalid') })).message, selfSet, contactIndex })
+  const a = assessed(graphMsg({ from: rcpt('reply.team@contoso.example.invalid') }))
+  const r = evaluateMessage({ message: a.message, extra: a.extra, selfSet, contactIndex })
   assert.strictEqual(r.outcome, 'eligible', 'the exclusion rules stay conservative')
 })
 
@@ -304,16 +344,47 @@ test('a group thread with several direct counterparties DEFERS rather than guess
     { outcome: 'deferred', code: 'ambiguous_counterparties' })
 })
 
-test('incomplete automation facts defer a NEW contact but allow a KNOWN one', () => {
-  const unknown = norm(graphMsg({ from: rcpt(ALEX), internetMessageHeaders: undefined }))
+test('a discovery item has incomplete facts: unknown DEFERS, known is still eligible', () => {
+  // This is the default state of every delta item now that headers are not selected.
+  const unknown = norm(graphMsg({ from: rcpt(ALEX) }))
+  assert.strictEqual(unknown.extra.automationFactsComplete, false)
   assert.deepStrictEqual(
     evaluateMessage({ message: unknown.message, extra: unknown.extra, selfSet, contactIndex }),
-    { outcome: 'deferred', code: 'automation_facts_incomplete' })
+    { outcome: 'deferred', code: 'automation_facts_incomplete' },
+    'an unknown sender is never accepted on unassessed automation')
 
-  const known = norm(graphMsg({ internetMessageHeaders: undefined }))
+  const known = norm(graphMsg())
   const r = evaluateMessage({ message: known.message, extra: known.extra, selfSet, contactIndex })
-  assert.strictEqual(r.outcome, 'eligible')
+  assert.strictEqual(r.outcome, 'eligible',
+    'a tracked exact address is not suppressed merely because optional headers are absent')
   assert.strictEqual(r.contactId, 'c-dana')
+})
+
+test('a missing `extra` fails CLOSED for an unknown sender', () => {
+  const m = norm(graphMsg({ from: rcpt(ALEX) })).message
+  assert.deepStrictEqual(evaluateMessage({ message: m, selfSet, contactIndex }),
+    { outcome: 'deferred', code: 'automation_facts_incomplete' },
+    'forgetting to thread the facts through must not accept a stranger')
+})
+
+test('an inconclusive header collection does not upgrade the state', () => {
+  const r = norm(graphMsg({ from: rcpt(ALEX) }))
+  // Graph answered, but without the collection: still not assessed.
+  const a = applyAutomationFacts(r.message, r.extra, automationFactsFromHeaders(undefined))
+  assert.strictEqual(a.extra.automationFactsComplete, false)
+  assert.deepStrictEqual(evaluateMessage({ message: a.message, extra: a.extra, selfSet, contactIndex }),
+    { outcome: 'deferred', code: 'automation_facts_incomplete' })
+})
+
+test('applyAutomationFacts never accepts a raw header collection', () => {
+  const r = norm(graphMsg())
+  // Anything that is not the classified {facts, complete} shape leaves the pair
+  // conservative rather than being interpreted.
+  for (const junk of [null, undefined, [{ name: 'List-Id', value: '<x>' }], 'headers', 42]) {
+    const a = applyAutomationFacts(r.message, r.extra, junk)
+    assert.ok(a.extra === undefined || a.extra.automationFactsComplete !== true,
+      `must not mark assessed from ${JSON.stringify(junk)}`)
+  }
 })
 
 // ── Episode qualification ────────────────────────────────────────────────────
@@ -341,8 +412,9 @@ test('a ONE-SIDED exchange is refused in both directions', () => {
 })
 
 test('an unknown but genuinely two-sided counterparty yields a NEW CONTACT suggestion', () => {
-  const inbound = norm(graphMsg({ id: 'i1', from: rcpt(ALEX, 'Alex Wilber'), conversationId: 'conv_alex' }))
-  const outbound = norm(graphMsg({
+  // Only reachable AFTER the per-message GET has supplied the automation facts.
+  const inbound = assessed(graphMsg({ id: 'i1', from: rcpt(ALEX, 'Alex Wilber'), conversationId: 'conv_alex' }))
+  const outbound = assessed(graphMsg({
     id: 'o1', conversationId: 'conv_alex', from: rcpt(USER), toRecipients: [rcpt(ALEX)],
     sentDateTime: '2026-09-12T09:00:00Z',
   }), 'sentitems')
@@ -373,8 +445,14 @@ test('a deferral anywhere in the conversation taints the whole episode', () => {
 })
 
 test('an episode whose messages are all excluded produces nothing', () => {
-  const junk = norm(graphMsg({ id: 'j1', internetMessageHeaders: [{ name: 'List-Id', value: '<x>' }] }))
-  assert.strictEqual(qualifyEpisode({ entries: [junk], selfSet, contactIndex }).code, 'no_eligible_messages')
+  // Excluded at DISCOVERY on envelope evidence alone (a no-reply sender).
+  const envelopeJunk = norm(graphMsg({ id: 'j1', from: rcpt('no-reply@contoso.example.invalid') }))
+  assert.strictEqual(qualifyEpisode({ entries: [envelopeJunk], selfSet, contactIndex }).code,
+    'no_eligible_messages')
+  // Excluded only once the CONTENT read revealed a List-Id.
+  const listJunk = assessedWithHeaders(graphMsg({ id: 'j2' }), [{ name: 'List-Id', value: '<x>' }])
+  assert.strictEqual(qualifyEpisode({ entries: [listJunk], selfSet, contactIndex }).code,
+    'no_eligible_messages')
   assert.strictEqual(qualifyEpisode({ entries: [], selfSet, contactIndex }).code, 'no_eligible_messages')
 })
 

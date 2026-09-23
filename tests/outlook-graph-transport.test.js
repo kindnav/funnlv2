@@ -11,14 +11,19 @@ import { fileURLToPath } from 'url'
 import { join, dirname } from 'path'
 import {
   GRAPH_BASE, GRAPH_HOST, GRAPH_FOLDERS, GRAPH_MAIL_READ_SCOPE,
-  ENVELOPE_SELECT, CONTENT_SELECT, PREFER_TEXT_BODY,
+  DISCOVERY_SELECT, ENVELOPE_SELECT, CONTENT_SELECT, PREFER_TEXT_BODY,
   MAX_PAGE_SIZE, MAX_PAGES_PER_RUN, MAX_MESSAGES_PER_RUN, MAX_RETRIES,
   MAX_RETRY_AFTER_MS, MAX_TOTAL_RETRY_DELAY_MS, MAX_RESPONSE_BYTES,
   buildFolderDeltaRequest, buildFollowLinkRequest, buildMessageContentRequest,
   validateGraphFollowLink, parseRetryAfterMs, backoffMs, planRetry, statusToCode,
   isRetryableStatus, executeGraphRequest, readDeltaPage, readMessageContent,
   checkRunCaps, checkResponseSize, isUsableGraphId, grantedScopesIncludeMailRead,
+  classifyFailure, readProviderErrorCode, isCursorInvalid, isSkippableMessageFailure,
+  CURSOR_INVALID_ERROR_CODES,
 } from '../supabase/functions/shared/outlookGraphTransport.js'
+import {
+  normalizeGraphMessage, normalizeGraphPage, readRemoval,
+} from '../supabase/functions/shared/outlookMessageNormalize.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const SRC = readFileSync(join(__dirname, '../supabase/functions/shared/outlookGraphTransport.js'), 'utf8')
@@ -47,17 +52,47 @@ const noSleep = async () => {}
 // ── Scope and $select minimization ───────────────────────────────────────────
 console.log('\nrequest minimization')
 
-test('envelope $select carries NO body projection of any kind', () => {
-  for (const forbidden of ['body', 'bodyPreview', 'uniqueBody', 'attachments', 'mimeContent']) {
-    assert.ok(!ENVELOPE_SELECT.includes(forbidden), `envelope select must not request ${forbidden}`)
+test('discovery $select carries NO body AND NO headers', () => {
+  for (const forbidden of ['body', 'bodyPreview', 'uniqueBody', 'attachments', 'mimeContent',
+    'internetMessageHeaders']) {
+    assert.ok(!DISCOVERY_SELECT.includes(forbidden), `discovery select must not request ${forbidden}`)
   }
-  assert.ok(ENVELOPE_SELECT.includes('id') && ENVELOPE_SELECT.includes('conversationId'))
-  assert.ok(ENVELOPE_SELECT.includes('from') && ENVELOPE_SELECT.includes('toRecipients') &&
-            ENVELOPE_SELECT.includes('ccRecipients'), 'envelope needs the participant fields')
+  assert.ok(DISCOVERY_SELECT.includes('id') && DISCOVERY_SELECT.includes('conversationId'))
+  assert.ok(DISCOVERY_SELECT.includes('from') && DISCOVERY_SELECT.includes('toRecipients') &&
+            DISCOVERY_SELECT.includes('ccRecipients'), 'discovery needs the participant fields')
+  assert.ok(DISCOVERY_SELECT.includes('isDraft'), 'and enough to skip drafts before any content read')
+  assert.strictEqual(ENVELOPE_SELECT, DISCOVERY_SELECT, 'the alias points at the same projection')
 })
 
-test('content $select is exactly id,body,uniqueBody — nothing re-requested', () => {
-  assert.deepStrictEqual([...CONTENT_SELECT], ['id', 'body', 'uniqueBody'])
+test('content $select requests body, uniqueBody AND headers in ONE request', () => {
+  for (const required of ['id', 'uniqueBody', 'body', 'internetMessageHeaders']) {
+    assert.ok(CONTENT_SELECT.includes(required), `content select must request ${required}`)
+  }
+  // Envelope fields are re-selected so the content read is self-contained.
+  for (const required of ['subject', 'from', 'sender', 'toRecipients', 'ccRecipients',
+    'receivedDateTime', 'sentDateTime']) {
+    assert.ok(CONTENT_SELECT.includes(required), `content select must request ${required}`)
+  }
+  // conversationId is required by the episode fingerprint contract; internetMessageId
+  // is used by no contract and is therefore not requested.
+  assert.ok(CONTENT_SELECT.includes('conversationId'), 'needed by the fingerprint contract')
+  assert.ok(!CONTENT_SELECT.includes('internetMessageId'), 'not required by any contract')
+  // Nothing that could pull attachments or raw MIME.
+  for (const forbidden of ['attachments', 'mimeContent', 'bodyPreview']) {
+    assert.ok(!CONTENT_SELECT.includes(forbidden), `content select must not request ${forbidden}`)
+  }
+})
+
+test('there is exactly ONE builder that can fetch headers — no header-only second call', () => {
+  const builders = [...SRC.matchAll(/^export function (build\w+Request)\b/gm)].map((m) => m[1])
+  assert.deepStrictEqual(builders.sort(),
+    ['buildFolderDeltaRequest', 'buildFollowLinkRequest', 'buildMessageContentRequest'])
+  const headerBuilders = builders.filter((b) => {
+    const i = SRC.indexOf(`export function ${b}`)
+    return SRC.slice(i, i + 700).includes('CONTENT_SELECT')
+  })
+  assert.deepStrictEqual(headerBuilders, ['buildMessageContentRequest'],
+    'headers come from the content request only')
 })
 
 test('delta request targets only a well-known folder and sets a bounded page size', () => {
@@ -85,7 +120,9 @@ test('content request asks for text bodies with the exact documented Prefer valu
   assert.strictEqual(r.headers.Prefer, 'outlook.body-content-type="text"')
   assert.strictEqual(PREFER_TEXT_BODY, 'outlook.body-content-type="text"')
   assert.ok(r.url.startsWith(`${GRAPH_BASE}/me/messages/`))
-  assert.ok(r.url.includes('$select=id,body,uniqueBody'))
+  assert.ok(r.url.includes(`$select=${CONTENT_SELECT.join(',')}`))
+  assert.ok(r.url.includes('uniqueBody') && r.url.includes('internetMessageHeaders'),
+    'content and headers arrive from the SAME request')
   assert.strictEqual(r.stage, 'content')
 })
 
@@ -241,7 +278,7 @@ test('status codes map to controlled codes with no provider text', () => {
   assert.strictEqual(statusToCode(401), 'unauthorized')
   assert.strictEqual(statusToCode(403), 'forbidden')
   assert.strictEqual(statusToCode(404), 'not_found')
-  assert.strictEqual(statusToCode(410), 'resync_required')
+  assert.strictEqual(statusToCode(410), 'cursor_invalid')
   assert.strictEqual(statusToCode(429), 'throttled')
   assert.strictEqual(statusToCode(500), 'server_error')
   assert.strictEqual(statusToCode(418), 'transport_failure')
@@ -329,14 +366,108 @@ await atest('401/403/404 are returned immediately without a retry', async () => 
   }
 })
 
-await atest('an expired deltaLink surfaces as resync_required, not as a silent success', async () => {
+await atest('an expired deltaLink surfaces as cursor_invalid, not as a silent success', async () => {
+  let calls = 0
   const res = await executeGraphRequest({
     request: buildFolderDeltaRequest({ folder: 'inbox' }),
     accessToken: 't',
-    fetchImpl: async () => fakeRes(410),
+    fetchImpl: async () => { calls += 1; return fakeRes(410) },
     sleepImpl: noSleep,
   })
-  assert.strictEqual(res.code, 'resync_required')
+  assert.strictEqual(res.code, 'cursor_invalid')
+  assert.ok(isCursorInvalid(res.code), 'the caller can test for it without string matching')
+  assert.strictEqual(calls, 1, 'a dead cursor is never retried')
+})
+
+await atest('syncStateNotFound is classified from the error CODE even on a 400', async () => {
+  for (const code of ['syncStateNotFound', 'SyncStateNotFound', 'resyncRequired']) {
+    for (const status of [400, 410]) {
+      const res = await executeGraphRequest({
+        request: buildFolderDeltaRequest({ folder: 'inbox' }),
+        accessToken: 't',
+        fetchImpl: async () => fakeRes(status, {
+          json: { error: { code, message: 'The sync state generation is not found: SECRETSTATE.' } },
+        }),
+        sleepImpl: noSleep,
+      })
+      assert.strictEqual(res.code, 'cursor_invalid', `${code} @ ${status}`)
+      assert.ok(!JSON.stringify(res).includes('SECRETSTATE'),
+        'the provider message is never echoed')
+    }
+  }
+})
+
+await atest('a delta-reset redirect is NOT followed and its Location is never read', async () => {
+  let sawRedirectOption = null
+  let locationRead = false
+  const res = await executeGraphRequest({
+    request: buildFolderDeltaRequest({ folder: 'inbox' }),
+    accessToken: 't',
+    fetchImpl: async (_u, init) => {
+      sawRedirectOption = init.redirect
+      return {
+        status: 303,
+        headers: {
+          get: (n) => {
+            if (String(n).toLowerCase() === 'location') { locationRead = true; return 'https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages/delta?$deltatoken=RESET' }
+            return null
+          },
+        },
+        json: async () => ({}),
+      }
+    },
+    sleepImpl: noSleep,
+  })
+  assert.strictEqual(sawRedirectOption, 'manual', 'redirects must never be auto-followed')
+  assert.strictEqual(res.ok, false)
+  assert.strictEqual(res.code, 'unexpected_redirect')
+  assert.strictEqual(locationRead, false, 'the Location header is not even read')
+  assert.ok(!JSON.stringify(res).includes('RESET'), 'and never echoed')
+})
+
+await atest('a 404 on a per-message GET is skippable, not a run failure', async () => {
+  const res = await executeGraphRequest({
+    request: buildMessageContentRequest({ messageId: 'AAMk_gone' }),
+    accessToken: 't',
+    fetchImpl: async () => fakeRes(404),
+    sleepImpl: noSleep,
+  })
+  assert.strictEqual(res.code, 'message_gone')
+  assert.ok(isSkippableMessageFailure(res.code), 'the run continues without this message')
+  assert.ok(!isCursorInvalid(res.code), 'and the cursor is unaffected')
+})
+
+test('stage decides how 404/410 are read; 401 and 403 stay distinct everywhere', () => {
+  assert.strictEqual(classifyFailure({ status: 404, stage: 'envelope' }), 'not_found')
+  assert.strictEqual(classifyFailure({ status: 404, stage: 'content' }), 'message_gone')
+  assert.strictEqual(classifyFailure({ status: 410, stage: 'envelope' }), 'cursor_invalid')
+  assert.strictEqual(classifyFailure({ status: 410, stage: 'content' }), 'message_gone')
+  for (const stage of ['envelope', 'content']) {
+    assert.strictEqual(classifyFailure({ status: 401, stage }), 'unauthorized')
+    assert.strictEqual(classifyFailure({ status: 403, stage }), 'forbidden')
+  }
+  assert.notStrictEqual(classifyFailure({ status: 401 }), classifyFailure({ status: 403 }))
+  // The error CODE outranks the status.
+  assert.strictEqual(classifyFailure({ status: 500, errorCode: 'resyncRequired', stage: 'envelope' }), 'cursor_invalid')
+  for (const c of CURSOR_INVALID_ERROR_CODES) {
+    assert.strictEqual(classifyFailure({ status: 400, errorCode: c.toUpperCase(), stage: 'envelope' }), 'cursor_invalid')
+  }
+})
+
+test('only a controlled error token is ever lifted out of a provider payload', () => {
+  assert.strictEqual(readProviderErrorCode({ error: { code: 'syncStateNotFound' } }), 'syncStateNotFound')
+  for (const bad of [
+    { error: { code: 'has space' } },
+    { error: { code: 'x'.repeat(65) } },
+    { error: { code: '' } },
+    { error: { code: 123 } },
+    { error: 'not an object' },
+    { nope: 1 }, null, 'string',
+  ]) {
+    assert.strictEqual(readProviderErrorCode(bad), null, `must reject ${JSON.stringify(bad)}`)
+  }
+  // The human-readable message is never extracted.
+  assert.strictEqual(readProviderErrorCode({ error: { code: 'itemNotFound', message: 'leak me' } }), 'itemNotFound')
 })
 
 await atest('a thrown transport error never leaks the URL or the message', async () => {
@@ -406,22 +537,145 @@ test('content reader rejects empty and oversized bodies', () => {
     'response_too_large')
 })
 
-test('content reader keeps ONLY the two body projections', () => {
+test('content reader keeps the two body projections plus CLASSIFIED header facts only', () => {
   const r = readMessageContent({
     id: 'M1',
     body: { contentType: 'html', content: '<p>hi</p>' },
     uniqueBody: { contentType: 'html', content: '<p>hi</p>' },
     hasAttachments: true,
     attachments: [{ name: 'secret.pdf', contentBytes: 'AAAA' }],
-    internetMessageHeaders: [{ name: 'X-Secret', value: 'leak' }],
+    internetMessageHeaders: [
+      { name: 'X-Secret', value: 'leak' },
+      { name: 'List-Id', value: '<newsletter.example.invalid>' },
+      { name: 'Precedence', value: 'bulk' },
+    ],
     from: { emailAddress: { address: 'someone@example.invalid' } },
   }, 'M1')
   assert.ok(r.ok)
   assert.deepStrictEqual(Object.keys(r).sort(),
-    ['bodyContent', 'bodyContentType', 'ok', 'uniqueBodyContent', 'uniqueBodyContentType'])
+    ['automation', 'automationComplete', 'bodyContent', 'bodyContentType', 'ok',
+      'uniqueBodyContent', 'uniqueBodyContentType'])
+  // The headers were USED...
+  assert.strictEqual(r.automationComplete, true)
+  assert.strictEqual(r.automation.hasListId, true)
+  assert.strictEqual(r.automation.precedence, 'bulk')
+  // ...and then discarded. Only booleans and small enums survive.
   const s = JSON.stringify(r)
-  assert.ok(!s.includes('secret.pdf') && !s.includes('leak') && !s.includes('example.invalid'),
-    'attachments, headers and addresses must not survive the content read')
+  assert.ok(!s.includes('secret.pdf') && !s.includes('X-Secret') && !s.includes('leak'),
+    'no raw header name or value survives')
+  assert.ok(!s.includes('newsletter.example.invalid') && !s.includes('someone@example.invalid'),
+    'no header value and no address survives')
+  assert.ok(!('internetMessageHeaders' in r), 'the collection itself is never returned')
+})
+
+test('an absent header collection is reported INCOMPLETE, never as "no automation"', () => {
+  const r = readMessageContent({
+    id: 'M1', body: { contentType: 'text', content: 'hello there' },
+  }, 'M1')
+  assert.ok(r.ok)
+  assert.strictEqual(r.automationComplete, false, 'absence is not evidence of absence')
+  assert.strictEqual(r.automation.hasListId, false)
+  assert.strictEqual(r.automation.autoSubmitted, null)
+})
+
+test('an automated/list message is identifiable from the direct GET headers alone', () => {
+  for (const [headers, expect] of [
+    [[{ name: 'List-Id', value: '<l.example.invalid>' }], { hasListId: true }],
+    [[{ name: 'List-Unsubscribe', value: '<mailto:u@example.invalid>' }], { hasListUnsubscribe: true }],
+    [[{ name: 'Precedence', value: 'bulk' }], { precedence: 'bulk' }],
+    [[{ name: 'Auto-Submitted', value: 'auto-replied' }], { autoSubmitted: 'auto-replied' }],
+    [[{ name: 'X-Auto-Response-Suppress', value: 'All' }], { hasAutoResponseSuppress: true }],
+  ]) {
+    const r = readMessageContent({
+      id: 'M1', body: { contentType: 'text', content: 'text here' }, internetMessageHeaders: headers,
+    }, 'M1')
+    assert.ok(r.ok && r.automationComplete === true)
+    for (const [k, v] of Object.entries(expect)) {
+      assert.strictEqual(r.automation[k], v, `${k} from the direct GET`)
+    }
+  }
+})
+
+// ── Discovery → content handoff ──────────────────────────────────────────────
+console.log('\ndiscovery to content handoff')
+
+await atest('a delta item with NO headers, body or uniqueBody still reaches the content GET', async () => {
+  // Exactly what Graph returns for a discovery projection.
+  const deltaItem = {
+    id: 'AAMk_disc_1',
+    conversationId: 'AAQk_conv_1',
+    receivedDateTime: '2026-09-10T14:03:00Z',
+    sentDateTime: '2026-09-10T14:02:55Z',
+    isDraft: false,
+    subject: 'Coffee chat follow-up',
+    from: { emailAddress: { name: 'Dana Swope', address: 'dana.swope@contoso.example.invalid' } },
+    toRecipients: [{ emailAddress: { address: 'student@example.invalid' } }],
+    ccRecipients: [],
+  }
+  for (const absent of ['internetMessageHeaders', 'uniqueBody', 'body']) {
+    assert.ok(!(absent in deltaItem), `fixture must not carry ${absent}`)
+  }
+  const page = readDeltaPage({ value: [deltaItem], '@odata.deltaLink': GOOD_DELTA })
+  assert.ok(page.ok && page.items.length === 1)
+
+  // The content read is issued for that id and succeeds with content + facts.
+  let requestedUrl = null
+  const res = await executeGraphRequest({
+    request: buildMessageContentRequest({ messageId: deltaItem.id }),
+    accessToken: 't',
+    fetchImpl: async (url) => {
+      requestedUrl = url
+      return fakeRes(200, {
+        json: {
+          id: 'AAMk_disc_1',
+          body: { contentType: 'text', content: 'Great speaking today.' },
+          uniqueBody: { contentType: 'text', content: 'Great speaking today.' },
+          internetMessageHeaders: [{ name: 'Precedence', value: 'bulk' }],
+        },
+      })
+    },
+  })
+  assert.ok(res.ok)
+  assert.ok(requestedUrl.includes('internetMessageHeaders'), 'headers requested here, not on delta')
+  const content = readMessageContent(res.json, deltaItem.id)
+  assert.ok(content.ok)
+  assert.strictEqual(content.automationComplete, true, 'facts now available')
+  assert.strictEqual(content.automation.precedence, 'bulk')
+})
+
+test('the opaque message id is encoded as ONE path segment and cannot alter the route', () => {
+  // A hostile id containing separators and traversal must not escape /me/messages/{id}.
+  const hostile = 'AAMk/../../users/victim@example.invalid/messages/AAA'
+  assert.ok(!isUsableGraphId(hostile), 'rejected outright by the shape check')
+  assert.throws(() => buildMessageContentRequest({ messageId: hostile }), /invalid_message_id/)
+
+  // A legitimate Graph id contains characters that MUST be percent-encoded.
+  const real = 'AAMkAGVmMDEzMTM4LTZmYWUtNDdkNC1hMDZiLTU1OGY5OTZhYmY4OABGAAAAAAEMAASoXUT3AAA='
+  const r = buildMessageContentRequest({ messageId: real })
+  const u = new URL(r.url)
+  const segments = u.pathname.split('/')
+  assert.deepStrictEqual(segments.slice(0, 4), ['', 'v1.0', 'me', 'messages'])
+  assert.strictEqual(segments.length, 5, 'the id occupies exactly one segment')
+  assert.strictEqual(decodeURIComponent(segments[4]), real, 'and round-trips exactly')
+  assert.ok(segments[4].includes('%3D'), '"=" is percent-encoded rather than left raw')
+  assert.ok(!u.pathname.includes('$value') && !u.pathname.includes('/attachments'))
+})
+
+test('a @removed tombstone never produces a content request', () => {
+  const removed = { id: 'AAMk_removed_1', '@removed': { reason: 'deleted' } }
+  const page = readDeltaPage({ value: [removed], '@odata.deltaLink': GOOD_DELTA })
+  assert.ok(page.ok)
+  // The transport hands the item on; the normalizer is what refuses it, and the
+  // content path is only ever entered for a normalized message.
+  const norm = normalizeGraphMessage(removed, 'inbox')
+  assert.ok(!norm.ok)
+  assert.strictEqual(norm.code, 'removed_tombstone')
+  const detected = readRemoval(removed)
+  assert.ok(detected && detected.removed === true)
+  // A page of only removals yields no message to fetch content for.
+  const batch = normalizeGraphPage([removed], 'inbox')
+  assert.strictEqual(batch.messages.length, 0, 'nothing to fetch')
+  assert.strictEqual(batch.removals.length, 1)
 })
 
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed\n`)

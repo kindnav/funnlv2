@@ -172,10 +172,19 @@ export function evaluateMessage(p) {
   if (match === 'ambiguous_contact') return { outcome: 'deferred', code: 'ambiguous_contact' }
   const contactId = match ? match.contactId : null
 
-  // If Graph did not return the header collection we cannot prove the message is not
-  // automated. For a person the user already tracks that is tolerable (they chose to
-  // track them). For proposing a BRAND NEW contact it is not — defer instead.
-  const automationComplete = isPlainObject(extra) ? extra.automationFactsComplete !== false : true
+  // Automation headers are NOT part of the discovery projection, so a message that has
+  // only been discovered always arrives here with incomplete facts; the real facts are
+  // merged in by applyAutomationFacts after the per-message content read.
+  //
+  // FAIL CLOSED: the default when `extra` is absent or unreadable is INCOMPLETE. A
+  // caller that forgets to thread the facts through must never thereby get an unknown
+  // sender accepted as a new-contact suggestion.
+  //
+  // For a person the user already tracks, missing automation facts are tolerable — they
+  // chose to track that exact address, and the envelope-based no-reply/bounce/system
+  // and subject rules above have already run independently. For proposing a BRAND NEW
+  // contact they are not: defer instead.
+  const automationComplete = isPlainObject(extra) && extra.automationFactsComplete === true
   if (!automationComplete && contactId === null) {
     return { outcome: 'deferred', code: 'automation_facts_incomplete' }
   }
