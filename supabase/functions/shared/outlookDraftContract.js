@@ -41,6 +41,12 @@ export const ANTHROPIC_VERSION = '2023-06-01'   // current version per the API r
 export const DRAFT_MODEL = 'claude-sonnet-5'
 export const DRAFT_MAX_TOKENS = 1024
 export const DRAFT_TEMPERATURE = 0              // deterministic extraction
+
+// Sonnet 5 accepts `thinking: {type: "disabled"}` (it is the documented example for
+// this model). Adaptive thinking would otherwise share the max_tokens budget with the
+// visible response. NOT the legacy extended-thinking form: `type: "enabled"` with
+// `budget_tokens` is not accepted on this model generation, and no `effort` is sent.
+export const THINKING_DISABLED = Object.freeze({ type: 'disabled' })
 export const DRAFT_TIMEOUT_MS = 30_000
 export const DRAFT_MAX_RETRIES = 2
 export const MAX_REQUEST_CHARS = 20_000         // whole serialized body ceiling
@@ -235,6 +241,16 @@ export function buildDraftRequest(p) {
     model: DRAFT_MODEL,
     max_tokens: DRAFT_MAX_TOKENS,
     temperature: DRAFT_TEMPERATURE,
+    // Claude Sonnet 5 has adaptive thinking ON by default at effort `high`, and
+    // thinking tokens are billed as output and COUNT TOWARD max_tokens alongside the
+    // response text. With only 1,024 tokens budgeted, adaptive thinking could consume
+    // the allowance and leave no visible JSON - the exact failure this repository
+    // already hit on ai-chat (empty_provider_response) and fixed the same way.
+    //
+    // This is a narrow structured extraction: the schema and the independent validator
+    // supply the correctness boundary, so the reasoning budget buys nothing here and
+    // the whole allowance is reserved for the validated JSON response.
+    thinking: THINKING_DISABLED,
     system: SYSTEM_CONTRACT,
     messages: [{ role: 'user', content: buildUserContent(p) }],
     // GA structured outputs. `output_format` was the older beta spelling and the beta

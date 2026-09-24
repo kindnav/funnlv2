@@ -14,7 +14,7 @@ import {
   ANTHROPIC_MESSAGES_URL, ANTHROPIC_VERSION, DRAFT_MODEL, DRAFT_MAX_TOKENS,
   DRAFT_TEMPERATURE, MAX_REQUEST_CHARS, BOUNDS,
   NAME_EVIDENCE, FIELD_EVIDENCE, SUMMARY_EVIDENCE, CONFIDENCE, INTERACTION_TYPE,
-  SYSTEM_CONTRACT, buildUserContent, buildDraftRequest, buildDraftHeaders,
+  SYSTEM_CONTRACT, THINKING_DISABLED, buildUserContent, buildDraftRequest, buildDraftHeaders,
   assertRequestMinimization, containsSensitiveInference,
   validateDraftResponse, parseDraftPayload, callDraftModel,
   interactionDraftSchema, newContactSchema,
@@ -104,6 +104,58 @@ test('the GA structured-output field is used, not the superseded beta spelling',
   assert.strictEqual(body.max_tokens, DRAFT_MAX_TOKENS)
   assert.strictEqual(body.temperature, 0, 'deterministic extraction')
   assert.strictEqual(DRAFT_TEMPERATURE, 0)
+})
+
+test('adaptive thinking is explicitly disabled so max_tokens is all visible output', () => {
+  const body = buildDraftRequest(baseInput())
+  // Exactly the documented disabled form for this model, and nothing more.
+  assert.deepStrictEqual(body.thinking, { type: 'disabled' })
+  assert.deepStrictEqual(Object.keys(body.thinking), ['type'],
+    'no display/budget/effort keys ride along')
+  assert.deepStrictEqual({ ...THINKING_DISABLED }, { type: 'disabled' })
+
+  // The legacy extended-thinking form is not accepted on this model generation.
+  assert.ok(!('budget_tokens' in body), 'no top-level budget_tokens')
+  assert.ok(!('budget_tokens' in body.thinking), 'no budget_tokens inside thinking')
+  assert.notStrictEqual(body.thinking.type, 'enabled', 'not the legacy enabled form')
+  assert.notStrictEqual(body.thinking.type, 'adaptive', 'not adaptive')
+
+  // Effort is deliberately not sent: it only steers thinking, which is off.
+  assert.ok(!('effort' in body), 'no top-level effort')
+  assert.ok(!('effort' in (body.output_config || {})), 'no effort in output_config')
+  const s = JSON.stringify(body)
+  assert.ok(!/"effort"/.test(s) && !/"budget_tokens"/.test(s) && !/"top_p"|"top_k"/.test(s),
+    'no effort, budget_tokens, top_p or top_k anywhere in the request')
+})
+
+test('the disabled setting is required — a changed or missing value is detectable', () => {
+  const body = buildDraftRequest(baseInput())
+  // These are the mutations the guard above must reject; each differs from the
+  // committed contract, so an accidental edit cannot pass silently.
+  for (const mutated of [undefined, null, {}, { type: 'adaptive' }, { type: 'enabled', budget_tokens: 512 },
+    { type: 'disabled', display: 'summarized' }]) {
+    let differs
+    try { assert.deepStrictEqual(mutated, { type: 'disabled' }); differs = false } catch { differs = true }
+    assert.ok(differs, `mutation ${JSON.stringify(mutated)} must not equal the required value`)
+  }
+  // And the real body still satisfies it.
+  assert.deepStrictEqual(body.thinking, { type: 'disabled' })
+  // Source-level pin: the constant is frozen and used by the builder.
+  assert.ok(/THINKING_DISABLED = Object\.freeze\(\{ type: 'disabled' \}\)/.test(SRC))
+  assert.ok(/thinking: THINKING_DISABLED,/.test(SRC), 'the builder uses the constant')
+})
+
+test('the rest of the request contract is unchanged by the thinking addition', () => {
+  const body = buildDraftRequest(baseInput())
+  assert.deepStrictEqual(Object.keys(body).sort(),
+    ['max_tokens', 'messages', 'model', 'output_config', 'system', 'temperature', 'thinking'],
+    'exactly the expected top-level keys')
+  assert.strictEqual(body.model, 'claude-sonnet-5')
+  assert.strictEqual(body.max_tokens, 1024)
+  assert.strictEqual(body.max_tokens, DRAFT_MAX_TOKENS)
+  assert.strictEqual(body.system, SYSTEM_CONTRACT)
+  assert.strictEqual(body.messages.length, 1)
+  assert.strictEqual(body.output_config.format.type, 'json_schema')
 })
 
 test('schemas use only the SUPPORTED JSON Schema subset', () => {

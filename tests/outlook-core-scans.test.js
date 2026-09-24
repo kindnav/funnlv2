@@ -203,6 +203,23 @@ test('the sanitizer documents the three-part header boundary explicitly', () => 
   assert.ok(!/the transport never requests them/i.test(doc), 'stale claim must not return')
 })
 
+test('no module uses a legacy or alternate thinking configuration', () => {
+  const draft = MODULES.find((m) => m.name === 'outlookDraftContract.js')
+  const code = exec(draft.src)
+  assert.ok(code.includes("THINKING_DISABLED = Object.freeze({ type: 'disabled' })"),
+    'the disabled form is a frozen constant')
+  assert.ok(code.includes('thinking: THINKING_DISABLED,'), 'and the builder sends it')
+  // The legacy extended-thinking configuration is not accepted on this model
+  // generation, and effort only steers thinking, which is off.
+  for (const bad of ['budget_tokens', "type: 'enabled'", "type: 'adaptive'", 'effort']) {
+    assert.ok(!code.includes(bad), `draft contract must not contain ${bad}`)
+  }
+  // No other module configures thinking at all.
+  for (const m of MODULES.filter((x) => x.name !== 'outlookDraftContract.js')) {
+    assert.ok(!/thinking/i.test(exec(m.src)), `${m.name} must not configure thinking`)
+  }
+})
+
 test('backend prose does not emit the accidental Tailwind visibility utility', () => {
   // Tailwind v4 is wired via @tailwindcss/vite with no content config, so it scans the
   // whole repository and extracts bare lowercase tokens as utility candidates. A word
