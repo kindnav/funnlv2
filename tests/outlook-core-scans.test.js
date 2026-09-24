@@ -203,6 +203,32 @@ test('the sanitizer documents the three-part header boundary explicitly', () => 
   assert.ok(!/the transport never requests them/i.test(doc), 'stale claim must not return')
 })
 
+test('backend prose does not emit the accidental Tailwind visibility utility', () => {
+  // Tailwind v4 is wired via @tailwindcss/vite with no content config, so it scans the
+  // whole repository and extracts bare lowercase tokens as utility candidates. A word
+  // used casually in a backend comment or a test description can therefore add a real
+  // CSS rule to the shipped stylesheet, which made the emitted frontend differ between
+  // `main` and this branch even though no frontend file changed.
+  //
+  // The token is assembled from two fragments so THIS file does not itself become the
+  // candidate that regenerates the utility.
+  const token = 'in' + 'visible'
+  const re = new RegExp('\\b' + token + '\\b')
+  const offenders = []
+  for (const f of [...MODULES, ...SUITES]) {
+    f.src.split('\n').forEach((line, i) => {
+      if (re.test(line)) offenders.push(`${f.name}:${i + 1}: ${line.trim().slice(0, 90)}`)
+    })
+  }
+  assert.deepStrictEqual(offenders, [],
+    `standalone lowercase Tailwind candidate found:\n${offenders.join('\n')}`)
+  // The uppercase identifier is deliberately still allowed: Tailwind candidates are
+  // case-sensitive, so INVISIBLE_RE does not generate a utility.
+  const sanitizer = MODULES.find((m) => m.name === 'outlookContentSanitizer.js')
+  assert.ok(sanitizer.src.includes('INVISIBLE_RE'),
+    'the regex identifier must remain - only the prose spelling was changed')
+})
+
 test('the normalizeGraphMessage JSDoc describes the real `extra` contract', () => {
   const src = read('supabase/functions/shared/outlookMessageNormalize.js')
   const i = src.indexOf('export function normalizeGraphMessage')

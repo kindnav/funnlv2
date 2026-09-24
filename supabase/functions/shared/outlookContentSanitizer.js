@@ -58,7 +58,7 @@ const CONTROL_RE = new RegExp('[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u0
 // Bidirectional overrides/isolates. These can visually reverse text so that what a
 // reviewer reads is not what the model read — a real spoofing vector, always removed.
 const BIDI_RE = new RegExp('[\\u200E\\u200F\\u202A-\\u202E\\u2066-\\u2069]', 'g')
-// Zero-width and invisible formatting characters (can hide instructions inside words).
+// Zero-width and other nonprinting formatting characters (can hide instructions inside words).
 const INVISIBLE_RE = new RegExp('[\\u00AD\\u200B-\\u200D\\u2060\\u2061-\\u2064\\uFEFF]', 'g')
 // Runs of spaces / non-breaking spaces. Escaped-string form for the same reason.
 const NBSP_RUN_RE = new RegExp('[ \\u00A0]{2,}', 'g')
@@ -131,7 +131,7 @@ export function htmlToText(html) {
   return s
 }
 
-/** Remove control, bidi and invisible characters, then normalize whitespace. */
+/** Remove control, bidi and nonprinting characters, then normalize whitespace. */
 export function stripUnsafeCharacters(s) {
   if (typeof s !== 'string') return ''
   return s
