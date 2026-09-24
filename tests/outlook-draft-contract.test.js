@@ -12,7 +12,7 @@ import { fileURLToPath } from 'url'
 import { join, dirname } from 'path'
 import {
   ANTHROPIC_MESSAGES_URL, ANTHROPIC_VERSION, DRAFT_MODEL, DRAFT_MAX_TOKENS,
-  DRAFT_TEMPERATURE, MAX_REQUEST_CHARS, BOUNDS,
+  MAX_REQUEST_CHARS, BOUNDS,
   NAME_EVIDENCE, FIELD_EVIDENCE, SUMMARY_EVIDENCE, CONFIDENCE, INTERACTION_TYPE,
   SYSTEM_CONTRACT, THINKING_DISABLED, buildUserContent, buildDraftRequest, buildDraftHeaders,
   assertRequestMinimization, containsSensitiveInference,
@@ -102,8 +102,40 @@ test('the GA structured-output field is used, not the superseded beta spelling',
     'no beta header in executable code')
   assert.strictEqual(body.model, DRAFT_MODEL)
   assert.strictEqual(body.max_tokens, DRAFT_MAX_TOKENS)
-  assert.strictEqual(body.temperature, 0, 'deterministic extraction')
-  assert.strictEqual(DRAFT_TEMPERATURE, 0)
+  assert.ok(!('temperature' in body), 'no sampling parameter is sent')
+})
+
+test('no sampling parameter is sent - Sonnet 5 rejects non-default values', () => {
+  // Claude Sonnet 5 returns a 400 on every request carrying a non-default
+  // `temperature`, `top_p` or `top_k`, and that holds even with thinking disabled.
+  // Sending temperature: 0 would therefore have failed 100% of real requests.
+  const body = buildDraftRequest(baseInput())
+  for (const k of ['temperature', 'top_p', 'top_k', 'budget_tokens']) {
+    assert.ok(!(k in body), `request must not carry ${k}`)
+  }
+  const s = JSON.stringify(body)
+  for (const k of ['temperature', 'top_p', 'top_k', 'budget_tokens']) {
+    assert.ok(!new RegExp('"' + k + '"').test(s), `${k} must not appear anywhere in the payload`)
+  }
+  // The contract that actually delivers consistency is still in place.
+  assert.strictEqual(body.model, 'claude-sonnet-5')
+  assert.strictEqual(body.max_tokens, 1024)
+  assert.deepStrictEqual(body.thinking, { type: 'disabled' })
+  assert.strictEqual(body.output_config.format.type, 'json_schema')
+  assert.strictEqual(body.system, SYSTEM_CONTRACT)
+})
+
+test('committed draft-contract source declares no sampling parameter', () => {
+  // Source-level guard so the parameter cannot creep back in indirectly (for example
+  // via a spread, a helper, or a re-introduced constant). Comments may still NAME the
+  // parameters to explain why they are absent, so only executable code is scanned.
+  const code = SRC
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .split('\n').filter((l) => !/^\s*(\/\/|\*)/.test(l)).join('\n')
+  for (const bad of ['temperature', 'top_p', 'top_k', 'budget_tokens', 'DRAFT_TEMPERATURE']) {
+    assert.ok(!code.includes(bad), `executable source must not contain ${bad}`)
+  }
+  assert.ok(code.includes('thinking: THINKING_DISABLED,'), 'thinking stays explicitly disabled')
 })
 
 test('adaptive thinking is explicitly disabled so max_tokens is all visible output', () => {
@@ -148,7 +180,7 @@ test('the disabled setting is required — a changed or missing value is detecta
 test('the rest of the request contract is unchanged by the thinking addition', () => {
   const body = buildDraftRequest(baseInput())
   assert.deepStrictEqual(Object.keys(body).sort(),
-    ['max_tokens', 'messages', 'model', 'output_config', 'system', 'temperature', 'thinking'],
+    ['max_tokens', 'messages', 'model', 'output_config', 'system', 'thinking'],
     'exactly the expected top-level keys')
   assert.strictEqual(body.model, 'claude-sonnet-5')
   assert.strictEqual(body.max_tokens, 1024)

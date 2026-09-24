@@ -40,7 +40,14 @@ export const ANTHROPIC_VERSION = '2023-06-01'   // current version per the API r
 // obvious to the person reviewing the draft. Single constant, easy to change.
 export const DRAFT_MODEL = 'claude-sonnet-5'
 export const DRAFT_MAX_TOKENS = 1024
-export const DRAFT_TEMPERATURE = 0              // deterministic extraction
+// NO SAMPLING PARAMETERS. Claude Sonnet 5 returns a 400 on every request that sends a
+// non-default `temperature`, `top_p` or `top_k` - and that holds even with thinking
+// disabled - so none is sent. Consistency does not come from a sampling knob anyway:
+// it comes from the fixed system contract and schema, the strict independent validator
+// (which re-checks key set, lengths, enums, evidence pairing and dates), the bounded
+// database fields, and the fact that every result is a draft a human must accept.
+// The same rule is recorded in ai-chat/providerCall.js: do not add temperature,
+// top_p, top_k, or manual budget_tokens.
 
 // Sonnet 5 accepts `thinking: {type: "disabled"}` (it is the documented example for
 // this model). Adaptive thinking would otherwise share the max_tokens budget with the
@@ -240,7 +247,6 @@ export function buildDraftRequest(p) {
   const body = {
     model: DRAFT_MODEL,
     max_tokens: DRAFT_MAX_TOKENS,
-    temperature: DRAFT_TEMPERATURE,
     // Claude Sonnet 5 has adaptive thinking ON by default at effort `high`, and
     // thinking tokens are billed as output and COUNT TOWARD max_tokens alongside the
     // response text. With only 1,024 tokens budgeted, adaptive thinking could consume

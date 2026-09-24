@@ -211,7 +211,12 @@ test('no module uses a legacy or alternate thinking configuration', () => {
   assert.ok(code.includes('thinking: THINKING_DISABLED,'), 'and the builder sends it')
   // The legacy extended-thinking configuration is not accepted on this model
   // generation, and effort only steers thinking, which is off.
-  for (const bad of ['budget_tokens', "type: 'enabled'", "type: 'adaptive'", 'effort']) {
+  //
+  // The sampling parameters are here for a harder reason: Claude Sonnet 5 returns a
+  // 400 on EVERY request carrying a non-default temperature, top_p or top_k, even
+  // with thinking disabled. Sending one would have failed 100% of real requests.
+  for (const bad of ['budget_tokens', "type: 'enabled'", "type: 'adaptive'", 'effort',
+    'temperature', 'top_p', 'top_k']) {
     assert.ok(!code.includes(bad), `draft contract must not contain ${bad}`)
   }
   // No other module configures thinking at all.
