@@ -104,7 +104,17 @@ test('"no identifiers are stored" is NOT claimed; the precise statement is', () 
   assert.ok(/Intentionally NO GRANT and NO POLICY for authenticated: provider provenance never leaks/.test(E2A_MIG))
 })
 test('the 30-day subject maximum is NOT published because no scheduler runs the expiry job', () => {
-  assert.ok(!/30 days/.test(POLICY), 'a maximum the code does not enforce must not be promised')
+  // SCOPED to the Gmail/Calendar half of the policy (everything before the Outlook
+  // section). The guard's intent is that FUNNL must not promise a Gmail subject-retention
+  // maximum it does not enforce. It originally scanned the whole document, which also
+  // caught the unrelated Outlook section's disclosure of ANTHROPIC's 30-day API retention
+  // — a different party, a different clock, and a required disclosure. Narrowing the
+  // scope keeps this guard exactly as strong for Gmail; the Outlook section has its own
+  // guard in tests/privacy-policy-outlook.test.js forbidding a Funnl-side 30-day erasure
+  // promise there.
+  const outlookAt = POLICY.indexOf('<Section title="Outlook connection (not yet available)">')
+  const GMAIL_SCOPE = outlookAt === -1 ? POLICY : POLICY.slice(0, outlookAt)
+  assert.ok(!/30 days/.test(GMAIL_SCOPE), 'a maximum the code does not enforce must not be promised')
   assert.ok(/expire_pending_email_context/.test(E2A_MIG), 'the job exists in SQL')
   const callers = ['supabase/functions/gmail-sync-worker/index.ts', 'supabase/functions/shared/gmailWorker.js', 'supabase/functions/google-calendar-sync/index.ts']
     .filter((p) => existsSync(join(ROOT, p)) && /expire_pending_email_context/.test(read(p)))
