@@ -52,6 +52,15 @@ const fnBody = (code, name) => {
   return m[0]
 }
 
+// Patterns shared by an assertion below and by the source-hygiene guards at the end of
+// this file. Both are written with escaped text only, so no literal control byte can sit
+// inside them where an escape sequence belongs.
+const TXN_CONTROL_RE = /\bCOMMIT\b|\bROLLBACK\b|START TRANSACTION/
+// Matching control characters is the whole point of this guard, and the pattern is
+// already written as Unicode escapes, which is what the rule asks for.
+// eslint-disable-next-line no-control-regex
+const FORBIDDEN_CONTROL_RE = new RegExp('[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F]')
+
 // ─────────────────────────────────────────────────────────────────────────────
 console.log('\nretention migration — shape')
 test('forward-only: no table/column/policy/constraint change; one partial index; no apply-time DML', () => {
@@ -137,7 +146,7 @@ test('cleanup order: candidates first, then oauth states, then the connection �
   const i3 = b.indexOf('DELETE FROM public.google_connections WHERE user_id = p_user_id')
   assert.ok(i1 >= 0 && i2 > i1 && i3 > i2)
   assert.ok(!/DELETE FROM public\.interaction_candidates|DELETE FROM public\.interactions|DELETE FROM public\.email_candidate_refs/.test(b))
-  assert.ok(!/COMMIT|ROLLBACK|START TRANSACTION/.test(b), 'no explicit transaction control (the function IS the transaction)')
+  assert.ok(!TXN_CONTROL_RE.test(b), 'no explicit transaction control (the function IS the transaction)')
   assert.ok(!/google_tokens|google_connection_capabilities|gmail_sync_state/.test(b), 'cascades do that work exactly as before')
 })
 test('ownership: only p_user_id (from the verified JWT) scopes every statement; NULL is refused; no auth.uid() (service path)', () => {
@@ -239,6 +248,45 @@ test('policy wording for whole-Google disconnect now matches run_google_local_cl
 })
 test('policy fingerprint-retention sentence matches the decision (until contact or account deletion)', () => {
   assert.ok(/its record \(without the subject line\) and its fingerprint remain so the conversation is not suggested again\. They are deleted when you delete the contact they concern or delete your account/.test(POLICY))
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+console.log('\nsource hygiene — this test file\'s own bytes')
+// A literal backspace (0x08) once stood where the escaped word boundaries of the
+// transaction-control assertion belong. It printed as nothing, so the assertion looked
+// right and matched nothing — every token it named could have appeared in the migration
+// unnoticed. These two guards make that class of defect fail loudly.
+test('this test file carries no forbidden control bytes (tab, LF and CR are the only ones allowed)', () => {
+  const self = read('tests/gmail-retention-invariants.test.js')
+  const found = []
+  for (let i = 0; i < self.length; i++) {
+    const c = self.charCodeAt(i)
+    if (c <= 0x08 || c === 0x0b || c === 0x0c || (c >= 0x0e && c <= 0x1f) || c === 0x7f) {
+      found.push(`0x${c.toString(16).padStart(2, '0')} at offset ${i}`)
+    }
+  }
+  assert.deepStrictEqual(found, [], `forbidden control bytes present: ${found.slice(0, 8).join(', ')}`)
+  // The escaped class must agree with the scan, and must be correct in both directions.
+  assert.ok(!FORBIDDEN_CONTROL_RE.test(self), 'escaped class agrees with the byte scan')
+  for (const c of [0x00, 0x01, 0x07, 0x08, 0x0b, 0x0c, 0x0e, 0x1f, 0x7f]) {
+    assert.ok(FORBIDDEN_CONTROL_RE.test(String.fromCharCode(c)), `0x${c.toString(16)} must be rejected`)
+  }
+  for (const c of [0x09, 0x0a, 0x0d]) {
+    assert.ok(!FORBIDDEN_CONTROL_RE.test(String.fromCharCode(c)), `0x${c.toString(16)} must be allowed`)
+  }
+})
+test('the transaction-control pattern rejects every token it names, and nothing else', () => {
+  for (const s of ['COMMIT;', '  COMMIT ', 'BEGIN; COMMIT; END', 'ROLLBACK;', '  ROLLBACK ', 'START TRANSACTION;']) {
+    assert.ok(TXN_CONTROL_RE.test(s), `must match: ${s}`)
+  }
+  for (const s of ['v_committed', 'committed', 'rollbacks', 'COMMITTED_ROWS', 'no transaction control here']) {
+    assert.ok(!TXN_CONTROL_RE.test(s), `must not match: ${s}`)
+  }
+  // The boundaries must be the two source characters backslash + b, four of them.
+  assert.strictEqual((TXN_CONTROL_RE.source.match(/\\b/g) || []).length, 4, 'four escaped word boundaries')
+  const line = read('tests/gmail-retention-invariants.test.js')
+    .split('\n').find((l) => l.includes('no explicit transaction control'))
+  assert.ok(line && line.includes('TXN_CONTROL_RE'), 'the assertion uses this shared pattern')
 })
 
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed\n`)
