@@ -65,12 +65,24 @@ const APPROVED_RETENTION_DISCLOSURES = [
     text: "Anthropic's 30 days is not a Funnl deletion schedule" },
 ]
 
-// Numbers and units a policy could plausibly use. Written-out forms matter: thirty days and
-// one month are the same promise as 30 days.
-const DURATION_NUMBER = '(?:[0-9]+|one|two|three|four|five|six|seven|eight|nine|ten|'
-  + 'eleven|twelve|fourteen|fifteen|twenty|thirty|forty|forty-five|sixty|ninety)'
-const DURATION_UNIT = '(?:day|week|month|year)'
-const durationRe = (flags) => new RegExp(DURATION_NUMBER + '[- ]*' + DURATION_UNIT + 's?', flags)
+// A retention duration is a QUANTITY, optionally restated in digits, optionally qualified,
+// then a UNIT. Kept as small named pieces so the invariant can be audited by eye, and written
+// generically so it catches the class rather than a list of phrasings. Earlier versions missed
+// 'within a month', '30 calendar days', 'thirty (30) days', 'sixteen days', '45 consecutive
+// days' and 'one quarter'.
+const DURATION_DIGITS = '[0-9]+(?:\\.[0-9]+)?'                         // 30, 1.5
+const DURATION_ONES = '(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|'
+  + 'thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen)'
+const DURATION_TENS = '(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)'
+// thirty, forty-five, forty five, seven
+const DURATION_WORD = '(?:' + DURATION_TENS + '(?:[- ]' + DURATION_ONES + ')?|' + DURATION_ONES + ')'
+const DURATION_ARTICLE = '(?:an?)'                                        // a month, an extra week
+const DURATION_QUANTITY = '(?:' + DURATION_DIGITS + '|' + DURATION_WORD + '|' + DURATION_ARTICLE + ')'
+const DURATION_RESTATED = '(?:[- ]*\\(\\s*' + DURATION_DIGITS + '\\s*\\))?'   // thirty (30)
+const DURATION_QUALIFIER = '(?:[- ]*(?:calendar|business|consecutive|working|full|additional)\\b)*'
+const DURATION_UNIT = '(?:day|week|month|quarter|year)s?'
+const durationRe = (flags) => new RegExp('\\b' + DURATION_QUANTITY + DURATION_RESTATED
+  + DURATION_QUALIFIER + '[- ]*' + DURATION_UNIT + '\\b', flags)
 
 // The Outlook prose with every approved disclosure removed. Anything left that looks like a
 // retention duration is an unapproved claim.
@@ -423,10 +435,30 @@ test('no unapproved retention duration survives anywhere in the Outlook section'
     'deleted after 14 days', 'kept 45 days', 'within 60 days', 'after 90 days',
     'for four weeks', 'for one month', 'for three months', 'for one year',
     'a thirty-day window', 'a 30-day window', 'a thirty day window',
+    // variants that defeated the first generation of this detector
+    'Funnl deletes Outlook context within a month.',
+    'Funnl deletes Outlook context after a calendar month.',
+    'Funnl deletes Outlook context after 30 calendar days.',
+    'Funnl removes Outlook context within one business month.',
+    'Funnl deletes Outlook context after thirty (30) days.',
+    'Funnl removes Outlook context after sixteen days.',
+    'Funnl removes Outlook context after twenty-one days.',
+    'Funnl removes Outlook context after 45 consecutive days.',
+    'Funnl retains Outlook context for one quarter.',
+    'Funnl retains Outlook context for 1.5 years.',
+    // and the rest of the grammar, so a later simplification cannot quietly narrow it
+    'forty five days', 'seventeen weeks', 'an additional month', 'two quarters',
+    'ninety (90) days', '0.5 years', 'nineteen days', 'fifty days', 'seventy-two days',
+    'thirteen days', 'eighteen months', 'an working day', 'a full year',
   ]
   for (const s of mustDetect) assert.ok(durationRe('i').test(s), `must recognize: ${s}`)
   // And it must not fire on the section's non-retention numbers.
-  for (const s of ['at most 200 characters', 'at most 160 characters', 'exactly five', 'the two parties']) {
+  const mustNotDetect = [
+    'at most 200 characters', 'at most 160 characters', 'exactly five', 'the two parties',
+    'a summary of at most 200 characters', 'five headers', 'two parties are labelled',
+    'the sender, the recipients', 'Inbox and Sent Items only', 'a confidence level',
+  ]
+  for (const s of mustNotDetect) {
     assert.ok(!durationRe('i').test(s), `must not fire on: ${s}`)
   }
 })
