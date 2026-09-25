@@ -252,10 +252,10 @@ test('policy fingerprint-retention sentence matches the decision (until contact 
 
 // ─────────────────────────────────────────────────────────────────────────────
 console.log('\nsource hygiene — this test file\'s own bytes')
-// A literal backspace (0x08) once stood where the escaped word boundaries of the
-// transaction-control assertion belong. It printed as nothing, so the assertion looked
-// right and matched nothing — every token it named could have appeared in the migration
-// unnoticed. These two guards make that class of defect fail loudly.
+// Literal backspaces (0x08) once replaced the escaped word boundaries around COMMIT
+// and ROLLBACK. Because 0x08 is nonprinting, the assertion looked correct while those
+// two alternatives required backspace-delimited SQL; START TRANSACTION remained
+// functional. These guards make that control-byte defect fail loudly.
 test('this test file carries no forbidden control bytes (tab, LF and CR are the only ones allowed)', () => {
   const self = read('tests/gmail-retention-invariants.test.js')
   const found = []
