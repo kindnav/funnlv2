@@ -232,7 +232,16 @@ test('the worker still never persists provider ids/headers (tombstone content ca
 // ─────────────────────────────────────────────────────────────────────────────
 console.log('\nconsistency with the published Privacy Policy')
 test('policy still makes NO 30-day promise (no expiry scheduler is applied in Production)', () => {
-  assert.ok(!/30 days/.test(POLICY))
+  // SCOPED to the Gmail/Calendar half of the policy (everything before the Outlook
+  // section). The intent is that FUNNL must not promise a Gmail retention maximum it
+  // does not enforce. Scanning the whole document also caught the unrelated Outlook
+  // section's disclosure of ANTHROPIC's 30-day API retention — a different party and a
+  // required disclosure. The guard is unchanged in strength for Gmail; the Outlook
+  // section is guarded separately in tests/privacy-policy-outlook.test.js, which forbids
+  // a Funnl-side 30-day erasure promise there.
+  const outlookAt = POLICY.indexOf('<Section title="Outlook connection (not yet available)">')
+  const GMAIL_SCOPE = outlookAt === -1 ? POLICY : POLICY.slice(0, outlookAt)
+  assert.ok(!/30 days/.test(GMAIL_SCOPE))
 })
 test('policy wording for whole-Google disconnect now matches run_google_local_cleanup (PUBLICATION GATE: publish only after PR-B deploys the caller)', () => {
   assert.ok(/deletes the stored Google tokens and the Google connection from Funnl, together with the connection's capability, cursor, and reference records/.test(POLICY))

@@ -136,6 +136,126 @@ function PrivacyPage() {
           </p>
         </Section>
 
+        {/* ── Outlook (NOT YET AVAILABLE) ─────────────────────────────────────
+            PUBLICATION GATE: this section describes a connection that does not
+            exist yet. There is no Outlook Edge Function, OAuth flow, worker, UI,
+            secret or scheduler, and every Outlook table is empty. Keep every
+            sentence conditional until the integration actually ships.
+
+            MANDATORY AT PUBLICATION: the "Last updated" date above is still
+            September 20, 2026 and MUST be changed to the real publication date in
+            the same commit that makes this section live. tests/privacy-policy-outlook.test.js
+            pins both the conditional framing and the date guard. ------------- */}
+        <Section title="Outlook connection (not yet available)">
+          <p>
+            <strong className="text-hi font-semibold">This connection does not exist yet.</strong> Outlook is not available,
+            not enabled, and not in pilot; Funnl has no Microsoft connection, requests no Microsoft permission, and holds no
+            Outlook data for anyone. The section below describes what would happen <em>if, and only if,</em> you choose to
+            connect Outlook when this integration becomes available, so you can read it before deciding. Nothing here is in
+            effect today.
+          </p>
+          <ul className="list-disc pl-5 space-y-2 mt-3">
+            <li><strong className="text-hi font-semibold">What Funnl would ask Microsoft for</strong> — a single delegated permission,
+              <strong className="text-hi font-semibold"> Mail.Read</strong> ("Read user mail"), which you authorize yourself and which is
+              read-only: it never allows sending, replying, deleting, moving, or changing anything in your mailbox. Be aware that Mail.Read
+              is a permission to read your mail generally — Microsoft grants it at the mailbox level, and it would technically allow reading
+              message bodies and attachments. Funnl's requests are deliberately narrower than the permission allows, as described next.
+              Funnl would not request Microsoft contacts, calendars, files, shared or delegated mailboxes, or any application-level
+              (organization-wide) mail permission.</li>
+
+            <li><strong className="text-hi font-semibold">What Funnl would read</strong> — selected messages from your
+              <strong className="text-hi font-semibold"> Inbox</strong> and <strong className="text-hi font-semibold">Sent Items</strong> only.
+              Funnl would first look at envelope details to decide whether a message is worth reading at all: the sender, the recipients
+              (To and Cc), their display names and addresses, the subject, the sent and received timestamps, the conversation identifier,
+              and whether the message is a draft. Only for the messages that survive that check would Funnl make a second, bounded request
+              for the message text — Microsoft's plain-text body projections, including the "unique body" that excludes the quoted reply
+              history — together with a short, fixed list of headers that identify automated and bulk mail.</li>
+
+            <li><strong className="text-hi font-semibold">The only headers Funnl would look at</strong> — exactly five:
+              <strong className="text-hi font-semibold"> Auto-Submitted</strong>, <strong className="text-hi font-semibold">Precedence</strong>,
+              <strong className="text-hi font-semibold"> List-Id</strong>, <strong className="text-hi font-semibold">List-Unsubscribe</strong>, and
+              <strong className="text-hi font-semibold"> X-Auto-Response-Suppress</strong>. They exist to recognize newsletters, mailing lists,
+              auto-replies and out-of-office messages so those are never turned into suggestions. Funnl's code reduces the header collection
+              Microsoft returns to a handful of yes/no facts and small labels and then <strong className="text-hi font-semibold">discards the
+              collection</strong>; no header name or value is kept, logged, or sent anywhere.</li>
+
+            <li><strong className="text-hi font-semibold">What Funnl would never request</strong> — attachments or attachment contents,
+              inline images, raw MIME (the complete original message file), Microsoft contacts, calendars, files, or shared mailboxes. Funnl
+              would never send, reply to, forward, delete, move, or mark mail.</li>
+
+            <li><strong className="text-hi font-semibold">Raw email bodies would not be stored by Funnl</strong> — message text would be held
+              only in server memory while a message is being processed. Funnl's database has no column that can hold a message body, HTML,
+              raw MIME, an attachment, a preview snippet, or a header collection.</li>
+
+            <li><strong className="text-hi font-semibold">Anthropic would see a minimized, pseudonymized extract</strong> — to turn an exchange
+              into a draft you can edit, Funnl would send <strong className="text-hi font-semibold">Anthropic</strong> (Claude) a reduced copy of
+              the current message text, an optional signature block, a shortened subject, the direction and date, and nothing that identifies the
+              people involved: the two parties are labelled only <em>USER</em> and <em>CONTACT</em>. Email addresses, the recipient's email domain,
+              Microsoft account, tenant, message and conversation identifiers, authorization tokens, attachments and raw headers are
+              <strong className="text-hi font-semibold"> not</strong> included.</li>
+
+            <li><strong className="text-hi font-semibold">Anthropic's retention — 30 days, and not Zero Data Retention</strong> — Funnl uses
+              Anthropic's standard commercial API terms. Anthropic automatically deletes API inputs and outputs from its systems within
+              <strong className="text-hi font-semibold"> 30 days</strong>. Funnl does <strong className="text-hi font-semibold">not</strong> have a
+              Zero Data Retention agreement. There are documented exceptions: if Anthropic's automated systems flag content as violating their
+              Usage Policy, Anthropic may retain the inputs and outputs for <strong className="text-hi font-semibold">up to 2 years</strong>, and the
+              related trust-and-safety classification scores for <strong className="text-hi font-semibold">up to 7 years</strong>. Anthropic does
+              not use commercial API data to train its models by default. Because Anthropic does not offer ad hoc deletion to paid API customers,
+              <strong className="text-hi font-semibold"> Funnl cannot promise to have an individual API record deleted on request</strong> — that
+              30-day window, and the exceptions above, are what apply.{' '}
+              <a href="https://privacy.claude.com/en/articles/7996866-how-long-do-you-store-personal-data" target="_blank" rel="noopener noreferrer" className="text-accent hover:text-tag no-underline">Anthropic retention policy →</a></li>
+
+            <li><strong className="text-hi font-semibold">Anthropic's 30 days is not a Funnl deletion schedule</strong> — it describes what
+              Anthropic does with the extract Funnl sends, and says nothing about the records in Funnl's own database. Funnl's own retention of
+              Outlook-derived records, and when draft context is erased, is described under "What Funnl would keep" and in "Your rights".</li>
+
+            <li><strong className="text-hi font-semibold">What Funnl would keep</strong> — only bounded, derived records, never message content:
+              <ul className="list-disc pl-5 space-y-1 mt-2">
+                <li>connection details: the Microsoft account and tenant identifiers, whether the account is personal or work, the connected
+                  address, the normalized permission list, connection status, the time you consented and the version of the disclosure you
+                  accepted, and short result codes;</li>
+                <li>your Microsoft authorization, stored only as encrypted values with a key version, never in your browser;</li>
+                <li>a per-folder synchronization position, itself stored encrypted because Microsoft's position markers embed provider state,
+                  plus timestamps, retry state and short result codes;</li>
+                <li>for a draft about someone already in your contacts: a summary of at most 200 characters, an optional suggested next step of
+                  at most 160 characters, a code saying whether the summary came from the message body or only the subject, a code saying whether
+                  the draft was produced deterministically or with AI, and review state;</li>
+                <li>for a suggested new contact: the proposed email address, name, company, role, how you met and LinkedIn profile URL — each
+                  length-limited and each stored with a code recording the evidence it came from (provider metadata, an explicit signature, or an
+                  explicit statement in the message) and a confidence level; plus the same summary and next-step fields, the proposed date, the
+                  interaction type (always Email), and a subject line shortened to at most 160 characters so you can recognize the conversation;</li>
+                <li>one-way keyed fingerprints (with the key version) of the conversation and of the person, so the same exchange is not suggested
+                  twice. Funnl does not store Microsoft message or conversation identifiers, mailbox addresses, or subject lines in these
+                  provenance records.</li>
+              </ul>
+            </li>
+
+            <li><strong className="text-hi font-semibold">Nothing would be added to your network automatically</strong> — a draft about someone you
+              already track becomes a suggested interaction; an exchange with someone you do not yet track, where you and they actually replied to
+              each other, may become a suggested new contact. Both are <strong className="text-hi font-semibold">suggestions you review</strong>:
+              you accept, dismiss, or defer them. Funnl never creates a contact or an interaction on its own.</li>
+
+            <li><strong className="text-hi font-semibold">The proposed email address comes from Microsoft, not from AI</strong> — it is taken from
+              the message envelope Microsoft provides. The AI is never asked for an email address and its output is rejected if it contains one.
+              When you accept a suggested contact, the address is fixed and cannot be changed in that step; afterwards it is an ordinary contact and
+              you can edit its email like any other contact.</li>
+
+            <li><strong className="text-hi font-semibold">Disconnecting</strong> — disconnecting Outlook would delete your Microsoft connection and,
+              with it, your stored authorization, the synchronization state and the provenance records. Any pending or deferred Outlook suggestion
+              would be marked invalidated and every proposed value it held — email, name, company, role, how you met, LinkedIn URL, summary, next
+              step and subject line — would be erased in the same step, leaving only a minimal record and its fingerprints so the same exchange is
+              not suggested again. Any unused sign-in attempt would be discarded. Interactions and contacts you already accepted remain, because
+              they are yours. Deleting your account removes all of your data.</li>
+          </ul>
+          <p className="mt-3">
+            Outlook data would be used only to produce the suggestions you can see in Funnl. It would not be sold, not shared with advertisers or
+            data brokers, and not used for advertising. It would not be read by a person at Funnl except with your explicit permission for a support
+            request, for a security investigation such as abuse or a suspected breach, or where the law requires it. Separately, Anthropic operates
+            its own automated safety systems on API traffic and, as described above, content those systems flag may be reviewed and retained by
+            Anthropic under their policy rather than Funnl's.
+          </p>
+        </Section>
+
         <Section title="Analytics: behavior, not content">
           <p>
             PostHog sees <em>what you do</em> in Funnl, never <em>what your contacts say</em>. For example:
