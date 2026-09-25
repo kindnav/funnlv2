@@ -29,6 +29,60 @@ const START = POLICY.indexOf('<Section title="Outlook connection (not yet availa
 const END = POLICY.indexOf('<Section title="Analytics: behavior, not content">')
 const OUTLOOK = START !== -1 && END !== -1 ? POLICY.slice(START, END) : ''
 
+// --------------------------------------------------------------------------
+// RETENTION DURATIONS: an allowlist, not a denylist.
+//
+// This section may state a retention duration only where Anthropic's own published contract
+// is being disclosed. A denylist of phrasings was tried first and was worthless: 9 of 10
+// obvious rewordings walked straight through it (erases ... after 30 days, kept for no more
+// than 30 days, retained for thirty days, passive voice, or no Funnl subject at all).
+//
+// So instead: pin each approved disclosure to its exact present wording, mask those out, and
+// require that NO duration expression survives anywhere else in the visible prose. A future
+// Funnl retention schedule must therefore be added to APPROVED_RETENTION_DISCLOSURES on
+// purpose - and only once it is implemented and owner/legal have approved saying so. A new
+// duration appearing here without that is meant to fail.
+
+// Reader-visible prose only: JSX tags removed, {' '} joins collapsed, whitespace normalized.
+const OUTLOOK_PROSE = OUTLOOK
+  .replace(/<[^>]+>/g, ' ')
+  .split("{' '}").join(' ')
+  .replace(/\s+/g, ' ')
+  .trim()
+
+const APPROVED_RETENTION_DISCLOSURES = [
+  { why: 'Anthropic standard retention, headline clause',
+    text: "Anthropic's retention — 30 days, and not Zero Data Retention —" },
+  { why: 'Anthropic deletes API inputs and outputs within 30 days',
+    text: 'Anthropic automatically deletes API inputs and outputs from its systems within 30 days' },
+  { why: 'Anthropic flagged-content exception, up to 2 years',
+    text: 'Anthropic may retain the inputs and outputs for up to 2 years' },
+  { why: 'Anthropic trust-and-safety classification scores, up to 7 years',
+    text: 'the related trust-and-safety classification scores for up to 7 years' },
+  { why: 'the same Anthropic window restated where ad hoc deletion is ruled out',
+    text: 'that 30-day window, and the exceptions above, are what apply' },
+  { why: "Anthropic's window is explicitly not a Funnl schedule",
+    text: "Anthropic's 30 days is not a Funnl deletion schedule" },
+]
+
+// Numbers and units a policy could plausibly use. Written-out forms matter: thirty days and
+// one month are the same promise as 30 days.
+const DURATION_NUMBER = '(?:[0-9]+|one|two|three|four|five|six|seven|eight|nine|ten|'
+  + 'eleven|twelve|fourteen|fifteen|twenty|thirty|forty|forty-five|sixty|ninety)'
+const DURATION_UNIT = '(?:day|week|month|year)'
+const durationRe = (flags) => new RegExp(DURATION_NUMBER + '[- ]*' + DURATION_UNIT + 's?', flags)
+
+// The Outlook prose with every approved disclosure removed. Anything left that looks like a
+// retention duration is an unapproved claim.
+function unapprovedDurations () {
+  let rest = OUTLOOK_PROSE
+  for (const { text } of APPROVED_RETENTION_DISCLOSURES) rest = rest.split(text).join(' [APPROVED] ')
+  return (rest.match(durationRe('ig')) || []).map((hit) => {
+    const at = rest.indexOf(hit)
+    return `${hit} -> ...${rest.slice(Math.max(0, at - 90), at + hit.length + 40)}...`
+  })
+}
+
 let passed = 0, failed = 0
 function test(name, fn) {
   try { fn(); console.log(`  ✓ ${name}`); passed++ }
@@ -213,14 +267,9 @@ test('no ad hoc Anthropic deletion is promised', () => {
 
 test('Anthropic retention is kept distinct from Funnl database retention', () => {
   assert.ok(/Anthropic's 30 days is not a Funnl deletion schedule/.test(OUTLOOK))
-  // And no Funnl-side 30-day erasure promise anywhere in the section.
-  for (const bad of [
-    /Funnl deletes .{0,40}after 30 days/i,
-    /erased after 30 days/i,
-    /removed from Funnl within 30 days/i,
-  ]) {
-    assert.ok(!bad.test(OUTLOOK), `must not promise a Funnl 30-day erasure: ${bad}`)
-  }
+  // No Funnl-side retention promise anywhere in the section. Enforced by the allowlist
+  // invariant at the top of this file rather than by guessing at phrasings.
+  assert.deepStrictEqual(unapprovedDurations(), [], 'unapproved retention duration present')
 })
 
 test('no Funnl-side context-erasure schedule is promised while none is scheduled', () => {
@@ -333,6 +382,53 @@ test('the packet records consent mechanics, decisions and blockers', () => {
 test('the packet does not itself claim the integration is live', () => {
   assert.ok(/Nothing in this packet is published, deployed or\s*\n?configured/.test(PACKET))
   assert.ok(/zero rows/.test(PACKET))
+})
+
+
+// --------------------------------------------------------------------------
+console.log('\nretention-duration allowlist')
+
+test('each approved Anthropic retention disclosure appears exactly once, attributed and qualified', () => {
+  for (const { why, text } of APPROVED_RETENTION_DISCLOSURES) {
+    const count = OUTLOOK_PROSE.split(text).length - 1
+    assert.strictEqual(count, 1, `${why}: expected exactly one occurrence, found ${count}`)
+    // Attribution: Anthropic must be named in the clause or in the run-up to it, so a
+    // duration can never be silently re-pointed at Funnl.
+    const at = OUTLOOK_PROSE.indexOf(text)
+    const window = OUTLOOK_PROSE.slice(Math.max(0, at - 240), at + text.length)
+    assert.ok(window.includes('Anthropic'), `${why}: not attributed to Anthropic`)
+    assert.ok(/Anthropic|API/.test(window), `${why}: not qualified to Anthropic API processing`)
+  }
+  // The durations themselves, so a silent renumbering fails.
+  assert.ok(/within 30 days/.test(OUTLOOK_PROSE), 'Anthropic 30-day window')
+  assert.ok(/up to 2 years/.test(OUTLOOK_PROSE), 'two-year flagged-content exception')
+  assert.ok(/up to 7 years/.test(OUTLOOK_PROSE), 'seven-year classification-score retention')
+})
+
+test('no unapproved retention duration survives anywhere in the Outlook section', () => {
+  assert.deepStrictEqual(unapprovedDurations(), [], 'unapproved retention duration present')
+  // The detector must recognize the forms a policy could use, including every one that
+  // defeated the previous denylist. Checked against the live pattern, not a copy of it.
+  const mustDetect = [
+    'Funnl erases your Outlook draft context after 30 days and nothing is kept longer.',
+    'Funnl deletes Outlook context after 30 days.',
+    'Outlook context is deleted after 30 days.',
+    'We remove Outlook drafts within 30 days.',
+    'Funnl purges this information at 30 days.',
+    'Funnl keeps Outlook context for no more than 30 days.',
+    'Outlook context is retained for thirty days.',
+    'Local draft context is kept for one month.',
+    'We delete this information after four weeks.',
+    'Funnl removes Outlook context within 90 days.',
+    'deleted after 14 days', 'kept 45 days', 'within 60 days', 'after 90 days',
+    'for four weeks', 'for one month', 'for three months', 'for one year',
+    'a thirty-day window', 'a 30-day window', 'a thirty day window',
+  ]
+  for (const s of mustDetect) assert.ok(durationRe('i').test(s), `must recognize: ${s}`)
+  // And it must not fire on the section's non-retention numbers.
+  for (const s of ['at most 200 characters', 'at most 160 characters', 'exactly five', 'the two parties']) {
+    assert.ok(!durationRe('i').test(s), `must not fire on: ${s}`)
+  }
 })
 
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed\n`)
