@@ -104,17 +104,46 @@ test('"no identifiers are stored" is NOT claimed; the precise statement is', () 
   assert.ok(/Intentionally NO GRANT and NO POLICY for authenticated: provider provenance never leaks/.test(E2A_MIG))
 })
 test('the 30-day subject maximum is NOT published because no scheduler runs the expiry job', () => {
-  // SCOPED to the Gmail/Calendar half of the policy (everything before the Outlook
-  // section). The guard's intent is that FUNNL must not promise a Gmail subject-retention
-  // maximum it does not enforce. It originally scanned the whole document, which also
-  // caught the unrelated Outlook section's disclosure of ANTHROPIC's 30-day API retention
-  // — a different party, a different clock, and a required disclosure. Narrowing the
-  // scope keeps this guard exactly as strong for Gmail; the Outlook section has its own
-  // guard in tests/privacy-policy-outlook.test.js forbidding a Funnl-side 30-day erasure
-  // promise there.
-  const outlookAt = POLICY.indexOf('<Section title="Outlook connection (not yet available)">')
-  const GMAIL_SCOPE = outlookAt === -1 ? POLICY : POLICY.slice(0, outlookAt)
-  assert.ok(!/30 days/.test(GMAIL_SCOPE), 'a maximum the code does not enforce must not be promised')
+  // This guard removes EXACTLY the Outlook section and nothing else. That section is the
+  // one place in the policy that must state a retention period, because it discloses
+  // ANTHROPIC's 30-day API retention: a different party, a different clock, and a required
+  // disclosure. Those durations are governed by an exact allowlist in
+  // tests/privacy-policy-outlook.test.js, which separately forbids a Funnl-side erasure
+  // promise inside Outlook.
+  //
+  // Every other section stays in scope — Gmail, Google Calendar, Analytics, Your rights,
+  // Cookies and local storage — so an unenforced Funnl retention maximum anywhere else in
+  // the policy still fails here. An earlier version sliced only the prefix before Outlook,
+  // which silently dropped the three sections that follow it; the assertions below exist so
+  // that cannot happen again unnoticed.
+  //
+  // Fail closed: a missing, duplicated or reordered boundary throws instead of quietly
+  // scanning a partial document.
+  const OUTLOOK_START = '<Section title="Outlook connection (not yet available)">'
+  const OUTLOOK_END = '<Section title="Analytics: behavior, not content">'
+  const startCount = POLICY.split(OUTLOOK_START).length - 1
+  const endCount = POLICY.split(OUTLOOK_END).length - 1
+  assert.strictEqual(startCount, 1, `Outlook start marker must occur exactly once, found ${startCount}`)
+  assert.strictEqual(endCount, 1, `Outlook end marker must occur exactly once, found ${endCount}`)
+  const outlookAt = POLICY.indexOf(OUTLOOK_START)
+  const afterOutlookAt = POLICY.indexOf(OUTLOOK_END)
+  assert.ok(afterOutlookAt > outlookAt, 'the Analytics section must follow the Outlook section')
+  const NON_OUTLOOK_POLICY = POLICY.slice(0, outlookAt) + POLICY.slice(afterOutlookAt)
+  // Exactly the Outlook section was cut: the lengths must account for it precisely.
+  assert.strictEqual(NON_OUTLOOK_POLICY.length, POLICY.length - (afterOutlookAt - outlookAt),
+    'the excision must remove exactly the Outlook section')
+  assert.ok(!NON_OUTLOOK_POLICY.includes(OUTLOOK_START), 'the Outlook section is out of scope')
+  assert.ok(!/Anthropic's 30 days is not a Funnl deletion schedule/.test(NON_OUTLOOK_POLICY),
+    'Outlook-only Anthropic wording is out of scope')
+  // ... and every other section is still in scope.
+  for (const kept of ['<Section title="Gmail connection (optional)">',
+    '<Section title="Google Calendar connection">',
+    '<Section title="Analytics: behavior, not content">',
+    '<Section title="Your rights">',
+    '<Section title="Cookies and local storage">']) {
+    assert.ok(NON_OUTLOOK_POLICY.includes(kept), `must still be scanned: ${kept}`)
+  }
+  assert.ok(!/30 days/.test(NON_OUTLOOK_POLICY), 'a maximum the code does not enforce must not be promised')
   assert.ok(/expire_pending_email_context/.test(E2A_MIG), 'the job exists in SQL')
   const callers = ['supabase/functions/gmail-sync-worker/index.ts', 'supabase/functions/shared/gmailWorker.js', 'supabase/functions/google-calendar-sync/index.ts']
     .filter((p) => existsSync(join(ROOT, p)) && /expire_pending_email_context/.test(read(p)))
