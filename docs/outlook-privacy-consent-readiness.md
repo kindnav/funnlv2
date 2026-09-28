@@ -3,7 +3,7 @@
 **Status: DRAFT FOR OWNER/LEGAL REVIEW. Nothing in this packet is published, deployed or
 configured.** The Outlook integration does not exist: there is no Edge Function, OAuth flow,
 worker, UI, secret, feature flag, scheduler or Entra registration, and every Outlook table in
-Production holds zero rows. The public Privacy Policy date remains **September 20, 2026** and
+Production holds zero rows. The public Privacy Policy date is the owner-approved **September 27, 2026** and
 must not change until the publication commit.
 
 Prepared against merged `main` `0ee55eb33ba54ba4527e3a1c2da4fbe2eb332941` (PR #50).
@@ -161,7 +161,7 @@ no implemented callback yet to define the refusal path. Decide this when the cal
       to pursue publisher verification (unverified apps show "Unverified" at consent).
 - [ ] 10. The Funnl-side history window **and** the context-erasure schedule — currently undefined
       and unenforced; see §5.
-- [ ] 11. The launch-time publication date (replaces September 20, 2026 in the publication commit).
+- [x] 11. The launch-time publication date. **Owner/product decision: September 27, 2026** (supersedes September 20, 2026). If the merge happens after that day, the date must be updated again in the merge commit.
 - [ ] 12. Authorization for a one-account real-mailbox pilot.
 
 ---
@@ -188,7 +188,7 @@ Non-blocking engineering note: add an explicit plain-object/prototype guard to
 1. Owner/legal sign-off on every box in §6.
 2. Implement blockers 1–6 in §7 under separate authorization.
 3. Decide and implement the retention/erasure schedule, then update the policy wording to match.
-4. In the **publication commit only**: change "Last updated" from September 20, 2026 to the real
+4. The "Last updated" date is now the approved **September 27, 2026**. If the merge slips past that day, change it again in the merge commit to the real
    date and rewrite the section from conditional ("would") to present tense.
 5. `tests/privacy-policy-outlook.test.js` must be updated in that same commit — it currently pins
    both the conditional framing and the September 20 date and will fail if either is changed

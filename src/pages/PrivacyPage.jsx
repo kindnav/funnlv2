@@ -36,7 +36,7 @@ function PrivacyPage() {
             <span className="font-display font-bold text-[20px] text-hi">Funnl</span>
           </div>
           <h1 className="font-display text-[32px] font-bold text-hi tracking-[-0.5px] mb-3">Privacy Policy</h1>
-          <p className="text-[14px] text-low">Last updated: September 20, 2026</p>
+          <p className="text-[14px] text-low">Last updated: September 27, 2026</p>
           <div className="mt-4 px-4 py-3 bg-elevated border border-line-1 rounded-xl">
             <p className="text-[13.5px] text-muted leading-relaxed">
               This policy explains, in plain language, what Funnl collects, how it is used, who processes it, and how to remove it.
@@ -136,16 +136,22 @@ function PrivacyPage() {
           </p>
         </Section>
 
-        {/* ── Outlook (NOT YET AVAILABLE) ─────────────────────────────────────
-            PUBLICATION GATE: this section describes a connection that does not
+        {/* ── Outlook (NOT YET AVAILABLE) ─────────────────────────────────────────────────────
+            STILL UNAVAILABLE: this section describes a connection that does not
             exist yet. There is no Outlook Edge Function, OAuth flow, worker, UI,
-            secret or scheduler, and every Outlook table is empty. Keep every
-            sentence conditional until the integration actually ships.
+            secret or scheduler, and every Outlook table is empty. Every sentence
+            here stays conditional until the integration actually ships.
 
-            MANDATORY AT PUBLICATION: the "Last updated" date above is still
-            September 20, 2026 and MUST be changed to the real publication date in
-            the same commit that makes this section live. tests/privacy-policy-outlook.test.js
-            pins both the conditional framing and the date guard. ------------- */}
+            PUBLICATION DECISION: the owner approved publishing this conditional
+            disclosure ahead of the integration, dated September 27, 2026. That is a
+            product decision, not legal advice, and is not evidence that outside
+            counsel reviewed or approved this policy.
+
+            MANDATORY AT PUBLICATION: the date above is September 27, 2026. If the
+            merge that publishes this section happens on any later day, the "Last
+            updated" date MUST be changed again in that same commit.
+            tests/privacy-policy-outlook.test.js pins the conditional framing and the
+            date. ------------- */}
         <Section title="Outlook connection (not yet available)">
           <p>
             <strong className="text-hi font-semibold">This connection does not exist yet.</strong> Outlook is not available,

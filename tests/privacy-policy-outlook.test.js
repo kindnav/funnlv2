@@ -357,15 +357,57 @@ test('human-access wording is precise and includes the Anthropic safety exceptio
 // ── Date guard and non-regression ────────────────────────────────────────────
 console.log('\npublication date guard')
 
-test('the published date is still September 20, 2026 on this unpublished draft', () => {
-  assert.ok(POLICY.includes('Last updated: September 20, 2026'),
-    'the public date must not change until the publication commit')
+test('the public date is the approved September 27, 2026 publication date', () => {
+  // Owner/product decision: publish the conditional Outlook disclosure dated
+  // 2026-09-27. If the merge slips to a later day this must be updated again in that
+  // commit, which is why the date is pinned here rather than left free.
+  assert.ok(POLICY.includes('Last updated: September 27, 2026'),
+    'the approved publication date must be present')
+  assert.ok(!/Last updated: September 20, 2026/.test(POLICY),
+    'the superseded September 20 date must be gone')
+  assert.ok(!/September 26, 2026/.test(POLICY),
+    'the briefly-proposed September 26 date must not linger anywhere in the source')
+  assert.strictEqual((POLICY.match(/Last updated:/g) || []).length, 1,
+    'exactly one public date line')
+  // Once in the public line, twice in the source decision comment (the approval and the
+  // recheck instruction). Pinned so a stray extra date cannot creep in unnoticed.
+  assert.strictEqual((POLICY.match(/September 27, 2026/g) || []).length, 3,
+    'one public date line plus the two source-comment mentions')
+  assert.strictEqual((POLICY.match(/Last updated: September 27, 2026/g) || []).length, 1,
+    'exactly one public Last-updated line carries the date')
 })
 
-test('the section carries a mandatory just-in-time date-change instruction', () => {
-  assert.ok(/MANDATORY AT PUBLICATION/.test(POLICY), 'the comment exists')
-  assert.ok(/MUST be changed to the real publication date/.test(POLICY))
+test('the section still carries a mandatory date-recheck instruction and an approval that is not legal advice', () => {
+  assert.ok(/MANDATORY AT PUBLICATION/.test(POLICY), 'the instruction survives')
+  assert.ok(/MUST be changed again in that same commit/.test(POLICY),
+    'a later merge date must force another update')
+  assert.ok(/PUBLICATION DECISION/.test(POLICY), 'the owner decision is recorded')
+  assert.ok(/not legal advice/.test(POLICY),
+    'owner approval must not be presented as legal review')
+  // The source must carry the disclaimer, and must not make the affirmative claim. A naive
+  // negative on 'counsel reviewed' would match the disclaimer itself, so match the claim
+  // shapes instead.
+  assert.ok(/not evidence that outside\s+counsel reviewed or approved this policy/.test(POLICY),
+    'owner approval is explicitly not counsel review')
+  for (const claim of [/reviewed and approved by (outside )?counsel/i,
+    /counsel has (reviewed|approved) (this|the) policy/i,
+    /legally (reviewed|approved)/i, /approved by our lawyers/i]) {
+    assert.ok(!claim.test(POLICY), `must not claim legal review: ${claim}`)
+  }
   assert.ok(/publication commit/i.test(PACKET), 'the packet repeats the requirement')
+})
+
+test('the Outlook section is still not represented as operational', () => {
+  // The publication decision changes the date, nothing else. Outlook stays dormant.
+  assert.ok(/not available,\s*not enabled, and not in pilot/.test(OUTLOOK))
+  assert.ok(/This connection does not exist yet/.test(OUTLOOK))
+  assert.ok(/STILL UNAVAILABLE/.test(POLICY), 'the source comment still says so')
+  for (const bad of [/Outlook is (now )?(available|enabled|live)/i, /you are connected to Outlook/i]) {
+    assert.ok(!bad.test(OUTLOOK), `must not claim: ${bad}`)
+  }
+  // No Funnl retention duration was approved along with the date.
+  assert.deepStrictEqual(unapprovedDurations(), [], 'no Funnl duration approved')
+  assert.strictEqual(APPROVED_RETENTION_DISCLOSURES.length, 6, 'still exactly six Anthropic clauses')
 })
 
 test('existing Gmail and Calendar wording is untouched', () => {
@@ -387,8 +429,14 @@ test('the packet records consent mechanics, decisions and blockers', () => {
     'Review UI', 'Pilot authorization', 'Scheduling']) {
     assert.ok(new RegExp(item, 'i').test(PACKET), `blocker listed: ${item}`)
   }
-  const boxes = (PACKET.match(/- \[ \]/g) || []).length
-  assert.ok(boxes >= 12, `at least 12 owner/legal decisions, found ${boxes}`)
+  // Twelve recorded owner/legal decisions. Item 11 (the publication date) is now decided,
+  // so count every box and require the rest to still be open.
+  const allBoxes = (PACKET.match(/- \[( |x)\]/g) || []).length
+  const openBoxes = (PACKET.match(/- \[ \]/g) || []).length
+  assert.ok(allBoxes >= 12, `at least 12 owner/legal decisions, found ${allBoxes}`)
+  assert.ok(openBoxes >= 10, `most decisions must still be open, found ${openBoxes}`)
+  assert.ok(/- \[x\] 11\./.test(PACKET), 'the publication-date decision is recorded as made')
+  assert.ok(/September 27, 2026/.test(PACKET), 'the packet names the approved date')
 })
 
 test('the packet does not itself claim the integration is live', () => {
