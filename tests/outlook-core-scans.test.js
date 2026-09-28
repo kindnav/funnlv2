@@ -492,26 +492,53 @@ test('the 30-day context ceiling exists in the schema and is not re-implemented 
 // ── Scope creep ──────────────────────────────────────────────────────────────
 console.log('\nscope containment')
 
-test('this phase adds no Edge Function entrypoint', () => {
+test('the only Outlook Edge Functions are the two OAuth entrypoints', () => {
+  // The content/draft phase added no entrypoint. The OAuth binding phase adds
+  // exactly two, both dormant behind OUTLOOK_INTEGRATION_ENABLED. Any further
+  // Outlook entrypoint (a worker, a sync job) is a later, separately reviewed
+  // slice and must not appear silently.
+  const ALLOWED = new Set(['outlook-oauth-start', 'outlook-oauth-callback'])
   const dirs = readdirSync(join(ROOT, 'supabase/functions'), { withFileTypes: true })
     .filter((d) => d.isDirectory()).map((d) => d.name)
   for (const d of dirs) {
-    assert.ok(!/outlook|microsoft|graph/i.test(d), `no Outlook Edge Function may exist yet (found ${d})`)
+    if (!/outlook|microsoft|graph/i.test(d)) continue
+    assert.ok(ALLOWED.has(d), `unexpected Outlook Edge Function (found ${d})`)
   }
+  // The content/draft MODULES themselves must still never be entrypoints.
   for (const m of MODULES) {
     assert.ok(!/Deno\.serve|serve\(|addEventListener\('fetch'/.test(exec(m.src)),
       `${m.name} must not be an entrypoint`)
   }
 })
 
-test('config.toml declares no Outlook function and is untouched by this phase', () => {
+test('both Outlook OAuth entrypoints are dormant unless explicitly enabled', () => {
+  for (const fn of ['outlook-oauth-start', 'outlook-oauth-callback']) {
+    const src = read(`supabase/functions/${fn}/index.ts`)
+    assert.ok(src.includes("Deno.env.get('OUTLOOK_INTEGRATION_ENABLED')"),
+      `${fn} must read the dormancy flag`)
+    assert.ok(/!==\s*'true'/.test(src),
+      `${fn} must treat anything other than exactly 'true' as off`)
+  }
+})
+
+test('config.toml pins verify_jwt for exactly the two Outlook OAuth functions', () => {
   const cfg = read('supabase/config.toml')
   // `graphql_public` in the exposed-schema list is unrelated to Microsoft Graph.
   const sections = [...cfg.matchAll(/^\[functions\.([^\]]+)\]/gm)].map((m) => m[1])
-  for (const name of sections) {
-    assert.ok(!/outlook|microsoft|graph/i.test(name), `no Outlook function section (found ${name})`)
+  const outlook = sections.filter((n) => /outlook|microsoft|graph/i.test(n))
+  assert.deepStrictEqual(outlook.sort(), ['outlook-oauth-callback', 'outlook-oauth-start'])
+  // The start is user-initiated and must verify the caller's JWT. The callback
+  // receives Microsoft's form_post, which carries no Supabase JWT, so platform
+  // verification must be off there or every completion would be rejected before
+  // the handler's binding gate could run.
+  const verifyJwtFor = (name) => {
+    const i = cfg.indexOf('[functions.' + name + ']')
+    if (i === -1) return null
+    const after = cfg.slice(i).split('verify_jwt =')[1]
+    return after ? after.split(String.fromCharCode(10))[0].trim() : null
   }
-  assert.ok(!/\boutlook\b|\bmicrosoft\b/i.test(cfg), 'no Outlook/Microsoft reference at all')
+  assert.strictEqual(verifyJwtFor('outlook-oauth-start'), 'true')
+  assert.strictEqual(verifyJwtFor('outlook-oauth-callback'), 'false')
   assert.ok(cfg.includes('[functions.delete-account]'), 'the existing delete-account section is intact')
   assert.ok(/verify_jwt = true/.test(cfg.slice(cfg.indexOf('[functions.delete-account]'))),
     'the merged delete-account JWT setting is unchanged')
