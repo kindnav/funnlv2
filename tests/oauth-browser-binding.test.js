@@ -32,9 +32,39 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const read = (rel) => readFileSync(join(__dirname, '..', rel), 'utf8')
 
 let passed = 0, failed = 0
+
+// Async tests must be awaited before the summary is printed and before the process
+// exits. An earlier version called fn() and counted a pass immediately: a rejected
+// Promise from an async test was never observed, so assertions that ran after an
+// `await` could not fail the run. Synchronous tests still report in place; async
+// ones are collected here and settled by finish() below.
+const pendingTests = []
 function test (name, fn) {
-  try { fn(); console.log(`  ✓ ${name}`); passed++ }
-  catch (e) { console.error(`  ✗ ${name}`); console.error(`    ${e.message}`); failed++ }
+  const pass = () => { console.log(`  ✓ ${name}`); passed++ }
+  const fail = (e) => {
+    console.error(`  ✗ ${name}`)
+    console.error(`    ${e && e.message ? e.message : e}`)
+    failed++
+  }
+  let result
+  try {
+    result = fn()
+  } catch (e) {
+    fail(e)
+    return
+  }
+  if (result && typeof result.then === 'function') {
+    pendingTests.push(result.then(pass, fail))
+    return
+  }
+  pass()
+}
+
+/** Settles every async test, then prints the summary and sets the exit code. */
+async function finish () {
+  await Promise.all(pendingTests)
+  console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed\n`)
+  if (failed > 0) process.exitCode = 1
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -407,5 +437,4 @@ test('the body cap and its Content-Length handling are untouched by this change'
   assert.strictEqual(r.ok, false, 'non-integer Content-Length rejected')
 })
 
-console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed\n`)
-if (failed > 0) process.exit(1)
+await finish()
