@@ -271,7 +271,10 @@ test('gmail-oauth-start preflight headers: * origin and at least authorization, 
 })
 test('gmail-oauth-start puts the CORS headers on EVERY response (single json() builder merges corsHeaders)', () => {
   const code = stripJs(START)
-  assert.ok(/function json\(body: unknown, status: number\): Response \{[\s\S]*?headers: \{ \.\.\.corsHeaders, \.\.\.securityHeaders,/.test(code))
+  // The builder may take an optional third argument (used to attach the OAuth
+  // browser-binding Set-Cookie); corsHeaders + securityHeaders must still be merged
+  // into EVERY response it produces.
+  assert.ok(/function json\(body: unknown, status: number(?:, [A-Za-z]+: Record<string, string> = \{\})?\): Response \{[\s\S]*?headers: \{ \.\.\.corsHeaders, \.\.\.securityHeaders,/.test(code))
   // every non-preflight response goes through json(); no bare `new Response(` besides the preflight
   const bare = (code.match(/new Response\(/g) || []).length
   assert.strictEqual(bare, 2, 'exactly two: the preflight and the json() builder')

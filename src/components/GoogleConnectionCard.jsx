@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
-import { supabase } from '../lib/supabase'
+import { supabase, SUPABASE_ANON_KEY, getSessionBearerToken } from '../lib/supabase'
 import { track } from '../lib/analytics'
+import { resolveOauthStartUrl } from '../lib/oauthStartEndpoint'
 import {
   classifyGoogleConnection,
   parseGoogleReturnParam,
@@ -76,10 +77,33 @@ export default function GoogleConnectionCard() {
     setConnecting(true)
     setConnectError('')
     try {
-      const { data, error } = await supabase.functions.invoke('google-oauth-start', {
-        body: { returnOrigin: window.location.origin },
+      // Called through the branded /api path, NOT supabase.functions.invoke: the
+      // start response carries the browser-binding cookie the callback requires, and
+      // a cookie set by *.supabase.co would never be sent to www.getfunnl.com.
+      const endpoint = resolveOauthStartUrl(window.location.origin, 'calendar')
+      if (!endpoint.ok) {
+        setConnectError('Please continue at www.getfunnl.com to connect Google.')
+        setConnecting(false)
+        return
+      }
+      const bearer = await getSessionBearerToken()
+      if (!bearer) {
+        setConnectError('Could not start Google connection. Please try again.')
+        setConnecting(false)
+        return
+      }
+      const res = await fetch(endpoint.url, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {
+          'Content-Type': 'application/json',
+          apikey: SUPABASE_ANON_KEY,
+          Authorization: `Bearer ${bearer}`,
+        },
+        body: JSON.stringify({ returnOrigin: window.location.origin }),
       })
-      if (error || !data?.url) {
+      const data = res.ok ? await res.json().catch(() => null) : null
+      if (!data?.url) {
         setConnectError('Could not start Google connection. Please try again.')
         setConnecting(false)
         return

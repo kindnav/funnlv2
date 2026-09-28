@@ -11,6 +11,14 @@
       "destination": "https://jzybxhvgnksrwxfivdwt.supabase.co/functions/v1/google-oauth-callback"
     },
     {
+      "source": "/api/google-oauth-start",
+      "destination": "https://jzybxhvgnksrwxfivdwt.supabase.co/functions/v1/google-oauth-start"
+    },
+    {
+      "source": "/api/gmail-oauth-start",
+      "destination": "https://jzybxhvgnksrwxfivdwt.supabase.co/functions/v1/gmail-oauth-start"
+    },
+    {
       "source": "/(.*)",
       "destination": "/index.html"
     }
