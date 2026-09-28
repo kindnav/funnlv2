@@ -67,7 +67,17 @@ test('the card renders nothing and runs no effect side-effects when disabled', (
 // ── Enabled mode retains the reviewed UI ──────────────────────────────────────
 console.log('\nenabled mode retains UI')
 test('the connect/disconnect Edge invocations are still present (enabled path)', () => {
-  assert.ok(card.includes("supabase.functions.invoke('google-oauth-start'"))
+  // Connect deliberately does NOT use supabase.functions.invoke any more. The start
+  // response carries the browser-binding cookie the callback requires, and a cookie
+  // set by *.supabase.co would never be sent to the branded callback host — so the
+  // start must be fetched through the same /api origin as the callback.
+  assert.ok(!card.includes("supabase.functions.invoke('google-oauth-start'"),
+    'connect must not bypass the branded /api route')
+  assert.ok(card.includes("resolveOauthStartUrl(window.location.origin, 'calendar')"),
+    'connect resolves the branded start endpoint')
+  assert.ok(/fetch\(endpoint\.url, \{/.test(card), 'connect posts to that endpoint')
+  assert.ok(card.includes("credentials: 'same-origin'"), 'so Set-Cookie is stored')
+  // Disconnect is unchanged: no cookie is involved and it is a plain authenticated RPC.
   assert.ok(card.includes("supabase.functions.invoke('google-oauth-disconnect'"))
   assert.ok(card.includes('Connect Google Calendar'))
   assert.ok(card.includes('Disconnect'))

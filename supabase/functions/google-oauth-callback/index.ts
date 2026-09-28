@@ -32,6 +32,7 @@ import {
   GOOGLE_REVOKE_ENDPOINT,
 } from '../shared/googleOauthHelpers.js'
 import { finalizeGoogleConnection } from '../shared/googleConnect.js'
+import { verifyBrowserBinding, buildClearedBindingCookie } from '../shared/oauthBrowserBinding.js'
 // E2B: the shared callback branches on the state row's integration_type. The Calendar path
 // below is unchanged; 'gmail' delegates to the separate capability-aware finalizer.
 import {
@@ -56,8 +57,17 @@ const securityHeaders = {
 // perform a GET at the Location. This guarantees the OAuth form body (code/state)
 // is never re-sent to the Settings URL (unlike 307/308, which preserve method +
 // body, or 302, whose method conversion is not guaranteed). Never use 301/302/307/308.
+// Every terminal response also clears the browser-binding cookie: the flow is over
+// either way, and a stale binding must never be reusable by a later attempt.
 function redirect(location: string): Response {
-  return new Response(null, { status: 303, headers: { ...securityHeaders, Location: location } })
+  return new Response(null, {
+    status: 303,
+    headers: {
+      ...securityHeaders,
+      'Set-Cookie': buildClearedBindingCookie(),
+      Location: location,
+    },
+  })
 }
 
 async function boundedFetch(url: string, init: RequestInit): Promise<Response> {
@@ -119,6 +129,24 @@ Deno.serve(async (req) => {
     const code        = parsed.code
     const state       = parsed.state        // guaranteed present by the parser
     const googleError = parsed.error        // e.g. access_denied
+
+    // ── Browser binding ── the completion must come from the browser that started
+    // Otherwise an attacker can sign in as themselves, start a connection, send the
+    // resulting Google authorization URL to a victim, and have the victim's Google
+    // account attached to the ATTACKER's Funnl account — because the user id comes
+    // from the state row, not from whoever completed consent. Single-use state does
+    // not help (the attacker discloses their own state, still on first use) and PKCE
+    // does not help (the verifier is server-side; our own callback redeems the code).
+    //
+    // This runs BEFORE any database access, before the token exchange, and before
+    // anything is persisted, so a failed binding costs nothing and reveals nothing.
+    // The state row is deliberately left untouched: it is single-use and expires on
+    // its own, and an unbound caller must not be able to burn someone else's state.
+    const binding = verifyBrowserBinding(req.headers.get('cookie'), state)
+    if (!binding.ok) {
+      console.error('google-oauth-callback binding_rejected', binding.reason)
+      return redirect(safeErrorRedirect)   // canonical: no validated origin yet
+    }
 
     const admin = createClient(
       Deno.env.get('SUPABASE_URL') ?? '',

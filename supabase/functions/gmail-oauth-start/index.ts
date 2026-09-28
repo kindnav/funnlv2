@@ -32,6 +32,7 @@ import {
   isValidConfiguredCallbackUrl,
 } from '../shared/googleOauthHelpers.js'
 import { buildGmailAuthUrl, GMAIL_INTEGRATION_TYPE } from '../shared/gmailOauth.js'
+import { buildBindingCookie } from '../shared/oauthBrowserBinding.js'
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -47,10 +48,10 @@ const securityHeaders = {
 const STATE_TTL_MS = 10 * 60 * 1000                    // 10 minutes, single-use
 const STATE_CLEANUP_RETENTION_MS = 24 * 60 * 60 * 1000 // best-effort sweep of dead rows
 
-function json(body: unknown, status: number): Response {
+function json(body: unknown, status: number, extraHeaders: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { ...corsHeaders, ...securityHeaders, 'Content-Type': 'application/json' },
+    headers: { ...corsHeaders, ...securityHeaders, ...extraHeaders, 'Content-Type': 'application/json' },
   })
 }
 
@@ -132,7 +133,10 @@ Deno.serve(async (req) => {
 
     // ── Gmail consent URL (incremental: preserves an existing Calendar grant) ──
     const url = buildGmailAuthUrl({ clientId, redirectUri: callbackUrl, state, codeChallenge })
-    return json({ url }, 200)
+    // Same browser binding as the Calendar start. The shared callback enforces it
+    // for every integration_type, so Gmail must set it too or Gmail consent would
+    // fail closed the moment GMAIL_INTEGRATION_ENABLED is turned on.
+    return json({ url }, 200, { 'Set-Cookie': buildBindingCookie(state) })
   } catch {
     console.error('gmail-oauth-start internal_error')
     return json({ error: 'internal_error' }, 500)

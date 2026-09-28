@@ -21,6 +21,7 @@ import {
   staleOauthStateCutoffIso,
   isValidConfiguredCallbackUrl,
 } from '../shared/googleOauthHelpers.js'
+import { buildBindingCookie } from '../shared/oauthBrowserBinding.js'
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -41,10 +42,10 @@ const STATE_TTL_MS = 10 * 60 * 1000 // 10 minutes
 // (whether consumed or expired). Cleaned up best-effort when a new flow starts.
 const STATE_CLEANUP_RETENTION_MS = 24 * 60 * 60 * 1000 // 24 hours
 
-function json(body: unknown, status: number): Response {
+function json(body: unknown, status: number, extraHeaders: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { ...corsHeaders, ...securityHeaders, 'Content-Type': 'application/json' },
+    headers: { ...corsHeaders, ...securityHeaders, ...extraHeaders, 'Content-Type': 'application/json' },
   })
 }
 
@@ -139,7 +140,12 @@ Deno.serve(async (req) => {
       codeChallenge,
     })
 
-    return json({ url }, 200)
+    // ── Bind this browser to the flow ──────────────────────────────────────
+    // The callback refuses any completion that does not present this cookie, so a
+    // leaked authorization URL cannot attach someone else's Google account to this
+    // user. Reaches the browser as a first-party cookie for the branded host only
+    // because the frontend calls this function through /api/google-oauth-start.
+    return json({ url }, 200, { 'Set-Cookie': buildBindingCookie(state) })
   } catch {
     console.error('google-oauth-start internal_error')
     return json({ error: 'internal_error' }, 500)
