@@ -232,7 +232,46 @@ test('the worker still never persists provider ids/headers (tombstone content ca
 // ─────────────────────────────────────────────────────────────────────────────
 console.log('\nconsistency with the published Privacy Policy')
 test('policy still makes NO 30-day promise (no expiry scheduler is applied in Production)', () => {
-  assert.ok(!/30 days/.test(POLICY))
+  // This guard removes EXACTLY the Outlook section and nothing else. That section is the
+  // one place in the policy that must state a retention period, because it discloses
+  // ANTHROPIC's 30-day API retention: a different party, a different clock, and a required
+  // disclosure. Those durations are governed by an exact allowlist in
+  // tests/privacy-policy-outlook.test.js, which separately forbids a Funnl-side erasure
+  // promise inside Outlook.
+  //
+  // Every other section stays in scope — Gmail, Google Calendar, Analytics, Your rights,
+  // Cookies and local storage — so an unenforced Funnl retention maximum anywhere else in
+  // the policy still fails here. An earlier version sliced only the prefix before Outlook,
+  // which silently dropped the three sections that follow it; the assertions below exist so
+  // that cannot happen again unnoticed.
+  //
+  // Fail closed: a missing, duplicated or reordered boundary throws instead of quietly
+  // scanning a partial document.
+  const OUTLOOK_START = '<Section title="Outlook connection (not yet available)">'
+  const OUTLOOK_END = '<Section title="Analytics: behavior, not content">'
+  const startCount = POLICY.split(OUTLOOK_START).length - 1
+  const endCount = POLICY.split(OUTLOOK_END).length - 1
+  assert.strictEqual(startCount, 1, `Outlook start marker must occur exactly once, found ${startCount}`)
+  assert.strictEqual(endCount, 1, `Outlook end marker must occur exactly once, found ${endCount}`)
+  const outlookAt = POLICY.indexOf(OUTLOOK_START)
+  const afterOutlookAt = POLICY.indexOf(OUTLOOK_END)
+  assert.ok(afterOutlookAt > outlookAt, 'the Analytics section must follow the Outlook section')
+  const NON_OUTLOOK_POLICY = POLICY.slice(0, outlookAt) + POLICY.slice(afterOutlookAt)
+  // Exactly the Outlook section was cut: the lengths must account for it precisely.
+  assert.strictEqual(NON_OUTLOOK_POLICY.length, POLICY.length - (afterOutlookAt - outlookAt),
+    'the excision must remove exactly the Outlook section')
+  assert.ok(!NON_OUTLOOK_POLICY.includes(OUTLOOK_START), 'the Outlook section is out of scope')
+  assert.ok(!/Anthropic's 30 days is not a Funnl deletion schedule/.test(NON_OUTLOOK_POLICY),
+    'Outlook-only Anthropic wording is out of scope')
+  // ... and every other section is still in scope.
+  for (const kept of ['<Section title="Gmail connection (optional)">',
+    '<Section title="Google Calendar connection">',
+    '<Section title="Analytics: behavior, not content">',
+    '<Section title="Your rights">',
+    '<Section title="Cookies and local storage">']) {
+    assert.ok(NON_OUTLOOK_POLICY.includes(kept), `must still be scanned: ${kept}`)
+  }
+  assert.ok(!/30 days/.test(NON_OUTLOOK_POLICY))
 })
 test('policy wording for whole-Google disconnect now matches run_google_local_cleanup (PUBLICATION GATE: publish only after PR-B deploys the caller)', () => {
   assert.ok(/deletes the stored Google tokens and the Google connection from Funnl, together with the connection's capability, cursor, and reference records/.test(POLICY))

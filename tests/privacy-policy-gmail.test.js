@@ -104,7 +104,46 @@ test('"no identifiers are stored" is NOT claimed; the precise statement is', () 
   assert.ok(/Intentionally NO GRANT and NO POLICY for authenticated: provider provenance never leaks/.test(E2A_MIG))
 })
 test('the 30-day subject maximum is NOT published because no scheduler runs the expiry job', () => {
-  assert.ok(!/30 days/.test(POLICY), 'a maximum the code does not enforce must not be promised')
+  // This guard removes EXACTLY the Outlook section and nothing else. That section is the
+  // one place in the policy that must state a retention period, because it discloses
+  // ANTHROPIC's 30-day API retention: a different party, a different clock, and a required
+  // disclosure. Those durations are governed by an exact allowlist in
+  // tests/privacy-policy-outlook.test.js, which separately forbids a Funnl-side erasure
+  // promise inside Outlook.
+  //
+  // Every other section stays in scope — Gmail, Google Calendar, Analytics, Your rights,
+  // Cookies and local storage — so an unenforced Funnl retention maximum anywhere else in
+  // the policy still fails here. An earlier version sliced only the prefix before Outlook,
+  // which silently dropped the three sections that follow it; the assertions below exist so
+  // that cannot happen again unnoticed.
+  //
+  // Fail closed: a missing, duplicated or reordered boundary throws instead of quietly
+  // scanning a partial document.
+  const OUTLOOK_START = '<Section title="Outlook connection (not yet available)">'
+  const OUTLOOK_END = '<Section title="Analytics: behavior, not content">'
+  const startCount = POLICY.split(OUTLOOK_START).length - 1
+  const endCount = POLICY.split(OUTLOOK_END).length - 1
+  assert.strictEqual(startCount, 1, `Outlook start marker must occur exactly once, found ${startCount}`)
+  assert.strictEqual(endCount, 1, `Outlook end marker must occur exactly once, found ${endCount}`)
+  const outlookAt = POLICY.indexOf(OUTLOOK_START)
+  const afterOutlookAt = POLICY.indexOf(OUTLOOK_END)
+  assert.ok(afterOutlookAt > outlookAt, 'the Analytics section must follow the Outlook section')
+  const NON_OUTLOOK_POLICY = POLICY.slice(0, outlookAt) + POLICY.slice(afterOutlookAt)
+  // Exactly the Outlook section was cut: the lengths must account for it precisely.
+  assert.strictEqual(NON_OUTLOOK_POLICY.length, POLICY.length - (afterOutlookAt - outlookAt),
+    'the excision must remove exactly the Outlook section')
+  assert.ok(!NON_OUTLOOK_POLICY.includes(OUTLOOK_START), 'the Outlook section is out of scope')
+  assert.ok(!/Anthropic's 30 days is not a Funnl deletion schedule/.test(NON_OUTLOOK_POLICY),
+    'Outlook-only Anthropic wording is out of scope')
+  // ... and every other section is still in scope.
+  for (const kept of ['<Section title="Gmail connection (optional)">',
+    '<Section title="Google Calendar connection">',
+    '<Section title="Analytics: behavior, not content">',
+    '<Section title="Your rights">',
+    '<Section title="Cookies and local storage">']) {
+    assert.ok(NON_OUTLOOK_POLICY.includes(kept), `must still be scanned: ${kept}`)
+  }
+  assert.ok(!/30 days/.test(NON_OUTLOOK_POLICY), 'a maximum the code does not enforce must not be promised')
   assert.ok(/expire_pending_email_context/.test(E2A_MIG), 'the job exists in SQL')
   const callers = ['supabase/functions/gmail-sync-worker/index.ts', 'supabase/functions/shared/gmailWorker.js', 'supabase/functions/google-calendar-sync/index.ts']
     .filter((p) => existsSync(join(ROOT, p)) && /expire_pending_email_context/.test(read(p)))
@@ -262,9 +301,11 @@ test('collection statement is scoped, not absolute', () => {
   for (const w of ['Account information', 'diagnostic error report', 'Cookies and local storage', 'Standard server logs']) assert.ok(POLICY.includes(w), `policy actually discloses: ${w}`)
 })
 test('effective date and contact', () => {
-  // Publication date set just-in-time (2026-09-20) once both corrected cleanup callers were deployed;
-  // the previous published version was dated September 18, 2026.
-  assert.ok(/Last updated: September 20, 2026/.test(POLICY))
+  // History: the Gmail wording was published 2026-09-20, once both corrected cleanup callers
+  // were deployed; the version before that was dated September 18, 2026. The date then moved
+  // to 2026-09-27 for the approved Outlook disclosure publication. This assertion tracks the
+  // single public date line, whatever the current approved date is.
+  assert.ok(/Last updated: September 27, 2026/.test(POLICY))
   assert.ok(!/Last updated: September 2026</.test(POLICY))
   assert.ok((POLICY.match(/navbir12345@gmail\.com/g) || []).length >= 3)
 })
