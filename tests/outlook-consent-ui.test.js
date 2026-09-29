@@ -36,9 +36,21 @@ import {
 import { resolveOauthStartUrl, OAUTH_START_PATHS } from '../src/lib/oauthStartEndpoint.js'
 
 let passed = 0, failed = 0
+// DEFECT THIS REPLACED: the previous runner called fn() and reported a tick
+// immediately. Twelve tests in this file are async, so their assertions had not
+// yet run when they were counted as passing. This is the same await-aware runner
+// tests/outlook-provider-redirect.test.js already uses.
+const pending = []
 function test (name, fn) {
-  try { fn(); console.log(`  ✓ ${name}`); passed++ }
-  catch (e) { console.error(`  ✗ ${name}\n    ${e.message}`); failed++ }
+  try {
+    const r = fn()
+    if (r && typeof r.then === 'function') {
+      pending.push(r.then(
+        () => { console.log(`  ✓ ${name}`); passed++ },
+        (e) => { console.error(`  ✗ ${name}\n    ${e.message}`); failed++ },
+      ))
+    } else { console.log(`  ✓ ${name}`); passed++ }
+  } catch (e) { console.error(`  ✗ ${name}\n    ${e.message}`); failed++ }
 }
 
 const CARD = readFileSync(new URL('../src/components/OutlookConnectionCard.jsx', import.meta.url), 'utf8')
@@ -272,9 +284,18 @@ test('the card creates no contact, logs no interaction, syncs no mailbox', () =>
     const re = new RegExp(B + banned + B, 'i')
     assert.ok(!re.test(CARD_CODE), `the connect card must not reference ${banned}`)
   }
-  for (const banned of ['.from(', '.rpc(', 'supabase.from']) {
-    assert.ok(!CARD_CODE.includes(banned), `the connect card must not call ${banned}`)
+  for (const banned of ['.from(', 'supabase.from']) {
+    assert.ok(!CARD_CODE.includes(banned), `the card must not query a table: ${banned}`)
   }
+  // .rpc( is now legitimate, but ONLY for the two user-scoped Outlook RPCs, and
+  // only with a literal name - a computed name could reach anything granted to
+  // the authenticated role.
+  const named = [...CARD_CODE.matchAll(/\.rpc\(\s*'([^']*)'/g)].map((m) => m[1]).sort()
+  assert.deepStrictEqual(named, ['disconnect_my_outlook', 'get_my_outlook_connection'],
+    `the card called unexpected RPCs: ${named.join(', ')}`)
+  const allCalls = CARD_CODE.match(/\.rpc\(/g) || []
+  assert.strictEqual(allCalls.length, named.length,
+    'every .rpc( call must name its function as a literal')
 })
 
 test('no token or provider value is handled in the browser', () => {
@@ -500,18 +521,48 @@ test('a BACKSPACE-built pattern would never match, which is why it is not used',
 console.log('')
 console.log('the draft claims no capability that does not exist')
 
-test('the disclosure does NOT offer disconnect as an available action', () => {
+test('the disclosure now OFFERS disconnect, because it exists', () => {
   const text = OUTLOOK_DISCLOSURE_PARAGRAPHS.join(' ')
-  assert.ok(!/disconnect .{0,30}at any time/i.test(text),
-    'disconnect is not built, so it must not be offered')
-  assert.ok(/not built yet/i.test(text), 'the absence must be stated plainly')
+  assert.ok(/disconnect at any time/i.test(text), 'disconnect is built, so say so')
+  assert.ok(!/not built yet/i.test(text), 'the old absence notice must be gone')
 })
 
-test('no disconnect path exists anywhere in this slice, matching the wording', () => {
-  assert.ok(!/disconnect/i.test(CARD_CODE), 'the card has no disconnect control')
-  const conn = readFileSync(new URL('../src/lib/outlookConnection.js', import.meta.url), 'utf8')
-  assert.ok(!/outlook-oauth-disconnect/.test(conn))
+test('the disclosure describes suggestions as EMPTIED, never as deleted', () => {
+  // The applied RPC keeps the suggestion row and NULLs its contents. Calling
+  // that deletion would be a false statement about what happened to the data.
+  const text = OUTLOOK_DISCLOSURE_PARAGRAPHS.join(' ')
+  assert.ok(/empties any suggestion/i.test(text), 'the emptying must be stated')
+  assert.ok(!/deletes? (any |your |all )?suggestions?/i.test(text),
+    'suggestions are not deleted, so the text must not say they are')
+  assert.ok(/Contacts and interactions you already saved are kept/i.test(text),
+    'the user must be told their saved records survive')
 })
 
-console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed\n`)
-if (failed > 0) process.exitCode = 1
+test('the disclosure does NOT claim the Microsoft grant is revoked', () => {
+  const text = OUTLOOK_DISCLOSURE_PARAGRAPHS.join(' ')
+  assert.ok(/does not withdraw the permission at Microsoft/i.test(text),
+    'the limit of a local disconnect must be stated')
+  // Checked by NEGATION rather than by banned words: the sentence that mentions
+  // withdrawal is exactly the one that says it does not happen. So every sentence
+  // mentioning revocation or withdrawal must be a negative one.
+  const sentences = text.split(/(?<=[.])\s+/)
+  for (const s of sentences) {
+    if (!/revok|withdraw/i.test(s)) continue
+    assert.ok(/does not|do not|cannot|never/i.test(s),
+      `a sentence claims revocation happens: ${s}`)
+  }
+})
+
+test('a disconnect path really exists, matching the wording', () => {
+  assert.ok(/disconnect/i.test(CARD_CODE), 'the card must carry a disconnect control')
+  assert.ok(CARD.includes("runOutlookDisconnect"), 'it must go through the reviewed flow')
+  assert.ok(CARD.includes("supabase.rpc('disconnect_my_outlook')"),
+    'and reach the applied user RPC')
+})
+
+async function finish () {
+  await Promise.all(pending)
+  console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed\n`)
+  if (failed > 0) process.exitCode = 1
+}
+await finish()
