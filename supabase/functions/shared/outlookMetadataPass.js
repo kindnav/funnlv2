@@ -476,6 +476,11 @@ export async function runOutlookMetadataPass (p) {
       deltaLink: res.complete ? res.deltaLink : null,
       pages: res.pages,
       requests: res.requests,
+      // MUST be copied. The commit gate sums this across folders to decide
+      // 'messages_dropped'; omitting it made that reason unreachable, so a run that
+      // had truncated a page could report only 'folder_incomplete' and understate
+      // what was actually lost.
+      droppedMessages: res.droppedMessages,
       contentFetches: res.contentFetches,
     }
     for (const [k, v] of res.entries) if (!merged.has(k)) merged.set(k, v)
