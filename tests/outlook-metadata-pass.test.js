@@ -772,8 +772,10 @@ test('that same case, through the WHOLE pass, is non-commit-ready with no cursor
 
   assert.strictEqual(result.commitReady, false)
   assert.strictEqual(result.cursors, null)
-  assert.deepStrictEqual(result.incompleteReasons, ['folder_incomplete', 'conversations_dropped'],
-    'the cap breach AND the knock-on grouping loss must both be reported')
+  assert.deepStrictEqual(result.incompleteReasons,
+    ['folder_incomplete', 'messages_dropped', 'conversations_dropped'],
+    'the cap breach, the truncated page AND the knock-on grouping loss are all reported')
+  assert.ok(result.droppedMessages > 0, 'the truncated page must be quantified')
   assert.strictEqual(result.folders.inbox.stop, 'max_messages_exceeded')
   assert.strictEqual(result.folders.inbox.reachedCursor, false,
     'the over-cap folder must not hold the cursor it was offered')
@@ -817,6 +819,42 @@ test('an oversized single page is refused outright rather than partly ingested',
   assert.strictEqual(res.entries.size, 0)
   assert.strictEqual(res.complete, false)
   assert.strictEqual(res.deltaLink, null)
+})
+
+test('MESSAGES DROPPED surfaces in the WHOLE-PASS result, not just the folder read', async () => {
+  // Regression: readFolderMetadata counted droppedMessages but the pass did not copy
+  // it into its per-folder record, so the sum was always 0 and 'messages_dropped' was
+  // unreachable - a run that had truncated a page reported only 'folder_incomplete'
+  // and understated the loss.
+  const fullPages = MAX_MESSAGES_PER_RUN / MAX_PAGE_SIZE
+  let served = 0
+  const fetchImpl = async (url) => {
+    if (!(url.includes('/mailFolders/inbox/') || url.includes('inbox-next'))) {
+      return okPage(finalPage('sentitems', []))
+    }
+    served += 1
+    const value = Array.from({ length: MAX_PAGE_SIZE }, (_, k) => filler((served - 1) * MAX_PAGE_SIZE + k))
+    return okPage({
+      value,
+      '@odata.nextLink': `${GRAPH_BASE}/me/mailFolders/inbox/messages/delta?$skiptoken=n${served}`,
+    })
+  }
+  const result = await passWith(fetchImpl)
+
+  assert.ok(served > fullPages, 'the fixture must serve past the entry ceiling')
+  assert.strictEqual(result.folders.inbox.droppedMessages, MAX_PAGE_SIZE,
+    'the folder record must carry the count')
+  assert.strictEqual(result.droppedMessages, MAX_PAGE_SIZE,
+    'and the pass must sum it rather than reporting 0')
+  assert.ok(result.incompleteReasons.includes('messages_dropped'),
+    `messages_dropped must be reachable: ${JSON.stringify(result.incompleteReasons)}`)
+  assert.strictEqual(result.commitReady, false)
+  assert.strictEqual(result.cursors, null)
+  // The summary must report it too, so an operator sees the loss.
+  const s = summarizePass(result)
+  assert.strictEqual(s.dropped_messages, MAX_PAGE_SIZE)
+  assert.strictEqual(s.folders.inbox.dropped_messages, MAX_PAGE_SIZE)
+  assert.ok(s.incomplete_reasons.includes('messages_dropped'))
 })
 
 test('CONVERSATIONS DROPPED: both folders finish cleanly, yet nothing commits', () => {
