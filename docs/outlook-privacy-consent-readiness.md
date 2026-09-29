@@ -3,6 +3,29 @@
 **Status: DRAFT FOR OWNER/LEGAL REVIEW. Nothing in this packet is published, deployed or
 configured.**
 
+**LAUNCH GATE: DISCONNECT MUST EXIST BEFORE ANY ACCOUNT IS CONNECTED.**
+
+There is currently no disconnect path for Outlook: no connected-status display, no
+disconnect control, and no server function that removes a Microsoft connection. The
+draft disclosure in `src/lib/outlookDisclosure.js` therefore says so plainly rather
+than offering a capability that does not exist. An earlier draft promised the user
+could "disconnect at any time from Settings", which was not true.
+
+Neither flag may be enabled until disconnect is implemented AND verified to remove:
+
+| Must be removed on disconnect | Where it lives |
+|---|---|
+| The connection row | `microsoft_connections` |
+| The encrypted access and refresh tokens | `microsoft_tokens` |
+| The delta cursors and lease state | `outlook_sync_state` |
+| Any pending or deferred suggestions | the candidate tables from `20260921000000` |
+| Any unconsumed OAuth state | `microsoft_oauth_states` |
+
+`disconnect_my_outlook()` exists in the applied schema and is the intended seam, but
+nothing calls it and its removal behaviour has not been verified end to end. Revoking
+the grant at Microsoft's side should also be considered, since deleting a refresh
+token locally does not invalidate it upstream.
+
 **THREE SEPARATE CONSENT ARTEFACTS. Only the first is published.**
 
 | # | Artefact | Where it lives | Status | Permissions it names |

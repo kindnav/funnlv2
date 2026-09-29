@@ -26,23 +26,22 @@
 // docs/outlook-privacy-consent-readiness.md.
 
 /**
- * Version identifier sent to the server as `consentPolicyVersion`.
- * Must equal the server's OUTLOOK_DISCLOSURE_VERSION, which is unset today.
+ * Stable prefix. The version itself is NOT this string: see below.
  */
-export const OUTLOOK_DISCLOSURE_VERSION = 'outlook-disclosure-draft-1'
+export const DISCLOSURE_VERSION_PREFIX = 'outlook-disclosure-draft'
 
 /**
  * The exact text shown before any redirect. Every paragraph rendered by the
  * card comes from this array, and nothing else is shown as disclosure.
  */
 export const OUTLOOK_DISCLOSURE_PARAGRAPHS = Object.freeze([
-  'Connecting Outlook is optional. Funnl works fully without it, and you can disconnect at any time.',
+  'Connecting Outlook is optional. Funnl works fully without it.',
   'You would grant two Microsoft permissions, both read-only. Mail.Read ("Read user mail") lets Funnl read messages in your Inbox and Sent Items. User.Read ("Sign in and read user profile") lets Funnl identify which mailbox you connected.',
   'Microsoft describes User.Read as allowing an app to read the signed-in user’s full profile and basic company information. Funnl asks it for three fields only — your account id, your mail address and your user principal name — and uses them only to record and display which mailbox is connected. The permission permits more than Funnl requests, which is why both are stated here.',
   'Mail.Read is mailbox-wide: it would technically allow reading message bodies and attachments anywhere in your mailbox. Funnl reads only Inbox and Sent Items, and never opens attachments.',
   'Funnl can never send, reply, delete, move or change anything in your mailbox. It does not read your Microsoft contacts, calendars or files, and it does not read your organisation’s directory, your colleagues or your manager.',
   'What Funnl would do with this: suggest networking contacts and draft interaction notes from relevant conversations. Nothing is saved as a contact or logged as an interaction until you review it and choose to accept it. You can edit or dismiss every suggestion.',
-  'You can disconnect Outlook at any time from Settings. Disconnecting deletes your Microsoft connection, your stored authorisation and the synchronisation state.',
+  'Disconnecting is not built yet. Until it is, do not connect an account you would need to disconnect: there is currently no way to remove the connection, the stored authorisation or the synchronisation state from this screen.',
 ])
 
 /**
@@ -53,7 +52,7 @@ export const OUTLOOK_DISCLOSURE_PARAGRAPHS = Object.freeze([
  * check passes at render time. This is an integrity check against accidental
  * drift between text and version, NOT a security primitive.
  */
-export const DISCLOSURE_FINGERPRINT = '1f0d100b'
+export const DISCLOSURE_FINGERPRINT = 'f09284dc'
 
 /** @param {readonly string[]} paragraphs */
 export function disclosureFingerprint (paragraphs) {
@@ -77,3 +76,27 @@ export function verifyDisclosureIntegrity (
 ) {
   return disclosureFingerprint(paragraphs) === fingerprint
 }
+
+/**
+ * The version identifier sent to the server as `consentPolicyVersion`.
+ *
+ * DERIVED FROM THE TEXT, not declared alongside it. An earlier revision used a
+ * fixed string, which left a real hole: edit the paragraphs, update
+ * DISCLOSURE_FINGERPRINT to match, and the integrity check passes again while
+ * the version stays the same - so one recorded consent_policy_version could
+ * describe two different documents. Because the fingerprint is part of the
+ * version, any text change necessarily produces a different version, and the
+ * server's exact-string comparison then refuses the stale one.
+ *
+ * Shape: <prefix>-<8 hex>. 32 characters, no whitespace or control characters,
+ * so it satisfies the microsoft_oauth_states consent_policy_version CHECK
+ * (1..40 chars, no whitespace/control).
+ */
+export function computeDisclosureVersion (
+  paragraphs = OUTLOOK_DISCLOSURE_PARAGRAPHS,
+  prefix = DISCLOSURE_VERSION_PREFIX,
+) {
+  return `${prefix}-${disclosureFingerprint(paragraphs)}`
+}
+
+export const OUTLOOK_DISCLOSURE_VERSION = computeDisclosureVersion()

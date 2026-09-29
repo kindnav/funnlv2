@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import { SUPABASE_ANON_KEY, getSessionBearerToken } from '../lib/supabase'
 import { track } from '../lib/analytics'
-import { resolveOauthStartUrl, canStartOauthFrom } from '../lib/oauthStartEndpoint'
+import { canStartOauthFrom } from '../lib/oauthStartEndpoint'
 import {
   OUTLOOK_DISCLOSURE_PARAGRAPHS,
   OUTLOOK_DISCLOSURE_VERSION,
@@ -9,8 +9,8 @@ import {
 } from '../lib/outlookDisclosure'
 import {
   buildConsentRequest,
-  classifyStartResponse,
   messageForOutcome,
+  startOutlookConsent,
 } from '../lib/outlookConnection'
 
 // Settings → "Connect Outlook". DORMANT: SettingsPage mounts this only when
@@ -48,64 +48,27 @@ export default function OutlookConnectionCard() {
   })
   const canConnect = request.ok
 
+  // The flow itself lives in startOutlookConsent so it can be driven directly
+  // in tests with injected fetch / navigate. This wrapper only supplies the
+  // browser's versions and applies the result to state.
   async function handleConnect() {
     setError('')
-    const built = buildConsentRequest({
-      acknowledged,
-      originOk,
-      connecting,
-      pageOrigin: window.location.origin,
-    })
-    if (!built.ok) {
-      setError(messageForOutcome(built.reason))
-      return
-    }
-
     setConnecting(true)
-    try {
-      const endpoint = resolveOauthStartUrl(window.location.origin, 'outlook')
-      if (!endpoint.ok) {
-        setError(messageForOutcome('non_canonical_origin'))
-        setConnecting(false)
-        return
-      }
-      const bearer = await getSessionBearerToken()
-      if (!bearer) {
-        setError(messageForOutcome('signed_out'))
-        setConnecting(false)
-        return
-      }
-      const res = await fetch(endpoint.url, {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: {
-          'Content-Type': 'application/json',
-          apikey: SUPABASE_ANON_KEY,
-          Authorization: `Bearer ${bearer}`,
-        },
-        body: JSON.stringify(built.body),
-      })
-      const data = await res.json().catch(() => null)
-      const outcome = classifyStartResponse(res.status, data)
-
-      if (outcome.kind === 'redirect') {
-        track('outlook_connect_started', { provider: 'outlook' })
-        window.location.assign(outcome.url)
-        return
-      }
-      if (outcome.kind === 'stale_version') {
-        // The acknowledgement was for text that is no longer current, so it is
-        // withdrawn rather than carried over to a version the user has not read.
-        setAcknowledged(false)
-      }
-      setError(messageForOutcome(outcome.kind))
-      setConnecting(false)
-    } catch {
-      setError(messageForOutcome('error'))
-      setConnecting(false)
-    }
+    const result = await startOutlookConsent({
+      acknowledged,
+      connecting: false,
+      pageOrigin: window.location.origin,
+      apikey: SUPABASE_ANON_KEY,
+      getBearer: getSessionBearerToken,
+      fetchImpl: (url, init) => fetch(url, init),
+      navigate: (url) => window.location.assign(url),
+      trackImpl: track,
+    })
+    if (result.navigated) return           // the page is leaving; keep the spinner
+    if (result.clearAcknowledgement) setAcknowledged(false)
+    setError(result.message)
+    setConnecting(false)
   }
-
   return (
     <div className="rounded-2xl border border-line-2 bg-card p-6">
       <h3 className="font-display text-lg text-hi">Connect Outlook</h3>

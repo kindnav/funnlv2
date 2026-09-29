@@ -13,6 +13,7 @@
 // leads to - suggesting contacts and interaction context from relevant mail -
 // is explicitly review-before-save, and none of that exists yet.
 
+import { resolveOauthStartUrl, canStartOauthFrom } from './oauthStartEndpoint.js'
 import {
   OUTLOOK_DISCLOSURE_VERSION,
   OUTLOOK_DISCLOSURE_PARAGRAPHS,
@@ -109,6 +110,90 @@ export function messageForOutcome (kind) {
       return 'This disclosure could not be verified, so connecting is disabled. Please reload the page.'
     default:
       return 'Could not start the Outlook connection. Please try again.'
+  }
+}
+
+/**
+ * The whole start flow, as one injectable function.
+ *
+ * The component owns state and markup; this owns the decisions and the calls,
+ * so the behaviour that matters can be driven directly in a test: that an
+ * unacknowledged attempt performs NO request, that a stale 409 withdraws the
+ * acknowledgement, and that a success navigates exactly once to the provider
+ * URL and nowhere else.
+ *
+ * Returns { message, clearAcknowledgement, navigated } - never throws.
+ *
+ * @param {object} p
+ * @param {boolean} p.acknowledged
+ * @param {boolean} p.connecting
+ * @param {string}  p.pageOrigin
+ * @param {string}  p.apikey
+ * @param {() => Promise<string|null>} p.getBearer
+ * @param {typeof fetch} p.fetchImpl
+ * @param {(url: string) => void} p.navigate
+ * @param {(name: string, props?: object) => void} [p.trackImpl]
+ */
+export async function startOutlookConsent ({
+  acknowledged, connecting, pageOrigin, apikey,
+  getBearer, fetchImpl, navigate, trackImpl = () => {},
+}) {
+  const originOk = canStartOauthFrom(pageOrigin)
+  const built = buildConsentRequest({ acknowledged, originOk, connecting, pageOrigin })
+  if (!built.ok) {
+    // No request is made at all - this is the refusal path.
+    return { message: messageForOutcome(built.reason), clearAcknowledgement: false, navigated: false }
+  }
+
+  const endpoint = resolveOauthStartUrl(pageOrigin, 'outlook')
+  if (!endpoint.ok) {
+    return { message: messageForOutcome('non_canonical_origin'), clearAcknowledgement: false, navigated: false }
+  }
+
+  let bearer = null
+  try {
+    bearer = await getBearer()
+  } catch {
+    bearer = null
+  }
+  if (!bearer) {
+    return { message: messageForOutcome('signed_out'), clearAcknowledgement: false, navigated: false }
+  }
+
+  let res
+  try {
+    res = await fetchImpl(endpoint.url, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: {
+        'Content-Type': 'application/json',
+        apikey,
+        Authorization: `Bearer ${bearer}`,
+      },
+      body: JSON.stringify(built.body),
+    })
+  } catch {
+    return { message: messageForOutcome('error'), clearAcknowledgement: false, navigated: false }
+  }
+
+  let data = null
+  try {
+    data = await res.json()
+  } catch {
+    data = null
+  }
+  const outcome = classifyStartResponse(res.status, data)
+
+  if (outcome.kind === 'redirect') {
+    trackImpl('outlook_connect_started', { provider: 'outlook' })
+    navigate(outcome.url)
+    return { message: '', clearAcknowledgement: false, navigated: true }
+  }
+  return {
+    message: messageForOutcome(outcome.kind),
+    // A stale version means the acknowledgement was for text no longer current.
+    clearAcknowledgement: outcome.kind === 'stale_version',
+    navigated: false,
   }
 }
 
