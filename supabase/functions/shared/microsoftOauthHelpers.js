@@ -204,10 +204,11 @@ export const MAILBOX_ADDRESS_RESOLUTION_REQUIRED = Object.freeze({
  * stored as ms_account_id, and `tid` classifies the account type.
  *
  * The display address is deliberately NOT part of identity and NOT required for
- * success here: `displayAddress` may be null, and a null simply means the
- * address must come from Graph before a connection can be written. See
- * MAILBOX_ADDRESS_RESOLUTION_REQUIRED. Callers must not treat a present
- * displayAddress as verified ownership of that mailbox.
+ * success here. `displayAddressHint` may be null, and its presence changes
+ * nothing: `graphMailboxResolutionRequired` is ALWAYS true, so the mailbox
+ * address must be resolved and cross-checked via Graph before finalization
+ * regardless. See MAILBOX_ADDRESS_RESOLUTION_REQUIRED. A present hint is never
+ * verified ownership of that mailbox.
  */
 export function identityFromIdTokenClaims (claims) {
   if (!claims || typeof claims !== 'object') return { ok: false, reason: 'no_claims' }
@@ -215,17 +216,21 @@ export function identityFromIdTokenClaims (claims) {
   if (!oid) return { ok: false, reason: 'missing_oid' }
   const accountType = classifyAccountType(claims.tid)
   if (!accountType) return { ok: false, reason: 'missing_or_invalid_tid' }
-  const displayAddress = displayAddressFromClaims(claims)
   return {
     ok: true,
     msAccountId: oid,
     msTenantId: String(claims.tid).trim().toLowerCase(),
     accountType,
-    displayAddress,                       // may be null
-    addressResolved: displayAddress !== null,
-    // True when the next slice MUST call Graph before it can satisfy the
-    // ms_email NOT NULL contract.
-    requiresGraphAddressLookup: displayAddress === null,
+    // A HINT ONLY, and may be null. Present or absent, it is never sufficient
+    // to write ms_email: a claim is not proof that the mailbox exists, is
+    // routable, or belongs to this account. Work/school preferred_username is
+    // a UPN, which is frequently not a mailbox at all.
+    displayAddressHint: displayAddressFromClaims(claims),
+    // ALWAYS true. Graph mailbox resolution is unconditional, so the presence
+    // of a hint can never be mistaken for having resolved the address. An
+    // earlier shape returned addressResolved/requiresGraphAddressLookup keyed
+    // off the hint, which contradicted this module's own contract.
+    graphMailboxResolutionRequired: true,
   }
 }
 
