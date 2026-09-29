@@ -204,12 +204,21 @@ async function run () {
     check('bound POST passes the gate and still ends in a safe 303',
       r.status === 303 && String(r.location).startsWith('https://www.getfunnl.com/settings?outlook=error'),
       `${r.status} ${r.location}`)
-    check('bound POST PASSES the gate and reaches not_implemented_exchange',
-      r.log.includes('not_implemented_exchange'), JSON.stringify(r.log.slice(-300)))
+    // The exchange slice has landed, so a bound POST no longer stops at a
+    // placeholder: it proceeds to the STATE LOOKUP. Against this sink that
+    // lookup fails (the sink answers 500), which is itself the proof that the
+    // request got past the gate and into the database path.
+    check('bound POST PASSES the gate and reaches the state lookup',
+      r.log.includes('state_lookup_failed') || r.log.includes('unknown_state'),
+      JSON.stringify(r.log.slice(-300)))
     check('bound POST is NOT refused at the gate',
       !r.log.includes('binding_rejected'), JSON.stringify(r.log.slice(-300)))
-    check('bound POST makes zero database calls ONLY because no exchange exists yet',
-      r.hits.length === 0, JSON.stringify(r.hits))
+    // Previously this asserted zero calls, which was only true because the
+    // handler had no database path. Now the bound path MUST reach the database:
+    // that is the positive control this suite previously lacked. The full
+    // happy path is driven in tests/outlook-callback-positive-integration.test.js.
+    check('bound POST now DOES reach the database (positive control)',
+      r.hits.some((h) => h.includes('microsoft_oauth_states')), JSON.stringify(r.hits))
     check('reason codes leak no state, cookie, code or token',
       !r.log.includes(STATE) && !r.log.includes('INTEGRATION-CODE'),
       'a secret appeared in the handler logs')
