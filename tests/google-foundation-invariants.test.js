@@ -116,6 +116,12 @@ const FUNCTION_JWT_SETTINGS = {
   // could run — the same shape as google-oauth-callback.
   'outlook-oauth-start': 'true',
   'outlook-oauth-callback': 'false',
+  // Outlook metadata-pass slice. A PRIVATE worker endpoint: a user JWT grants no
+  // authority on it, so platform verification is off and authorisation is a separate
+  // >= 32-character secret compared in constant time inside the handler - the same
+  // shape as gmail-sync-worker. It is additionally dormant behind two flags, checked
+  // before the secret so a disabled endpoint cannot be used to probe it.
+  'outlook-import-worker': 'false',
 }
 // Non-comment, non-blank settings lines of one [functions.<name>] section.
 function functionSectionSettings(name) {

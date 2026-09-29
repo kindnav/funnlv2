@@ -465,3 +465,15 @@ verify_jwt = true
 # before any database or token work.
 [functions.outlook-oauth-callback]
 verify_jwt = false
+
+# outlook-import-worker is PRIVATE and NOT user-callable. Platform JWT verification is
+# intentionally disabled because a user JWT grants no authority on a worker endpoint:
+# authorisation is a separate high-entropy secret (OUTLOOK_WORKER_SECRET, >= 32 chars)
+# compared in constant time inside the handler, exactly as gmail-sync-worker does.
+#
+# It is DORMANT twice over: the handler returns 503 not_enabled unless BOTH
+# OUTLOOK_INTEGRATION_ENABLED and OUTLOOK_IMPORT_WORKER_ENABLED are exactly 'true',
+# and neither is set in any environment. The dormancy check runs BEFORE the secret
+# comparison, so a disabled endpoint cannot be used to probe the secret.
+[functions.outlook-import-worker]
+verify_jwt = false
