@@ -20,12 +20,15 @@ import { readFileSync } from 'node:fs'
 import { webcrypto } from 'node:crypto'
 import {
   PASS_STAGE, MAX_CONVERSATIONS_PER_RUN, MAX_PLAN_ENTRIES, SKIP_CODES, STOP_CODES,
+  INCOMPLETE_REASONS,
   localDateFor, readFolderMetadata, groupByConversation, planEpisodes,
   runOutlookMetadataPass, summarizePass,
 } from '../supabase/functions/shared/outlookMetadataPass.js'
 import {
-  DISCOVERY_SELECT, CONTENT_SELECT, MAX_PAGES_PER_RUN, GRAPH_BASE,
+  DISCOVERY_SELECT, CONTENT_SELECT, MAX_PAGES_PER_RUN, MAX_MESSAGES_PER_RUN,
+  MAX_PAGE_SIZE, GRAPH_BASE,
 } from '../supabase/functions/shared/outlookGraphTransport.js'
+import { MAX_EPISODE_MESSAGES } from '../supabase/functions/shared/outlookParticipants.js'
 import {
   handleOutlookImportWorker, flagEnabled, WORKER_FLAGS,
 } from '../supabase/functions/outlook-import-worker/handler.js'
@@ -454,9 +457,11 @@ test('the page cap is shared ACROSS folders, not per folder', async () => {
   })
   assert.ok(calls.length <= MAX_PAGES_PER_RUN + 2,
     `a shared cap was exceeded: ${calls.length} requests`)
-  assert.strictEqual(result.runComplete, false)
+  assert.strictEqual(result.commitReady, false)
+  assert.ok(result.incompleteReasons.includes('folder_incomplete'))
+  assert.strictEqual(result.cursors, null, 'no cursor may be exposed on an incomplete run')
   for (const f of ['inbox', 'sentitems']) {
-    assert.strictEqual(result.folders[f].deltaLink, null, f)
+    assert.strictEqual(result.folders[f].reachedCursor, false, f)
   }
 })
 
@@ -465,11 +470,17 @@ test('a finished stream returns its cursor, and only then', async () => {
     inbox: [finalPage('inbox', TWO_SIDED.inbox)],
     sentitems: [finalPage('sentitems', TWO_SIDED.sentitems)],
   })
-  assert.strictEqual(result.runComplete, true)
+  assert.strictEqual(result.commitReady, true)
+  assert.deepStrictEqual(result.incompleteReasons, [])
+  assert.ok(result.cursors !== null, 'a clean run must expose its cursors')
   for (const f of ['inbox', 'sentitems']) {
     assert.strictEqual(result.folders[f].complete, true, f)
-    assert.ok(typeof result.folders[f].deltaLink === 'string' && result.folders[f].deltaLink.length > 0, f)
     assert.strictEqual(result.folders[f].stop, 'complete', f)
+    assert.strictEqual(result.folders[f].reachedCursor, true, f)
+    assert.ok(typeof result.cursors[f] === 'string' && result.cursors[f].length > 0, f)
+    // The VALUE lives only behind the gate, never on the per-folder record.
+    assert.strictEqual(result.folders[f].deltaLink, undefined,
+      'a cursor value must not be reachable past the gate')
   }
 })
 
@@ -547,14 +558,14 @@ test('summarizePass returns counts and codes only', async () => {
   const s = JSON.stringify(summarizePass(result))
   for (const secret of [RECRUITER, ME, 'Coffee chat', 'ava', CONTACT_ID, CONN,
     result.plan[0].episodeFingerprint, result.plan[0].personFingerprint,
-    result.folders.inbox.deltaLink]) {
+    result.cursors.inbox]) {
     assert.ok(!s.includes(secret), `the summary leaked: ${String(secret).slice(0, 24)}`)
   }
   const sum = summarizePass(result)
   assert.strictEqual(sum.stage, PASS_STAGE)
   assert.strictEqual(sum.plan_entries, 1)
   assert.strictEqual(sum.plan_by_kind.known_contact_interaction, 1)
-  assert.strictEqual(sum.run_complete, true)
+  assert.strictEqual(sum.commit_ready, true)
 })
 
 test('a fingerprint is deliberately excluded from the summary', () => {
@@ -682,6 +693,357 @@ test('the pass documents that a metadata-only run cannot propose new people', ()
   assert.ok(/can only ever DEFER a new person/.test(PASS_SRC))
   assert.ok(/NO database write/.test(PASS_SRC))
   assert.ok(/NO contact or interaction is created/.test(PASS_SRC))
+})
+
+console.log('')
+console.log('completion and cursor contract: dropped work is never commit-ready')
+
+// These are WHOLE-PASS tests on purpose. Each ceiling below used to be reported as a
+// count while the run still claimed completion and handed back a cursor, so the thing
+// worth asserting is the end-to-end result a caller would act on.
+
+/** A Graph item with a distinct conversation, so N items make N conversations. */
+function filler (i) {
+  return msg({
+    id: `f${i}`, conversationId: `fc${i}`,
+    from: `person${i}@firm.test`, to: [ME],
+    sent: '2026-09-20T10:00:00Z',
+  })
+}
+
+/**
+ * Serves `pageCount` full pages to one folder; the LAST one carries a deltaLink.
+ * The other folder finishes immediately and cleanly.
+ */
+function bigFolderProvider (folder, pageCount, itemsPerPage) {
+  let served = 0
+  const calls = []
+  const fetchImpl = async (url) => {
+    calls.push(url)
+    const isTarget = url.includes(`/mailFolders/${folder}/`) ||
+      url.includes(`${folder === 'inbox' ? 'inbox' : 'sent'}-next`)
+    if (!isTarget) return okPage(finalPage(folder === 'inbox' ? 'sentitems' : 'inbox', []))
+    served += 1
+    const value = Array.from({ length: itemsPerPage }, (_, k) => filler(served * 1000 + k))
+    return okPage(served >= pageCount
+      ? { value, '@odata.deltaLink': `${GRAPH_BASE}/me/mailFolders/${folder}/messages/delta?$deltatoken=final` }
+      : { value, '@odata.nextLink': `${GRAPH_BASE}/me/mailFolders/${folder}/messages/delta?$skiptoken=${folder === 'inbox' ? 'inbox' : 'sent'}-next` })
+  }
+  return { calls, fetchImpl }
+}
+
+function okPage (body) {
+  return { status: 200, headers: { get: () => null }, json: async () => body }
+}
+
+async function passWith (fetchImpl, over = {}) {
+  return runOutlookMetadataPass({
+    connection: { connectionId: CONN, primaryEmail: ME, timeZone: 'UTC' },
+    accessToken: 't',
+    contacts: CONTACTS,
+    userId: USER_ID,
+    keyRing: KEY_RING,
+    deps: { fetchImpl },
+    ...over,
+  })
+}
+
+test('A FINAL PAGE THAT CARRIES A CURSOR BUT BREACHES THE MESSAGE CAP is not complete', async () => {
+  // The exact defect this fix addresses. Enough pages to pass MAX_MESSAGES_PER_RUN,
+  // with the last one carrying an @odata.deltaLink. Honouring the cursor first made
+  // the run claim completion while the overflow had already been discarded.
+  const pageCount = Math.ceil((MAX_MESSAGES_PER_RUN + MAX_PAGE_SIZE) / MAX_PAGE_SIZE)
+  const p = bigFolderProvider('inbox', pageCount, MAX_PAGE_SIZE)
+  const res = await readFolderMetadata({ folder: 'inbox', accessToken: 't', deps: { fetchImpl: p.fetchImpl } })
+
+  assert.ok(res.messages > MAX_MESSAGES_PER_RUN,
+    `the fixture must actually breach the cap (saw ${res.messages})`)
+  assert.strictEqual(res.stop, 'max_messages_exceeded',
+    'a cap breach must outrank a delta cursor')
+  assert.strictEqual(res.complete, false)
+  assert.strictEqual(res.deltaLink, null,
+    'a cursor from an over-cap run would skip every dropped message forever')
+})
+
+test('that same case, through the WHOLE pass, is non-commit-ready with no cursors', async () => {
+  const pageCount = Math.ceil((MAX_MESSAGES_PER_RUN + MAX_PAGE_SIZE) / MAX_PAGE_SIZE)
+  const p = bigFolderProvider('inbox', pageCount, MAX_PAGE_SIZE)
+  const result = await passWith(p.fetchImpl)
+
+  assert.strictEqual(result.commitReady, false)
+  assert.strictEqual(result.cursors, null)
+  assert.deepStrictEqual(result.incompleteReasons, ['folder_incomplete', 'conversations_dropped'],
+    'the cap breach AND the knock-on grouping loss must both be reported')
+  assert.strictEqual(result.folders.inbox.stop, 'max_messages_exceeded')
+  assert.strictEqual(result.folders.inbox.reachedCursor, false,
+    'the over-cap folder must not hold the cursor it was offered')
+  for (const r of result.incompleteReasons) {
+    assert.ok(INCOMPLETE_REASONS.includes(r), `uncontrolled reason: ${r}`)
+  }
+})
+
+test('MESSAGES DROPPED by the entry ceiling are counted, and refuse the cursor', async () => {
+  // Exactly MAX_MESSAGES_PER_RUN across full pages, every one carrying a nextLink, so
+  // the entry map fills before the cap check can fire. The next page's messages have
+  // nowhere to go: they are counted as dropped rather than vanishing.
+  const fullPages = MAX_MESSAGES_PER_RUN / MAX_PAGE_SIZE
+  assert.ok(Number.isInteger(fullPages), 'the fixture assumes the cap is a whole number of pages')
+  let served = 0
+  const fetchImpl = async () => {
+    served += 1
+    const value = Array.from({ length: MAX_PAGE_SIZE }, (_, k) => filler((served - 1) * MAX_PAGE_SIZE + k))
+    return okPage({
+      value,
+      '@odata.nextLink': `${GRAPH_BASE}/me/mailFolders/inbox/messages/delta?$skiptoken=n${served}`,
+    })
+  }
+  const res = await readFolderMetadata({ folder: 'inbox', accessToken: 't', deps: { fetchImpl } })
+  assert.strictEqual(res.entries.size, MAX_MESSAGES_PER_RUN)
+  assert.ok(res.droppedMessages > 0, 'the surplus must be counted, not silently discarded')
+  assert.strictEqual(res.complete, false)
+  assert.strictEqual(res.deltaLink, null)
+})
+
+test('an oversized single page is refused outright rather than partly ingested', async () => {
+  // readDeltaPage rejects a page above MAX_PAGE_SIZE, so there is no path by which
+  // half of one page is kept and the rest quietly lost.
+  const value = Array.from({ length: MAX_PAGE_SIZE + 5 }, (_, k) => filler(k))
+  const fetchImpl = async () => okPage({
+    value,
+    '@odata.deltaLink': `${GRAPH_BASE}/me/mailFolders/inbox/messages/delta?$deltatoken=final`,
+  })
+  const res = await readFolderMetadata({ folder: 'inbox', accessToken: 't', deps: { fetchImpl } })
+  assert.strictEqual(res.stop, 'malformed_response')
+  assert.strictEqual(res.entries.size, 0)
+  assert.strictEqual(res.complete, false)
+  assert.strictEqual(res.deltaLink, null)
+})
+
+test('CONVERSATIONS DROPPED: both folders finish cleanly, yet nothing commits', () => {
+  // The cleanest form of the defect. Every folder reaches its deltaLink, the message
+  // ceiling is NOT breached, and the loss happens entirely at the grouping stage after
+  // the merge. Under the old contract this reported completion and returned cursors.
+  const perPage = MAX_PAGE_SIZE
+  const total = MAX_CONVERSATIONS_PER_RUN + 50
+  const pages = Math.ceil(total / perPage)
+  let served = 0
+  const fetchImpl = async (url) => {
+    if (!(url.includes('/mailFolders/inbox/') || url.includes('inbox-next'))) {
+      return okPage(finalPage('sentitems', []))
+    }
+    served += 1
+    const value = Array.from({ length: perPage }, (_, k) => filler((served - 1) * perPage + k))
+    return okPage(served >= pages
+      ? { value, '@odata.deltaLink': `${GRAPH_BASE}/me/mailFolders/inbox/messages/delta?$deltatoken=final` }
+      : { value, '@odata.nextLink': `${GRAPH_BASE}/me/mailFolders/inbox/messages/delta?$skiptoken=inbox-next` })
+  }
+  return passWith(fetchImpl).then((result) => {
+    assert.ok(result.totals.messagesSeen <= MAX_MESSAGES_PER_RUN,
+      `the fixture must NOT breach the message cap, or it proves the wrong thing (saw ${result.totals.messagesSeen})`)
+    for (const f of ['inbox', 'sentitems']) {
+      assert.strictEqual(result.folders[f].complete, true, `${f} should have finished`)
+      assert.strictEqual(result.folders[f].reachedCursor, true, f)
+      assert.strictEqual(result.folders[f].droppedMessages, 0, f)
+    }
+    assert.strictEqual(result.conversations, MAX_CONVERSATIONS_PER_RUN)
+    assert.strictEqual(result.droppedConversations, 50)
+    assert.deepStrictEqual(result.incompleteReasons, ['conversations_dropped'],
+      'the reason must be exactly this one, not a coincidental folder failure')
+    assert.strictEqual(result.commitReady, false)
+    assert.strictEqual(result.cursors, null)
+  })
+})
+
+test('groupByConversation reports dropped and truncated SEPARATELY', async () => {
+  // Driven directly, because the two ceilings are distinguishable only here: a
+  // discarded thread and a shortened thread are different kinds of loss.
+  const overflow = []
+  for (let i = 0; i < MAX_CONVERSATIONS_PER_RUN + 6; i++) {
+    overflow.push({ message: { providerConversationKey: `k${i}`, providerMessageKey: `m${i}`, timestampIso: '2026-09-20T10:00:00Z' } })
+  }
+  const g1 = groupByConversation(overflow)
+  assert.strictEqual(g1.byConversation.size, MAX_CONVERSATIONS_PER_RUN)
+  assert.strictEqual(g1.droppedConversations, 6)
+  assert.strictEqual(g1.truncatedConversations, 0)
+
+  const longThread = []
+  for (let i = 0; i < MAX_EPISODE_MESSAGES + 9; i++) {
+    longThread.push({ message: { providerConversationKey: 'one', providerMessageKey: `m${i}`, timestampIso: `2026-09-20T10:${String(i).padStart(2, '0')}:00Z` } })
+  }
+  const g2 = groupByConversation(longThread)
+  assert.strictEqual(g2.byConversation.get('one').length, MAX_EPISODE_MESSAGES)
+  // Counted per CONVERSATION, not per discarded message.
+  assert.strictEqual(g2.truncatedConversations, 1)
+  assert.strictEqual(g2.droppedConversations, 0)
+})
+
+test('A TRUNCATED EPISODE makes the run non-commit-ready, because the view is partial', async () => {
+  // One conversation with more messages than MAX_EPISODE_MESSAGES, split across the
+  // two folders so it genuinely alternates and would otherwise qualify.
+  const inbox = []
+  const sent = []
+  for (let i = 0; i < MAX_EPISODE_MESSAGES + 8; i++) {
+    const m = msg({
+      id: `t${i}`, conversationId: 'long',
+      from: i % 2 === 0 ? RECRUITER : ME,
+      to: [i % 2 === 0 ? ME : RECRUITER],
+      sent: `2026-09-20T${String(10 + Math.floor(i / 6)).padStart(2, '0')}:${String((i % 6) * 10).padStart(2, '0')}:00Z`,
+    })
+    ;(i % 2 === 0 ? inbox : sent).push(m)
+  }
+  const fetchImpl = async (url) => okPage(
+    url.includes('/mailFolders/inbox/') ? finalPage('inbox', inbox) : finalPage('sentitems', sent))
+  const result = await passWith(fetchImpl)
+
+  assert.strictEqual(result.truncatedConversations, 1)
+  assert.strictEqual(result.commitReady, false,
+    'a suggestion built from a shortened thread rests on a partial view')
+  assert.strictEqual(result.cursors, null)
+  assert.ok(result.incompleteReasons.includes('episode_truncated'),
+    JSON.stringify(result.incompleteReasons))
+  // Both folders DID finish - the loss is at the grouping stage, after the merge.
+  for (const f of ['inbox', 'sentitems']) {
+    assert.strictEqual(result.folders[f].complete, true, f)
+    assert.strictEqual(result.folders[f].reachedCursor, true, f)
+  }
+})
+
+test('A TRUNCATED PLAN makes the run non-commit-ready even with both folders complete', async () => {
+  // MAX_PLAN_ENTRIES qualified episodes plus a few more. Both folders finish cleanly;
+  // the loss is entirely at the plan stage, which is exactly the case that used to
+  // report completion.
+  const inbox = []
+  const sent = []
+  const many = MAX_PLAN_ENTRIES + 4
+  for (let i = 0; i < many; i++) {
+    inbox.push(msg({ id: `pi${i}`, conversationId: `pc${i}`, from: RECRUITER, to: [ME], sent: '2026-09-20T10:00:00Z' }))
+    sent.push(msg({ id: `ps${i}`, conversationId: `pc${i}`, from: ME, to: [RECRUITER], sent: '2026-09-21T10:00:00Z' }))
+  }
+  // Paged so no single page exceeds MAX_PAGE_SIZE.
+  const pageUp = (folder, items) => {
+    const chunks = []
+    for (let i = 0; i < items.length; i += MAX_PAGE_SIZE) chunks.push(items.slice(i, i + MAX_PAGE_SIZE))
+    return chunks.map((c, i) => (i === chunks.length - 1
+      ? { value: c, '@odata.deltaLink': `${GRAPH_BASE}/me/mailFolders/${folder}/messages/delta?$deltatoken=final` }
+      : { value: c, '@odata.nextLink': `${GRAPH_BASE}/me/mailFolders/${folder}/messages/delta?$skiptoken=${folder === 'inbox' ? 'inbox' : 'sent'}-next` }))
+  }
+  const queues = { inbox: pageUp('inbox', inbox), sentitems: pageUp('sentitems', sent) }
+  const at = { inbox: 0, sentitems: 0 }
+  const fetchImpl = async (url) => {
+    const f = (url.includes('/mailFolders/inbox/') || url.includes('inbox-next')) ? 'inbox' : 'sentitems'
+    const body = queues[f][at[f]] ?? finalPage(f, [])
+    at[f] += 1
+    return okPage(body)
+  }
+  const result = await passWith(fetchImpl)
+
+  assert.strictEqual(result.plan.length, MAX_PLAN_ENTRIES,
+    `the plan must be capped (got ${result.plan.length}, skipped ${JSON.stringify(result.skipped)})`)
+  assert.ok(result.skipped.plan_cap_reached > 0)
+  assert.strictEqual(result.commitReady, false)
+  assert.strictEqual(result.cursors, null,
+    'discarded episodes would be covered by a cursor that was never earned')
+  assert.ok(result.incompleteReasons.includes('plan_truncated'),
+    JSON.stringify(result.incompleteReasons))
+})
+
+test('INBOX FINISHES, SENT ITEMS DOES NOT: neither cursor is handed back', async () => {
+  // The asymmetric case. Inbox reaches its deltaLink cleanly; Sent Items never does.
+  // Committing Inbox alone would be wrong, because an episode spans both folders and
+  // the ceilings are applied after the merge - so a Sent message this run never saw
+  // could belong to a conversation Inbox's cursor already covers.
+  const fetchImpl = async (url) => {
+    if (url.includes('/mailFolders/inbox/') || url.includes('inbox-next')) {
+      return okPage(finalPage('inbox', TWO_SIDED.inbox))
+    }
+    return okPage({
+      value: [],
+      '@odata.nextLink': `${GRAPH_BASE}/me/mailFolders/sentitems/messages/delta?$skiptoken=sent-next`,
+    })
+  }
+  const result = await passWith(fetchImpl)
+
+  assert.strictEqual(result.folders.inbox.complete, true, 'Inbox did finish')
+  assert.strictEqual(result.folders.inbox.reachedCursor, true)
+  assert.strictEqual(result.folders.sentitems.complete, false, 'Sent Items did not')
+  assert.strictEqual(result.folders.sentitems.stop, 'max_pages_exceeded')
+
+  assert.strictEqual(result.commitReady, false)
+  assert.strictEqual(result.cursors, null,
+    "Inbox's cursor must not be committable while Sent Items is unfinished")
+  assert.deepStrictEqual(result.incompleteReasons, ['folder_incomplete'])
+})
+
+test('THE ONLY commit-ready shape is: both folders finished and nothing dropped', async () => {
+  const clean = await passWith(async (url) => okPage(
+    url.includes('/mailFolders/inbox/') ? finalPage('inbox', TWO_SIDED.inbox)
+      : finalPage('sentitems', TWO_SIDED.sentitems)))
+  assert.strictEqual(clean.commitReady, true)
+  assert.deepStrictEqual(clean.incompleteReasons, [])
+  assert.strictEqual(clean.droppedMessages, 0)
+  assert.strictEqual(clean.droppedConversations, 0)
+  assert.strictEqual(clean.truncatedConversations, 0)
+  assert.ok(clean.cursors && typeof clean.cursors.inbox === 'string' && typeof clean.cursors.sentitems === 'string')
+  // And the plan still came out, so the gate is not simply refusing everything.
+  assert.strictEqual(clean.plan.length, 1)
+})
+
+test('the cursor VALUES are unreachable except through the gate', async () => {
+  const incomplete = await passWith(async () => okPage({
+    value: [], '@odata.nextLink': `${GRAPH_BASE}/me/mailFolders/inbox/messages/delta?$skiptoken=inbox-next`,
+  }))
+  assert.strictEqual(incomplete.cursors, null)
+  const serialized = JSON.stringify(incomplete)
+  assert.ok(!serialized.includes('$deltatoken'),
+    'no delta cursor value may appear anywhere in a non-commit-ready result')
+  for (const f of ['inbox', 'sentitems']) {
+    assert.strictEqual(incomplete.folders[f].deltaLink, undefined)
+  }
+})
+
+test('the log summary leads with commit readiness and names the reasons', async () => {
+  const incomplete = await passWith(async () => okPage({
+    value: [], '@odata.nextLink': `${GRAPH_BASE}/me/mailFolders/inbox/messages/delta?$skiptoken=inbox-next`,
+  }))
+  const s = summarizePass(incomplete)
+  assert.strictEqual(s.commit_ready, false)
+  assert.deepStrictEqual(s.incomplete_reasons, ['folder_incomplete'])
+  assert.strictEqual(Object.keys(s)[1], 'commit_ready',
+    'a reader must not have to hunt for the gate')
+  assert.ok(!JSON.stringify(s).includes('$deltatoken'))
+  assert.strictEqual(s.folders.inbox.reached_cursor, false)
+})
+
+test('the module documents that oversized mailboxes need a continuation design', () => {
+  assert.ok(/CONTINUATION IS NOT IMPLEMENTED/.test(PASS_SRC),
+    'the gap must be stated where the ceilings are enforced')
+  assert.ok(/makes no progress, forever/.test(PASS_SRC),
+    'and its consequence stated, not softened: safe is not the same as working')
+  assert.ok(/DURABLE CONTINUATION design/.test(PASS_SRC))
+  assert.ok(/worker endpoint must stay disabled/.test(PASS_SRC),
+    'and tied to the reason the endpoint is off')
+})
+
+test('the worker records continuation as a SECOND, independent blocker', () => {
+  // The write path and the continuation design are different problems. Fixing only
+  // the first would leave an endpoint that can be enabled but cannot make progress
+  // on a large mailbox, so both are named where the enable decision is made.
+  assert.ok(/A SECOND BLOCKER, INDEPENDENT OF THE FIRST: NO CONTINUATION DESIGN/.test(HANDLER_SRC))
+  assert.ok(/make no progress forever/.test(HANDLER_SRC))
+  assert.ok(/DURABLE\s*(\/\/)?\s*CONTINUATION/.test(HANDLER_SRC))
+  assert.ok(/intermediate nextLink is opaque and time-limited/.test(HANDLER_SRC),
+    'why storing partial progress is not trivially safe must be stated')
+})
+
+test('every INCOMPLETE_REASONS value is one this pass can actually produce', () => {
+  assert.deepStrictEqual([...INCOMPLETE_REASONS].sort(), [
+    'conversations_dropped', 'episode_truncated', 'folder_incomplete',
+    'messages_dropped', 'plan_truncated',
+  ])
+  for (const r of INCOMPLETE_REASONS) {
+    assert.ok(PASS_SRC.includes(`incompleteReasons.push('${r}')`),
+      `${r} is declared but never produced`)
+  }
 })
 
 async function finish () {
