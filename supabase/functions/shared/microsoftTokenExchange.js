@@ -98,6 +98,11 @@ export async function redeemAuthorizationCode ({
         headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
         body: form.toString(),
         signal: ctrl.signal,
+        // This body carries the authorization code, the client secret and the
+        // PKCE verifier. A 307 or 308 preserves method AND body, so a followed
+        // redirect would repost all three to whatever host the response named.
+        // 'error' makes the fetch reject instead of following anything.
+        redirect: 'error',
       })
     } catch {
       return { ok: false, reason: 'token_endpoint_unreachable' }

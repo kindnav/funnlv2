@@ -13,7 +13,8 @@
 // The endpoint values come from arguments this process is started with, not from
 // anything the production handler consults.
 
-import { createRemoteJWKSet } from 'https://esm.sh/jose@5'
+import { createLocalJWKSet, type JSONWebKeySet } from 'https://esm.sh/jose@5'
+import { fetchJwks } from '../../supabase/functions/shared/microsoftJwks.js'
 import { handleOutlookCallback } from '../../supabase/functions/outlook-oauth-callback/handler.js'
 
 const base = Deno.env.get('FIXTURE_BASE') ?? ''
@@ -27,8 +28,13 @@ const fixtureEndpoints = {
   graphMeUrl: `${base}/me`,
   // Every tenant resolves to the one local key set. The handler still computes
   // the tenant-derived URL and still pins the issuer to that tenant; only the
-  // transport is redirected here.
-  jwksFor: (_tenantDerivedUrl: string) => createRemoteJWKSet(new URL(`${base}/jwks`)),
+  // transport is redirected here. The same fetchJwks used in production is
+  // exercised, so its redirect policy and bounds are the ones under test.
+  jwksFor: async (_tenantDerivedUrl: string) => {
+    const res = await fetchJwks(`${base}/jwks`)
+    if (!res.ok) throw new Error(res.reason)
+    return createLocalJWKSet(res.jwks as JSONWebKeySet)
+  },
 }
 
 Deno.serve((req: Request) => handleOutlookCallback(req, fixtureEndpoints))

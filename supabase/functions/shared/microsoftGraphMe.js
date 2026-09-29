@@ -13,7 +13,8 @@
 //     returned. The disclosure describes both.
 //   * The Graph `id` is cross-checked against the VALIDATED id_token `oid`.
 //     A mismatch fails closed rather than trusting the Graph body.
-//   * The access token is passed as a bearer credential and never decoded.
+//   * The access token is passed as a bearer credential and never decoded, and
+//     redirects are refused so it is not replayed to another host.
 //   * No provider response body is ever logged.
 
 import { displayAddressFromClaims } from './microsoftOauthHelpers.js'
@@ -85,6 +86,10 @@ export async function fetchMailboxAddress ({
         method: 'GET',
         headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
         signal: ctrl.signal,
+        // The Authorization header carries the Graph access token. Following a
+        // redirect could replay that bearer credential to another host, so the
+        // fetch rejects instead.
+        redirect: 'error',
       })
     } catch {
       return { ok: false, reason: 'graph_me_unreachable' }
