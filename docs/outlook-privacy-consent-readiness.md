@@ -3,13 +3,47 @@
 **Status: DRAFT FOR OWNER/LEGAL REVIEW. Nothing in this packet is published, deployed or
 configured.**
 
+**LAUNCH GATE: DISCONNECT MUST EXIST BEFORE ANY ACCOUNT IS CONNECTED.**
+
+There is currently no disconnect path for Outlook: no connected-status display, no
+disconnect control, and no server function that removes a Microsoft connection. The
+draft disclosure in `src/lib/outlookDisclosure.js` therefore says so plainly rather
+than offering a capability that does not exist. An earlier draft promised the user
+could "disconnect at any time from Settings", which was not true.
+
+Neither flag may be enabled until disconnect is implemented AND verified to remove:
+
+| Must be removed on disconnect | Where it lives |
+|---|---|
+| The connection row | `microsoft_connections` |
+| The encrypted access and refresh tokens | `microsoft_tokens` |
+| The delta cursors and lease state | `outlook_sync_state` |
+| Any pending or deferred suggestions | the candidate tables from `20260921000000` |
+| Any unconsumed OAuth state | `microsoft_oauth_states` |
+
+`disconnect_my_outlook()` exists in the applied schema and is the intended seam, but
+nothing calls it and its removal behaviour has not been verified end to end. Revoking
+the grant at Microsoft's side should also be considered, since deleting a refresh
+token locally does not invalidate it upstream.
+
+**CURRENT STACK — three unmerged Draft PRs, none deployed.**
+
+| PR | Adds | Deployed? |
+|---|---|---|
+| #54 | OAuth start + callback binding gate; forward migration `20260928000000` adding `User.Read` | no; migration **unapplied** |
+| #55 | Callback token exchange, id_token validation, Graph `/me`, finalization | no |
+| #56 | Settings **Connect Outlook** UI + draft just-in-time disclosure | no; flag off |
+
+Nothing in the stack syncs a mailbox, creates a contact or logs an interaction, and
+no Outlook OAuth flow has ever run against Microsoft.
+
 **THREE SEPARATE CONSENT ARTEFACTS. Only the first is published.**
 
 | # | Artefact | Where it lives | Status | Permissions it names |
 |---|---|---|---|---|
 | 1 | **Conditional Outlook section of the Privacy Policy** | `src/pages/PrivacyPage.jsx`, live at `/privacy` | **PUBLISHED** | **`Mail.Read` only** |
 | 2 | Updated permission wording | this document only | **NOT published** | `Mail.Read` **+ `User.Read`** |
-| 3 | Just-in-time consent disclosure shown before the redirect | nowhere — does not exist | **NOT written, NOT published** | n/a |
+| 3 | Just-in-time consent disclosure shown before the redirect | `src/lib/outlookDisclosure.js`, **Draft PR #56 only** | **DRAFT. Not approved, not deployed** — the UI is behind `VITE_OUTLOOK_CONNECTION_ENABLED` (off) and the server refuses without `OUTLOOK_DISCLOSURE_VERSION` (unset) | `Mail.Read` **+ `User.Read`** |
 
 **DISCREPANCY, unresolved.** Artefact 1 is live and tells readers Outlook would use
 *one* delegated permission. Draft PR #54 requests **two**, because Graph `GET /me` —
@@ -124,16 +158,22 @@ you agree".
 > message envelope, never from the AI, and is fixed while you accept it — afterwards you can edit
 > it like any other contact.
 >
-> **You can disconnect at any time** from Settings. Disconnecting deletes your Microsoft
-> connection, your stored authorization and the sync state, and erases the content of any pending
-> suggestion. Contacts and interactions you already accepted stay.
+> **Disconnecting is not built yet.** There is currently no way to remove the connection,
+> the stored authorisation or the synchronisation state from Settings. This wording is a
+> LAUNCH GATE, not a description: disconnect must exist and be verified before any account
+> is connected. When it does exist, this paragraph becomes the description of what it removes.
 >
 > [Read the Privacy Policy](/privacy)
 >
 > `[ Connect Outlook ]`   `[ Cancel ]`
 
-**Consent version placeholder:** `outlook-content-v1` — a placeholder only. Not implemented, not
-written to Production, and the value must be fixed at implementation time.
+**Consent version:** no longer a placeholder string. Draft PR #56 DERIVES it from the
+disclosure text (`ol-disc-<32 hex of SHA-256>`), so any edit to the wording produces a
+different version and the server's exact-string gate refuses the stale one. The current
+draft value is `ol-disc-262842c59ea7841d25c357cabea2e679`. **Not approved.** The server's
+`OUTLOOK_DISCLOSURE_VERSION` is unset in every environment, so `outlook-oauth-start`
+refuses with `config_missing`. The wording and the server value must be approved together —
+approving one without the other is self-defeating, since the version moves with the text.
 
 ---
 
