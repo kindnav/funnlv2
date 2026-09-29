@@ -25,10 +25,14 @@
 // permissions. That discrepancy is unresolved and blocks consent collection; see
 // docs/outlook-privacy-consent-readiness.md.
 
+import { sha256Hex } from './sha256.js'
+
 /**
  * Stable prefix. The version itself is NOT this string: see below.
  */
-export const DISCLOSURE_VERSION_PREFIX = 'outlook-disclosure-draft'
+// 7 characters; with the joining hyphen and 32 hex that is exactly the
+// 40-character ceiling in the microsoft_oauth_states consent_policy_version CHECK.
+export const DISCLOSURE_VERSION_PREFIX = 'ol-disc'
 
 /**
  * The exact text shown before any redirect. Every paragraph rendered by the
@@ -45,25 +49,38 @@ export const OUTLOOK_DISCLOSURE_PARAGRAPHS = Object.freeze([
 ])
 
 /**
- * Fingerprint of the paragraphs above. Any edit changes it.
+ * Content digest of the paragraphs above.
  *
- * FNV-1a over the newline-joined text: deterministic, dependency-free and
- * synchronous, which matters because the consent control is disabled unless the
- * check passes at render time. This is an integrity check against accidental
- * drift between text and version, NOT a security primitive.
+ * WHY NOT THE EARLIER FNV-1a. That was a 32-bit non-cryptographic hash chosen
+ * for being short and synchronous. Two distinct texts collide under it readily
+ * - a test exhibits an actual colliding pair - so the claim that a text change
+ * NECESSARILY changes the version was false: an edit could have landed on the
+ * same fingerprint and kept the old version, letting one recorded
+ * consent_policy_version describe two documents.
+ *
+ * This is SHA-256 truncated to 128 bits (32 hex characters).
+ *
+ * WHAT THAT ACTUALLY GUARANTEES, stated without overclaiming: finding two
+ * different texts sharing a truncated digest is computationally infeasible with
+ * any known method - roughly 2^64 work for a birthday collision on 128 bits -
+ * not mathematically impossible. For distinguishing drafts of a consent notice,
+ * including against someone deliberately trying, that is sound. It is a content
+ * identifier, not a signature: it says nothing about who wrote the text.
  */
-export const DISCLOSURE_FINGERPRINT = 'f09284dc'
+export const DIGEST_HEX_CHARS = 32
 
 /** @param {readonly string[]} paragraphs */
 export function disclosureFingerprint (paragraphs) {
-  const text = (Array.isArray(paragraphs) ? paragraphs : []).join('\n')
-  let h = 0x811c9dc5
-  for (let i = 0; i < text.length; i++) {
-    h ^= text.charCodeAt(i)
-    h = Math.imul(h, 0x01000193) >>> 0
-  }
-  return h.toString(16).padStart(8, '0')
+  const text = (Array.isArray(paragraphs) ? paragraphs : []).join(String.fromCharCode(10))
+  return sha256Hex(text).slice(0, DIGEST_HEX_CHARS)
 }
+/**
+ * The digest the CURRENT version was declared against. Updating this is a
+ * deliberate act: it records that someone reviewed the new text. Because the
+ * version is derived from the same digest, updating it also changes the
+ * version, so a reviewed edit can never quietly keep the old identifier.
+ */
+export const DISCLOSURE_FINGERPRINT = '262842c59ea7841d25c357cabea2e679'
 
 /**
  * True only when the paragraphs still match the fingerprint the version was
