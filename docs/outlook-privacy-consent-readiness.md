@@ -28,12 +28,22 @@ Shown **before** the Microsoft authorization redirect and before any OAuth state
 Affirmative action required; no pre-selected checkbox, no implied consent, no "continue means
 you agree".
 
+> **STATUS: NOT PUBLISHED.** The text below is a draft for review. No Outlook
+> disclosure has been published to users, `OUTLOOK_DISCLOSURE_VERSION` is not
+> configured in any environment, and no consent has ever been collected.
+> `outlook-oauth-start` refuses to mint a state while that variable is unset.
+
 > ### Connect Outlook?
 >
 > Connecting Outlook is **optional**. Funnl works fully without it.
 >
-> **What you would be granting.** One Microsoft permission: **Mail.Read** ("Read user mail").
-> It is read-only — Funnl can never send, reply, delete, move or change anything in your mailbox.
+> **What you would be granting.** Two Microsoft permissions, both read-only:
+> **Mail.Read** ("Read user mail") and **User.Read** ("Sign you in and read your profile").
+> Funnl can never send, reply, delete, move or change anything in your mailbox.
+> **User.Read** is what lets Funnl read your basic profile — your name and the email address
+> of the account you connect — so it can show you which mailbox is connected. It is the
+> least-privileged permission Microsoft offers for that, and it grants no access to anyone
+> else's profile or to your organization's directory.
 > Please note this permission lets an app read your mail generally, including message bodies and
 > attachments. Funnl asks for much less than that, as described below, but the permission itself
 > is mailbox-wide.
@@ -93,8 +103,8 @@ These are not proposals; migration `20260921000000` already enforces them.
 | The state stores evidence, not prose | `microsoft_oauth_states` holds a state hash, user, timestamps and policy version — there is no column for disclosure text |
 | Single-use, locked state | finalization selects the state `FOR UPDATE` and consumes it; a second use cannot succeed |
 | Ownership is derived, not supplied | the RPC takes `p_expected_user_id` and matches it against the state's own `user_id` |
-| Active connection implies the permission | `microsoft_connections_active_requires_mail_read` — status `active` requires `Mail.Read` in `scopes` |
-| Only the canonical permissions may be stored | `microsoft_connections_scopes_allowlist` — `scopes` must be a subset of `Mail.Read, offline_access, openid, email, profile` |
+| Active connection implies the permissions | `microsoft_connections_active_requires_mail_read` — status `active` requires **both** `Mail.Read` and `User.Read` in `scopes` (tightened by migration `20260928000000`) |
+| Only the canonical permissions may be stored | `microsoft_connections_scopes_allowlist` — `scopes` must be a subset of `Mail.Read, User.Read, offline_access, openid, email, profile` (extended by migration `20260928000000`) |
 | Consent version is always present | `consent_policy_version` is `NOT NULL`, 1–40 chars, no control characters or whitespace |
 | Re-authorization needs fresh consent | a new connection requires a new state row, which requires a new `consented_at` / `consent_policy_version` |
 

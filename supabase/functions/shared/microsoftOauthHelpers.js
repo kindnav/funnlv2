@@ -47,11 +47,19 @@ export const MSA_CONSUMERS_TENANT_ID = '9188040d-6c67-4c5b-b112-36a304b66dad'
 // Delegated, read-only mail plus the minimal identity/refresh scopes. Every one
 // of these is supported for personal Microsoft accounts.
 //   Mail.Read      read the signed-in user's mail (delegated; personal + work)
+//   User.Read      REQUIRED for Graph GET /me, which is how the connected mailbox
+//                  address is resolved. Per Microsoft's "Get user" reference, /me
+//                  needs a DELEGATED permission (application permissions are not
+//                  supported there at all) and User.Read is the least privileged
+//                  one for BOTH work/school and personal Microsoft accounts.
+//                  Mail.Read does NOT grant it, and the OIDC `profile` scope does
+//                  not grant Graph access - it only populates id_token claims.
 //   offline_access refresh tokens, so the worker can run without re-consent
 //   openid/profile/email  identity for the id_token, and the address to display
 // This list must stay a subset of the DB allowlist enforced by
 // finalize_microsoft_connection and by the microsoft_connections CHECK:
-//   ARRAY['Mail.Read','offline_access','openid','email','profile']
+//   ARRAY['Mail.Read','User.Read','offline_access','openid','email','profile']
+// as extended by migration 20260928000000.
 // No read-write, send, settings, files, contacts, calendar, .default, or
 // application-only mail scope may ever appear here.
 export const OUTLOOK_OAUTH_SCOPES = Object.freeze([
@@ -60,11 +68,12 @@ export const OUTLOOK_OAUTH_SCOPES = Object.freeze([
   'email',
   'offline_access',
   'https://graph.microsoft.com/Mail.Read',
+  'https://graph.microsoft.com/User.Read',
 ])
 
 /** What the DB will store after normalization, for test cross-checking. */
 export const OUTLOOK_CANONICAL_SCOPES = Object.freeze([
-  'Mail.Read', 'offline_access', 'openid', 'email', 'profile',
+  'Mail.Read', 'User.Read', 'offline_access', 'openid', 'email', 'profile',
 ])
 
 // ── Branded callback ──────────────────────────────────────────────────────────
@@ -92,9 +101,12 @@ export function buildOutlookSettingsRedirect (origin, result) {
 // ── Authorization URL ─────────────────────────────────────────────────────────
 /**
  * response_mode=form_post is deliberate. See the ADR block in
- * outlook-oauth-callback/index.ts for the full reasoning; in short it keeps the
- * authorization code and the state OUT of the callback URL, so neither lands in
- * browser history, the Referer header, or any intermediary access log.
+ * outlook-oauth-callback/index.ts for the full reasoning. Note what it does NOT
+ * claim: this function deliberately places `state`, `nonce` and the PKCE
+ * challenge in the OUTBOUND authorization URL, which is a real navigation and
+ * lands in history like any other. form_post protects only the INBOUND leg,
+ * keeping `code` and `state` out of the BRANDED CALLBACK URL and therefore out
+ * of our own access logs and our origin's history entry.
  *
  * `nonce` is bound to the state so the id_token cannot be replayed from another
  * flow. It is NOT a substitute for the browser binding: an attacker who starts
@@ -192,6 +204,8 @@ export const MAILBOX_ADDRESS_RESOLUTION_REQUIRED = Object.freeze({
   preferred: 'mail',
   fallback: 'userPrincipalName',
   mustMatchIdTokenClaim: 'oid',
+  // The permission this call depends on. Without it GET /me is refused.
+  requiresScope: 'User.Read',
 })
 
 /**

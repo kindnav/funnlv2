@@ -131,7 +131,11 @@ async function run () {
         try { parsed = JSON.parse(body) } catch { /* ignore */ }
         const row = Array.isArray(parsed) ? parsed[0] : parsed
         stateInserts.push({
-          hasStateHash: typeof row?.state_hash === 'string' && row.state_hash.length === 64,
+          // Lowercase 64-hex, matching the DB's own
+          // microsoft_oauth_states_state_hash_shape CHECK. Length alone would
+          // accept a 64-character non-hex string, which the column would reject.
+          hasStateHash: typeof row?.state_hash === 'string' &&
+            /^[0-9a-f]{64}$/.test(row.state_hash),
           userId: row?.user_id ?? null,
           integrationType: row?.integration_type ?? null,
           consentPolicyVersion: row?.consent_policy_version ?? null,

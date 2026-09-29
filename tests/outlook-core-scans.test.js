@@ -427,12 +427,18 @@ test('no credential-shaped literal exists in modules or suites', () => {
 // ── PR-A compatibility (the applied migration must not be edited) ────────────
 console.log('\napplied PR-A schema compatibility')
 
-test('the applied migration is unmodified by this phase and remains the newest pair', () => {
+test('applied migrations are unmodified; the only addition is the forward scope migration', () => {
   const files = readdirSync(join(ROOT, 'supabase/migrations')).sort()
   assert.ok(files.includes('20260921000000_add_outlook_content_draft_primitives.sql'))
   assert.ok(files.includes('20260922175616_revoke_service_role_from_outlook_user_rpcs.sql'))
-  assert.strictEqual(files[files.length - 1], '20260922175616_revoke_service_role_from_outlook_user_rpcs.sql',
-    'this phase must add NO migration')
+  // The OAuth binding phase adds exactly one migration, and it sorts last so it
+  // applies after both already-applied Outlook migrations.
+  assert.strictEqual(files[files.length - 1], '20260928000000_outlook_add_user_read_scope.sql',
+    'the forward scope migration must be the newest')
+  // The applied migrations must not be edited: 20260921000000 still carries its
+  // original allowlist, which the forward migration supersedes at runtime.
+  assert.ok(MIGRATION.includes("scopes <@ ARRAY['Mail.Read', 'offline_access', 'openid', 'email', 'profile']"),
+    'the applied migration must remain untouched history')
   assert.ok(!files.some((f) => f.startsWith('20260918000100')), 'the held-back Cron migration stays absent')
 })
 
