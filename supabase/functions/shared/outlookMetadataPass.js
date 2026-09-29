@@ -36,6 +36,51 @@
 // bound the in-memory grouping, because a plan is held in memory and must not grow
 // with the mailbox.
 //
+// THE COMPLETION AND CURSOR CONTRACT - the part that is easiest to get wrong.
+//
+// A stored @odata.deltaLink is a claim: "everything before this point has been
+// ingested; next time, start after it." If that claim is false, the messages it
+// skipped are lost for good, because a delta stream never offers them again.
+//
+// So this pass exposes cursors through ONE gate, `commitReady`, and withholds the
+// values entirely when it is false. Five things clear the gate, and any one of them
+// closing it is enough to withhold every cursor:
+//
+//   folder_incomplete       a folder never reached its deltaLink.
+//   messages_dropped        the per-run message ceiling truncated a page.
+//   conversations_dropped   the in-memory conversation ceiling discarded threads.
+//   episode_truncated       a thread exceeded MAX_EPISODE_MESSAGES and was shortened,
+//                           so a suggestion from it would rest on a partial view.
+//   plan_truncated          MAX_PLAN_ENTRIES discarded episodes that had qualified.
+//
+// WHY THE GATE IS WHOLE-RUN AND NOT PER FOLDER. A conversation can span Inbox and
+// Sent Items, and the conversation, episode and plan ceilings are applied AFTER the
+// two folders are merged. An episode discarded at the plan stage may therefore have
+// been drawn from Inbox messages that Inbox's own cursor already covers, so
+// committing Inbox alone would lose it. Either the whole run is committable or none
+// of it is - including the case where Inbox finishes cleanly and Sent Items does not.
+//
+// A DEFECT THIS REPLACED, worth recording because the ordering looked harmless: a
+// final page can BOTH carry a deltaLink and push the run past MAX_MESSAGES_PER_RUN.
+// The cursor used to be honoured first, so such a run reported itself complete and
+// handed back a cursor while having silently dropped the overflow.
+//
+// CONTINUATION IS NOT IMPLEMENTED, AND MUST BE DESIGNED BEFORE THIS IS OPERATIONAL.
+// Withholding the cursor is the SAFE failure, not a working one. A mailbox large
+// enough to exceed these ceilings will never become commit-ready under the current
+// design: every run restarts from the same stored cursor (or from scratch), reads the
+// same first MAX_MESSAGES_PER_RUN messages, hits the same ceiling, and commits
+// nothing - so it makes no progress, forever. That is correct in the sense that it
+// loses nothing, and useless in the sense that it imports nothing.
+//
+// Making it work needs a DURABLE CONTINUATION design, which is deliberately out of
+// scope here and must be reviewed on its own: somewhere to persist partial progress
+// within a delta stream (an intermediate nextLink is opaque and time-limited, so it
+// is not obviously safe to store), a way to resume mid-stream across runs, and a
+// decision about what a user is shown while a first import is still in progress.
+// Until that exists, the worker endpoint must stay disabled - which it is, twice
+// over, and it answers 501 rather than running.
+//
 // CROSS-USER SAFETY. The pass is given ONE connection's identity, ONE contact index
 // and ONE key ring, all by the caller. It never queries for them, so there is no
 // path by which another user's contact or another connection's cursor could enter.
@@ -73,6 +118,21 @@ export const SKIP_CODES = Object.freeze([
   'malformed_addresses', 'ambiguous_counterparties', 'ambiguous_contact',
   'mixed_counterparties', 'not_two_sided', 'automation_facts_incomplete',
   'conversation_cap_reached', 'plan_cap_reached',
+])
+
+/**
+ * Why a run is NOT commit-ready. Controlled set; safe to log.
+ *
+ * Each of these means work was dropped or left unfinished, so no delta cursor from
+ * this run may be stored: a cursor says "everything up to here has been ingested",
+ * and that would be false.
+ */
+export const INCOMPLETE_REASONS = Object.freeze([
+  'folder_incomplete',        // a folder never reached its deltaLink
+  'messages_dropped',         // the per-run message ceiling truncated a page
+  'conversations_dropped',    // the in-memory conversation ceiling discarded threads
+  'episode_truncated',        // a thread had more messages than MAX_EPISODE_MESSAGES
+  'plan_truncated',           // MAX_PLAN_ENTRIES discarded qualified episodes
 ])
 
 /** Why a run stopped early. Controlled set; safe to log. */
@@ -149,6 +209,7 @@ export async function readFolderMetadata (p) {
   let deltaLink = null
   let stop = 'complete'
   let requests = 0
+  let droppedMessages = 0
 
   for (;;) {
     const capCode = checkRunCaps({ pages: pages + 1, messages })
@@ -189,7 +250,12 @@ export async function readFolderMetadata (p) {
 
     const norm = normalizeGraphPage(page.items, folder)
     for (const m of norm.messages) {
-      if (entries.size >= MAX_MESSAGES_PER_RUN) break
+      if (entries.size >= MAX_MESSAGES_PER_RUN) {
+        // The in-memory map is full. Counting this is the whole point: a silently
+        // dropped message plus an advanced cursor is permanent data loss.
+        droppedMessages += 1
+        continue
+      }
       if (!entries.has(m.providerMessageKey)) {
         entries.set(m.providerMessageKey, { message: m, extra: norm.extras.get(m.providerMessageKey) })
       }
@@ -200,9 +266,14 @@ export async function readFolderMetadata (p) {
     }
     messages += norm.counts.input
 
+    // ORDER MATTERS, and the previous order was wrong. A final page can BOTH carry
+    // an @odata.deltaLink and push the run past MAX_MESSAGES_PER_RUN. Honouring the
+    // cursor first meant a run that had already truncated a page reported itself
+    // complete and handed back a cursor - storing it would have skipped every
+    // dropped message forever. A cap breach now outranks the cursor.
     const overCap = checkRunCaps({ pages, messages })
-    if (page.complete) { deltaLink = page.deltaLink; stop = 'complete'; break }
     if (overCap) { stop = overCap; break }
+    if (page.complete) { deltaLink = page.deltaLink; stop = 'complete'; break }
     if (!page.nextLink) {
       // Neither a nextLink nor a deltaLink: the stream said nothing about how to
       // continue. Treat it as malformed rather than as finished, so the cursor is
@@ -213,16 +284,20 @@ export async function readFolderMetadata (p) {
     link = page.nextLink
   }
 
+  // A folder is complete only if it reached a cursor AND dropped nothing. The cursor
+  // itself is withheld in every other case, so a caller cannot store one by mistake.
+  const complete = stop === 'complete' && deltaLink !== null && droppedMessages === 0
   return {
     folder,
     entries,
     removals,
     discards,
-    deltaLink,
-    complete: stop === 'complete' && deltaLink !== null,
+    deltaLink: complete ? deltaLink : null,
+    complete,
     stop,
     pages,
     messages,
+    droppedMessages,
     requests,
     contentFetches: 0,          // structural: this pass never reads a body
   }
@@ -238,7 +313,8 @@ export async function readFolderMetadata (p) {
 export function groupByConversation (entries) {
   const source = entries instanceof Map ? [...entries.values()] : (Array.isArray(entries) ? entries : [])
   const byConversation = new Map()
-  let truncatedConversations = 0
+  const truncated = new Set()
+  const dropped = new Set()
 
   const ordered = source.slice().sort((a, b) => {
     const ak = String(a?.message?.providerConversationKey ?? '')
@@ -255,15 +331,31 @@ export function groupByConversation (entries) {
     if (typeof key !== 'string' || key.length === 0) continue
     let list = byConversation.get(key)
     if (list === undefined) {
-      if (byConversation.size >= MAX_CONVERSATIONS_PER_RUN) continue
+      if (byConversation.size >= MAX_CONVERSATIONS_PER_RUN) {
+        // A whole thread discarded. Counted, not swallowed: the run must not then
+        // claim it ingested everything.
+        dropped.add(key)
+        continue
+      }
       list = []
       byConversation.set(key, list)
     }
-    if (list.length >= MAX_EPISODE_MESSAGES) { truncatedConversations += 1; continue }
+    if (list.length >= MAX_EPISODE_MESSAGES) {
+      // The thread is kept but SHORTENED, so any suggestion built from it would rest
+      // on a partial view of the exchange.
+      truncated.add(key)
+      continue
+    }
     list.push(e)
   }
 
-  return { byConversation, truncatedConversations }
+  return {
+    byConversation,
+    // Counted per CONVERSATION, not per discarded message: a 60-message thread is one
+    // truncated conversation, which is what a reader needs to know.
+    truncatedConversations: truncated.size,
+    droppedConversations: dropped.size,
+  }
 }
 
 /**
@@ -402,13 +494,58 @@ export async function runOutlookMetadataPass (p) {
     deps,
   })
 
-  const runComplete = GRAPH_FOLDERS.every((f) => folders[f].complete === true)
+  // ── COMMIT READINESS ──────────────────────────────────────────────────────
+  // One gate, for the whole run, because a delta cursor is a claim about what has
+  // been INGESTED - not about what was fetched. Every condition below means some
+  // relevant work was dropped or left unfinished, and in each case advancing any
+  // cursor would skip that work permanently.
+  //
+  // The gate is deliberately whole-run rather than per folder. A conversation can span
+  // both folders, and the conversation, episode and plan ceilings are applied AFTER the
+  // folders are merged, so a thread discarded at the plan stage may have been drawn
+  // from Inbox messages that Inbox's own cursor already covers. Committing Inbox alone
+  // would therefore lose it. So: either the whole run is committable, or none of it is.
+  const foldersComplete = GRAPH_FOLDERS.every((f) => folders[f].complete === true)
+  const droppedMessages = GRAPH_FOLDERS
+    .reduce((n, f) => n + (folders[f].droppedMessages || 0), 0)
+  const planTruncated = Number.isInteger(plan.skipped.plan_cap_reached)
+    ? plan.skipped.plan_cap_reached
+    : 0
+
+  const incompleteReasons = []
+  if (!foldersComplete) incompleteReasons.push('folder_incomplete')
+  if (droppedMessages > 0) incompleteReasons.push('messages_dropped')
+  if (grouped.droppedConversations > 0) incompleteReasons.push('conversations_dropped')
+  if (grouped.truncatedConversations > 0) incompleteReasons.push('episode_truncated')
+  if (planTruncated > 0) incompleteReasons.push('plan_truncated')
+  const commitReady = incompleteReasons.length === 0
 
   return {
     stage: PASS_STAGE,
     connectionId: connection.connectionId,
-    folders,
-    runComplete,
+
+    // THE GATE. A caller must read this before anything else.
+    commitReady,
+    incompleteReasons,
+
+    // The cursors, and the ONLY place they are exposed. They are absent unless the run
+    // is committable, so a caller cannot store one by reaching past the gate. The
+    // per-folder records below carry `reachedCursor` as a boolean for diagnostics and
+    // deliberately do NOT carry the value.
+    cursors: commitReady
+      ? Object.freeze(Object.fromEntries(GRAPH_FOLDERS.map((f) => [f, folders[f].deltaLink])))
+      : null,
+
+    folders: Object.fromEntries(GRAPH_FOLDERS.map((f) => [f, {
+      stop: folders[f].stop,
+      complete: folders[f].complete,
+      reachedCursor: typeof folders[f].deltaLink === 'string' && folders[f].deltaLink.length > 0,
+      pages: folders[f].pages,
+      requests: folders[f].requests,
+      droppedMessages: folders[f].droppedMessages || 0,
+      contentFetches: folders[f].contentFetches,
+    }])),
+
     // Removed/deleted provider items, as fingerprint-free provider keys. The caller
     // decides whether to invalidate anything; this pass does not.
     removals,
@@ -416,6 +553,8 @@ export async function runOutlookMetadataPass (p) {
     skipped: plan.skipped,
     discards,
     truncatedConversations: grouped.truncatedConversations,
+    droppedConversations: grouped.droppedConversations,
+    droppedMessages,
     conversations: grouped.byConversation.size,
     totals: { pages: pagesUsed, messagesSeen: messagesUsed, contentFetches: 0 },
   }
@@ -430,7 +569,7 @@ export async function runOutlookMetadataPass (p) {
  * someone talks to.
  */
 export function summarizePass (result) {
-  if (!isPlainObject(result)) return { stage: PASS_STAGE, ok: false }
+  if (!isPlainObject(result)) return { stage: PASS_STAGE, commit_ready: false }
   const byKind = Object.create(null)
   for (const e of Array.isArray(result.plan) ? result.plan : []) {
     byKind[e.kind] = (byKind[e.kind] || 0) + 1
@@ -438,14 +577,27 @@ export function summarizePass (result) {
   const folders = Object.create(null)
   for (const f of GRAPH_FOLDERS) {
     const r = result.folders?.[f]
-    folders[f] = r ? { stop: r.stop, complete: r.complete === true, pages: r.pages, requests: r.requests } : null
+    folders[f] = r
+      ? {
+          stop: r.stop,
+          complete: r.complete === true,
+          reached_cursor: r.reachedCursor === true,
+          pages: r.pages,
+          requests: r.requests,
+          dropped_messages: r.droppedMessages ?? 0,
+        }
+      : null
   }
   return {
     stage: PASS_STAGE,
-    run_complete: result.runComplete === true,
+    // First, because it is the only field that decides whether a cursor may be stored.
+    commit_ready: result.commitReady === true,
+    incomplete_reasons: Array.isArray(result.incompleteReasons) ? result.incompleteReasons : [],
     folders,
     conversations: result.conversations ?? 0,
+    dropped_conversations: result.droppedConversations ?? 0,
     truncated_conversations: result.truncatedConversations ?? 0,
+    dropped_messages: result.droppedMessages ?? 0,
     plan_entries: Array.isArray(result.plan) ? result.plan.length : 0,
     plan_by_kind: byKind,
     skipped: result.skipped ?? {},

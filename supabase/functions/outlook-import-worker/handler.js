@@ -25,6 +25,19 @@
 // suggestions needs its own RPC against `outlook_candidate_refs`, which is a forward
 // migration and a separate reviewed slice.
 //
+// A SECOND BLOCKER, INDEPENDENT OF THE FIRST: NO CONTINUATION DESIGN.
+// Even with a write path, this endpoint could not be turned on for a large mailbox.
+// shared/outlookMetadataPass.js refuses to hand back a delta cursor whenever work was
+// dropped or left unfinished, which is the safe failure but not a working one: a
+// mailbox that exceeds the per-run ceilings would restart from the same cursor every
+// run, hit the same ceiling, commit nothing, and make no progress forever.
+//
+// Before this endpoint becomes operational, someone must design and review DURABLE
+// CONTINUATION: where partial progress inside a delta stream is persisted (an
+// intermediate nextLink is opaque and time-limited, so storing one is not obviously
+// safe), how a run resumes mid-stream, and what a user sees while a first import is
+// still incomplete. That is deliberately not in this slice.
+//
 // So when both flags are on, this endpoint answers 501 `not_implemented` with
 // `reason: 'no_outlook_candidate_write_path'`. It deliberately does NOT reserve a
 // lease, call Microsoft, or touch the database: a run that quietly discarded its own
