@@ -518,13 +518,55 @@ test('the only Outlook Edge Functions are the two OAuth entrypoints', () => {
 })
 
 test('both Outlook OAuth entrypoints are dormant unless explicitly enabled', () => {
-  for (const fn of ['outlook-oauth-start', 'outlook-oauth-callback']) {
-    const src = read(`supabase/functions/${fn}/index.ts`)
+  // The callback delegates to handler.js, so the gate may live in either file
+  // of that function's directory.
+  const sources = {
+    'outlook-oauth-start': read('supabase/functions/outlook-oauth-start/index.ts'),
+    'outlook-oauth-callback': read('supabase/functions/outlook-oauth-callback/index.ts') +
+      read('supabase/functions/outlook-oauth-callback/handler.js'),
+  }
+  for (const [fn, src] of Object.entries(sources)) {
     assert.ok(src.includes("Deno.env.get('OUTLOOK_INTEGRATION_ENABLED')"),
       `${fn} must read the dormancy flag`)
     assert.ok(/!==\s*'true'/.test(src),
       `${fn} must treat anything other than exactly 'true' as off`)
   }
+})
+
+test('the deployed callback cannot have its provider endpoints redirected', () => {
+  // An earlier revision resolved the Microsoft token, JWKS and Graph URLs from
+  // environment variables behind a guard that was claimed to be unreachable in
+  // Production. It was not: the variables could simply be set, and
+  // host.docker.internal is a route to the Docker host, not a loopback address.
+  // A reachable override would receive the authorization code and the client
+  // secret at /token and the Graph access token at /me.
+  const entry = read('supabase/functions/outlook-oauth-callback/index.ts')
+  const endpoints = read('supabase/functions/outlook-oauth-callback/endpoints.js')
+  const handler = read('supabase/functions/outlook-oauth-callback/handler.js')
+
+  // The deployable entrypoint reads NO environment variable at all.
+  assert.ok(!entry.includes('Deno.env'), 'index.ts must not read any env var')
+  assert.ok(entry.includes('PRODUCTION_ENDPOINTS'), 'index.ts must pass fixed endpoints')
+
+  // Endpoints are constants, not configuration.
+  assert.ok(!endpoints.includes('Deno.env'), 'endpoints.js must not read any env var')
+  assert.ok(endpoints.includes('MS_TOKEN_ENDPOINT') && endpoints.includes('GRAPH_ME_URL'))
+
+  // No fixture seam survives anywhere in deployable code.
+  for (const [name, src] of Object.entries({ entry, endpoints, handler })) {
+    for (const banned of ['OUTLOOK_LOCAL_FIXTURES', 'OUTLOOK_FIXTURE_BASE', 'FIXTURE_BASE']) {
+      assert.ok(!src.includes(banned), `${name} must not contain the ${banned} seam`)
+    }
+  }
+  // The removed module must stay removed.
+  assert.ok(!existsSync(join(ROOT, 'supabase/functions/shared/microsoftEndpoints.js')),
+    'the endpoint-override module must not come back')
+
+  // The fixture harness lives OUTSIDE supabase/functions, so `supabase functions
+  // deploy` cannot pick it up.
+  assert.ok(existsSync(join(ROOT, 'tests/harness/outlook-callback-fixture-entry.ts')),
+    'the fixture harness must exist outside the deployed directory')
+  assert.ok(!existsSync(join(ROOT, 'supabase/functions/outlook-oauth-callback/fixture-entry.ts')))
 })
 
 test('config.toml pins verify_jwt for exactly the two Outlook OAuth functions', () => {
