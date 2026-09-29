@@ -45,7 +45,8 @@ export const OUTLOOK_DISCLOSURE_PARAGRAPHS = Object.freeze([
   'Mail.Read is mailbox-wide: it would technically allow reading message bodies and attachments anywhere in your mailbox. Funnl reads only Inbox and Sent Items, and never opens attachments.',
   'Funnl can never send, reply, delete, move or change anything in your mailbox. It does not read your Microsoft contacts, calendars or files, and it does not read your organisation’s directory, your colleagues or your manager.',
   'What Funnl would do with this: suggest networking contacts and draft interaction notes from relevant conversations. Nothing is saved as a contact or logged as an interaction until you review it and choose to accept it. You can edit or dismiss every suggestion.',
-  'Disconnecting is not built yet. Until it is, do not connect an account you would need to disconnect: there is currently no way to remove the connection, the stored authorisation or the synchronisation state from this screen.',
+  'You can disconnect at any time from this screen. Disconnecting deletes the connection, the stored Microsoft authorisation and the mailbox synchronisation state, and empties any suggestion you have not reviewed: each becomes inactive and its proposed details and drafts are removed. Contacts and interactions you already saved are kept.',
+  'Disconnecting removes Funnl’s copy. It does not withdraw the permission at Microsoft — to do that, remove Funnl from the permissions page of your Microsoft account.',
 ])
 
 /**
@@ -80,7 +81,7 @@ export function disclosureFingerprint (paragraphs) {
  * version is derived from the same digest, updating it also changes the
  * version, so a reviewed edit can never quietly keep the old identifier.
  */
-export const DISCLOSURE_FINGERPRINT = '262842c59ea7841d25c357cabea2e679'
+export const DISCLOSURE_FINGERPRINT = 'c7d331bdc76c22b11e8faedc31f71259'
 
 /**
  * True only when the paragraphs still match the fingerprint the version was
@@ -105,9 +106,9 @@ export function verifyDisclosureIntegrity (
  * version, any text change necessarily produces a different version, and the
  * server's exact-string comparison then refuses the stale one.
  *
- * Shape: <prefix>-<8 hex>. 32 characters, no whitespace or control characters,
- * so it satisfies the microsoft_oauth_states consent_policy_version CHECK
- * (1..40 chars, no whitespace/control).
+ * Shape: <prefix>-<32 hex>. Exactly 40 characters, no whitespace or control
+ * characters, so it satisfies the microsoft_oauth_states consent_policy_version
+ * CHECK (1..40 chars, no whitespace/control) exactly at its ceiling.
  */
 export function computeDisclosureVersion (
   paragraphs = OUTLOOK_DISCLOSURE_PARAGRAPHS,

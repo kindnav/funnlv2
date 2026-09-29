@@ -431,10 +431,15 @@ test('applied migrations are unmodified; the only addition is the forward scope 
   const files = readdirSync(join(ROOT, 'supabase/migrations')).sort()
   assert.ok(files.includes('20260921000000_add_outlook_content_draft_primitives.sql'))
   assert.ok(files.includes('20260922175616_revoke_service_role_from_outlook_user_rpcs.sql'))
-  // The OAuth binding phase adds exactly one migration, and it sorts last so it
-  // applies after both already-applied Outlook migrations.
-  assert.strictEqual(files[files.length - 1], '20260928000000_outlook_add_user_read_scope.sql',
-    'the forward scope migration must be the newest')
+  // Two UNAPPLIED forward migrations now exist. Both must sort after every
+  // applied one, and in this order, so `db push` applies them as reviewed: the
+  // scope widening first, then the connection-status read path.
+  const UNAPPLIED = [
+    '20260928000000_outlook_add_user_read_scope.sql',
+    '20260929000000_outlook_connection_status_rpc.sql',
+  ]
+  assert.deepStrictEqual(files.slice(-UNAPPLIED.length), UNAPPLIED,
+    'the unapplied forward migrations must be the newest, in this order')
   // The applied migrations must not be edited: 20260921000000 still carries its
   // original allowlist, which the forward migration supersedes at runtime.
   assert.ok(MIGRATION.includes("scopes <@ ARRAY['Mail.Read', 'offline_access', 'openid', 'email', 'profile']"),

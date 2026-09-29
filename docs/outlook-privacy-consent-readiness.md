@@ -3,36 +3,59 @@
 **Status: DRAFT FOR OWNER/LEGAL REVIEW. Nothing in this packet is published, deployed or
 configured.**
 
-**LAUNCH GATE: DISCONNECT MUST EXIST BEFORE ANY ACCOUNT IS CONNECTED.**
+**LAUNCH GATE: DISCONNECT NOW EXISTS, AND IS VERIFIED AT THE DATABASE LAYER.**
 
-There is currently no disconnect path for Outlook: no connected-status display, no
-disconnect control, and no server function that removes a Microsoft connection. The
-draft disclosure in `src/lib/outlookDisclosure.js` therefore says so plainly rather
-than offering a capability that does not exist. An earlier draft promised the user
-could "disconnect at any time from Settings", which was not true.
+Draft PR #57 adds the disconnect path this gate required: a connected-status display,
+a two-step disconnect control in Settings, and a read path for the status. The removal
+behaviour was verified against a real Postgres rather than asserted, by
+`tests/sql/outlook-disconnect-runtime.sql`. Both flags remain off.
 
-Neither flag may be enabled until disconnect is implemented AND verified to remove:
+What was required, and what the verification actually found:
 
-| Must be removed on disconnect | Where it lives |
-|---|---|
-| The connection row | `microsoft_connections` |
-| The encrypted access and refresh tokens | `microsoft_tokens` |
-| The delta cursors and lease state | `outlook_sync_state` |
-| Any pending or deferred suggestions | the candidate tables from `20260921000000` |
-| Any unconsumed OAuth state | `microsoft_oauth_states` |
+| Required on disconnect | Where it lives | Verified outcome |
+|---|---|---|
+| The connection row | `microsoft_connections` | **deleted** |
+| The encrypted access and refresh tokens | `microsoft_tokens` | **deleted** (composite FK cascade) |
+| The delta cursors and lease state | `outlook_sync_state` | **deleted** (composite FK cascade) |
+| Any unconsumed OAuth state | `microsoft_oauth_states` | **deleted** |
+| Any pending or deferred suggestions | `interaction_candidates`, `new_contact_candidates` | **emptied, NOT deleted** - see below |
+| (not previously listed) The link from a suggestion to a mail item | `outlook_candidate_refs` | **deleted** (cascade) |
 
-`disconnect_my_outlook()` exists in the applied schema and is the intended seam, but
-nothing calls it and its removal behaviour has not been verified end to end. Revoking
-the grant at Microsoft's side should also be considered, since deleting a refresh
-token locally does not invalidate it upstream.
+**The suggestion row is not deleted.** `run_microsoft_local_cleanup()` sets its status to
+`invalidated` and NULLs every `proposed_*` field, every draft and the retained subject,
+leaving an empty provenance shell. The schema enforces the emptying independently:
+`ncc_terminal_erased` and `interaction_candidates_terminal_draft_erased` forbid a
+non-pending row from holding that content at all. Every user-visible description in the
+branch says "emptied", never "deleted", and a test fails if that wording drifts.
 
-**CURRENT STACK — three unmerged Draft PRs, none deployed.**
+Contacts and interactions the user already saved are **kept**. Disconnecting a mailbox
+is not a request to delete their CRM. The SQL test sweeps every user-scoped table in the
+schema, so an Outlook table added later that disconnect forgets to clear will fail there
+rather than go unnoticed.
+
+**Still open: upstream revocation.** Deleting a refresh token locally does not invalidate
+it at Microsoft, and no revocation call exists in this codebase. Nothing in the branch
+claims otherwise: the disclosure and the confirmation both state that disconnecting
+removes Funnl's copy and does not withdraw the permission at Microsoft, and point the
+user at their Microsoft account permissions page. A test asserts that every sentence
+mentioning revocation or withdrawal is a negative one.
+
+**One forward migration was needed, and only one.** The removal behaviour needed none -
+the applied RPC already covered it. What was missing was a *read* path: RLS is enabled on
+`microsoft_connections` and it has an owner SELECT policy, but the `authenticated` role
+holds no table privilege on it, so a browser query is denied. `20260929000000` adds
+`get_my_outlook_connection()` (SECURITY DEFINER, STABLE, zero arguments,
+`authenticated`-only) returning only the fields the card displays, and never a token,
+ciphertext, nonce, connection id or Microsoft account id. It is **unapplied**.
+
+**CURRENT STACK — four unmerged Draft PRs, none deployed.**
 
 | PR | Adds | Deployed? |
 |---|---|---|
 | #54 | OAuth start + callback binding gate; forward migration `20260928000000` adding `User.Read` | no; migration **unapplied** |
 | #55 | Callback token exchange, id_token validation, Graph `/me`, finalization | no |
 | #56 | Settings **Connect Outlook** UI + draft just-in-time disclosure | no; flag off |
+| #57 | Connected status + user-controlled disconnect; forward migration `20260929000000` adding the status read path | no; migration **unapplied**; flag off |
 
 Nothing in the stack syncs a mailbox, creates a contact or logs an interaction, and
 no Outlook OAuth flow has ever run against Microsoft.
@@ -43,7 +66,7 @@ no Outlook OAuth flow has ever run against Microsoft.
 |---|---|---|---|---|
 | 1 | **Conditional Outlook section of the Privacy Policy** | `src/pages/PrivacyPage.jsx`, live at `/privacy` | **PUBLISHED** | **`Mail.Read` only** |
 | 2 | Updated permission wording | this document only | **NOT published** | `Mail.Read` **+ `User.Read`** |
-| 3 | Just-in-time consent disclosure shown before the redirect | `src/lib/outlookDisclosure.js`, **Draft PR #56 only** | **DRAFT. Not approved, not deployed** — the UI is behind `VITE_OUTLOOK_CONNECTION_ENABLED` (off) and the server refuses without `OUTLOOK_DISCLOSURE_VERSION` (unset) | `Mail.Read` **+ `User.Read`** |
+| 3 | Just-in-time consent disclosure shown before the redirect | `src/lib/outlookDisclosure.js`, **Draft PRs #56 and #57 only** | **DRAFT. Not approved, not deployed** — the UI is behind `VITE_OUTLOOK_CONNECTION_ENABLED` (off) and the server refuses without `OUTLOOK_DISCLOSURE_VERSION` (unset) | `Mail.Read` **+ `User.Read`** |
 
 **DISCREPANCY, unresolved.** Artefact 1 is live and tells readers Outlook would use
 *one* delegated permission. Draft PR #54 requests **two**, because Graph `GET /me` —
@@ -158,10 +181,13 @@ you agree".
 > message envelope, never from the AI, and is fixed while you accept it — afterwards you can edit
 > it like any other contact.
 >
-> **Disconnecting is not built yet.** There is currently no way to remove the connection,
-> the stored authorisation or the synchronisation state from Settings. This wording is a
-> LAUNCH GATE, not a description: disconnect must exist and be verified before any account
-> is connected. When it does exist, this paragraph becomes the description of what it removes.
+> **You can disconnect at any time from this screen.** Disconnecting deletes the connection,
+> the stored Microsoft authorisation and the mailbox synchronisation state, and empties any
+> suggestion you have not reviewed: each becomes inactive and its proposed details and drafts
+> are removed. Contacts and interactions you already saved are kept.
+>
+> **Disconnecting removes Funnl’s copy.** It does not withdraw the permission at Microsoft —
+> to do that, remove Funnl from the permissions page of your Microsoft account.
 >
 > [Read the Privacy Policy](/privacy)
 >
@@ -170,7 +196,7 @@ you agree".
 **Consent version:** no longer a placeholder string. Draft PR #56 DERIVES it from the
 disclosure text (`ol-disc-<32 hex of SHA-256>`), so any edit to the wording produces a
 different version and the server's exact-string gate refuses the stale one. The current
-draft value is `ol-disc-262842c59ea7841d25c357cabea2e679`. **Not approved.** The server's
+draft value is `ol-disc-c7d331bdc76c22b11e8faedc31f71259`. **Not approved.** The server's
 `OUTLOOK_DISCLOSURE_VERSION` is unset in every environment, so `outlook-oauth-start`
 refuses with `config_missing`. The wording and the server value must be approved together —
 approving one without the other is self-defeating, since the version moves with the text.
@@ -223,8 +249,9 @@ no implemented callback yet to define the refusal path. Decide this when the cal
 | 19 | Nothing created automatically; accept / dismiss / defer | No module performs any write; `accept_new_contact_candidate`, `dismiss_new_contact_candidate`, `defer_candidate` are the only user paths and are `authenticated`-only |
 | 20 | Proposed email is envelope-derived and AI cannot supply it | `accept_new_contact_candidate` takes **no email parameter** and uses `v_cand.proposed_email`; validator rejects any AI output key matching `email/e_mail/mail_address/address` |
 | 21 | Email fixed at acceptance, editable afterwards | Accept RPC inserts `v_email` into `contacts.email`; `AddContactDrawer` (the edit form) exposes an editable email input and updates `contacts` |
-| 22 | Disconnect behavior | `disconnect_my_outlook` → `run_microsoft_local_cleanup`: invalidates pending/deferred candidates and NULLs every proposed field, deletes OAuth states, deletes `microsoft_connections` (cascading tokens, sync state, provenance refs) |
+| 22 | Disconnect behaviour, and the exact difference between deleted and emptied | **Executed against a real Postgres**, not read off the source: `tests/sql/outlook-disconnect-runtime.sql` seeds two users with a connection, tokens, sync cursors, an OAuth state, a pending suggested interaction, a pending suggested contact and the mail links, calls `disconnect_my_outlook()` as one of them, and asserts the four deletions plus `outlook_candidate_refs`, that both candidate rows REMAIN with status `invalidated` and all content NULL, that the other user is untouched, and that no other user-scoped table in the schema retains a row. `ncc_terminal_erased` and `interaction_candidates_terminal_draft_erased` enforce the emptying independently of the RPC |
 | 23 | Provenance records hold no provider identifiers | `outlook_candidate_refs` stores connection id, fingerprints and key version only — no message/conversation id, address or subject |
+| 24 | The browser can read its own connection status without a service-role key or a table grant | `20260929000000` adds `get_my_outlook_connection()`: SECURITY DEFINER, STABLE, **zero arguments**, `REVOKE ALL … FROM PUBLIC, anon, service_role` then `GRANT EXECUTE … TO authenticated`. It returns mailbox, account type, status, needs_reauth, connected_at, consent version and scopes, and never a token, ciphertext, nonce, key version, connection id or Microsoft account/tenant id. `tests/sql/outlook-connection-status-runtime.sql` asserts the refusal without a session, the caller-follows-identity behaviour, an allowlist over the returned keys, the grants, and that `authenticated` still holds **no** SELECT on `microsoft_connections`. No file under `src/` mentions a service-role key (asserted by `tests/outlook-disconnect-ui.test.js`) |
 
 ---
 
@@ -238,6 +265,7 @@ no implemented callback yet to define the refusal path. Decide this when the cal
 | A specific history/lookback window | The worker is unbuilt; no lookback is implemented. |
 | That the Microsoft consent screen shows Funnl's Privacy/Terms links | The [consent experience](https://learn.microsoft.com/en-us/entra/identity-platform/application-consent-experience) documents the prompt's building blocks (publisher, verification badge, permissions, report link) and does not confirm Terms/Privacy links appear there. Confirm at registration. |
 | That the app is verified or certified | Unverified publishers display "**Unverified**" in the consent prompt. Publisher verification is an owner decision. |
+| That disconnecting revokes Funnl's access at Microsoft | **No upstream revocation call exists in this codebase.** `disconnect_my_outlook()` is a local teardown: it deletes Funnl's copy of the refresh token, but that token stays valid at Microsoft until it expires or the user removes Funnl from their account permissions. Both the disclosure and the disconnect confirmation state this and point the user at Microsoft, and a test asserts that every sentence mentioning revocation or withdrawal is a negative one. **Owner decision: whether to implement an upstream revocation call before the pilot.** |
 
 ---
 
@@ -257,6 +285,8 @@ no implemented callback yet to define the refusal path. Decide this when the cal
       and unenforced; see §5.
 - [x] 11. The launch-time publication date. **Owner/product decision: September 27, 2026** (supersedes September 20, 2026). If the merge happens after that day, the date must be updated again in the merge commit.
 - [ ] 12. Authorization for a one-account real-mailbox pilot.
+- [ ] 13. Whether disconnect must also revoke the grant at Microsoft before the pilot. A local
+      disconnect is implemented and verified; upstream revocation is not implemented and is not claimed.
 
 ---
 
