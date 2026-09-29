@@ -422,7 +422,13 @@ test('existing Gmail and Calendar wording is untouched', () => {
 console.log('\nreadiness packet')
 
 test('the packet records consent mechanics, decisions and blockers', () => {
-  assert.ok(/outlook-content-v1/.test(PACKET), 'placeholder consent version recorded')
+  // The placeholder `outlook-content-v1` is gone: Draft PR #56 derives the
+  // version from the disclosure text, so the packet records the MECHANISM and
+  // the current draft value rather than a standalone placeholder string.
+  assert.ok(/ol-disc-/.test(PACKET), 'derived consent version recorded')
+  assert.ok(/DERIVES it from the/.test(PACKET), 'the derivation mechanism is recorded')
+  assert.ok(/OUTLOOK_DISCLOSURE_VERSION` is unset/.test(PACKET),
+    'the packet must state the server value is unset')
   assert.ok(/DRAFT FOR OWNER\/LEGAL REVIEW/.test(PACKET))
   assert.ok(/finalize_microsoft_connection/.test(PACKET), 'consent mechanics cited to the RPC')
   for (const item of ['Entra registration', 'HMAC key', 'OAuth start and callback',

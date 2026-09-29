@@ -26,7 +26,7 @@ import { readFileSync } from 'node:fs'
 import {
   OUTLOOK_DISCLOSURE_VERSION, OUTLOOK_DISCLOSURE_PARAGRAPHS,
   DISCLOSURE_FINGERPRINT, disclosureFingerprint, verifyDisclosureIntegrity,
-  computeDisclosureVersion, DISCLOSURE_VERSION_PREFIX,
+  computeDisclosureVersion, DISCLOSURE_VERSION_PREFIX, DIGEST_HEX_CHARS,
 } from '../src/lib/outlookDisclosure.js'
 import {
   outlookConnectionEnabled, OUTLOOK_CONNECTION_ENABLED, canRequestConsent,
@@ -95,17 +95,47 @@ test('dropping or reordering a paragraph invalidates the version', () => {
   assert.strictEqual(verifyDisclosureIntegrity(swapped), false)
 })
 
-test('a failed integrity check REFUSES to build a request', () => {
-  // Simulated by tampering through the exported checker the builder uses.
-  const real = verifyDisclosureIntegrity()
-  assert.strictEqual(real, true, 'precondition')
-  // buildConsentRequest calls verifyDisclosureIntegrity() with the shipped
-  // paragraphs, so the observable contract is: acknowledged + integrity + origin.
+test('a HEALTHY build produces a request carrying the derived version', () => {
   const r = buildConsentRequest({ acknowledged: true, originOk: true, connecting: false, pageOrigin: 'https://www.getfunnl.com' })
   assert.strictEqual(r.ok, true)
   assert.strictEqual(r.body.consentPolicyVersion, OUTLOOK_DISCLOSURE_VERSION)
 })
 
+test('a FAILED integrity check really refuses, and sends nothing', async () => {
+  // Driven, not asserted about: verifyIntegrity is injected as failing, which
+  // is what a text/fingerprint drift would look like at runtime.
+  const failing = () => false
+  const r = buildConsentRequest({
+    acknowledged: true, originOk: true, connecting: false,
+    pageOrigin: 'https://www.getfunnl.com', verifyIntegrity: failing,
+  })
+  assert.strictEqual(r.ok, false)
+  assert.strictEqual(r.reason, 'disclosure_integrity_failed')
+  assert.strictEqual(r.body, undefined, 'no body may be produced')
+
+  // …and the whole flow makes no network call and does not navigate.
+  let fetched = 0, navigated = 0, bearerAsked = 0
+  const out = await startOutlookConsent({
+    acknowledged: true, connecting: false, pageOrigin: 'https://www.getfunnl.com',
+    apikey: 'k', verifyIntegrity: failing,
+    getBearer: async () => { bearerAsked++; return 'b' },
+    fetchImpl: async () => { fetched++; return { status: 200, json: async () => ({}) } },
+    navigate: () => { navigated++ },
+  })
+  assert.strictEqual(fetched, 0, 'no request may be sent')
+  assert.strictEqual(navigated, 0, 'nothing may navigate')
+  assert.strictEqual(bearerAsked, 0, 'no credential may be touched')
+  assert.strictEqual(out.navigated, false)
+  assert.ok(/could not be verified/i.test(out.message))
+})
+
+test('integrity failure beats acknowledgement: a ticked box does not override it', () => {
+  const r = buildConsentRequest({
+    acknowledged: true, originOk: true, connecting: false,
+    pageOrigin: 'https://www.getfunnl.com', verifyIntegrity: () => false,
+  })
+  assert.strictEqual(r.reason, 'disclosure_integrity_failed')
+})
 test('the card renders EVERY paragraph, not a summary', () => {
   assert.ok(CARD.includes('OUTLOOK_DISCLOSURE_PARAGRAPHS.map('),
     'the card must render the exported paragraphs')
@@ -393,6 +423,36 @@ test('changed text PLUS an updated fingerprint still yields a NEW version', () =
   // ...but the version must NOT survive it.
   assert.notStrictEqual(computeDisclosureVersion(tampered), OUTLOOK_DISCLOSURE_VERSION,
     'a changed text must produce a different version')
+})
+
+test('two texts that COLLIDE under the old FNV-32 scheme are distinguished now', () => {
+  // A real collision, found by search. Under the previous 32-bit FNV-1a
+  // fingerprint these two distinct strings hashed identically, so an edit
+  // could have kept the old version - the claim that a text change NECESSARILY
+  // changed the version was false.
+  const A = 'Funnl consent text variant 693709'
+  const B = 'Funnl consent text variant 1083080'
+  assert.notStrictEqual(A, B)
+
+  const fnv1a32 = (s) => {
+    let h = 0x811c9dc5
+    for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0 }
+    return h.toString(16).padStart(8, '0')
+  }
+  assert.strictEqual(fnv1a32(A), fnv1a32(B), 'precondition: these collide under FNV-32')
+
+  // The replacement separates them, at both the digest and version level.
+  assert.notStrictEqual(disclosureFingerprint([A]), disclosureFingerprint([B]))
+  assert.notStrictEqual(computeDisclosureVersion([A]), computeDisclosureVersion([B]))
+})
+
+test('the digest is SHA-256 truncated to 128 bits, matching node:crypto', async () => {
+  const { createHash } = await import('node:crypto')
+  const paras = ['alpha', 'beta']
+  const joined = paras.join(String.fromCharCode(10))
+  const full = createHash('sha256').update(joined, 'utf8').digest('hex')
+  assert.strictEqual(disclosureFingerprint(paras), full.slice(0, DIGEST_HEX_CHARS))
+  assert.strictEqual(DIGEST_HEX_CHARS, 32, '128 bits')
 })
 
 test('the version satisfies the DB consent_policy_version CHECK', () => {

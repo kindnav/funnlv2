@@ -54,8 +54,13 @@ export function canRequestConsent ({ acknowledged, integrityOk, originOk, connec
  * Build the start-request body, or refuse. Returns { ok, body } | { ok: false, reason }.
  * Refusing here means no request is made at all.
  */
-export function buildConsentRequest ({ acknowledged, originOk, connecting, pageOrigin }) {
-  const integrityOk = verifyDisclosureIntegrity()
+export function buildConsentRequest ({
+  acknowledged, originOk, connecting, pageOrigin,
+  // Injectable so the REFUSAL can be driven in a test. Production callers pass
+  // nothing and get the real check over the shipped paragraphs.
+  verifyIntegrity = verifyDisclosureIntegrity,
+}) {
+  const integrityOk = verifyIntegrity() === true
   if (!integrityOk) return { ok: false, reason: 'disclosure_integrity_failed' }
   if (acknowledged !== true) return { ok: false, reason: 'not_acknowledged' }
   if (!canRequestConsent({ acknowledged, integrityOk, originOk, connecting })) {
@@ -137,9 +142,10 @@ export function messageForOutcome (kind) {
 export async function startOutlookConsent ({
   acknowledged, connecting, pageOrigin, apikey,
   getBearer, fetchImpl, navigate, trackImpl = () => {},
+  verifyIntegrity = verifyDisclosureIntegrity,
 }) {
   const originOk = canStartOauthFrom(pageOrigin)
-  const built = buildConsentRequest({ acknowledged, originOk, connecting, pageOrigin })
+  const built = buildConsentRequest({ acknowledged, originOk, connecting, pageOrigin, verifyIntegrity })
   if (!built.ok) {
     // No request is made at all - this is the refusal path.
     return { message: messageForOutcome(built.reason), clearAcknowledgement: false, navigated: false }
