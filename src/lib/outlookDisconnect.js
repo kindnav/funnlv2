@@ -17,8 +17,9 @@
 //
 // WHAT DISCONNECT ACTUALLY DOES - the wording below is not a summary, it is the
 // verified behaviour of the applied RPC, proven on a disposable database by
-// tests/sql/outlook-disconnect-runtime.sql. The three outcomes differ and the
-// user is told which is which:
+// tests/sql/outlook-disconnect-runtime.sql and over real HTTP through PostgREST
+// by tests/local/outlook-rpc-postgrest.mjs. The outcomes differ, and the user is
+// told which is which:
 //
 //   DELETED  the connection row, the encrypted access and refresh tokens, the
 //            mailbox sync cursors and leases, any unconsumed OAuth state, and
@@ -29,22 +30,37 @@
 //   KEPT     contacts and interactions already saved. Disconnecting a mailbox
 //            is not a request to delete the user's CRM.
 //
-// WHAT IT DOES NOT DO: it does not revoke Funnl's grant at Microsoft. No
-// upstream revocation call exists in this codebase. Saying otherwise would tell
-// users a permission had been withdrawn when it had not, so the copy below
-// points them at their Microsoft account instead.
+// TWO THINGS IT CANNOT DO, AND MUST NOT PROMISE.
+//
+//   1. It does not revoke Funnl's grant at Microsoft. No upstream revocation
+//      call exists in this codebase, so a deleted refresh token stays valid at
+//      Microsoft until it expires or the user removes Funnl from their account.
+//
+//   2. It does not stop work already in flight. The RPC deletes rows; it cannot
+//      reach inside a request that is already running and already holds an
+//      access token it fetched earlier. What it guarantees is that nothing can
+//      obtain a NEW token or start a NEW read. So the copy says Funnl 'has no
+//      credential left and cannot start a new read', never that access has
+//      already stopped everywhere at that instant.
 
 import { canStartOauthFrom } from './oauthStartEndpoint.js'
 
 /**
  * The exact consequences shown in the confirmation, as data rather than markup
  * so a test can assert each one against the database behaviour it describes.
- * `effect` is the verified verb: deleted, emptied or kept.
+ * `effect` is the verified verb: deleted, emptied, kept, in_flight or upstream.
  */
 export const DISCONNECT_CONSEQUENCES = Object.freeze([
   Object.freeze({
     effect: 'deleted',
-    text: 'The connection and the stored Microsoft authorisation are deleted, so Funnl can no longer reach your mailbox.',
+    text: 'The connection and the stored Microsoft authorisation are deleted, so Funnl has no credential left and cannot start a new read of your mailbox.',
+  }),
+  Object.freeze({
+    effect: 'in_flight',
+    // Deliberately not an absolute promise. The RPC deletes Funnl's stored
+    // credentials; it cannot reach inside a request that is already running and
+    // already holds an access token it obtained earlier.
+    text: 'A read that is already under way may finish using access it had already obtained. It has no way to obtain more.',
   }),
   Object.freeze({
     effect: 'deleted',
@@ -116,7 +132,7 @@ export function classifyDisconnectResponse (error, data) {
 export function messageForDisconnect (kind) {
   switch (kind) {
     case 'disconnected':
-      return 'Outlook is disconnected. Funnl can no longer reach your mailbox.'
+      return 'Outlook is disconnected. Funnl has no stored credential left and cannot start a new read of your mailbox.'
     case 'already_disconnected':
       return 'Outlook was already disconnected.'
     case 'signed_out':

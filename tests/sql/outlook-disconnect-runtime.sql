@@ -23,6 +23,26 @@
 -- done by the user at Microsoft, or by an upstream revocation call that does
 -- not exist in this branch.
 --
+-- HOW TO BUILD THE DATABASE THIS NEEDS: tests/sql/_bootstrap-disposable-db.sql
+--
+-- WHAT THIS PROVES, AND WHAT IT DOES NOT - stated precisely, because the
+-- difference matters.
+--
+-- It runs as the PRIVILEGED `postgres` role and simulates the caller with
+-- set_config('request.jwt.claim.sub', ...). So it proves the function bodies,
+-- the cascades, the constraints and the catalog facts (grants, SECURITY DEFINER,
+-- pinned search_path, volatility). It does NOT prove that a real request is
+-- switched to the `authenticated` role, that the EXECUTE grant is what admits
+-- it, or that the same role is denied direct table access - because a privileged
+-- role bypasses exactly those checks.
+--
+-- THIS IS NOT A BROWSER-TO-DATABASE END-TO-END TEST, and must not be described
+-- as one. There is no JWT, no PostgREST, no Kong, no supabase-js and no browser
+-- in this file. The role switching, the grant enforcement over HTTP and the
+-- table-access denial are covered separately by
+-- tests/local/outlook-rpc-postgrest.mjs, which drives real HTTP through real
+-- PostgREST and states its own remaining limits.
+--
 -- It also checks the authorisation shape: the RPC derives the user from
 -- auth.uid() and refuses when there is no session, so a caller cannot
 -- disconnect someone else's account by passing an id.

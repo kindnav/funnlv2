@@ -20,9 +20,17 @@
 // unless OUTLOOK_DISCLOSURE_VERSION is configured to match. Both must be
 // approved together before either is enabled.
 //
-// SEPARATE FROM THE PUBLISHED PRIVACY POLICY. The conditional Outlook section
-// already live at /privacy names Mail.Read only. This disclosure names two
-// permissions. That discrepancy is unresolved and blocks consent collection; see
+// SEPARATE FROM THE PUBLISHED PRIVACY POLICY, AND NARROWER THAN IT.
+// The conditional Outlook section already live at /privacy is the full account.
+// This is the short version shown at the moment of the decision, so it
+// summarises rather than repeats: the same facts, fewer words. It must never say
+// LESS than the published policy about what happens to the user's mail, which is
+// why it names the two-step read, the absence of body storage, Anthropic and
+// Anthropic's actual retention terms.
+//
+// ONE UNRESOLVED DIVERGENCE: the live /privacy section names Mail.Read only,
+// while this names Mail.Read and User.Read. That blocks consent collection until
+// the published text is revised. Nothing here publishes or alters it; see
 // docs/outlook-privacy-consent-readiness.md.
 
 import { sha256Hex } from './sha256.js'
@@ -44,9 +52,13 @@ export const OUTLOOK_DISCLOSURE_PARAGRAPHS = Object.freeze([
   'Microsoft describes User.Read as allowing an app to read the signed-in user’s full profile and basic company information. Funnl asks it for three fields only — your account id, your mail address and your user principal name — and uses them only to record and display which mailbox is connected. The permission permits more than Funnl requests, which is why both are stated here.',
   'Mail.Read is mailbox-wide: it would technically allow reading message bodies and attachments anywhere in your mailbox. Funnl reads only Inbox and Sent Items, and never opens attachments.',
   'Funnl can never send, reply, delete, move or change anything in your mailbox. It does not read your Microsoft contacts, calendars or files, and it does not read your organisation’s directory, your colleagues or your manager.',
-  'What Funnl would do with this: suggest networking contacts and draft interaction notes from relevant conversations. Nothing is saved as a contact or logged as an interaction until you review it and choose to accept it. You can edit or dismiss every suggestion.',
+  'Funnl would read those two folders in two steps. First the envelope of each message — who sent it, who it was addressed to, the subject, the times, which conversation it belongs to and whether it is a draft — to decide whether the message is worth reading at all. Then, only for the messages that pass that check, the message text itself: Microsoft’s plain-text version of the body and the version that leaves out the quoted reply history, plus five headers that identify newsletters, mailing lists and automatic replies. Those five are reduced to yes/no facts and then discarded.',
+  'Funnl does not store your emails. Message text is held in server memory only while a message is being processed. Funnl’s database has no column that can hold a message body, HTML, raw MIME, an attachment, a preview snippet or a collection of headers.',
+  'To turn an exchange into a draft you can edit, Funnl would send Anthropic (Claude) a minimized extract: the message text, an optional signature block, a shortened subject, the direction and the date. The two people are labelled only USER and CONTACT. Email addresses, the recipient’s email domain, Microsoft account, tenant, message and conversation identifiers, authorisation tokens, attachments and raw headers are not included.',
+  'Anthropic deletes API inputs and outputs within 30 days. Funnl does not have a Zero Data Retention agreement. If Anthropic’s automated systems flag content as violating their Usage Policy, Anthropic may keep those inputs and outputs for up to 2 years, and the related trust-and-safety classification scores for up to 7 years. Anthropic does not train its models on commercial API data by default, and does not offer per-record deletion to paid API customers, so Funnl cannot promise to have an individual record deleted on request.',
+  'What Funnl would do with all of this: suggest networking contacts and draft interaction notes from relevant conversations. Nothing is saved as a contact or logged as an interaction until you review it and choose to accept it. You can edit or dismiss every suggestion.',
   'You can disconnect at any time from this screen. Disconnecting deletes the connection, the stored Microsoft authorisation and the mailbox synchronisation state, and empties any suggestion you have not reviewed: each becomes inactive and its proposed details and drafts are removed. Contacts and interactions you already saved are kept.',
-  'Disconnecting removes Funnl’s copy. It does not withdraw the permission at Microsoft — to do that, remove Funnl from the permissions page of your Microsoft account.',
+  'Disconnecting removes Funnl’s copy of the authorisation, so Funnl has nothing left to start a new read with. A read already under way may finish using access it had already obtained. Disconnecting does not withdraw the permission at Microsoft — to do that, remove Funnl from the permissions page of your Microsoft account.',
 ])
 
 /**
@@ -81,7 +93,7 @@ export function disclosureFingerprint (paragraphs) {
  * version is derived from the same digest, updating it also changes the
  * version, so a reviewed edit can never quietly keep the old identifier.
  */
-export const DISCLOSURE_FINGERPRINT = 'c7d331bdc76c22b11e8faedc31f71259'
+export const DISCLOSURE_FINGERPRINT = '34f8d13dc657d2d6ca6377f0c93ca427'
 
 /**
  * True only when the paragraphs still match the fingerprint the version was

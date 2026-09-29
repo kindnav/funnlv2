@@ -426,7 +426,8 @@ test('the packet records consent mechanics, decisions and blockers', () => {
   // version from the disclosure text, so the packet records the MECHANISM and
   // the current draft value rather than a standalone placeholder string.
   assert.ok(/ol-disc-/.test(PACKET), 'derived consent version recorded')
-  assert.ok(/DERIVES it from the/.test(PACKET), 'the derivation mechanism is recorded')
+  assert.ok(/derived, not declared/i.test(PACKET) && /computes it from the/.test(PACKET),
+    'the derivation mechanism is recorded')
   assert.ok(/OUTLOOK_DISCLOSURE_VERSION` is unset/.test(PACKET),
     'the packet must state the server value is unset')
   assert.ok(/DRAFT FOR OWNER\/LEGAL REVIEW/.test(PACKET))
@@ -445,9 +446,33 @@ test('the packet records consent mechanics, decisions and blockers', () => {
   assert.ok(/September 27, 2026/.test(PACKET), 'the packet names the approved date')
 })
 
-test('the packet does not itself claim the integration is live', () => {
-  assert.ok(/Nothing in this packet is published, deployed or\s*\n?configured/.test(PACKET))
+test('the packet separates what IS published from what is not', () => {
+  // The packet used to open with "Nothing in this packet is published, deployed or
+  // configured", which was false: the conditional Outlook section of the Privacy
+  // Policy is live. Asserting that sentence pinned a wrong claim in place, so the
+  // requirement is now the true one - the packet must tell the four artefacts
+  // apart rather than flatten them.
+  assert.ok(/WHAT IS PUBLISHED AND WHAT IS NOT/.test(PACKET),
+    'the packet must draw the distinction explicitly')
+  assert.ok(/\*\*YES, live now\*\*/.test(PACKET),
+    'the live conditional policy section must be marked published')
+  assert.ok(!/Nothing in this packet is published/.test(PACKET),
+    'that blanket claim is false while the policy section is live')
+})
+
+test('the packet does not claim the INTEGRATION is live', () => {
+  // Published policy text is not a live integration. These are the facts that
+  // must stay stated whatever else changes.
   assert.ok(/zero rows/.test(PACKET))
+  assert.ok(/never been deployed|never deployed/i.test(PACKET))
+  assert.ok(/no Entra application exists/i.test(PACKET))
+  assert.ok(/no consent has ever been collected/i.test(PACKET))
+  assert.ok(/both build flags are unset/i.test(PACKET) || /flags are off/i.test(PACKET))
+  assert.ok(/unapplied/i.test(PACKET), 'the forward migrations must be marked unapplied')
+  for (const overclaim of [/Outlook is (now )?(live|available|enabled)/i,
+    /the integration (is|has) (live|shipped|launched)/i]) {
+    assert.ok(!overclaim.test(PACKET), `the packet claims the integration is live: ${overclaim}`)
+  }
 })
 
 
