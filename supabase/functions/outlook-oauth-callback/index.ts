@@ -44,7 +44,8 @@
 //   2. POST only
 //   3. bounded body parse
 //   4. BINDING GATE  <- before anything expensive or stateful
-//   5. (next slice) token exchange, id_token validation, finalize RPC
+//   5. state lookup (unknown / consumed / expired refused before the provider)
+//   6. token redemption, id_token validation, Graph /me, finalize RPC
 // Every terminal response is a 303 to the canonical Settings error page and every
 // one of them clears the binding cookie.
 
@@ -57,7 +58,19 @@ import {
   verifyMsBrowserBinding,
   buildClearedMsBindingCookie,
 } from '../shared/microsoftOauthBinding.js'
-import { OUTLOOK_CANONICAL_ERROR_REDIRECT } from '../shared/microsoftOauthHelpers.js'
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
+import { jwtVerify, createRemoteJWKSet } from 'https://esm.sh/jose@5'
+import {
+  OUTLOOK_CANONICAL_ERROR_REDIRECT,
+  buildOutlookSettingsRedirect,
+  identityFromIdTokenClaims,
+} from '../shared/microsoftOauthHelpers.js'
+import { sha256Hex, resolveReturnOrigin } from '../shared/googleOauthHelpers.js'
+import { importKeyFromBase64, decryptToken, encryptToken } from '../shared/googleTokenCrypto.js'
+import { verifyMicrosoftIdToken } from '../shared/microsoftIdToken.js'
+import { redeemAuthorizationCode, grantedScopesSufficient } from '../shared/microsoftTokenExchange.js'
+import { fetchMailboxAddress } from '../shared/microsoftGraphMe.js'
+import { resolveMicrosoftEndpoints, resolveJwksUrl } from '../shared/microsoftEndpoints.js'
 
 // NOTE ON REUSE: parseCallbackFormBody and readBoundedStream are
 // provider-neutral. The parser requires application/x-www-form-urlencoded,
@@ -135,20 +148,171 @@ Deno.serve(async (req) => {
       return redirect(OUTLOOK_CANONICAL_ERROR_REDIRECT)
     }
 
-    // ── 5. NEXT SLICE ────────────────────────────────────────────────────────
-    // Still to come, deliberately not in this reviewable slice:
-    //   - redeem `code` at MS_TOKEN_ENDPOINT with the decrypted PKCE verifier
-    //   - validate the id_token: JWKS signature, iss, aud === MICROSOFT_CLIENT_ID,
-    //     exp/nbf, and nonce === sha256('nonce:' + state)
-    //   - derive identity via identityFromIdTokenClaims (NEVER by decoding the
-    //     Graph access token, whose format is not guaranteed)
-    //   - encrypt tokens and call finalize_microsoft_connection, which consumes
-    //     the state, enforces the scope allowlist and copies consent evidence
-    // Until then the flow stops here and reports failure rather than pretending
-    // to connect. This endpoint is unreachable in Production anyway: the
-    // dormancy gate above returns first.
-    console.error('outlook-oauth-callback not_implemented_exchange')
-    return redirect(OUTLOOK_CANONICAL_ERROR_REDIRECT)
+    // ── 5. State lookup (service role) ───────────────────────────────────
+    // Only reached by a BOUND request. The unbound and provider-error paths
+    // above return before any database or provider call.
+    const admin = createClient(
+      Deno.env.get('SUPABASE_URL') ?? '',
+      Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? '',
+      { auth: { persistSession: false } },
+    )
+    const stateHash = await sha256Hex(state)
+    const { data: row, error: rowError } = await admin
+      .from('microsoft_oauth_states')
+      .select('state_hash, user_id, pkce_verifier_ciphertext, pkce_verifier_nonce, key_version, return_origin, expires_at, consumed_at')
+      .eq('state_hash', stateHash)
+      .eq('integration_type', 'outlook')
+      .maybeSingle()
+    if (rowError) {
+      console.error('outlook-oauth-callback state_lookup_failed')
+      return redirect(OUTLOOK_CANONICAL_ERROR_REDIRECT)
+    }
+    if (!row) {
+      console.error('outlook-oauth-callback unknown_state')
+      return redirect(OUTLOOK_CANONICAL_ERROR_REDIRECT)
+    }
+    if (row.consumed_at) {
+      // Replay. finalize would refuse too, but refusing here stops a replay
+      // from ever reaching the provider.
+      console.error('outlook-oauth-callback state_consumed')
+      return redirect(OUTLOOK_CANONICAL_ERROR_REDIRECT)
+    }
+    if (!row.expires_at || Date.parse(row.expires_at) <= Date.now()) {
+      console.error('outlook-oauth-callback state_expired')
+      return redirect(OUTLOOK_CANONICAL_ERROR_REDIRECT)
+    }
+
+    // The return origin is trusted because the start function validated it
+    // before persisting. Re-validate anyway: defence in depth costs nothing.
+    const trustedOrigin = resolveReturnOrigin(row.return_origin)
+    const failRedirect = trustedOrigin
+      ? buildOutlookSettingsRedirect(trustedOrigin, 'error')
+      : OUTLOOK_CANONICAL_ERROR_REDIRECT
+
+    // ── 6. Configuration ─────────────────────────────────────────────────
+    const clientId = Deno.env.get('MICROSOFT_CLIENT_ID') ?? ''
+    const clientSecret = Deno.env.get('MICROSOFT_CLIENT_SECRET') ?? ''
+    const redirectUri = Deno.env.get('OUTLOOK_OAUTH_CALLBACK_URL') ?? ''
+    const keyB64 = Deno.env.get('MICROSOFT_TOKEN_ENCRYPTION_KEY_V1') ?? ''
+    if (!clientId || !clientSecret || !redirectUri || !keyB64) {
+      console.error('outlook-oauth-callback config_missing')
+      return redirect(failRedirect)
+    }
+    const endpoints = resolveMicrosoftEndpoints((k) => Deno.env.get(k))
+
+    // ── 7. Decrypt the PKCE verifier ─────────────────────────────────────
+    let verifier: string
+    try {
+      const key = await importKeyFromBase64(keyB64)
+      verifier = await decryptToken(
+        row.pkce_verifier_ciphertext, row.pkce_verifier_nonce, key)
+    } catch {
+      console.error('outlook-oauth-callback verifier_decrypt_failed')
+      return redirect(failRedirect)
+    }
+
+    // ── 8. Redeem the code ───────────────────────────────────────────────
+    const redeemed = await redeemAuthorizationCode({
+      code, codeVerifier: verifier, clientId, clientSecret, redirectUri,
+      tokenUrl: endpoints.tokenUrl,
+    })
+    if (!redeemed.ok) {
+      console.error('outlook-oauth-callback token_exchange_failed', redeemed.reason)
+      return redirect(failRedirect)
+    }
+
+    // ── 9. The user may have declined individual permissions ─────────────
+    const sufficiency = grantedScopesSufficient(redeemed.grantedScopes)
+    if (!sufficiency.ok) {
+      console.error('outlook-oauth-callback insufficient_scopes', sufficiency.missing.join(','))
+      return redirect(failRedirect)
+    }
+
+    // ── 10. Validate the id_token ────────────────────────────────────────
+    // nonce is bound to THIS state, exactly as the start function derived it.
+    const expectedNonce = await sha256Hex('nonce:' + state)
+    const verified = await verifyMicrosoftIdToken({
+      idToken: redeemed.idToken,
+      clientId,
+      expectedNonce,
+      // jose expresses its key argument as a union of its own types. The
+      // shared module is provider-agnostic and deliberately does not depend
+      // on them, so the boundary is widened here rather than there.
+      // deno-lint-ignore no-explicit-any
+      verifyJwt: (token: string, keySet: any, opts: any) =>
+        jwtVerify(token, keySet, opts),
+      jwksFor: (tenantUrl: string) =>
+        createRemoteJWKSet(new URL(resolveJwksUrl(endpoints, tenantUrl))),
+    })
+    if (!verified.ok) {
+      console.error('outlook-oauth-callback id_token_invalid', verified.reason)
+      return redirect(failRedirect)
+    }
+
+    // Identity comes from the VALIDATED id_token, never from the Graph
+    // access token, whose format is not guaranteed.
+    const identity = identityFromIdTokenClaims(verified.payload)
+    if (!identity.ok) {
+      console.error('outlook-oauth-callback identity_incomplete', identity.reason)
+      return redirect(failRedirect)
+    }
+
+    // ── 11. Resolve the mailbox address from Graph ───────────────────────
+    const mailbox = await fetchMailboxAddress({
+      accessToken: redeemed.accessToken,
+      oid: identity.msAccountId,
+      meUrl: endpoints.graphMeUrl,
+    })
+    if (!mailbox.ok) {
+      console.error('outlook-oauth-callback mailbox_unresolved', mailbox.reason)
+      return redirect(failRedirect)
+    }
+
+    // ── 12. Encrypt and finalize ─────────────────────────────────────────
+    let sealedAccess, sealedRefresh
+    try {
+      const key = await importKeyFromBase64(keyB64)
+      sealedAccess = await encryptToken(redeemed.accessToken, key)
+      sealedRefresh = await encryptToken(redeemed.refreshToken, key)
+    } catch {
+      console.error('outlook-oauth-callback token_encrypt_failed')
+      return redirect(failRedirect)
+    }
+
+    // Scopes are passed through EXACTLY as the provider granted them. The RPC
+    // normalizes and enforces the allowlist; fabricating them here would
+    // defeat that check.
+    const { data: finalized, error: rpcError } = await admin.rpc(
+      'finalize_microsoft_connection', {
+        p_state_hash: stateHash,
+        p_expected_user_id: row.user_id,
+        p_ms_account_id: identity.msAccountId,
+        p_ms_tenant_id: identity.msTenantId,
+        p_account_type: identity.accountType,
+        p_ms_email: mailbox.email,
+        p_scopes: redeemed.grantedScopes,
+        p_token_expires_at: redeemed.expiresAt,
+        p_access_ct: sealedAccess.ciphertext,
+        p_access_nonce: sealedAccess.nonce,
+        p_refresh_ct: sealedRefresh.ciphertext,
+        p_refresh_nonce: sealedRefresh.nonce,
+        p_key_version: 1,
+      })
+    if (rpcError) {
+      console.error('outlook-oauth-callback finalize_failed')
+      return redirect(failRedirect)
+    }
+    // ONLY the RPC's own stored result counts as success. Anything else is a
+    // refusal it made for a reason we must not paper over.
+    const result = (finalized as { result?: string } | null)?.result ?? 'no_result'
+    if (result !== 'stored') {
+      console.error('outlook-oauth-callback finalize_refused', result)
+      return redirect(failRedirect)
+    }
+
+    console.error('outlook-oauth-callback connected')
+    return redirect(buildOutlookSettingsRedirect(
+      trustedOrigin ?? 'https://www.getfunnl.com', 'connected'))
   } catch (e) {
     console.error('outlook-oauth-callback unexpected', (e as Error)?.name ?? 'error')
     return redirect(OUTLOOK_CANONICAL_ERROR_REDIRECT)

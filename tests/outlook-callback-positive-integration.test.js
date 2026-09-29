@@ -1,0 +1,352 @@
+// BOUND POSITIVE CONTROL against the REAL outlook-oauth-callback handler.
+//
+// WHAT THIS PROVES, AND WHAT IT DOES NOT — stated precisely, because the
+// distinction is the whole point of having it.
+//
+//   PROVES: a bound request gets past the browser-binding gate, performs the
+//   state lookup, redeems the code, validates a genuinely RS256-signed
+//   id_token against a served JWKS, calls Graph /me, and reaches
+//   finalize_microsoft_connection with the arguments it should — including the
+//   provider-granted scopes, the Graph-resolved mailbox address, and the
+//   state's own user_id. It also proves the handler treats ONLY a 'stored'
+//   result as success.
+//
+//   DOES NOT PROVE: that the RPC wrote a connection row. This harness records
+//   the RPC request at a sink; a recorded request is not a write. The RPC's
+//   own behaviour — atomic single-use consumption, the scope allowlist, the
+//   same-account rule, consent copying — is proven separately against a real
+//   Postgres by tests/sql/outlook-user-read-scope-runtime.sql and
+//   tests/sql/outlook-content-draft-runtime.sql.
+//
+//   NOT EXERCISED AT ALL: real Microsoft behaviour. Every provider response
+//   here is a local fixture built from Microsoft's documented contract. No
+//   Entra registration exists, so the real /token, /discovery and /me
+//   responses remain unverified assumptions.
+//
+// The provider endpoints are redirected through the loopback-only fixture seam
+// (OUTLOOK_LOCAL_FIXTURES + a loopback OUTLOOK_FIXTURE_BASE), which cannot be
+// activated in Production.
+//
+// OPT-IN:  FUNNL_EDGE_INTEGRATION=1 node tests/outlook-callback-positive-integration.test.js
+
+import http from 'node:http'
+import { once } from 'node:events'
+import { execFileSync } from 'node:child_process'
+import { webcrypto, randomBytes, createHash } from 'node:crypto'
+import { fileURLToPath } from 'url'
+import { join, dirname } from 'path'
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
+const ROOT = join(__dirname, '..')
+
+const COOKIE = '__Host-fnl_ms_oauth_bind'
+const CONTAINER = 'funnl-outlook-positive-itest'
+const HANDLER_PORT = 9981
+const SINK_PORT = 9982
+const FIXTURE_PORT = 9983
+const CLIENT_ID = 'test-client-id'
+const CALLBACK_URL = 'https://www.getfunnl.com/api/outlook-oauth-callback'
+const USER_ID = '22222222-3333-4444-5555-666666666666'
+const CONSUMERS = '9188040d-6c67-4c5b-b112-36a304b66dad'
+const OID = '00000000-0000-0000-0000-0000000000aa'
+const MAILBOX = 'student@outlook.test'
+
+let passed = 0, failed = 0
+function check (name, cond, detail = '') {
+  if (cond) { console.log(`  ✓ ${name}`); passed++ }
+  else { console.error(`  ✗ ${name}`); if (detail) console.error(`    ${detail}`); failed++ }
+}
+function skip (why) {
+  console.log(`\nSKIPPED: ${why}`)
+  console.log('\n0 tests: 0 passed, 0 failed\n')
+  process.exitCode = 0
+}
+
+
+// ── helpers ──────────────────────────────────────────────────────────────────
+const b64u = (b) => Buffer.from(b).toString('base64')
+  .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+const sha256hex = (s) => createHash('sha256').update(s, 'utf8').digest('hex')
+
+async function aesEncrypt (plaintext, rawKey) {
+  const key = await webcrypto.subtle.importKey('raw', rawKey, 'AES-GCM', false, ['encrypt'])
+  const iv = webcrypto.getRandomValues(new Uint8Array(12))
+  const ct = await webcrypto.subtle.encrypt({ name: 'AES-GCM', iv }, key,
+    new TextEncoder().encode(plaintext))
+  return {
+    ciphertext: Buffer.from(new Uint8Array(ct)).toString('base64'),
+    nonce: Buffer.from(iv).toString('base64'),
+  }
+}
+
+async function makeSigner () {
+  const kp = await webcrypto.subtle.generateKey(
+    { name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' },
+    true, ['sign', 'verify'])
+  const jwk = await webcrypto.subtle.exportKey('jwk', kp.publicKey)
+  const kid = 'test-key-1'
+  return {
+    jwks: { keys: [{ ...jwk, kid, alg: 'RS256', use: 'sig' }] },
+    sign: async (payload) => {
+      const h = b64u(Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT', kid })))
+      const p = b64u(Buffer.from(JSON.stringify(payload)))
+      const sig = await webcrypto.subtle.sign('RSASSA-PKCS1-v1_5', kp.privateKey,
+        new TextEncoder().encode(`${h}.${p}`))
+      return `${h}.${p}.${b64u(new Uint8Array(sig))}`
+    },
+  }
+}
+
+function stopHandler () {
+  try { execFileSync('docker', ['rm', '-f', CONTAINER], { stdio: 'ignore' }) } catch { /* not running */ }
+}
+
+async function startHandler (keyB64) {
+  stopHandler()
+  execFileSync('docker', [
+    'run', '--rm', '-d', '--name', CONTAINER,
+    '-p', `${HANDLER_PORT}:8000`,
+    '-v', `${join(ROOT, 'supabase', 'functions')}:/app:ro`,
+    '-w', '/app',
+    '-e', `SUPABASE_URL=http://host.docker.internal:${SINK_PORT}`,
+    '-e', 'SUPABASE_SERVICE_ROLE_KEY=test-service-role-key',
+    '-e', 'OUTLOOK_INTEGRATION_ENABLED=true',
+    '-e', `MICROSOFT_CLIENT_ID=${CLIENT_ID}`,
+    '-e', 'MICROSOFT_CLIENT_SECRET=test-client-secret',
+    '-e', `OUTLOOK_OAUTH_CALLBACK_URL=${CALLBACK_URL}`,
+    '-e', `MICROSOFT_TOKEN_ENCRYPTION_KEY_V1=${keyB64}`,
+    '-e', 'OUTLOOK_LOCAL_FIXTURES=true',
+    '-e', `OUTLOOK_FIXTURE_BASE=http://host.docker.internal:${FIXTURE_PORT}`,
+    'denoland/deno:alpine',
+    'run', '--allow-net', '--allow-env', '--allow-read', 'outlook-oauth-callback/index.ts',
+  ], { stdio: 'ignore' })
+  for (let i = 0; i < 120; i++) {
+    try {
+      const r = await fetch(`http://127.0.0.1:${HANDLER_PORT}/`, { method: 'GET' })
+      if (r.status === 405) return
+    } catch { /* not up */ }
+    await new Promise((r) => setTimeout(r, 1000))
+  }
+  throw new Error('the containerised callback never started listening')
+}
+
+async function run () {
+  console.log('\nreal outlook-oauth-callback: BOUND POSITIVE CONTROL (local fixtures)')
+
+  const rawKey = randomBytes(32)
+  const keyB64 = rawKey.toString('base64')
+  const signer = await makeSigner()
+
+  const state = b64u(randomBytes(32))
+  const stateHash = sha256hex(state)
+  const expectedNonce = sha256hex(`nonce:${state}`)
+  const verifier = b64u(randomBytes(32))
+  const sealedVerifier = await aesEncrypt(verifier, rawKey)
+
+  // What the scenario should hand back.
+  let scenario = {
+    grantedScope: 'openid profile email offline_access Mail.Read User.Read',
+    meBody: { id: OID, mail: MAILBOX, userPrincipalName: 'upn@outlook.test' },
+    rpcResult: { result: 'stored', connection_id: 'conn-1' },
+    stateRow: null,   // set below
+    tokenStatus: 200,
+  }
+  const freshRow = (over = {}) => ({
+    state_hash: stateHash, user_id: USER_ID,
+    pkce_verifier_ciphertext: sealedVerifier.ciphertext,
+    pkce_verifier_nonce: sealedVerifier.nonce,
+    key_version: 1, return_origin: 'https://www.getfunnl.com',
+    expires_at: new Date(Date.now() + 9 * 60_000).toISOString(),
+    consumed_at: null, ...over,
+  })
+  scenario.stateRow = freshRow()
+
+  const seen = { tokenCalls: 0, meCalls: 0, rpcArgs: [], stateQueries: 0, verifierSent: null }
+
+  // ── Supabase sink: state row + the finalize RPC ───────────────────────────
+  const sink = http.createServer((req, res) => {
+    let body = ''
+    req.on('data', (c) => { body += c })
+    req.on('end', () => {
+      const path = req.url.split('?')[0]
+      if (path === '/rest/v1/microsoft_oauth_states' && req.method === 'GET') {
+        seen.stateQueries++
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        return res.end(JSON.stringify(scenario.stateRow ? [scenario.stateRow] : []))
+      }
+      if (path === '/rest/v1/rpc/finalize_microsoft_connection' && req.method === 'POST') {
+        try { seen.rpcArgs.push(JSON.parse(body)) } catch { seen.rpcArgs.push(null) }
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        return res.end(JSON.stringify(scenario.rpcResult))
+      }
+      res.writeHead(404, { 'Content-Type': 'application/json' })
+      res.end('{}')
+    })
+  })
+  sink.listen(SINK_PORT, '0.0.0.0'); await once(sink, 'listening')
+
+  // ── Microsoft / Graph fixtures (loopback only) ────────────────────────────
+  const fixtures = http.createServer((req, res) => {
+    let body = ''
+    req.on('data', (c) => { body += c })
+    req.on('end', async () => {
+      const path = req.url.split('?')[0]
+      if (path === '/token' && req.method === 'POST') {
+        seen.tokenCalls++
+        seen.verifierSent = new URLSearchParams(body).get('code_verifier')
+        if (scenario.tokenStatus !== 200) {
+          res.writeHead(scenario.tokenStatus, { 'Content-Type': 'application/json' })
+          return res.end('{"error":"invalid_grant"}')
+        }
+        const now = Math.floor(Date.now() / 1000)
+        const idToken = await signer.sign({
+          iss: `https://login.microsoftonline.com/${CONSUMERS}/v2.0`,
+          aud: CLIENT_ID, tid: CONSUMERS, oid: OID, nonce: expectedNonce,
+          exp: now + 3600, nbf: now - 60, iat: now, email: MAILBOX,
+        })
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        return res.end(JSON.stringify({
+          access_token: 'fixture-access-token', refresh_token: 'fixture-refresh-token',
+          id_token: idToken, expires_in: 3600, scope: scenario.grantedScope,
+        }))
+      }
+      if (path === '/jwks') {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        return res.end(JSON.stringify(signer.jwks))
+      }
+      if (path === '/me') {
+        seen.meCalls++
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        return res.end(JSON.stringify(scenario.meBody))
+      }
+      res.writeHead(404); res.end()
+    })
+  })
+  fixtures.listen(FIXTURE_PORT, '0.0.0.0'); await once(fixtures, 'listening')
+
+  const post = async (cookie) => {
+    seen.tokenCalls = 0; seen.meCalls = 0; seen.rpcArgs = []; seen.stateQueries = 0
+    const headers = { 'Content-Type': 'application/x-www-form-urlencoded' }
+    if (cookie) headers.Cookie = cookie
+    const res = await fetch(`http://127.0.0.1:${HANDLER_PORT}/`, {
+      method: 'POST', headers, redirect: 'manual',
+      body: new URLSearchParams({ state, code: 'FIXTURE-CODE' }).toString(),
+    })
+    await new Promise((r) => setTimeout(r, 600))
+    return { status: res.status, location: res.headers.get('location') }
+  }
+
+  try {
+    await startHandler(keyB64)
+
+    // ── THE POSITIVE CONTROL ────────────────────────────────────────────────
+    let r = await post(`${COOKIE}=${state}`)
+    check('bound POST reaches the STATE LOOKUP (gate passed)',
+      seen.stateQueries === 1, `stateQueries=${seen.stateQueries}`)
+    check('bound POST redeems the code at the token endpoint',
+      seen.tokenCalls === 1, `tokenCalls=${seen.tokenCalls}`)
+    check('the DECRYPTED PKCE verifier is sent to the token endpoint',
+      seen.verifierSent === verifier, 'verifier round-trip failed')
+    check('bound POST calls Graph /me', seen.meCalls === 1, `meCalls=${seen.meCalls}`)
+    check('bound POST reaches finalize_microsoft_connection',
+      seen.rpcArgs.length === 1, `rpcCalls=${seen.rpcArgs.length}`)
+
+    const a = seen.rpcArgs[0] ?? {}
+    check('finalize receives the state hash, not the state',
+      a.p_state_hash === stateHash && a.p_state_hash !== state, 'wrong p_state_hash')
+    check('finalize receives the user id FROM THE STATE ROW',
+      a.p_expected_user_id === USER_ID, String(a.p_expected_user_id))
+    check('finalize receives the Graph-resolved mailbox address',
+      a.p_ms_email === MAILBOX, String(a.p_ms_email))
+    check('finalize receives identity from the VALIDATED id_token',
+      a.p_ms_account_id === OID && a.p_ms_tenant_id === CONSUMERS && a.p_account_type === 'personal',
+      JSON.stringify({ id: a.p_ms_account_id, tid: a.p_ms_tenant_id, t: a.p_account_type }))
+    check('finalize receives PROVIDER-GRANTED scopes, not what we asked for',
+      Array.isArray(a.p_scopes) && a.p_scopes.includes('Mail.Read') && a.p_scopes.includes('User.Read'),
+      JSON.stringify(a.p_scopes))
+    check('tokens are encrypted before finalize (ciphertext + nonce, not plaintext)',
+      typeof a.p_access_ct === 'string' && a.p_access_ct.length > 0 &&
+      a.p_access_ct !== 'fixture-access-token' &&
+      typeof a.p_refresh_ct === 'string' && a.p_refresh_ct !== 'fixture-refresh-token' &&
+      typeof a.p_access_nonce === 'string' && typeof a.p_refresh_nonce === 'string',
+      'token ciphertext looks wrong')
+    check('a stored result redirects to the CONNECTED settings page',
+      r.status === 303 && String(r.location).endsWith('/settings?outlook=connected'),
+      `${r.status} ${r.location}`)
+
+    // ── refusals: each must stop BEFORE the provider ─────────────────────────
+    scenario.stateRow = null
+    r = await post(`${COOKIE}=${state}`)
+    check('unknown state: refused, no token call',
+      seen.tokenCalls === 0 && r.status === 303 && String(r.location).includes('outlook=error'),
+      `tokenCalls=${seen.tokenCalls}`)
+
+    scenario.stateRow = freshRow({ consumed_at: new Date().toISOString() })
+    r = await post(`${COOKIE}=${state}`)
+    check('REPLAY of a consumed state: refused, no token call',
+      seen.tokenCalls === 0 && seen.rpcArgs.length === 0, `tokenCalls=${seen.tokenCalls}`)
+
+    scenario.stateRow = freshRow({ expires_at: new Date(Date.now() - 60_000).toISOString() })
+    r = await post(`${COOKIE}=${state}`)
+    check('expired state: refused, no token call',
+      seen.tokenCalls === 0 && seen.rpcArgs.length === 0, `tokenCalls=${seen.tokenCalls}`)
+
+    // ── failures after redemption ───────────────────────────────────────────
+    scenario.stateRow = freshRow()
+    scenario.tokenStatus = 400
+    r = await post(`${COOKIE}=${state}`)
+    check('failed redemption: no Graph call, no finalize',
+      seen.meCalls === 0 && seen.rpcArgs.length === 0 && String(r.location).includes('outlook=error'),
+      `me=${seen.meCalls} rpc=${seen.rpcArgs.length}`)
+    scenario.tokenStatus = 200
+
+    scenario.grantedScope = 'openid profile email offline_access Mail.Read'
+    r = await post(`${COOKIE}=${state}`)
+    check('User.Read DECLINED by the user: no Graph call, no finalize',
+      seen.meCalls === 0 && seen.rpcArgs.length === 0, `me=${seen.meCalls} rpc=${seen.rpcArgs.length}`)
+    scenario.grantedScope = 'openid profile email offline_access Mail.Read User.Read'
+
+    scenario.meBody = { id: 'a-different-account', mail: MAILBOX }
+    r = await post(`${COOKIE}=${state}`)
+    check('MISMATCHED Graph identity: fails closed, no finalize',
+      seen.rpcArgs.length === 0 && String(r.location).includes('outlook=error'),
+      `rpc=${seen.rpcArgs.length}`)
+
+    scenario.meBody = { id: OID, userPrincipalName: 'NOT-AN-ADDRESS' }
+    r = await post(`${COOKIE}=${state}`)
+    check('unusable mailbox address: no finalize, no invented address',
+      seen.rpcArgs.length === 0, `rpc=${seen.rpcArgs.length}`)
+    scenario.meBody = { id: OID, mail: MAILBOX, userPrincipalName: 'upn@outlook.test' }
+
+    scenario.rpcResult = { result: 'state_consumed' }
+    r = await post(`${COOKIE}=${state}`)
+    check('a NON-stored RPC result is NOT treated as success',
+      r.status === 303 && String(r.location).includes('outlook=error'), String(r.location))
+    scenario.rpcResult = { result: 'stored', connection_id: 'conn-1' }
+
+    // ── the gate still comes first ──────────────────────────────────────────
+    r = await post(null)
+    check('UNBOUND POST still makes zero state, provider and RPC calls',
+      seen.stateQueries === 0 && seen.tokenCalls === 0 && seen.meCalls === 0 && seen.rpcArgs.length === 0,
+      JSON.stringify(seen))
+  } finally {
+    stopHandler()
+    sink.close()
+    fixtures.close()
+  }
+
+  console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed\n`)
+  if (failed > 0) process.exitCode = 1
+}
+
+
+// Entry point last: the helpers above are const-declared and would otherwise
+// be in the temporal dead zone when run() executes.
+if (process.env.FUNNL_EDGE_INTEGRATION !== '1') {
+  skip('opt-in Edge integration test not enabled')
+} else {
+  let ok = true
+  try { execFileSync('docker', ['info'], { stdio: 'ignore' }) } catch { ok = false }
+  if (!ok) skip('Docker daemon not available')
+  else await run()
+}
