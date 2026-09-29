@@ -23,9 +23,13 @@
 //   Entra registration exists, so the real /token, /discovery and /me
 //   responses remain unverified assumptions.
 //
-// The provider endpoints are redirected through the loopback-only fixture seam
-// (OUTLOOK_LOCAL_FIXTURES + a loopback OUTLOOK_FIXTURE_BASE), which cannot be
-// activated in Production.
+// HOW THE FIXTURES ARE INJECTED: through a SEPARATE harness entrypoint
+// (tests/harness/outlook-callback-fixture-entry.ts) that imports the same
+// handler and passes its own endpoint object. The deployable entrypoint
+// (supabase/functions/outlook-oauth-callback/index.ts) passes fixed Microsoft
+// and Graph URLs and reads no endpoint configuration, so there is no branch in
+// deployed code that could redirect the authorization code, the client secret
+// or the Graph access token.
 //
 // OPT-IN:  FUNNL_EDGE_INTEGRATION=1 node tests/outlook-callback-positive-integration.test.js
 
@@ -79,6 +83,14 @@ async function aesEncrypt (plaintext, rawKey) {
   }
 }
 
+async function aesDecrypt (ciphertextB64, nonceB64, rawKey) {
+  const key = await webcrypto.subtle.importKey('raw', rawKey, 'AES-GCM', false, ['decrypt'])
+  const pt = await webcrypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: Buffer.from(nonceB64, 'base64') }, key,
+    Buffer.from(ciphertextB64, 'base64'))
+  return new TextDecoder().decode(pt)
+}
+
 async function makeSigner () {
   const kp = await webcrypto.subtle.generateKey(
     { name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' },
@@ -101,24 +113,27 @@ function stopHandler () {
   try { execFileSync('docker', ['rm', '-f', CONTAINER], { stdio: 'ignore' }) } catch { /* not running */ }
 }
 
-async function startHandler (keyB64) {
+async function startHandler (keyB64, callbackUrl = CALLBACK_URL) {
   stopHandler()
   execFileSync('docker', [
     'run', '--rm', '-d', '--name', CONTAINER,
     '-p', `${HANDLER_PORT}:8000`,
-    '-v', `${join(ROOT, 'supabase', 'functions')}:/app:ro`,
-    '-w', '/app',
+    // Mount the REPO ROOT so the harness entry can import the shared handler.
+    '-v', `${ROOT}:/repo:ro`,
+    '-w', '/repo',
     '-e', `SUPABASE_URL=http://host.docker.internal:${SINK_PORT}`,
     '-e', 'SUPABASE_SERVICE_ROLE_KEY=test-service-role-key',
     '-e', 'OUTLOOK_INTEGRATION_ENABLED=true',
     '-e', `MICROSOFT_CLIENT_ID=${CLIENT_ID}`,
     '-e', 'MICROSOFT_CLIENT_SECRET=test-client-secret',
-    '-e', `OUTLOOK_OAUTH_CALLBACK_URL=${CALLBACK_URL}`,
+    '-e', `OUTLOOK_OAUTH_CALLBACK_URL=${callbackUrl}`,
     '-e', `MICROSOFT_TOKEN_ENCRYPTION_KEY_V1=${keyB64}`,
-    '-e', 'OUTLOOK_LOCAL_FIXTURES=true',
-    '-e', `OUTLOOK_FIXTURE_BASE=http://host.docker.internal:${FIXTURE_PORT}`,
+    '-e', `FIXTURE_BASE=http://host.docker.internal:${FIXTURE_PORT}`,
     'denoland/deno:alpine',
-    'run', '--allow-net', '--allow-env', '--allow-read', 'outlook-oauth-callback/index.ts',
+    // --no-lock: the repo is mounted read-only, so Deno must not try to write
+    // a lockfile into it.
+    'run', '--no-lock', '--allow-net', '--allow-env', '--allow-read',
+    'tests/harness/outlook-callback-fixture-entry.ts',
   ], { stdio: 'ignore' })
   for (let i = 0; i < 120; i++) {
     try {
@@ -264,12 +279,25 @@ async function run () {
     check('finalize receives PROVIDER-GRANTED scopes, not what we asked for',
       Array.isArray(a.p_scopes) && a.p_scopes.includes('Mail.Read') && a.p_scopes.includes('User.Read'),
       JSON.stringify(a.p_scopes))
-    check('tokens are encrypted before finalize (ciphertext + nonce, not plaintext)',
-      typeof a.p_access_ct === 'string' && a.p_access_ct.length > 0 &&
+    // A real round trip, not merely 'the ciphertext differs from the plaintext'.
+    // Decrypt what the handler sent, with the same key it was given, and
+    // compare against the fixture tokens.
+    let decAccess = null, decRefresh = null
+    try {
+      decAccess = await aesDecrypt(a.p_access_ct, a.p_access_nonce, rawKey)
+      decRefresh = await aesDecrypt(a.p_refresh_ct, a.p_refresh_nonce, rawKey)
+    } catch (e) { decAccess = 'DECRYPT FAILED: ' + e.message }
+    check('access token DECRYPTS back to the fixture token',
+      decAccess === 'fixture-access-token', String(decAccess).slice(0, 60))
+    check('refresh token DECRYPTS back to the fixture token',
+      decRefresh === 'fixture-refresh-token', String(decRefresh).slice(0, 60))
+    check('the ciphertext is not the plaintext, and a nonce accompanies each',
       a.p_access_ct !== 'fixture-access-token' &&
-      typeof a.p_refresh_ct === 'string' && a.p_refresh_ct !== 'fixture-refresh-token' &&
-      typeof a.p_access_nonce === 'string' && typeof a.p_refresh_nonce === 'string',
-      'token ciphertext looks wrong')
+      a.p_refresh_ct !== 'fixture-refresh-token' &&
+      typeof a.p_access_nonce === 'string' && a.p_access_nonce.length > 0 &&
+      typeof a.p_refresh_nonce === 'string' && a.p_refresh_nonce.length > 0 &&
+      a.p_access_nonce !== a.p_refresh_nonce,
+      'ciphertext/nonce shape wrong')
     check('a stored result redirects to the CONNECTED settings page',
       r.status === 303 && String(r.location).endsWith('/settings?outlook=connected'),
       `${r.status} ${r.location}`)
@@ -323,6 +351,20 @@ async function run () {
     check('a NON-stored RPC result is NOT treated as success',
       r.status === 303 && String(r.location).includes('outlook=error'), String(r.location))
     scenario.rpcResult = { result: 'stored', connection_id: 'conn-1' }
+
+    // ── a wrong but NON-EMPTY callback URI must send no code anywhere ───────
+    // outlook-oauth-start refuses to mint unless the configured callback URL is
+    // the exact branded URI; the callback must apply the same check BEFORE it
+    // forwards a code and a client secret to the token endpoint.
+    scenario.stateRow = freshRow()
+    await startHandler(keyB64, 'https://attacker.example.com/api/outlook-oauth-callback')
+    r = await post(`${COOKIE}=${state}`)
+    check('WRONG callback URI config: state looked up but NO token request',
+      seen.tokenCalls === 0 && seen.meCalls === 0 && seen.rpcArgs.length === 0,
+      `token=${seen.tokenCalls} me=${seen.meCalls} rpc=${seen.rpcArgs.length}`)
+    check('WRONG callback URI config: redirects to the error page',
+      r.status === 303 && String(r.location).includes('outlook=error'), String(r.location))
+    await startHandler(keyB64)
 
     // ── the gate still comes first ──────────────────────────────────────────
     r = await post(null)

@@ -7,7 +7,10 @@
 // NEVER LOGGED: the code, the verifier, the client secret, the returned tokens,
 // or any provider response body. Failures surface as controlled reason codes.
 
+import { readJsonBounded, MAX_PROVIDER_BODY_BYTES } from './boundedJson.js'
+
 export const TOKEN_TIMEOUT_MS = 15_000
+export const MAX_TOKEN_RESPONSE_BYTES = MAX_PROVIDER_BODY_BYTES
 
 /** Space-delimited granted scopes, exactly as the provider returned them. */
 export function parseGrantedScopes (scopeString) {
@@ -56,15 +59,15 @@ export function validateTokenResponseShape (body) {
 }
 
 /**
- * Redeem the code. `fetchImpl` and `tokenUrl` are injected for tests and the
- * loopback-only local harness.
+ * Redeem the code. `fetchImpl` and `tokenUrl` are parameters: the deployed
+ * entrypoint passes fixed Microsoft URLs, and only the test harness passes others.
  *
  * Returns { ok, accessToken, refreshToken, idToken, grantedScopes, expiresAt }
  * or { ok: false, reason }.
  */
 export async function redeemAuthorizationCode ({
   code, codeVerifier, clientId, clientSecret, redirectUri,
-  fetchImpl = globalThis.fetch, tokenUrl, timeoutMs = TOKEN_TIMEOUT_MS, now = () => Date.now(),
+  fetchImpl = globalThis.fetch, tokenUrl, timeoutMs = TOKEN_TIMEOUT_MS, now = () => Date.now(), maxBytes = MAX_TOKEN_RESPONSE_BYTES,
 }) {
   for (const [v, reason] of [
     [code, 'no_code'], [codeVerifier, 'no_verifier'], [clientId, 'no_client_id'],
@@ -82,46 +85,51 @@ export async function redeemAuthorizationCode ({
     code_verifier: codeVerifier,
   })
 
+  // ONE deadline covering the request AND the body read. fetch resolves when
+  // the HEADERS arrive, so clearing the timer here would leave a stalled or
+  // endless body unbounded.
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), timeoutMs)
-  let res
   try {
-    res = await fetchImpl(tokenUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
-      body: form.toString(),
-      signal: ctrl.signal,
-    })
-  } catch {
-    return { ok: false, reason: 'token_endpoint_unreachable' }
+    let res
+    try {
+      res = await fetchImpl(tokenUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
+        body: form.toString(),
+        signal: ctrl.signal,
+      })
+    } catch {
+      return { ok: false, reason: 'token_endpoint_unreachable' }
+    }
+
+    if (!res || typeof res.status !== 'number') return { ok: false, reason: 'token_response_malformed' }
+    if (res.status !== 200) {
+      // The provider body can contain the code and diagnostic detail: not logged,
+      // not returned. Only the status class is kept.
+      return { ok: false, reason: res.status >= 500 ? 'token_endpoint_server_error' : 'token_exchange_rejected' }
+    }
+
+    const read = await readJsonBounded(res, maxBytes)
+    if (!read.ok) {
+      return { ok: false, reason: read.reason === 'response_malformed'
+        ? 'token_response_malformed' : read.reason }
+    }
+    const body = read.value
+
+    const shape = validateTokenResponseShape(body)
+    if (!shape.ok) return { ok: false, reason: shape.reason }
+
+    const granted = parseGrantedScopes(body.scope)
+    return {
+      ok: true,
+      accessToken: body.access_token,
+      refreshToken: body.refresh_token,
+      idToken: body.id_token,
+      grantedScopes: granted,
+      expiresAt: new Date(now() + shape.expiresIn * 1000).toISOString(),
+    }
   } finally {
     clearTimeout(timer)
-  }
-
-  if (!res || typeof res.status !== 'number') return { ok: false, reason: 'token_response_malformed' }
-  if (res.status !== 200) {
-    // The provider body can contain the code and diagnostic detail: not logged,
-    // not returned. Only the status class is kept.
-    return { ok: false, reason: res.status >= 500 ? 'token_endpoint_server_error' : 'token_exchange_rejected' }
-  }
-
-  let body
-  try {
-    body = await res.json()
-  } catch {
-    return { ok: false, reason: 'token_response_malformed' }
-  }
-
-  const shape = validateTokenResponseShape(body)
-  if (!shape.ok) return { ok: false, reason: shape.reason }
-
-  const granted = parseGrantedScopes(body.scope)
-  return {
-    ok: true,
-    accessToken: body.access_token,
-    refreshToken: body.refresh_token,
-    idToken: body.id_token,
-    grantedScopes: granted,
-    expiresAt: new Date(now() + shape.expiresIn * 1000).toISOString(),
   }
 }

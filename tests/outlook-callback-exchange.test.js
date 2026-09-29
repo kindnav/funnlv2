@@ -21,10 +21,7 @@ import {
   pickMailboxAddress, resolveMailboxFromGraphBody, fetchMailboxAddress,
   GRAPH_ME_SELECT,
 } from '../supabase/functions/shared/microsoftGraphMe.js'
-import {
-  isLoopbackBase, resolveMicrosoftEndpoints, resolveJwksUrl,
-} from '../supabase/functions/shared/microsoftEndpoints.js'
-import { MS_TOKEN_ENDPOINT } from '../supabase/functions/shared/microsoftOauthHelpers.js'
+import { readJsonBounded, MAX_PROVIDER_BODY_BYTES } from '../supabase/functions/shared/boundedJson.js'
 
 let passed = 0, failed = 0
 const pending = []
@@ -377,51 +374,111 @@ test('an unreachable or malformed Graph is a controlled failure', async () => {
   assert.strictEqual(c.reason, 'no_access_token')
 })
 
-console.log('\nendpoint seam is loopback-only')
+console.log('')
+console.log('response bodies are bounded in time and size')
 
-test('production endpoints are used when the fixture flag is unset', () => {
-  const e = resolveMicrosoftEndpoints(() => undefined)
-  assert.strictEqual(e.tokenUrl, MS_TOKEN_ENDPOINT)
-  assert.strictEqual(e.usingFixtures, false)
+// A Response whose HEADERS arrive immediately and whose BODY never completes.
+// This is precisely the case the earlier code could not survive: it cleared the
+// AbortController timer as soon as fetch resolved, and fetch resolves on headers.
+function stallingResponse (signal) {
+  const body = new ReadableStream({
+    start (controller) {
+      controller.enqueue(new TextEncoder().encode('{'))
+      signal?.addEventListener('abort', () => {
+        try {
+          controller.error(Object.assign(new Error('aborted'), { name: 'AbortError' }))
+        } catch { /* already errored */ }
+      })
+    },
+  })
+  return new Response(body, { status: 200, headers: { 'Content-Type': 'application/json' } })
+}
+
+function oversizedResponse (bytes) {
+  const chunk = new TextEncoder().encode('x'.repeat(64 * 1024))
+  let sent = 0
+  const body = new ReadableStream({
+    pull (controller) {
+      if (sent >= bytes) { controller.close(); return }
+      controller.enqueue(chunk)
+      sent += chunk.byteLength
+    },
+  })
+  return new Response(body, { status: 200, headers: { 'Content-Type': 'application/json' } })
+}
+
+test('a STALLED body hits the deadline instead of hanging (token endpoint)', async () => {
+  const started = Date.now()
+  const r = await redeemAuthorizationCode({
+    code: 'c', codeVerifier: 'v', clientId: 'i', clientSecret: 's',
+    redirectUri: 'https://www.getfunnl.com/api/outlook-oauth-callback',
+    tokenUrl: 'https://t.invalid', timeoutMs: 400,
+    fetchImpl: async (_u, init) => stallingResponse(init.signal),
+  })
+  assert.strictEqual(r.ok, false)
+  assert.strictEqual(r.reason, 'response_body_timeout')
+  assert.ok(Date.now() - started < 8000, 'must not hang past the deadline')
 })
 
-test('a NON-loopback override is ignored even with the flag on', () => {
-  const env = (k) => ({
-    OUTLOOK_LOCAL_FIXTURES: 'true',
-    OUTLOOK_FIXTURE_BASE: 'https://attacker.example.com',
-  })[k]
-  const e = resolveMicrosoftEndpoints(env)
-  assert.strictEqual(e.usingFixtures, false, 'a public host must never be honoured')
-  assert.strictEqual(e.tokenUrl, MS_TOKEN_ENDPOINT)
+test('a STALLED body hits the deadline instead of hanging (Graph /me)', async () => {
+  const r = await fetchMailboxAddress({
+    accessToken: 'at', oid: 'o', meUrl: 'https://g.invalid/me', timeoutMs: 400,
+    fetchImpl: async (_u, init) => stallingResponse(init.signal),
+  })
+  assert.strictEqual(r.ok, false)
+  assert.strictEqual(r.reason, 'response_body_timeout')
 })
 
-test('the override needs BOTH the flag and a loopback base', () => {
-  const onlyBase = resolveMicrosoftEndpoints((k) =>
-    ({ OUTLOOK_FIXTURE_BASE: 'http://127.0.0.1:9000' })[k])
-  assert.strictEqual(onlyBase.usingFixtures, false)
-  const both = resolveMicrosoftEndpoints((k) => ({
-    OUTLOOK_LOCAL_FIXTURES: 'true', OUTLOOK_FIXTURE_BASE: 'http://127.0.0.1:9000',
-  })[k])
-  assert.strictEqual(both.usingFixtures, true)
-  assert.strictEqual(both.tokenUrl, 'http://127.0.0.1:9000/token')
-  assert.strictEqual(both.graphMeUrl, 'http://127.0.0.1:9000/me')
+test('an OVERSIZED body is refused rather than buffered (token endpoint)', async () => {
+  const r = await redeemAuthorizationCode({
+    code: 'c', codeVerifier: 'v', clientId: 'i', clientSecret: 's',
+    redirectUri: 'https://www.getfunnl.com/api/outlook-oauth-callback',
+    tokenUrl: 'https://t.invalid', maxBytes: 128 * 1024,
+    fetchImpl: async () => oversizedResponse(1024 * 1024),
+  })
+  assert.strictEqual(r.reason, 'response_too_large')
 })
 
-test('loopback detection accepts only real loopback hosts', () => {
-  for (const good of ['http://127.0.0.1:1', 'http://localhost:2', 'http://[::1]:3',
-    'http://host.docker.internal:4']) {
-    assert.ok(isLoopbackBase(good), good)
+test('an OVERSIZED body is refused rather than buffered (Graph /me)', async () => {
+  const r = await fetchMailboxAddress({
+    accessToken: 'at', oid: 'o', meUrl: 'https://g.invalid/me', maxBytes: 128 * 1024,
+    fetchImpl: async () => oversizedResponse(1024 * 1024),
+  })
+  assert.strictEqual(r.reason, 'response_too_large')
+})
+
+test('a declared content-length over the ceiling is refused before buffering', async () => {
+  // A controlled double, so 'was a byte read?' is observable. A real Response
+  // may touch its stream during construction, which would mask the point.
+  let readerRequested = false
+  const res = {
+    status: 200,
+    headers: { get: (k) => (k.toLowerCase() === 'content-length' ? String(10 * 1024 * 1024) : null) },
+    body: { getReader: () => { readerRequested = true; return { read: async () => ({ done: true }) } } },
   }
-  for (const bad of ['https://example.com', 'http://127.0.0.1.evil.com',
-    'ftp://127.0.0.1', 'file:///etc', '', null, 'not a url']) {
-    assert.ok(!isLoopbackBase(bad), String(bad))
-  }
+  const r = await readJsonBounded(res, 1024)
+  assert.strictEqual(r.ok, false)
+  assert.strictEqual(r.reason, 'response_too_large')
+  assert.strictEqual(readerRequested, false, 'must refuse before reading a byte')
+})
+test('a well-formed bounded body still parses', async () => {
+  const res = new Response(JSON.stringify({ a: 1 }), {
+    status: 200, headers: { 'Content-Type': 'application/json' },
+  })
+  const r = await readJsonBounded(res, MAX_PROVIDER_BODY_BYTES)
+  assert.deepStrictEqual(r, { ok: true, value: { a: 1 } })
 })
 
-test('the tenant JWKS URL is used unchanged in production', () => {
-  const prod = resolveMicrosoftEndpoints(() => undefined)
-  const tenantUrl = jwksUrlForTenant(WORK)
-  assert.strictEqual(resolveJwksUrl(prod, tenantUrl), tenantUrl)
+test('malformed JSON inside the ceiling is a controlled failure', async () => {
+  const res = new Response('{not json', { status: 200 })
+  const r = await readJsonBounded(res, MAX_PROVIDER_BODY_BYTES)
+  assert.strictEqual(r.reason, 'response_malformed')
+})
+
+test('no provider body text ever reaches a returned reason', async () => {
+  const res = new Response('{"secret":"LEAKED-CODE"', { status: 200 })
+  const r = await readJsonBounded(res, MAX_PROVIDER_BODY_BYTES)
+  assert.ok(!JSON.stringify(r).includes('LEAKED-CODE'))
 })
 
 async function finish () {

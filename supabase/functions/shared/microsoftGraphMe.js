@@ -17,10 +17,12 @@
 //   * No provider response body is ever logged.
 
 import { displayAddressFromClaims } from './microsoftOauthHelpers.js'
+import { readJsonBounded, MAX_PROVIDER_BODY_BYTES } from './boundedJson.js'
 
 export const GRAPH_ME_URL = 'https://graph.microsoft.com/v1.0/me'
 export const GRAPH_ME_SELECT = 'id,mail,userPrincipalName'
 export const GRAPH_TIMEOUT_MS = 10_000
+export const MAX_GRAPH_RESPONSE_BYTES = MAX_PROVIDER_BODY_BYTES
 
 function mailShaped (v) {
   if (typeof v !== 'string') return null
@@ -66,39 +68,42 @@ export function resolveMailboxFromGraphBody (body, oid) {
  */
 export async function fetchMailboxAddress ({
   accessToken, oid, fetchImpl = globalThis.fetch, meUrl = GRAPH_ME_URL,
-  timeoutMs = GRAPH_TIMEOUT_MS,
+  timeoutMs = GRAPH_TIMEOUT_MS, maxBytes = MAX_GRAPH_RESPONSE_BYTES,
 }) {
   if (typeof accessToken !== 'string' || accessToken.length === 0) {
     return { ok: false, reason: 'no_access_token' }
   }
   const url = `${meUrl}?$select=${encodeURIComponent(GRAPH_ME_SELECT)}`
+  // ONE deadline covering the request AND the body read. fetch resolves on
+  // HEADERS, so clearing the timer there would leave a stalled body unbounded.
   const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(), timeoutMs)
-  let res
   try {
-    res = await fetchImpl(url, {
-      method: 'GET',
-      headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
-      signal: ctrl.signal,
-    })
-  } catch {
-    return { ok: false, reason: 'graph_me_unreachable' }
+    let res
+    try {
+      res = await fetchImpl(url, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
+        signal: ctrl.signal,
+      })
+    } catch {
+      return { ok: false, reason: 'graph_me_unreachable' }
+    }
+    if (!res || typeof res.status !== 'number') return { ok: false, reason: 'graph_me_malformed' }
+    if (res.status === 401 || res.status === 403) {
+      // Most likely User.Read was not actually granted.
+      return { ok: false, reason: 'graph_me_forbidden' }
+    }
+    if (res.status !== 200) return { ok: false, reason: 'graph_me_http_error' }
+    const read = await readJsonBounded(res, maxBytes)
+    if (!read.ok) {
+      return { ok: false, reason: read.reason === 'response_malformed'
+        ? 'graph_me_malformed' : read.reason }
+    }
+    return resolveMailboxFromGraphBody(read.value, oid)
   } finally {
     clearTimeout(timer)
   }
-  if (!res || typeof res.status !== 'number') return { ok: false, reason: 'graph_me_malformed' }
-  if (res.status === 401 || res.status === 403) {
-    // Most likely User.Read was not actually granted.
-    return { ok: false, reason: 'graph_me_forbidden' }
-  }
-  if (res.status !== 200) return { ok: false, reason: 'graph_me_http_error' }
-  let body
-  try {
-    body = await res.json()
-  } catch {
-    return { ok: false, reason: 'graph_me_malformed' }
-  }
-  return resolveMailboxFromGraphBody(body, oid)
 }
 
 /** Belt and braces: the id_token hint must not override the Graph answer. */
