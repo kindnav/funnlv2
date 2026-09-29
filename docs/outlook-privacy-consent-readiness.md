@@ -1,12 +1,25 @@
 # Outlook privacy and consent — human-review readiness packet
 
 **Status: DRAFT FOR OWNER/LEGAL REVIEW. Nothing in this packet is published, deployed or
-configured.** The Outlook integration does not exist: there is no Edge Function, OAuth flow,
-worker, UI, secret, feature flag, scheduler or Entra registration, and every Outlook table in
-Production holds zero rows. The public Privacy Policy date is the owner-approved **September 27, 2026** and
-must not change until the publication commit.
+configured.**
 
-Prepared against merged `main` `0ee55eb33ba54ba4527e3a1c2da4fbe2eb332941` (PR #50).
+**What exists where — code in a Draft branch is not code in Production.**
+
+| | In the repository | Deployed to Production |
+|---|---|---|
+| Outlook schema (`microsoft_connections`, `microsoft_tokens`, `microsoft_oauth_states`, `outlook_sync_state`) | yes, on `main` | **yes, applied** (`20260921000000`, `20260922175616`) — all tables hold **zero rows** |
+| `User.Read` scope migration `20260928000000` | yes, in **Draft PR #54 only** | **no — unapplied** |
+| `outlook-oauth-start` / `outlook-oauth-callback` Edge Functions | yes, in **Draft PR #54 only** | **no — never deployed**, and dormant behind `OUTLOOK_INTEGRATION_ENABLED` (unset) |
+| Worker, UI, scheduler | no | no |
+| Entra registration, client secret, token-encryption key, `OUTLOOK_DISCLOSURE_VERSION` | no | no |
+
+So: Outlook OAuth **code now exists in an unmerged Draft**, but no Outlook OAuth flow has ever
+run, no Entra application exists to run it against, no consent has been collected, and every
+Outlook table in Production holds zero rows. The public Privacy Policy date is the
+owner-approved **September 27, 2026** and must not change until the publication commit.
+
+Prepared against merged `main` `0ee55eb33ba54ba4527e3a1c2da4fbe2eb332941` (PR #50); updated for
+Draft PR #54 (Outlook OAuth binding + `User.Read`), which is **unmerged and undeployed**.
 
 ---
 
@@ -28,12 +41,31 @@ Shown **before** the Microsoft authorization redirect and before any OAuth state
 Affirmative action required; no pre-selected checkbox, no implied consent, no "continue means
 you agree".
 
+> **STATUS: NOT PUBLISHED.** The text below is a draft for review. No Outlook
+> disclosure has been published to users, `OUTLOOK_DISCLOSURE_VERSION` is not
+> configured in any environment, and no consent has ever been collected.
+> `outlook-oauth-start` refuses to mint a state while that variable is unset.
+
 > ### Connect Outlook?
 >
 > Connecting Outlook is **optional**. Funnl works fully without it.
 >
-> **What you would be granting.** One Microsoft permission: **Mail.Read** ("Read user mail").
-> It is read-only — Funnl can never send, reply, delete, move or change anything in your mailbox.
+> **What you would be granting.** Two Microsoft permissions, both read-only:
+> **Mail.Read** ("Read user mail") and **User.Read** ("Sign you in and read your profile").
+> Funnl can never send, reply, delete, move or change anything in your mailbox.
+> **User.Read** is what lets Funnl identify the mailbox you connect, so it can show you which
+> account is linked. Microsoft describes this permission as: *"Allows the app to read the
+> signed-in user's full profile. It also allows the app to read the signed-in user's basic
+> company information."* It is the least-privileged permission Microsoft offers for reading
+> your own profile, it needs no administrator approval, and it never reaches anyone else's
+> profile. On a work or school account it does permit reading basic information about your
+> organization.
+>
+> **What Funnl would actually read with it:** a single request for three fields — your
+> account id, and your mail address / user principal name — used only to record and display
+> which mailbox is connected. Funnl does not read your organization's directory, your
+> colleagues, your manager, or your group memberships. Note the distinction: the permission
+> *permits* more than Funnl *requests*, which is why it is described here in both terms.
 > Please note this permission lets an app read your mail generally, including message bodies and
 > attachments. Funnl asks for much less than that, as described below, but the permission itself
 > is mailbox-wide.
@@ -93,8 +125,8 @@ These are not proposals; migration `20260921000000` already enforces them.
 | The state stores evidence, not prose | `microsoft_oauth_states` holds a state hash, user, timestamps and policy version — there is no column for disclosure text |
 | Single-use, locked state | finalization selects the state `FOR UPDATE` and consumes it; a second use cannot succeed |
 | Ownership is derived, not supplied | the RPC takes `p_expected_user_id` and matches it against the state's own `user_id` |
-| Active connection implies the permission | `microsoft_connections_active_requires_mail_read` — status `active` requires `Mail.Read` in `scopes` |
-| Only the canonical permissions may be stored | `microsoft_connections_scopes_allowlist` — `scopes` must be a subset of `Mail.Read, offline_access, openid, email, profile` |
+| Active connection implies the permissions | `microsoft_connections_active_requires_mail_read` — status `active` requires **both** `Mail.Read` and `User.Read` in `scopes` (tightened by migration `20260928000000`) |
+| Only the canonical permissions may be stored | `microsoft_connections_scopes_allowlist` — `scopes` must be a subset of `Mail.Read, User.Read, offline_access, openid, email, profile` (extended by migration `20260928000000`) |
 | Consent version is always present | `consent_policy_version` is `NOT NULL`, 1–40 chars, no control characters or whitespace |
 | Re-authorization needs fresh consent | a new connection requires a new state row, which requires a new `consented_at` / `consent_policy_version` |
 
@@ -108,7 +140,7 @@ no implemented callback yet to define the refusal path. Decide this when the cal
 
 | # | Public claim | Evidence |
 |---|---|---|
-| 1 | Outlook is not available / not enabled / not in pilot | No Edge Function (12 deployed, none Outlook), no `config.toml` section, no OAuth code, no UI import, no secret, no flag; all Outlook tables zero rows |
+| 1 | Outlook is not available / not enabled / not in pilot | **No Outlook Edge Function is deployed** (12 deployed, none Outlook). The `outlook-oauth-start` / `outlook-oauth-callback` sources and their `config.toml` sections exist in **Draft PR #54 only**, are unmerged and undeployed, and are inert unless `OUTLOOK_INTEGRATION_ENABLED` is exactly `true` (unset everywhere). No UI import, no Entra app, no secret, no flag; all Outlook tables zero rows |
 | 2 | Delegated `Mail.Read`, read-only, user-authorized | [Graph permissions reference](https://learn.microsoft.com/en-us/graph/permissions-reference) — "Read user mail", "Allows the app to read email in user mailboxes", admin consent **not** required; `GRAPH_MAIL_READ_SCOPE = 'Mail.Read'` in `outlookGraphTransport.js`; schema `microsoft_connections_active_requires_mail_read` |
 | 3 | Mail.Read is mailbox-wide and would technically permit bodies/attachments | Same reference — Mail.ReadBasic is the variant that *excludes* body and attachments; migration comment: "$select minimization in the worker never narrows the authority Mail.Read grants; the policy discloses it" |
 | 4 | Inbox and Sent Items only | `GRAPH_FOLDERS = ['inbox','sentitems']`; schema `oss_folder_check` |
@@ -139,7 +171,7 @@ no implemented callback yet to define the refusal path. Decide this when the cal
 | Not claimed | Reason |
 |---|---|
 | A Funnl-side "context deleted after 30 days" promise | The schema **caps** `context_expires_at` at `created_at + 30 days`, but `expire_pending_outlook_context` is **unscheduled** — `pg_cron` is not installed, there is no `cron` schema, and no migration schedules it. Nothing currently erases expired context. Promising a schedule would be false. **Owner decision + implementation required.** |
-| "Your tokens are encrypted" as present tense | No OAuth flow exists, so no token exists. The schema would store them encrypted; the policy says "would be". Token encryption is a **launch requirement**, below. |
+| "Your tokens are encrypted" as present tense | No OAuth flow has ever RUN (the Draft PR #54 code is undeployed and dormant, and no Entra app exists), so no token exists. The schema would store them encrypted; the policy says "would be". Token encryption is a **launch requirement**, below. |
 | "Funnl employees never read your email" | Too absolute. The drafted wording allows support-with-permission, security investigation, and legal requirement — and separately discloses that Anthropic runs its own safety systems and may review flagged content under their policy. |
 | A specific history/lookback window | The worker is unbuilt; no lookback is implemented. |
 | That the Microsoft consent screen shows Funnl's Privacy/Terms links | The [consent experience](https://learn.microsoft.com/en-us/entra/identity-platform/application-consent-experience) documents the prompt's building blocks (publisher, verification badge, permissions, report link) and does not confirm Terms/Privacy links appear there. Confirm at registration. |

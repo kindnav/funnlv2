@@ -19,6 +19,14 @@
       "destination": "https://jzybxhvgnksrwxfivdwt.supabase.co/functions/v1/gmail-oauth-start"
     },
     {
+      "source": "/api/outlook-oauth-callback",
+      "destination": "https://jzybxhvgnksrwxfivdwt.supabase.co/functions/v1/outlook-oauth-callback"
+    },
+    {
+      "source": "/api/outlook-oauth-start",
+      "destination": "https://jzybxhvgnksrwxfivdwt.supabase.co/functions/v1/outlook-oauth-start"
+    },
+    {
       "source": "/(.*)",
       "destination": "/index.html"
     }
