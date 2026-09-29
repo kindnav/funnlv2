@@ -301,7 +301,7 @@ test('nothing is tracked for a refusal, a failure, or an already-gone connection
 console.log('\nthe copy matches what the database actually does')
 
 test('every consequence is labelled with a verified effect', () => {
-  const allowed = ['deleted', 'emptied', 'kept', 'upstream']
+  const allowed = ['deleted', 'emptied', 'kept', 'in_flight', 'upstream']
   assert.ok(DISCONNECT_CONSEQUENCES.length >= 4, 'the confirmation must be specific')
   for (const c of DISCONNECT_CONSEQUENCES) {
     assert.ok(allowed.includes(c.effect), `unreviewed effect: ${c.effect}`)
@@ -342,11 +342,39 @@ test('nothing in the confirmation claims Microsoft revoked anything', () => {
   }
 })
 
-test('the module states the upstream limit where a reader will see it', () => {
+test('the module states BOTH limits where a reader will see them', () => {
   assert.ok(/does not revoke Funnl's grant at Microsoft/i.test(LIB),
     'the file must record that no upstream revocation exists')
-  assert.ok(/No\s*(\/\/)?\s*upstream revocation call exists/i.test(LIB),
+  assert.ok(/No upstream revocation/i.test(LIB) && /call exists in this codebase/i.test(LIB),
     'and that the absence is why the copy points at Microsoft instead')
+  assert.ok(/TWO THINGS IT CANNOT DO/i.test(LIB),
+    'the in-flight limit must be recorded alongside the upstream one')
+  assert.ok(/already holds\s*(\/\/)?\s*an\s*(\/\/)?\s*access token/i.test(LIB),
+    'the file must say why a request already running cannot be stopped')
+})
+
+test('nothing promises that Microsoft access stops instantly', () => {
+  // The RPC deletes stored credentials. It cannot reach into a request that is
+  // already running with a token it fetched earlier, so an absolute promise
+  // would be false.
+  const flight = DISCONNECT_CONSEQUENCES.find((c) => c.effect === 'in_flight')
+  assert.ok(flight, 'the in-flight limit must be shown to the user, not only commented')
+  assert.ok(/already under way/i.test(flight.text))
+  assert.ok(/no way to obtain more/i.test(flight.text),
+    'the bound on that limit must be stated too')
+
+  const all = DISCONNECT_CONSEQUENCES.map((c) => c.text).join(' ') + ' ' +
+    messageForDisconnect('disconnected')
+  for (const absolute of [
+    /immediately (loses|stops|ends)/i,
+    /can no longer (reach|read|access)/i,
+    /access (ends|stops) (immediately|instantly|at once)/i,
+    /revoked instantly/i,
+  ]) {
+    assert.ok(!absolute.test(all), `absolute promise found: ${absolute}`)
+  }
+  // What it may and does say: no credential left, cannot START a new read.
+  assert.ok(/cannot start a new read/i.test(all))
 })
 
 console.log('\nno service-role key, and no table access, from the browser')
@@ -509,6 +537,55 @@ test('the SQL test sweeps every user-scoped table, not a hand-picked list', () =
 test('the SQL test states, rather than assumes, that no upstream grant is revoked', () => {
   assert.ok(/nothing here revokes Funnl's grant at/i.test(SQL_TEST))
   assert.ok(/local teardown only/i.test(SQL_TEST))
+})
+
+console.log('')
+console.log('the verification limits are stated, not glossed over')
+
+test('both SQL runtime tests say plainly that they are NOT end-to-end', () => {
+  for (const f of ['outlook-disconnect-runtime.sql', 'outlook-connection-status-runtime.sql']) {
+    const body = readFileSync(new URL(`../tests/sql/${f}`, import.meta.url), 'utf8')
+    assert.ok(/NOT A BROWSER-TO-DATABASE END-TO-END TEST/i.test(body),
+      `${f} must refuse that description of itself`)
+    assert.ok(/PRIVILEGED `postgres` role/i.test(body),
+      `${f} must say which role it actually runs as`)
+    assert.ok(/no JWT, no PostgREST, no Kong/i.test(body), `${f} must list what is absent`)
+    assert.ok(/outlook-rpc-postgrest\.mjs/.test(body),
+      `${f} must point at the harness that does cover the gap`)
+  }
+})
+
+test('a real HTTP-through-PostgREST harness exists and covers the role gap', () => {
+  const h = readFileSync(new URL('../tests/local/outlook-rpc-postgrest.mjs', import.meta.url), 'utf8')
+  // The two checks the SQL tests structurally cannot make, because a privileged
+  // role bypasses them.
+  assert.ok(/permission denied for table microsoft_connections/.test(h),
+    'it must assert the direct table read is refused for the authenticated role')
+  assert.ok(/authenticated CAN execute both RPCs/.test(h),
+    'and that the grant is what admits the RPC')
+  assert.ok(/PGRST_JWT_SECRET/.test(h) && /Bearer/.test(h),
+    'it must go through a real JWT over HTTP')
+  assert.ok(/service_role cannot execute either RPC/.test(h),
+    'and confirm the least-privilege rule over the wire')
+})
+
+test('that harness also states what it still does NOT cover', () => {
+  const h = readFileSync(new URL('../tests/local/outlook-rpc-postgrest.mjs', import.meta.url), 'utf8')
+  assert.ok(/It is NOT an end-to-end\s*(\/\/)?\s*browser test/i.test(h))
+  assert.ok(/GoTrue/.test(h), 'no real session issuance')
+  assert.ok(/Kong/.test(h), 'no gateway apikey check')
+  assert.ok(/THE ASSUMPTION, STATED/.test(h),
+    "the auth.uid() shim's scope must be declared, not buried")
+})
+
+test('the bootstrap discloses its one shim and what it cannot reproduce', () => {
+  const b = readFileSync(new URL('../tests/sql/_bootstrap-disposable-db.sql', import.meta.url), 'utf8')
+  assert.ok(/email_confirmed_at/.test(b), 'the GoTrue column difference must be named')
+  assert.ok(/WHAT IT DOES NOT AND CANNOT REPRODUCE/i.test(b))
+  assert.ok(/NEVER run against/i.test(b) && /Production/.test(b),
+    'the file must refuse Production in its first line')
+  assert.ok(!/supabase\/migrations/.test(b) || /nothing in supabase\/migrations\/ is edited/i.test(b),
+    'it must state that it edits no migration')
 })
 
 async function finish () {

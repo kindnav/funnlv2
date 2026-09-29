@@ -167,6 +167,103 @@ test('the disclosure names BOTH permissions and what each is for', () => {
     'must distinguish what is permitted from what is requested')
 })
 
+test('the disclosure states how the mail is actually PROCESSED, not only what is read', () => {
+  // An earlier draft described the permissions and the folders and then jumped
+  // straight to "suggestions". It omitted the material processing: that
+  // shortlisted message text is read, and that a minimized extract of it leaves
+  // Funnl for Anthropic. A consent notice that omits the processing is not
+  // informed consent.
+  const text = OUTLOOK_DISCLOSURE_PARAGRAPHS.join(' ')
+  assert.ok(/in two steps/i.test(text), 'the envelope-then-text sequence must be stated')
+  assert.ok(/envelope/i.test(text))
+  assert.ok(/message text/i.test(text), 'reading the body must be stated, not implied')
+  assert.ok(/quoted reply history/i.test(text))
+  assert.ok(/does not store your emails/i.test(text),
+    'and the counterpart: the text is not retained')
+})
+
+test('the disclosure names Anthropic and what it receives', () => {
+  const text = OUTLOOK_DISCLOSURE_PARAGRAPHS.join(' ')
+  assert.ok(/Anthropic/.test(text), 'the processor must be named')
+  assert.ok(/Claude/.test(text))
+  assert.ok(/minimized extract/i.test(text))
+  assert.ok(/USER and CONTACT/.test(text), 'the pseudonymisation must be stated')
+  assert.ok(/Email addresses[^.]*are not included/i.test(text),
+    'and what is withheld must be stated')
+})
+
+test("the disclosure states Anthropic's ACTUAL retention terms, and does not claim ZDR", () => {
+  const text = OUTLOOK_DISCLOSURE_PARAGRAPHS.join(' ')
+  assert.ok(/within 30 days/i.test(text), 'the 30-day window')
+  assert.ok(/does not have a Zero Data Retention agreement/i.test(text),
+    'the absence of ZDR must be explicit')
+  assert.ok(/up to 2 years/i.test(text), 'the flagged-content exception')
+  assert.ok(/up to 7 years/i.test(text), 'the classification-score exception')
+  assert.ok(/does not offer per-record deletion/i.test(text))
+  assert.ok(/cannot promise/i.test(text), 'and the honest consequence for the user')
+  // The claim that would be false:
+  assert.ok(!/Zero Data Retention agreement (is|has been) in place/i.test(text))
+  assert.ok(!/deleted immediately/i.test(text))
+})
+
+test('the short disclosure says no LESS than the published policy on the material facts', () => {
+  // Cross-check, not a restatement: each fact below is asserted by the live
+  // /privacy Outlook section. The short notice shown at the moment of the
+  // decision must carry the same ones.
+  const policy = readFileSync(new URL('../src/pages/PrivacyPage.jsx', import.meta.url), 'utf8')
+  const short = OUTLOOK_DISCLOSURE_PARAGRAPHS.join(' ')
+  const facts = ['Anthropic', '30 days', 'Zero Data Retention', '2 years', '7 years',
+    'Inbox', 'Sent Items', 'Mail.Read']
+  for (const fact of facts) {
+    assert.ok(policy.includes(fact), `the published policy no longer states: ${fact}`)
+    assert.ok(short.includes(fact), `the short disclosure omits a published fact: ${fact}`)
+  }
+})
+
+test('the disclosure is longer than before and still one paragraph per idea', () => {
+  assert.ok(DISCLOSURE_PARAGRAPH_COUNT >= 12,
+    'the processing disclosures added paragraphs; a silent shrink means text was lost')
+  for (const para of OUTLOOK_DISCLOSURE_PARAGRAPHS) {
+    assert.ok(para.length >= 40, `too short to be a paragraph: ${para}`)
+    assert.ok(para.length <= 700, `too long to read at a decision point: ${para.slice(0, 60)}`)
+  }
+})
+
+test('the readiness packet quotes the shipped text VERBATIM, not a paraphrase', () => {
+  // A reviewer approves the wording in the packet. If the packet and the module
+  // can drift, that approval attaches to text no user would see - which is the
+  // same failure the derived version exists to prevent, one level up.
+  const packet = readFileSync(
+    new URL('../docs/outlook-privacy-consent-readiness.md', import.meta.url), 'utf8')
+  for (const para of OUTLOOK_DISCLOSURE_PARAGRAPHS) {
+    assert.ok(packet.includes(para),
+      `the packet does not quote this paragraph verbatim: ${para.slice(0, 70)}...`)
+  }
+  assert.ok(packet.includes(OUTLOOK_DISCLOSURE_VERSION),
+    'the packet must name the version the shipped text produces')
+})
+
+test('the packet does not describe the consent UI as unimplemented', () => {
+  const packet = readFileSync(
+    new URL('../docs/outlook-privacy-consent-readiness.md', import.meta.url), 'utf8')
+  // It IS implemented, in a Draft branch, and unreachable because a flag is off.
+  // Those are three different facts and the packet has to keep them apart.
+  assert.ok(!/just-in-time consent copy[^.]*\(not implemented\)/i.test(packet))
+  assert.ok(/It \*\*is implemented\*\*/.test(packet),
+    'the packet must say the card exists')
+  assert.ok(/VITE_OUTLOOK_CONNECTION_ENABLED/.test(packet),
+    'and say what makes it unreachable')
+})
+
+test('the packet does not call the published policy unpublished', () => {
+  const packet = readFileSync(
+    new URL('../docs/outlook-privacy-consent-readiness.md', import.meta.url), 'utf8')
+  assert.ok(/\*\*YES, live now\*\*/.test(packet),
+    'the live conditional /privacy section must be marked published')
+  assert.ok(!/conditional Outlook section drafted into[^.]*\(not published\)/i.test(packet))
+  assert.ok(/Published\?/.test(packet), 'a published-or-not column must exist')
+})
+
 test('the disclosure states review-before-save, not automatic saving', () => {
   const text = OUTLOOK_DISCLOSURE_PARAGRAPHS.join(' ')
   assert.ok(/until you review it/i.test(text))

@@ -1,5 +1,38 @@
 -- Runtime verification for the Outlook content-draft schema primitives (PR-A).
 --
+-- ⚠ TWO REASONS THIS FILE DOES NOT CURRENTLY RUN GREEN, both observed rather
+-- than inferred. Recorded here so a failure is not mistaken for a regression.
+--
+-- 1. IT PINS THE OLD SCOPE CONTRACT. This file requires Mail.Read and lists
+--    User.Read among the FORBIDDEN scopes. Draft PR #54's forward migration
+--    20260928000000 deliberately reverses the second half: it admits User.Read
+--    and makes an active connection require BOTH, because Graph GET /me cannot
+--    be called without it. Observed on a disposable database with all 22
+--    migrations applied: the first finalize_microsoft_connection returns
+--    {"result": "missing_user_read"} and the run stops there. That is the
+--    contract change working, not a schema regression.
+--
+-- 2. IT NEEDS A FULL LOCAL SUPABASE STACK, NOT A BARE psql SESSION. Its RLS
+--    visibility assertions assume the role context `supabase db reset` provides.
+--    Observed on a disposable database with 20260928000000 and 20260929000000
+--    HELD BACK, so the scope contract matched Production: it then gets past the
+--    finalization and fails later at "U1 sees 0 new-contact candidates
+--    (expected own 4)", because a bare `psql -U postgres` session is the table
+--    owner and does not read through RLS as `authenticated` would.
+--
+-- So it is NOT accurate to say this file passes against the Production schema:
+-- that was not demonstrated, and reason 2 stands in the way independently of
+-- reason 1. What has been demonstrated is only which failure each configuration
+-- produces.
+--
+-- RECONCILING IT IS A PREREQUISITE FOR MERGING DRAFT PR #54, where the contract
+-- changed. Deliberately not attempted here: reason 1 alone spans ~23 fixture and
+-- exact-array assertion sites across several DO blocks, and rewriting assertions
+-- owned by another slice mid-review risks weakening them silently. The forward
+-- migration's behaviour is covered meanwhile by
+-- tests/sql/outlook-user-read-scope-runtime.sql, which #54 added for exactly this
+-- purpose and which passes on the full 22-migration stack.
+--
 -- RUN ONLY AGAINST A DISPOSABLE LOCAL SUPABASE STACK (after `supabase db reset`):
 --   docker cp tests/sql/outlook-content-draft-runtime.sql supabase_db_<project>:/tmp/
 --   docker exec supabase_db_<project> psql -U postgres -d postgres -v ON_ERROR_STOP=1 -f /tmp/outlook-content-draft-runtime.sql

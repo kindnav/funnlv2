@@ -45,10 +45,14 @@ import {
 // Nothing here uses a service-role key - the RPC runs as the signed-in user and
 // derives the account from auth.uid().
 
+// One label per verified effect. 'In flight' and 'At Microsoft' are the two
+// limits: the RPC cannot stop a request already holding a token, and it does not
+// withdraw the grant at Microsoft.
 const EFFECT_LABEL = {
   deleted: 'Deleted',
   emptied: 'Emptied',
   kept: 'Kept',
+  in_flight: 'In flight',
   upstream: 'At Microsoft',
 }
 

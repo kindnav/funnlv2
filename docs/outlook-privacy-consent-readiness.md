@@ -1,14 +1,34 @@
 # Outlook privacy and consent — human-review readiness packet
 
-**Status: DRAFT FOR OWNER/LEGAL REVIEW. Nothing in this packet is published, deployed or
-configured.**
+**Status: MIXED, and the distinction is the point of this section.** One artefact is
+already PUBLISHED; everything else in this packet is a draft, unapproved and not
+configured. Read the four-row table under "WHAT IS PUBLISHED AND WHAT IS NOT" before
+quoting anything from here.
+
+Artefacts B, C and D in that table are **DRAFT FOR OWNER/LEGAL REVIEW**: unapproved,
+unconfigured, and not published to anyone.
+
+**WHAT IS PUBLISHED AND WHAT IS NOT.** Four different things are easy to confuse.
+
+| | Artefact | Where it lives | Published? | Approved? |
+|---|---|---|---|---|
+| **A** | The conditional Outlook section of the Privacy Policy | `src/pages/PrivacyPage.jsx`, **live at `/privacy`** | **YES, live now**, dated September 27, 2026 | yes, owner-approved |
+| **B** | Revised permission wording (adds `User.Read`) | **this document only** | no | no |
+| **C** | The just-in-time consent disclosure shown before the redirect | `src/lib/outlookDisclosure.js`, **Draft PRs #56 / #57 only** | no | no |
+| **D** | The Outlook code itself: Edge Functions, Settings UI, disconnect, two forward migrations | **Draft PRs #54-#57 only**, unmerged | n/a | n/a |
+
+A is a live public promise and nothing in these branches changes it. B and C are drafts in
+this repository. D is code that exists in Git and nowhere else: no Outlook Edge Function is
+deployed, no migration from the stack is applied, both flags are off, no Entra application
+exists, and every Outlook table in Production holds zero rows. "It exists in a Draft branch"
+and "it exists in Production" are different claims throughout this document.
 
 **LAUNCH GATE: DISCONNECT NOW EXISTS, AND IS VERIFIED AT THE DATABASE LAYER.**
 
 Draft PR #57 adds the disconnect path this gate required: a connected-status display,
 a two-step disconnect control in Settings, and a read path for the status. The removal
 behaviour was verified against a real Postgres rather than asserted, by
-`tests/sql/outlook-disconnect-runtime.sql`. Both flags remain off.
+`tests/sql/outlook-disconnect-runtime.sql`, and again over real HTTP through real PostgREST by `tests/local/outlook-rpc-postgrest.mjs`. Both flags remain off.
 
 What was required, and what the verification actually found:
 
@@ -60,23 +80,20 @@ ciphertext, nonce, connection id or Microsoft account id. It is **unapplied**.
 Nothing in the stack syncs a mailbox, creates a contact or logs an interaction, and
 no Outlook OAuth flow has ever run against Microsoft.
 
-**THREE SEPARATE CONSENT ARTEFACTS. Only the first is published.**
+**THE ONE DIVERGENCE BETWEEN A AND C, unresolved.** Artefact A is live and tells readers
+Outlook would use *one* delegated permission. Artefacts B, C and D name **two**, because Graph
+`GET /me` — the only way to satisfy `ms_email NOT NULL` — cannot be called without `User.Read`,
+which Microsoft describes as reading the signed-in user's full profile and basic company
+information. Until A is revised to match, or the design changes to avoid `User.Read`, **no
+Outlook consent may be collected.** Nothing in the current branches publishes or alters A.
 
-| # | Artefact | Where it lives | Status | Permissions it names |
-|---|---|---|---|---|
-| 1 | **Conditional Outlook section of the Privacy Policy** | `src/pages/PrivacyPage.jsx`, live at `/privacy` | **PUBLISHED** | **`Mail.Read` only** |
-| 2 | Updated permission wording | this document only | **NOT published** | `Mail.Read` **+ `User.Read`** |
-| 3 | Just-in-time consent disclosure shown before the redirect | `src/lib/outlookDisclosure.js`, **Draft PRs #56 and #57 only** | **DRAFT. Not approved, not deployed** — the UI is behind `VITE_OUTLOOK_CONNECTION_ENABLED` (off) and the server refuses without `OUTLOOK_DISCLOSURE_VERSION` (unset) | `Mail.Read` **+ `User.Read`** |
+On every other material fact — the two-step read, reading shortlisted message text, storing no
+message bodies, sending Anthropic a minimized pseudonymized extract, Anthropic's 30-day
+retention with the 2-year and 7-year exceptions, no Zero Data Retention agreement, no
+per-record deletion, and review-before-save — A and C now say the same thing, and a test
+asserts C does not omit a fact A states.
 
-**DISCREPANCY, unresolved.** Artefact 1 is live and tells readers Outlook would use
-*one* delegated permission. Draft PR #54 requests **two**, because Graph `GET /me` —
-the only way to satisfy `ms_email NOT NULL` — cannot be called without `User.Read`,
-which Microsoft describes as reading the signed-in user's full profile and basic
-company information. Until artefact 1 is revised to match, or the design changes to
-avoid `User.Read`, **no Outlook consent may be collected.** Nothing in the current
-branches publishes or alters artefact 1.
-
-Artefact 3 is what `OUTLOOK_DISCLOSURE_VERSION` identifies. That variable is unset in
+Artefact C is what `OUTLOOK_DISCLOSURE_VERSION` identifies. That variable is unset in
 every environment, and `outlook-oauth-start` refuses to mint a state without it, so no
 consent can be recorded today even by accident. The version string and the text it
 names must be approved **together**: a version sent without its matching displayed
@@ -88,25 +105,37 @@ text would be evidence of nothing.
 |---|---|---|
 | Outlook schema (`microsoft_connections`, `microsoft_tokens`, `microsoft_oauth_states`, `outlook_sync_state`) | yes, on `main` | **yes, applied** (`20260921000000`, `20260922175616`) — all tables hold **zero rows** |
 | `User.Read` scope migration `20260928000000` | yes, in **Draft PR #54 only** | **no — unapplied** |
-| `outlook-oauth-start` / `outlook-oauth-callback` Edge Functions | yes, in **Draft PR #54 only** | **no — never deployed**, and dormant behind `OUTLOOK_INTEGRATION_ENABLED` (unset) |
-| Worker, UI, scheduler | no | no |
+| Connection-status migration `20260929000000` | yes, in **Draft PR #57 only** | **no — unapplied** |
+| `outlook-oauth-start` / `outlook-oauth-callback` Edge Functions | yes: start + binding gate in **Draft PR #54**, token exchange and finalization in **Draft PR #55** | **no — never deployed**, and dormant behind `OUTLOOK_INTEGRATION_ENABLED` (unset) |
+| Settings UI: consent card, connected status, disconnect | yes, in **Draft PRs #56 / #57** — `SettingsPage.jsx` does import the card on those branches | **no** — the import exists in the bundle but the card never mounts: `VITE_OUTLOOK_CONNECTION_ENABLED` is unset, and the predicate requires exactly `'true'` |
+| Mailbox import worker | no | no |
+| Scheduler for the worker or for context expiry | no | no |
 | Entra registration, client secret, token-encryption key, `OUTLOOK_DISCLOSURE_VERSION` | no | no |
 
-So: Outlook OAuth **code now exists in an unmerged Draft**, but no Outlook OAuth flow has ever
-run, no Entra application exists to run it against, no consent has been collected, and every
-Outlook table in Production holds zero rows. The public Privacy Policy date is the
-owner-approved **September 27, 2026** and must not change until the publication commit.
+So: the Outlook OAuth flow, the Settings consent card, connected status and disconnect all
+**exist in unmerged Drafts**, and the Settings card is even imported there. None of it is
+reachable: no Outlook Edge Function has ever been deployed, no Outlook OAuth flow has ever
+run, no Entra application exists to run it against, no consent has ever been collected, both
+build flags are unset, both forward migrations are unapplied, and every Outlook table in
+Production holds zero rows. The public Privacy Policy date is the owner-approved
+**September 27, 2026** and must not change until the publication commit.
 
-Prepared against merged `main` `0ee55eb33ba54ba4527e3a1c2da4fbe2eb332941` (PR #50); updated for
-Draft PR #54 (Outlook OAuth binding + `User.Read`), which is **unmerged and undeployed**.
+Prepared against merged `main` `ef4aa21827fb3675620bb516e0432f39ddb79247`; updated for the
+four-PR Outlook stack #54 (`8f27553`) → #55 (`827414b`) → #56 (`549954c`) → #57 (`20f1b2d`),
+all of which are **unmerged, unapplied and undeployed**.
 
 ---
 
 ## 1. What this packet covers
 
-1. A conditional Outlook section drafted into `src/pages/PrivacyPage.jsx` (not published).
-2. Proposed just-in-time consent copy shown immediately before the Microsoft OAuth state is
-   minted (not implemented).
+1. The conditional Outlook section **already published** at `/privacy` (artefact A) — quoted
+   here for comparison only. **This pass does not change it.**
+2. The just-in-time consent copy shown immediately before the Microsoft OAuth state is minted
+   (artefact C). It **is implemented**, in `src/lib/outlookDisclosure.js` and
+   `src/components/OutlookConnectionCard.jsx` in Draft PRs #56 / #57, and is **unapproved,
+   unconfigured and unreachable**: the card mounts only when
+   `VITE_OUTLOOK_CONNECTION_ENABLED` is exactly `true` (it is unset everywhere) and
+   `outlook-oauth-start` refuses without `OUTLOOK_DISCLOSURE_VERSION` (also unset).
 3. The consent mechanics the applied schema already enforces.
 4. An evidence table mapping every public claim to committed code, the applied migration, or an
    official provider document.
@@ -127,76 +156,51 @@ you agree".
 
 > ### Connect Outlook?
 >
-> Connecting Outlook is **optional**. Funnl works fully without it.
+> Connecting Outlook is optional. Funnl works fully without it.
 >
-> **What you would be granting.** Two Microsoft permissions, both read-only:
-> **Mail.Read** ("Read user mail") and **User.Read** ("Sign you in and read your profile").
-> Funnl can never send, reply, delete, move or change anything in your mailbox.
-> **User.Read** is what lets Funnl identify the mailbox you connect, so it can show you which
-> account is linked. Microsoft describes this permission as: *"Allows the app to read the
-> signed-in user's full profile. It also allows the app to read the signed-in user's basic
-> company information."* It is the least-privileged permission Microsoft offers for reading
-> your own profile, it needs no administrator approval, and it never reaches anyone else's
-> profile. On a work or school account it does permit reading basic information about your
-> organization.
+> You would grant two Microsoft permissions, both read-only. Mail.Read ("Read user mail") lets Funnl read messages in your Inbox and Sent Items. User.Read ("Sign in and read user profile") lets Funnl identify which mailbox you connected.
 >
-> **What Funnl would actually read with it:** a single request for three fields — your
-> account id, and your mail address / user principal name — used only to record and display
-> which mailbox is connected. Funnl does not read your organization's directory, your
-> colleagues, your manager, or your group memberships. Note the distinction: the permission
-> *permits* more than Funnl *requests*, which is why it is described here in both terms.
-> Please note this permission lets an app read your mail generally, including message bodies and
-> attachments. Funnl asks for much less than that, as described below, but the permission itself
-> is mailbox-wide.
+> Microsoft describes User.Read as allowing an app to read the signed-in user’s full profile and basic company information. Funnl asks it for three fields only — your account id, your mail address and your user principal name — and uses them only to record and display which mailbox is connected. The permission permits more than Funnl requests, which is why both are stated here.
 >
-> **What Funnl would read.** Messages in your **Inbox** and **Sent Items** only. First just the
-> envelope — sender, recipients (To and Cc), their names and addresses, subject, sent/received
-> times, the conversation identifier, and whether it is a draft — to decide whether a message is
-> worth reading. Then, only for messages that pass that check, the **message text** (Microsoft's
-> plain-text body, and the version that excludes the quoted reply history) plus five headers that
-> identify automated and bulk mail: `Auto-Submitted`, `Precedence`, `List-Id`, `List-Unsubscribe`,
-> `X-Auto-Response-Suppress`. Those headers are turned into simple yes/no facts and then discarded.
+> Mail.Read is mailbox-wide: it would technically allow reading message bodies and attachments anywhere in your mailbox. Funnl reads only Inbox and Sent Items, and never opens attachments.
 >
-> **What Funnl would never touch.** Attachments or their contents, raw MIME, your Microsoft
-> contacts, calendars or files, shared mailboxes — and it never sends, replies, deletes or
-> modifies mail.
+> Funnl can never send, reply, delete, move or change anything in your mailbox. It does not read your Microsoft contacts, calendars or files, and it does not read your organisation’s directory, your colleagues or your manager.
 >
-> **Funnl does not store your emails.** Message text is held in memory only while a message is
-> processed. Funnl's database cannot store a message body, attachment or header collection.
+> Funnl would read those two folders in two steps. First the envelope of each message — who sent it, who it was addressed to, the subject, the times, which conversation it belongs to and whether it is a draft — to decide whether the message is worth reading at all. Then, only for the messages that pass that check, the message text itself: Microsoft’s plain-text version of the body and the version that leaves out the quoted reply history, plus five headers that identify newsletters, mailing lists and automatic replies. Those five are reduced to yes/no facts and then discarded.
 >
-> **AI.** To turn an exchange into a draft you can edit, Funnl sends **Anthropic (Claude)** a
-> minimized extract: the current message text, an optional signature block, a shortened subject,
-> the direction and date. The two people are labelled only **USER** and **CONTACT** — no email
-> addresses, no domain, no Microsoft identifiers, no tokens, no attachments, no raw headers.
+> Funnl does not store your emails. Message text is held in server memory only while a message is being processed. Funnl’s database has no column that can hold a message body, HTML, raw MIME, an attachment, a preview snippet or a collection of headers.
 >
-> **Anthropic's retention.** Anthropic deletes API inputs and outputs within **30 days**. Funnl
-> does **not** have a Zero Data Retention agreement. If Anthropic's automated systems flag content
-> as violating their Usage Policy, they may keep it for **up to 2 years**, and the related safety
-> classification scores for **up to 7 years**. Anthropic does not train its models on commercial
-> API data by default. Anthropic does not offer per-record deletion to paid API customers, so
-> Funnl cannot promise to have an individual record deleted on request.
+> To turn an exchange into a draft you can edit, Funnl would send Anthropic (Claude) a minimized extract: the message text, an optional signature block, a shortened subject, the direction and the date. The two people are labelled only USER and CONTACT. Email addresses, the recipient’s email domain, Microsoft account, tenant, message and conversation identifiers, authorisation tokens, attachments and raw headers are not included.
 >
-> **Nothing is added to your network automatically.** Everything arrives as a suggestion you
-> **accept, dismiss, or defer**. A suggested new contact's email address comes from Microsoft's
-> message envelope, never from the AI, and is fixed while you accept it — afterwards you can edit
-> it like any other contact.
+> Anthropic deletes API inputs and outputs within 30 days. Funnl does not have a Zero Data Retention agreement. If Anthropic’s automated systems flag content as violating their Usage Policy, Anthropic may keep those inputs and outputs for up to 2 years, and the related trust-and-safety classification scores for up to 7 years. Anthropic does not train its models on commercial API data by default, and does not offer per-record deletion to paid API customers, so Funnl cannot promise to have an individual record deleted on request.
 >
-> **You can disconnect at any time from this screen.** Disconnecting deletes the connection,
-> the stored Microsoft authorisation and the mailbox synchronisation state, and empties any
-> suggestion you have not reviewed: each becomes inactive and its proposed details and drafts
-> are removed. Contacts and interactions you already saved are kept.
+> What Funnl would do with all of this: suggest networking contacts and draft interaction notes from relevant conversations. Nothing is saved as a contact or logged as an interaction until you review it and choose to accept it. You can edit or dismiss every suggestion.
 >
-> **Disconnecting removes Funnl’s copy.** It does not withdraw the permission at Microsoft —
-> to do that, remove Funnl from the permissions page of your Microsoft account.
+> You can disconnect at any time from this screen. Disconnecting deletes the connection, the stored Microsoft authorisation and the mailbox synchronisation state, and empties any suggestion you have not reviewed: each becomes inactive and its proposed details and drafts are removed. Contacts and interactions you already saved are kept.
+>
+> Disconnecting removes Funnl’s copy of the authorisation, so Funnl has nothing left to start a new read with. A read already under way may finish using access it had already obtained. Disconnecting does not withdraw the permission at Microsoft — to do that, remove Funnl from the permissions page of your Microsoft account.
 >
 > [Read the Privacy Policy](/privacy)
 >
-> `[ Connect Outlook ]`   `[ Cancel ]`
+> `[ I have read this ]` (unchecked)   `[ Connect Outlook ]`   `[ Cancel ]`
 
-**Consent version:** no longer a placeholder string. Draft PR #56 DERIVES it from the
+**These are the exact strings, not a paraphrase.** They are copied from
+`OUTLOOK_DISCLOSURE_PARAGRAPHS` in `src/lib/outlookDisclosure.js`, and
+`tests/outlook-consent-ui.test.js` fails if this document and that array ever diverge, so a
+reviewer approving the text here is approving the text a user would see.
+
+**WHY IT IS THIS LONG.** An earlier draft of the card described the permissions and the
+folders and then jumped to "suggestions", omitting the material processing: that shortlisted
+message text is actually read, and that a minimized extract of it leaves Funnl for Anthropic.
+Artefact A already discloses both. A short notice at the decision point may summarise the
+published policy but must not say LESS than it about what happens to the user's mail, so the
+two-step read, the absence of body storage, Anthropic and Anthropic's real retention terms
+are all named here. Tests assert each of those facts appears in both.
+
+**Consent version:** derived, not declared. Draft PR #56 computes it from the
 disclosure text (`ol-disc-<32 hex of SHA-256>`), so any edit to the wording produces a
 different version and the server's exact-string gate refuses the stale one. The current
-draft value is `ol-disc-c7d331bdc76c22b11e8faedc31f71259`. **Not approved.** The server's
+draft value is `ol-disc-34f8d13dc657d2d6ca6377f0c93ca427`. **Not approved.** The server's
 `OUTLOOK_DISCLOSURE_VERSION` is unset in every environment, so `outlook-oauth-start`
 refuses with `config_missing`. The wording and the server value must be approved together —
 approving one without the other is self-defeating, since the version moves with the text.
@@ -218,9 +222,12 @@ These are not proposals; migration `20260921000000` already enforces them.
 | Consent version is always present | `consent_policy_version` is `NOT NULL`, 1–40 chars, no control characters or whitespace |
 | Re-authorization needs fresh consent | a new connection requires a new state row, which requires a new `consented_at` / `consent_policy_version` |
 
-**Unresolved:** whether a refused or failed callback consumes the state is **not** settled by the
-applied RPC in a way I can state publicly — the finalization path consumes the state, but there is
-no implemented callback yet to define the refusal path. Decide this when the callback is built.
+**Resolved since this section was written.** Draft PR #55 implements the callback, so the
+refusal path is now defined rather than open: `handler.js` looks the state up first and refuses
+an unknown, already-consumed or expired state **before any request reaches Microsoft**, and
+only the `'stored'` result of `finalize_microsoft_connection` counts as success. Finalization
+consumes the state under `FOR UPDATE`, so a second use cannot succeed. That behaviour is in a
+Draft branch and undeployed; it is not a Production fact.
 
 ---
 
@@ -228,7 +235,7 @@ no implemented callback yet to define the refusal path. Decide this when the cal
 
 | # | Public claim | Evidence |
 |---|---|---|
-| 1 | Outlook is not available / not enabled / not in pilot | **No Outlook Edge Function is deployed** (12 deployed, none Outlook). The `outlook-oauth-start` / `outlook-oauth-callback` sources and their `config.toml` sections exist in **Draft PR #54 only**, are unmerged and undeployed, and are inert unless `OUTLOOK_INTEGRATION_ENABLED` is exactly `true` (unset everywhere). No UI import, no Entra app, no secret, no flag; all Outlook tables zero rows |
+| 1 | Outlook is not available / not enabled / not in pilot | **No Outlook Edge Function is deployed** (12 deployed, none Outlook). The `outlook-oauth-start` / `outlook-oauth-callback` sources and their `config.toml` sections exist in **Draft PRs #54 / #55 only**, are unmerged and undeployed, and are inert unless `OUTLOOK_INTEGRATION_ENABLED` is exactly `true` (unset everywhere). The Settings card IS imported by `SettingsPage.jsx` on **Draft PRs #56 / #57**, and is gated by `OUTLOOK_CONNECTION_ENABLED`, which requires `VITE_OUTLOOK_CONNECTION_ENABLED === 'true'` and is unset in every environment — so the code ships in the bundle and the card never mounts. No Entra app, no secret, no flag, no worker, no scheduler; every Outlook table holds **zero rows** |
 | 2 | Delegated `Mail.Read`, read-only, user-authorized | [Graph permissions reference](https://learn.microsoft.com/en-us/graph/permissions-reference) — "Read user mail", "Allows the app to read email in user mailboxes", admin consent **not** required; `GRAPH_MAIL_READ_SCOPE = 'Mail.Read'` in `outlookGraphTransport.js`; schema `microsoft_connections_active_requires_mail_read` |
 | 3 | Mail.Read is mailbox-wide and would technically permit bodies/attachments | Same reference — Mail.ReadBasic is the variant that *excludes* body and attachments; migration comment: "$select minimization in the worker never narrows the authority Mail.Read grants; the policy discloses it" |
 | 4 | Inbox and Sent Items only | `GRAPH_FOLDERS = ['inbox','sentitems']`; schema `oss_folder_check` |
@@ -262,7 +269,7 @@ no implemented callback yet to define the refusal path. Decide this when the cal
 | A Funnl-side "context deleted after 30 days" promise | The schema **caps** `context_expires_at` at `created_at + 30 days`, but `expire_pending_outlook_context` is **unscheduled** — `pg_cron` is not installed, there is no `cron` schema, and no migration schedules it. Nothing currently erases expired context. Promising a schedule would be false. **Owner decision + implementation required.** |
 | "Your tokens are encrypted" as present tense | No OAuth flow has ever RUN (the Draft PR #54 code is undeployed and dormant, and no Entra app exists), so no token exists. The schema would store them encrypted; the policy says "would be". Token encryption is a **launch requirement**, below. |
 | "Funnl employees never read your email" | Too absolute. The drafted wording allows support-with-permission, security investigation, and legal requirement — and separately discloses that Anthropic runs its own safety systems and may review flagged content under their policy. |
-| A specific history/lookback window | The worker is unbuilt; no lookback is implemented. |
+| A specific history/lookback window | No import worker exists in any branch, so no lookback is implemented and none may be promised. |
 | That the Microsoft consent screen shows Funnl's Privacy/Terms links | The [consent experience](https://learn.microsoft.com/en-us/entra/identity-platform/application-consent-experience) documents the prompt's building blocks (publisher, verification badge, permissions, report link) and does not confirm Terms/Privacy links appear there. Confirm at registration. |
 | That the app is verified or certified | Unverified publishers display "**Unverified**" in the consent prompt. Publisher verification is an owner decision. |
 | That disconnecting revokes Funnl's access at Microsoft | **No upstream revocation call exists in this codebase.** `disconnect_my_outlook()` is a local teardown: it deletes Funnl's copy of the refresh token, but that token stays valid at Microsoft until it expires or the user removes Funnl from their account permissions. Both the disclosure and the disconnect confirmation state this and point the user at Microsoft, and a test asserts that every sentence mentioning revocation or withdrawal is a negative one. **Owner decision: whether to implement an upstream revocation call before the pilot.** |

@@ -5,6 +5,26 @@
 -- applied, so it exercises the real forward-migration ordering. Never run
 -- against Production.
 --
+-- HOW TO BUILD THE DATABASE THIS NEEDS: tests/sql/_bootstrap-disposable-db.sql
+--
+-- WHAT THIS PROVES, AND WHAT IT DOES NOT - stated precisely, because the
+-- difference matters.
+--
+-- It runs as the PRIVILEGED `postgres` role and simulates the caller with
+-- set_config('request.jwt.claim.sub', ...). So it proves the function bodies,
+-- the cascades, the constraints and the catalog facts (grants, SECURITY DEFINER,
+-- pinned search_path, volatility). It does NOT prove that a real request is
+-- switched to the `authenticated` role, that the EXECUTE grant is what admits
+-- it, or that the same role is denied direct table access - because a privileged
+-- role bypasses exactly those checks.
+--
+-- THIS IS NOT A BROWSER-TO-DATABASE END-TO-END TEST, and must not be described
+-- as one. There is no JWT, no PostgREST, no Kong, no supabase-js and no browser
+-- in this file. The role switching, the grant enforcement over HTTP and the
+-- table-access denial are covered separately by
+-- tests/local/outlook-rpc-postgrest.mjs, which drives real HTTP through real
+-- PostgREST and states its own remaining limits.
+--
 -- The point of this RPC is to let the browser ask "is my mailbox connected?"
 -- without a service-role key and without a table grant. So the things worth
 -- proving are: it answers for the CALLER only, it answers nothing at all
