@@ -131,21 +131,83 @@ export function buildOutlookAuthUrl ({
  * else is a work/school tenant. Returns null when `tid` is absent or malformed,
  * which the caller must treat as a failure rather than guessing.
  */
+const GUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
 export function classifyAccountType (tid) {
   if (typeof tid !== 'string') return null
   const t = tid.trim().toLowerCase()
-  if (!/^[0-9a-f-]{36}$/.test(t)) return null
+  // Must be a real 8-4-4-4-12 GUID. An earlier check accepted any 36 characters
+  // drawn from [0-9a-f-], which admitted nonsense like 36 hyphens.
+  if (!GUID_RE.test(t)) return null
   return t === MSA_CONSUMERS_TENANT_ID ? 'personal' : 'work'
 }
 
 /**
- * Extract the identity this flow may act on, from an ALREADY-VALIDATED id_token
+ * Best-effort DISPLAY address from id_token claims. Deliberately separate from
+ * identity: Microsoft does not guarantee that `email` or `preferred_username` is
+ * present, nor that either is mail-shaped. For work/school accounts
+ * preferred_username is a UPN, which frequently is NOT a routable mailbox; for
+ * personal accounts `email` is usual but not promised.
+ *
+ * Returns null when nothing usable is present. A null here is NOT a failure of
+ * the flow — it means the address must be resolved from Microsoft Graph before
+ * the connection can be written. See resolveMailboxAddress below.
+ */
+export function displayAddressFromClaims (claims) {
+  if (!claims || typeof claims !== 'object') return null
+  for (const raw of [claims.email, claims.preferred_username]) {
+    if (typeof raw !== 'string') continue
+    const v = raw.trim().toLowerCase()
+    // Minimal shape check only: one @, something either side, no whitespace.
+    if (v.length < 3 || v.length > 320) continue
+    if (!/^[^\s@]+@[^\s@]+$/.test(v)) continue
+    return v
+  }
+  return null
+}
+
+/**
+ * CONTRACT FOR THE NEXT SLICE (not implemented here).
+ *
+ * microsoft_connections.ms_email is NOT NULL with a 3..320 length CHECK, so a
+ * connection cannot be written without an address. The claims above are not a
+ * sufficient source. The exchange/finalize slice MUST:
+ *
+ *   1. call GET https://graph.microsoft.com/v1.0/me with the delegated access
+ *      token, selecting only what is needed ($select=id,mail,userPrincipalName);
+ *   2. prefer `mail`; fall back to `userPrincipalName` ONLY when it is mail
+ *      shaped (a UPN can be non-routable, so this is display-only either way);
+ *   3. cross-check that the Graph `id` equals the validated id_token `oid`,
+ *      and abort on mismatch rather than trusting the Graph response alone;
+ *   4. if no usable address results, FAIL the connection with a controlled code
+ *      instead of inventing a placeholder to satisfy the NOT NULL constraint.
+ *
+ * Until that exists, this Draft does not claim that either account type will
+ * connect successfully — only that identity can be derived and the gate holds.
+ */
+export const MAILBOX_ADDRESS_RESOLUTION_REQUIRED = Object.freeze({
+  graphEndpoint: MS_GRAPH_ME,
+  select: ['id', 'mail', 'userPrincipalName'],
+  preferred: 'mail',
+  fallback: 'userPrincipalName',
+  mustMatchIdTokenClaim: 'oid',
+})
+
+/**
+ * Extract the IDENTITY this flow may act on, from an ALREADY-VALIDATED id_token
  * payload. Validation (signature via JWKS, iss, aud === our client id, exp/nbf,
  * and nonce equality) is the caller's job and must happen first.
  *
- * `oid` is the stable per-account object id and is what ms_account_id stores.
- * `email` is display-only; for personal accounts it usually arrives in `email`,
- * for work/school often in `preferred_username`. Neither is used for authorization.
+ * Identity is `oid` + `tid` ONLY. Those are the claims Microsoft guarantees and
+ * the only ones used for any decision: `oid` is the stable per-account object id
+ * stored as ms_account_id, and `tid` classifies the account type.
+ *
+ * The display address is deliberately NOT part of identity and NOT required for
+ * success here: `displayAddress` may be null, and a null simply means the
+ * address must come from Graph before a connection can be written. See
+ * MAILBOX_ADDRESS_RESOLUTION_REQUIRED. Callers must not treat a present
+ * displayAddress as verified ownership of that mailbox.
  */
 export function identityFromIdTokenClaims (claims) {
   if (!claims || typeof claims !== 'object') return { ok: false, reason: 'no_claims' }
@@ -153,19 +215,17 @@ export function identityFromIdTokenClaims (claims) {
   if (!oid) return { ok: false, reason: 'missing_oid' }
   const accountType = classifyAccountType(claims.tid)
   if (!accountType) return { ok: false, reason: 'missing_or_invalid_tid' }
-  const rawEmail = typeof claims.email === 'string' && claims.email.includes('@')
-    ? claims.email
-    : (typeof claims.preferred_username === 'string' && claims.preferred_username.includes('@')
-        ? claims.preferred_username
-        : '')
-  const email = rawEmail.trim().toLowerCase()
-  if (email.length < 3 || email.length > 320) return { ok: false, reason: 'missing_email' }
+  const displayAddress = displayAddressFromClaims(claims)
   return {
     ok: true,
     msAccountId: oid,
     msTenantId: String(claims.tid).trim().toLowerCase(),
     accountType,
-    email,
+    displayAddress,                       // may be null
+    addressResolved: displayAddress !== null,
+    // True when the next slice MUST call Graph before it can satisfy the
+    // ms_email NOT NULL contract.
+    requiresGraphAddressLookup: displayAddress === null,
   }
 }
 

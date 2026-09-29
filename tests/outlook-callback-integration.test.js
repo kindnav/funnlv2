@@ -5,11 +5,23 @@
 // over HTTP, so "the unbound path returns before any database call" is measured
 // rather than modelled.
 //
-// How the database claim is measured: the container's SUPABASE_URL points at a
-// local sink server, so ANY attempt to reach PostgREST is recorded. Every case
-// here must produce zero recorded calls — while dormant the handler must not
-// touch the database at all, and with the flag on an unbound POST must be
-// refused before any row is read.
+// TWO OBSERVABLES, AND WHAT EACH IS WORTH.
+//
+// 1. Database calls. The container's SUPABASE_URL points at a local sink, so any
+//    attempt to reach PostgREST is recorded. IMPORTANT AND DELIBERATELY STATED:
+//    in THIS slice a zero count is weak evidence on its own, because the handler
+//    has no database path at all yet — bound and unbound alike must read zero.
+//    It becomes strong evidence only once the exchange/finalize slice lands.
+//
+// 2. Controlled reason codes from the handler's own logs. These DO distinguish
+//    the paths today: an unbound POST must reach binding_rejected, while a bound
+//    POST must get past the gate and reach not_implemented_exchange. The codes
+//    are fixed strings containing no state, cookie, code or token.
+//
+// REQUIRED WHEN THE EXCHANGE/FINALIZE SLICE LANDS: add a POSITIVE CONTROL that
+// reaches the database after the gate (a bound POST recording a real PostgREST
+// call), so the zero counts below stop being vacuous. Without that control, a
+// handler that rejected everything would also show zeros.
 //
 // OPT-IN. Needs Docker and network access to esm.sh, which the rest of the suite
 // deliberately does not, so `npm test` stays hermetic. Enable with:
@@ -20,7 +32,7 @@
 
 import http from 'node:http'
 import { once } from 'node:events'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'url'
 import { join, dirname } from 'path'
 
@@ -88,6 +100,25 @@ function stopHandler () {
   try { execFileSync('docker', ['rm', '-f', CONTAINER], { stdio: 'ignore' }) } catch { /* not running */ }
 }
 
+// The handler logs a CONTROLLED reason code on every terminal path. Those codes
+// are the only non-secret observable that distinguishes WHY a request ended, and
+// they contain no state, cookie, code or token. Reading them is what lets this
+// suite prove the bound and unbound paths diverge, rather than merely observing
+// that neither touched a database it does not yet have.
+// `docker logs` writes the container's stdout to ITS stdout and the container's
+// stderr to ITS stderr. The handler uses console.error, so both streams must be
+// read and joined or the reason codes would be invisible.
+function allLogs () {
+  const r = spawnSync('docker', ['logs', CONTAINER], { encoding: 'utf8' })
+  return `${r.stdout ?? ''}${r.stderr ?? ''}`
+}
+function logLength () {
+  try { return allLogs().length } catch { return 0 }
+}
+function logsSince (offset) {
+  try { return allLogs().slice(offset) } catch { return '' }
+}
+
 async function run () {
   console.log('\nreal outlook-oauth-callback handler (Deno, containerised)')
 
@@ -102,6 +133,7 @@ async function run () {
 
   const post = async (cookie, body) => {
     sinkHits = []
+    const logOffset = logLength()
     const headers = { 'Content-Type': 'application/x-www-form-urlencoded' }
     if (cookie) headers.Cookie = cookie
     const res = await fetch(`http://127.0.0.1:${HANDLER_PORT}/`,
@@ -112,6 +144,7 @@ async function run () {
       location: res.headers.get('location'),
       setCookie: res.headers.getSetCookie?.().join(' | ') ?? res.headers.get('set-cookie'),
       hits: [...sinkHits],
+      log: logsSince(logOffset),
     }
   }
 
@@ -141,12 +174,20 @@ async function run () {
     check('unbound POST redirects to the canonical error page',
       String(r.location).startsWith('https://www.getfunnl.com/settings?outlook=error'), String(r.location))
     check('unbound POST makes ZERO database calls', r.hits.length === 0, JSON.stringify(r.hits))
+    check('unbound POST is refused AT THE GATE (binding_rejected, no_cookie_header)',
+      r.log.includes('binding_rejected') && r.log.includes('no_cookie_header'),
+      JSON.stringify(r.log.slice(-300)))
+    check('unbound POST never reaches the post-gate path',
+      !r.log.includes('not_implemented_exchange'), JSON.stringify(r.log.slice(-300)))
     check('unbound POST clears the binding cookie',
       String(r.setCookie).includes(COOKIE) && String(r.setCookie).includes('Max-Age=0'), String(r.setCookie))
 
     r = await post(`${COOKIE}=A-DIFFERENT-BROWSERS-STATE-00`, form)
     check('mismatched-cookie POST returns 303', r.status === 303, `status=${r.status}`)
     check('mismatched-cookie POST makes ZERO database calls', r.hits.length === 0, JSON.stringify(r.hits))
+    check('mismatched-cookie POST is refused at the gate (binding_mismatch)',
+      r.log.includes('binding_rejected') && r.log.includes('binding_mismatch'),
+      JSON.stringify(r.log.slice(-300)))
 
     r = await post(null, refusal)
     check('unbound refusal makes ZERO database calls', r.hits.length === 0, JSON.stringify(r.hits))
@@ -163,8 +204,15 @@ async function run () {
     check('bound POST passes the gate and still ends in a safe 303',
       r.status === 303 && String(r.location).startsWith('https://www.getfunnl.com/settings?outlook=error'),
       `${r.status} ${r.location}`)
-    check('bound POST makes zero database calls in this slice (exchange not implemented)',
+    check('bound POST PASSES the gate and reaches not_implemented_exchange',
+      r.log.includes('not_implemented_exchange'), JSON.stringify(r.log.slice(-300)))
+    check('bound POST is NOT refused at the gate',
+      !r.log.includes('binding_rejected'), JSON.stringify(r.log.slice(-300)))
+    check('bound POST makes zero database calls ONLY because no exchange exists yet',
       r.hits.length === 0, JSON.stringify(r.hits))
+    check('reason codes leak no state, cookie, code or token',
+      !r.log.includes(STATE) && !r.log.includes('INTEGRATION-CODE'),
+      'a secret appeared in the handler logs')
   } finally {
     stopHandler()
     sink.close()

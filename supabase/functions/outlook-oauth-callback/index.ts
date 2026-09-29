@@ -4,29 +4,37 @@
 // ─────────────────────────────────────────────────────────────────────────────
 // ADR: why response_mode=form_post rather than query
 // ─────────────────────────────────────────────────────────────────────────────
-// With response_mode=query, Microsoft delivers the result as a top-level GET to
+// SCOPE OF THE CLAIM — stated precisely, because an earlier draft overstated it.
+// The state is NOT kept out of every URL. buildOutlookAuthUrl deliberately puts
+// `state` (and `nonce`, and the PKCE challenge) in the OUTBOUND authorization URL
+// to login.microsoftonline.com — that is how the protocol works, and that URL is
+// a real navigation that lands in the user's history like any other.
+//
+// What form_post changes is the INBOUND leg. With response_mode=query, Microsoft
+// returns the result as a top-level GET to
 //     https://www.getfunnl.com/api/outlook-oauth-callback?code=...&state=...
-// which puts BOTH the authorization code and the state into a URL. A URL is the
-// single most-copied string in a browser: it lands in history and the omnibox,
-// in the Referer header of any subresource the response loads, in extension and
-// proxy logs, in crash/session-restore state, and in anything the user pastes
-// into a support ticket. The state is exactly the secret this flow's binding
-// depends on, and the code is a bearer credential until it is redeemed.
+// which puts the authorization code AND the state into a URL on OUR branded
+// origin. That is the leg worth protecting, for two reasons the outbound leg does
+// not share:
+//   * it is the only leg carrying `code`, a bearer credential until redeemed;
+//   * it is on our own origin, so the values land in our access logs, in any
+//     Referer sent from our page, and in our own error reporting.
+// form_post moves both into a POST body, so neither appears in the branded
+// callback URL, in our server logs, or in the history entry for our own origin.
 //
-// form_post delivers them in a POST body instead, so neither appears in the URL
-// at any point. The cost is that the callback arrives as a CROSS-SITE TOP-LEVEL
-// POST, which a SameSite=Lax cookie is not sent on — so the binding cookie must
-// be SameSite=None; Secure. That is a real widening of the cookie's reach and it
-// is accepted deliberately: the cookie is __Host- prefixed, HttpOnly, Path=/,
-// ten-minute-lived, and carries a value that is useless without also holding the
-// matching unconsumed state row.
+// The cost is that the callback arrives as a CROSS-SITE TOP-LEVEL POST, which a
+// SameSite=Lax cookie is not sent on — so the binding cookie must be
+// SameSite=None; Secure. That is a real widening of the cookie's reach, accepted
+// deliberately: the cookie is __Host- prefixed, HttpOnly, Path=/, ten-minute-
+// lived, and its value is useless without the matching unconsumed state row.
 //
-// Rejected alternative (query + SameSite=Lax): a tighter cookie, but it pays for
-// that by publishing the state and the code in a URL. Between "the state may be
-// sent on a cross-site POST" and "the state is written into browser history",
-// the first is the smaller exposure, and it is the one the binding gate is
-// designed around. If a repo constraint later forces query mode, the state
-// exposure analysis above must be revisited BEFORE switching.
+// Rejected alternative (query + SameSite=Lax): a tighter cookie, paid for by
+// putting `code` and `state` into a URL on our own origin. Between "the state may
+// be sent on a cross-site POST" and "the code and state are written into our
+// branded URL and our logs", the first is the smaller exposure, and it is the one
+// the binding gate is designed around. The corrected, narrower analysis does not
+// change the decision. If a repo constraint later forces query mode, this
+// analysis must be revisited BEFORE switching.
 //
 // ─────────────────────────────────────────────────────────────────────────────
 // Order of operations. The binding gate runs BEFORE any database read, any token
