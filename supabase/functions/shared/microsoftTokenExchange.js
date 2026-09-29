@@ -1,8 +1,12 @@
 // Authorization-code redemption at the Microsoft token endpoint.
 //
-// Confidential client: the secret never leaves the Edge Function, and the
-// request carries the PKCE verifier plus the EXACT registered redirect URI
-// (Microsoft requires it to match the one used at /authorize).
+// Confidential client. The client secret IS sent - that is what makes this a
+// confidential client - but only from the Edge Function to Microsoft's fixed
+// token endpoint, over TLS, with redirects refused so the request cannot be
+// pointed at another host. It never reaches the browser and is never returned
+// to a caller. The request also carries the PKCE verifier and the EXACT
+// registered redirect URI, which Microsoft requires to match the one used at
+// /authorize.
 //
 // NEVER LOGGED: the code, the verifier, the client secret, the returned tokens,
 // or any provider response body. Failures surface as controlled reason codes.

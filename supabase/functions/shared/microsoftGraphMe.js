@@ -13,8 +13,10 @@
 //     returned. The disclosure describes both.
 //   * The Graph `id` is cross-checked against the VALIDATED id_token `oid`.
 //     A mismatch fails closed rather than trusting the Graph body.
-//   * The access token is passed as a bearer credential and never decoded, and
-//     redirects are refused so it is not replayed to another host.
+//   * The access token is passed as a bearer credential and never decoded.
+//     Redirects are refused: Fetch already strips Authorization cross-origin,
+//     but refusing outright also rules out an unexpected destination whose
+//     response would otherwise be parsed as this user's profile.
 //   * No provider response body is ever logged.
 
 import { displayAddressFromClaims } from './microsoftOauthHelpers.js'
@@ -86,9 +88,12 @@ export async function fetchMailboxAddress ({
         method: 'GET',
         headers: { Authorization: `Bearer ${accessToken}`, Accept: 'application/json' },
         signal: ctrl.signal,
-        // The Authorization header carries the Graph access token. Following a
-        // redirect could replay that bearer credential to another host, so the
-        // fetch rejects instead.
+        // Fetch already strips Authorization on a CROSS-ORIGIN redirect, so the
+        // bearer token would not itself be replayed to another origin. Refusing
+        // all redirects is still the right policy: it prevents a same-origin
+        // redirect carrying the header somewhere unintended, and it stops an
+        // unexpected destination returning a body this code would then parse as
+        // the signed-in user's profile.
         redirect: 'error',
       })
     } catch {
