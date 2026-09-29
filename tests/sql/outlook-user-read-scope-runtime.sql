@@ -102,6 +102,37 @@ BEGIN
   DELETE FROM public.microsoft_connections WHERE user_id = u1;
   DELETE FROM public.microsoft_oauth_states WHERE user_id = u1;
 
+  -- ── 5b. RPC: the GRAPH-PREFIXED User.Read spelling also normalizes ────────
+  -- Case 5 exercised the unprefixed 'USER.READ'. Microsoft may return either the
+  -- bare permission name or the full Graph resource URI, so both must reduce to
+  -- the single canonical 'User.Read' the allowlist stores.
+  INSERT INTO public.microsoft_oauth_states
+    (state_hash, user_id, pkce_verifier_ciphertext, pkce_verifier_nonce,
+     key_version, return_origin, integration_type, consented_at,
+     consent_policy_version, expires_at)
+  VALUES (repeat('c', 64), u1, 'ct', 'nonce', 1, 'https://www.getfunnl.com',
+          'outlook', now(), 'v1', now() + interval '10 minutes')
+  RETURNING state_hash INTO h;
+
+  v := public.finalize_microsoft_connection(
+         h, NULL, 'acct-1', 'consumers', 'personal', 'a@b.test',
+         ARRAY['https://graph.microsoft.com/Mail.Read',
+               'https://graph.microsoft.com/User.Read',
+               'offline_access', 'openid', 'email', 'profile'],
+         now() + interval '1 hour', 'act', 'an', 'rct', 'rn', 1::smallint);
+  ASSERT v ->> 'result' = 'stored',
+         'Graph-prefixed User.Read not accepted: ' || v::text;
+  ASSERT (SELECT scopes FROM public.microsoft_connections WHERE user_id = u1)
+         @> ARRAY['Mail.Read','User.Read'],
+         'Graph-prefixed User.Read did not normalize to canonical User.Read';
+  -- and the prefixed spelling must NOT be stored verbatim
+  ASSERT NOT ((SELECT scopes FROM public.microsoft_connections WHERE user_id = u1)
+              @> ARRAY['https://graph.microsoft.com/User.Read']),
+         'the raw Graph URI was stored instead of the canonical name';
+
+  DELETE FROM public.microsoft_connections WHERE user_id = u1;
+  DELETE FROM public.microsoft_oauth_states WHERE user_id = u1;
+
   -- ── 6. RPC: missing User.Read is refused, and the state SURVIVES ───────────
   INSERT INTO public.microsoft_oauth_states
     (state_hash, user_id, pkce_verifier_ciphertext, pkce_verifier_nonce,

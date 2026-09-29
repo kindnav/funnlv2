@@ -170,8 +170,12 @@ BEGIN
       WHEN 'profile'        THEN 'profile'
       ELSE NULL END;
     -- Anything outside the canonical allowlist (Mail.ReadWrite*, Mail.Send*, Mail.ReadBasic,
-    -- MailboxSettings.*, Files.*, Contacts.*, Calendars.*, .default, *.All, User.Read, …)
-    -- refuses activation. Broader permissions are never stored "as granted".
+    -- MailboxSettings.*, Files.*, Contacts.*, Calendars.*, .default, *.All,
+    -- User.ReadWrite, User.ReadBasic.All, User.Read.All, Directory.*, ...) refuses
+    -- activation. Broader permissions are never stored "as granted".
+    -- NOTE: this copied comment previously listed User.Read as forbidden. As of
+    -- this migration canonical User.Read is PERMITTED, and is required for an
+    -- ACTIVE connection; only its broader variants remain forbidden_scope.
     IF v_norm IS NULL THEN RETURN jsonb_build_object('result', 'forbidden_scope'); END IF;
     IF NOT (v_norm = ANY (v_scopes)) THEN v_scopes := pg_catalog.array_append(v_scopes, v_norm); END IF;
   END LOOP;
