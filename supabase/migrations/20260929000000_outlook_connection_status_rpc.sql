@@ -1,20 +1,34 @@
 -- Outlook — a read path for "is my mailbox connected?", for the signed-in user.
 --
--- WHY THIS EXISTS (verified against the applied catalog, not assumed):
+-- WHY THIS EXISTS.
 --   The Settings page must show whether Outlook is connected before it can offer
---   to disconnect. It cannot read public.microsoft_connections directly. RLS is
---   enabled on that table and it has a SELECT policy for the owner, but the
---   `authenticated` role holds NO table privilege on it at all:
---     SELECT grantee, privilege_type FROM information_schema.role_table_grants
---      WHERE table_name = 'microsoft_connections';
---     -- returns only postgres and service_role
---   A policy without a grant denies. So a browser query would fail with
---   permission denied, and the only alternatives are to widen the table grant
---   (exposing every column, including the operational token metadata) or to add
---   a narrow function. This adds the narrow function.
+--   to disconnect.
 --
---   This is the ONE thing the disconnect slice needed a migration for. The
---   removal behaviour did NOT need one: the applied disconnect_my_outlook()
+-- CORRECTION TO AN EARLIER VERSION OF THIS COMMENT, which said the browser "cannot
+-- read public.microsoft_connections directly" because "a policy without a grant
+-- denies". That was WRONG, and the mistake was reading
+-- information_schema.role_table_grants (which shows only TABLE-level grants) and
+-- generalising from a PostgREST 403 on `select=*`. Measured afterwards on a
+-- disposable database with real roles:
+--   * there is indeed no TABLE-level grant for `authenticated`, so `select=*` and
+--     any select naming a withheld column returns 42501;
+--   * but `authenticated` DOES hold COLUMN-level SELECT on exactly the non-secret
+--     columns - ms_email, status, needs_reauth, connected_at, consented_at,
+--     consent_policy_version, scopes, account_type, last_result_code,
+--     last_success_at, updated_at - and `select=ms_email,status,needs_reauth`
+--     returns 200 through PostgREST, scoped to the owner by RLS.
+--   So the browser CAN already read the reviewable columns. This function was not
+--   strictly necessary.
+--
+-- WHY IT IS STILL WORTH HAVING, stated as a preference rather than a necessity:
+--   it is one named contract instead of a column list duplicated in the client, it
+--   cannot be widened by someone adding a column to the select, and the allowlist
+--   test over its returned keys fails when a new field appears. A column grant
+--   gives none of those. If a reviewer prefers the direct select, this migration can
+--   be dropped without affecting the disconnect path.
+--
+--   The removal behaviour needed no migration either: the applied
+--   disconnect_my_outlook()
 --   already deletes the connection, the encrypted tokens, the sync cursors and
 --   leases, unconsumed OAuth states and the mail-to-suggestion links, and
 --   already invalidates pending suggestions. That was verified on a disposable

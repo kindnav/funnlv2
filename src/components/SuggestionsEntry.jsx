@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
-import { CALENDAR_INGESTION_ENABLED } from '../lib/calendarIngestion'
+import { SUGGESTION_REVIEW_ENABLED } from '../lib/suggestionReview'
 
 // Compact, secondary Dashboard entry into the source-neutral Suggestions queue.
 // Google Calendar is currently the only connected source, but the entry is worded and
@@ -12,7 +12,7 @@ export default function SuggestionsEntry() {
   const [count, setCount] = useState(null)   // null until loaded; number afterwards
 
   useEffect(() => {
-    if (!CALENDAR_INGESTION_ENABLED) return   // disabled → no suggestions query at all
+    if (!SUGGESTION_REVIEW_ENABLED) return   // disabled → no suggestions query at all
     let alive = true
     ;(async () => {
       const { count: c, error } = await supabase
@@ -24,7 +24,7 @@ export default function SuggestionsEntry() {
     return () => { alive = false }
   }, [])
 
-  if (!CALENDAR_INGESTION_ENABLED) return null
+  if (!SUGGESTION_REVIEW_ENABLED) return null
   if (!count || count < 1) return null   // nothing to review → no entry
 
   return (

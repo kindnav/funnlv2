@@ -131,9 +131,21 @@ BEGIN
           WHERE nsp.nspname = 'public' AND p.proname = 'get_my_outlook_connection'),
          'the status RPC has no pinned search_path';
 
-  -- ── 9. the table grant was NOT widened to get here ───────────────────────
+  -- ── 9. the TABLE grant was not widened to get here ───────────────────────
+  -- Stated carefully. There is no TABLE-level grant for `authenticated`, which this
+  -- asserts. That is NOT the same as "the browser cannot read the table": a
+  -- COLUMN-level grant already exposes the non-secret columns, and a select naming
+  -- only those returns 200 through PostgREST. So this RPC is a preferred contract,
+  -- not a necessity - see the migration header, which records the correction.
   ASSERT NOT has_table_privilege('authenticated', 'public.microsoft_connections', 'SELECT'),
-         'microsoft_connections was granted to authenticated - the RPC exists so it need not be';
+         'a TABLE-level grant appeared; this RPC exists so one is not needed';
+  -- And the columns that must stay unreadable, whatever else changes.
+  ASSERT NOT has_column_privilege('authenticated', 'public.microsoft_connections', 'id', 'SELECT'),
+         'the connection id became readable by the browser';
+  ASSERT NOT has_column_privilege('authenticated', 'public.microsoft_connections', 'ms_account_id', 'SELECT'),
+         'the Microsoft account id became readable by the browser';
+  ASSERT NOT has_column_privilege('authenticated', 'public.microsoft_connections', 'token_expires_at', 'SELECT'),
+         'token metadata became readable by the browser';
 
   DELETE FROM public.microsoft_connections WHERE user_id IN (u1, u2);
 

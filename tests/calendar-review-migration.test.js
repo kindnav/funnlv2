@@ -104,9 +104,9 @@ test('never touches contacts/refs/tokens/connections destructively', () => {
 })
 
 console.log('\nReview UI (source)')
-test('review page + entry are flag-gated (CALENDAR_INGESTION_ENABLED)', () => {
-  assert.ok(/CALENDAR_INGESTION_ENABLED/.test(PAGE) && /if \(!CALENDAR_INGESTION_ENABLED\) return/.test(PAGE))
-  assert.ok(/CALENDAR_INGESTION_ENABLED/.test(ENTRY) && /if \(!CALENDAR_INGESTION_ENABLED\) return/.test(ENTRY))
+test('review page + entry are flag-gated (SUGGESTION_REVIEW_ENABLED)', () => {
+  assert.ok(/SUGGESTION_REVIEW_ENABLED/.test(PAGE) && /if \(!SUGGESTION_REVIEW_ENABLED\) return/.test(PAGE))
+  assert.ok(/SUGGESTION_REVIEW_ENABLED/.test(ENTRY) && /if \(!SUGGESTION_REVIEW_ENABLED\) return/.test(ENTRY))
 })
 test('review UI never renders provider/sensitive fields', () => {
   for (const bad of ['source_fingerprint', 'google_sub', 'connection_id', 'event_id', 'ical', 'interaction_id', 'ciphertext', 'nonce', 'refresh_token', 'access_token']) {

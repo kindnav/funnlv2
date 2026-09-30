@@ -8,7 +8,7 @@
 // bodies and the catalog facts, but it does NOT prove the thing the browser
 // depends on: that a request carrying a user's JWT is switched to the
 // `authenticated` role, that the EXECUTE grant is what admits it, and that the
-// same role cannot read `microsoft_connections` directly. Those are the reasons
+// same role is refused a `select=*` on `microsoft_connections`. Those are the reasons
 // migration 20260929000000 exists at all, so they deserve a real test.
 //
 // WHAT THIS IS, PRECISELY
@@ -319,9 +319,11 @@ async function main () {
     }
   })
 
-  await test('authenticated CANNOT read microsoft_connections directly (403, 42501)', async () => {
-    // This is the exact denial that makes migration 20260929000000 necessary:
-    // the table has RLS and an owner SELECT policy, but no grant for this role.
+  await test('authenticated is refused a WHOLE-ROW read of microsoft_connections (403, 42501)', async () => {
+    // CORRECTED CLAIM: this denial is real, but it is a TABLE-level denial only. A
+    // column-level grant already lets this role select the non-secret columns, so
+    // 20260929000000 is a preferred contract rather than a necessity. See that
+    // migration's header, which records the measurement.
     const r = await call('GET', '/microsoft_connections?select=*', { token: TOKENS.u1() })
     assert.strictEqual(r.status, 403)
     assert.strictEqual(r.body.code, '42501')

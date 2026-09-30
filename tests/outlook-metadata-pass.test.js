@@ -654,7 +654,7 @@ test('enabled but unauthenticated is refused, and enabled+authorised is 501, not
   assert.strictEqual(ok.status, 501)
   const body = await ok.json()
   assert.strictEqual(body.error, 'not_implemented')
-  assert.strictEqual(body.reason, 'no_outlook_candidate_write_path')
+  assert.strictEqual(body.reason, 'no_token_access_path')
 })
 
 test('the handler touches no provider, no database and no scheduler', () => {
@@ -681,12 +681,17 @@ test('config.toml records the endpoint as private and explains the dormancy orde
 
 console.log('\nthe gap is stated, not hidden')
 
-test('the handler explains WHY there is no write path, naming the coupling', () => {
+test('the handler records the CLEARED write-path blocker and the current one', () => {
+  // The Gmail coupling is kept on the record so the change of reason is auditable,
+  // rather than the old reason simply disappearing.
   assert.ok(/upsert_email_candidate/.test(HANDLER_SRC))
   assert.ok(/gmail_sync_state/.test(HANDLER_SRC) && /google_connections/.test(HANDLER_SRC),
-    'the actual coupling must be named, not hand-waved')
-  assert.ok(/outlook_candidate_refs/.test(HANDLER_SRC),
-    'and what a correct Outlook write path would need')
+    'the actual coupling must stay named, not hand-waved')
+  assert.ok(/outlook_candidate_refs/.test(HANDLER_SRC))
+  assert.ok(/20260930000000/.test(HANDLER_SRC), 'and the migration that cleared it')
+  // The current reason: a deployed run has no way to obtain a Graph access token.
+  assert.ok(/no_token_access_path/.test(HANDLER_SRC))
+  assert.ok(/token-encryption key/.test(HANDLER_SRC) && /Entra application/.test(HANDLER_SRC))
 })
 
 test('the pass documents that a metadata-only run cannot propose new people', () => {
@@ -1062,13 +1067,15 @@ test('the module documents that oversized mailboxes need a continuation design',
     'and tied to the reason the endpoint is off')
 })
 
-test('the worker records continuation as a SECOND, independent blocker', () => {
-  // The write path and the continuation design are different problems. Fixing only
-  // the first would leave an endpoint that can be enabled but cannot make progress
-  // on a large mailbox, so both are named where the enable decision is made.
-  assert.ok(/A SECOND BLOCKER, INDEPENDENT OF THE FIRST: NO CONTINUATION DESIGN/.test(HANDLER_SRC))
-  assert.ok(/make no progress forever/.test(HANDLER_SRC))
-  assert.ok(/DURABLE\s*(\/\/)?\s*CONTINUATION/.test(HANDLER_SRC))
+test('the worker records continuation as an independent, still-open blocker', () => {
+  // The write path, the token path and the continuation design are three different
+  // problems. The write path is now built (migration 20260930000000), so the endpoint's
+  // stated reason moved to the token path - and continuation must stay named, because
+  // clearing the other two would leave an endpoint that can be enabled but cannot make
+  // progress on a large mailbox.
+  assert.ok(/NO CONTINUATION DESIGN/.test(HANDLER_SRC))
+  assert.ok(/makes no progress\s*(\/\/)?\s*forever/.test(HANDLER_SRC))
+  assert.ok(/DURABLE\s*(\/\/)?\s*CONTINUATION|Durable continuation/.test(HANDLER_SRC))
   assert.ok(/intermediate nextLink is opaque and time-limited/.test(HANDLER_SRC),
     'why storing partial progress is not trivially safe must be stated')
 })
