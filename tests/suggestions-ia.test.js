@@ -34,8 +34,8 @@ test('renamed components exist; old names are gone', () => {
 console.log('\ncanonical route + redirect compatibility')
 test('/suggestions is canonical; /calendar-suggestions redirects to it; both flag-gated', () => {
   assert.ok(/import SuggestionsPage from '\.\/pages\/SuggestionsPage'/.test(APP))
-  assert.ok(/CALENDAR_INGESTION_ENABLED &&[\s\S]*?path="\/suggestions" element=\{<SuggestionsPage \/>\}/.test(APP))
-  assert.ok(/CALENDAR_INGESTION_ENABLED &&[\s\S]*?path="\/calendar-suggestions" element=\{<Navigate to="\/suggestions" replace \/>\}/.test(APP))
+  assert.ok(/SUGGESTION_REVIEW_ENABLED &&[\s\S]*?path="\/suggestions" element=\{<SuggestionsPage \/>\}/.test(APP))
+  assert.ok(/SUGGESTION_REVIEW_ENABLED &&[\s\S]*?path="\/calendar-suggestions" element=\{<Navigate to="\/suggestions" replace \/>\}/.test(APP))
   assert.ok(!/CalendarSuggestionsPage/.test(APP), 'old page name must be gone from App')
 })
 
@@ -56,10 +56,10 @@ test('user-facing copy is not calendar-centric', () => {
 })
 
 console.log('\nflag gating (off = no entry/page/query/RPC)')
-test('entry + page gate on CALENDAR_INGESTION_ENABLED', () => {
-  assert.ok(/if \(!CALENDAR_INGESTION_ENABLED\) return null/.test(ENTRY))
-  assert.ok(/if \(!CALENDAR_INGESTION_ENABLED\) return null/.test(PAGE))
-  assert.ok(/if \(!CALENDAR_INGESTION_ENABLED\) return/.test(PAGE)) // effect guard: no query
+test('entry + page gate on SUGGESTION_REVIEW_ENABLED', () => {
+  assert.ok(/if \(!SUGGESTION_REVIEW_ENABLED\) return null/.test(ENTRY))
+  assert.ok(/if \(!SUGGESTION_REVIEW_ENABLED\) return null/.test(PAGE))
+  assert.ok(/if \(!SUGGESTION_REVIEW_ENABLED\) return/.test(PAGE)) // effect guard: no query
 })
 
 console.log('\nno nonfunctional Gmail/Outlook UI exposed')

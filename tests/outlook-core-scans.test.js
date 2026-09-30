@@ -437,6 +437,7 @@ test('applied migrations are unmodified; the only addition is the forward scope 
   const UNAPPLIED = [
     '20260928000000_outlook_add_user_read_scope.sql',
     '20260929000000_outlook_connection_status_rpc.sql',
+    '20260930000000_outlook_interaction_candidate_write.sql',
   ]
   assert.deepStrictEqual(files.slice(-UNAPPLIED.length), UNAPPLIED,
     'the unapplied forward migrations must be the newest, in this order')

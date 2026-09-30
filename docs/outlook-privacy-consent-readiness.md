@@ -15,7 +15,7 @@ unconfigured, and not published to anyone.
 | **A** | The conditional Outlook section of the Privacy Policy | `src/pages/PrivacyPage.jsx`, **live at `/privacy`** | **YES, live now**, dated September 27, 2026 | yes, owner-approved |
 | **B** | Revised permission wording (adds `User.Read`) | **this document only** | no | no |
 | **C** | The just-in-time consent disclosure shown before the redirect | `src/lib/outlookDisclosure.js`, **Draft PRs #56 / #57 only** | no | no |
-| **D** | The Outlook code itself: Edge Functions, Settings UI, disconnect, two forward migrations | **Draft PRs #54-#57 only**, unmerged | n/a | n/a |
+| **D** | The Outlook code itself: Edge Functions, Settings UI, disconnect, the import pass, the candidate write path and the suggestion review surface, plus three forward migrations | **Draft PRs #54-#59 only**, unmerged | n/a | n/a |
 
 A is a live public promise and nothing in these branches changes it. B and C are drafts in
 this repository. D is code that exists in Git and nowhere else: no Outlook Edge Function is
@@ -61,14 +61,22 @@ user at their Microsoft account permissions page. A test asserts that every sent
 mentioning revocation or withdrawal is a negative one.
 
 **One forward migration was needed, and only one.** The removal behaviour needed none -
-the applied RPC already covered it. What was missing was a *read* path: RLS is enabled on
-`microsoft_connections` and it has an owner SELECT policy, but the `authenticated` role
-holds no table privilege on it, so a browser query is denied. `20260929000000` adds
+**One forward migration was added for the status read, and its justification was overstated.**
+An earlier version of this section said the `authenticated` role "holds no table privilege" on
+`microsoft_connections` "so a browser query is denied". Measured afterwards on a disposable
+database with real roles: there is no TABLE-level grant, so `select=*` returns 42501 - but a
+COLUMN-level grant already exposes exactly the non-secret columns (`ms_email`, `status`,
+`needs_reauth`, `connected_at`, `consented_at`, `consent_policy_version`, `scopes`,
+`account_type`, `last_result_code`, `last_success_at`, `updated_at`), and a select naming only
+those returns **200** through PostgREST, scoped to the owner by RLS. So the browser could already
+read the reviewable columns and `20260929000000` was **not strictly necessary**; it is a preferred
+single contract that cannot be widened by editing a select. The migration's own header records the
+correction. `20260929000000` adds
 `get_my_outlook_connection()` (SECURITY DEFINER, STABLE, zero arguments,
 `authenticated`-only) returning only the fields the card displays, and never a token,
 ciphertext, nonce, connection id or Microsoft account id. It is **unapplied**.
 
-**CURRENT STACK — four unmerged Draft PRs, none deployed.**
+**CURRENT STACK — six unmerged Draft PRs, none deployed.**
 
 | PR | Adds | Deployed? |
 |---|---|---|
@@ -76,6 +84,8 @@ ciphertext, nonce, connection id or Microsoft account id. It is **unapplied**.
 | #55 | Callback token exchange, id_token validation, Graph `/me`, finalization | no |
 | #56 | Settings **Connect Outlook** UI + draft just-in-time disclosure | no; flag off |
 | #57 | Connected status + user-controlled disconnect; forward migration `20260929000000` adding the status read path | no; migration **unapplied**; flag off |
+| #58 | Bounded, dormant Inbox/Sent **metadata pass** and a private worker endpoint | no; both worker flags unset; endpoint answers 501 |
+| #59 | Outlook **candidate write path** (forward migration `20260930000000`), the manually triggered run, and the **suggestion review surface** | no; migration **unapplied**; worker flags and `VITE_OUTLOOK_REVIEW_ENABLED` all unset |
 
 Nothing in the stack syncs a mailbox, creates a contact or logs an interaction, and
 no Outlook OAuth flow has ever run against Microsoft.
@@ -106,9 +116,11 @@ text would be evidence of nothing.
 | Outlook schema (`microsoft_connections`, `microsoft_tokens`, `microsoft_oauth_states`, `outlook_sync_state`) | yes, on `main` | **yes, applied** (`20260921000000`, `20260922175616`) — all tables hold **zero rows** |
 | `User.Read` scope migration `20260928000000` | yes, in **Draft PR #54 only** | **no — unapplied** |
 | Connection-status migration `20260929000000` | yes, in **Draft PR #57 only** | **no — unapplied** |
+| Candidate-write migration `20260930000000` | yes, in **Draft PR #59 only** | **no — unapplied** |
 | `outlook-oauth-start` / `outlook-oauth-callback` Edge Functions | yes: start + binding gate in **Draft PR #54**, token exchange and finalization in **Draft PR #55** | **no — never deployed**, and dormant behind `OUTLOOK_INTEGRATION_ENABLED` (unset) |
 | Settings UI: consent card, connected status, disconnect | yes, in **Draft PRs #56 / #57** — `SettingsPage.jsx` does import the card on those branches | **no** — the import exists in the bundle but the card never mounts: `VITE_OUTLOOK_CONNECTION_ENABLED` is unset, and the predicate requires exactly `'true'` |
-| Mailbox import worker | no | no |
+| Mailbox import worker | yes, in **Draft PRs #58 / #59** — the metadata pass, the run orchestrator and a private endpoint | **no** — never deployed; the endpoint answers 501 `no_token_access_path` and is dormant behind two unset flags |
+| Suggestion review surface (show / edit / accept / dismiss) | yes, on `main` for Calendar; extended to Outlook in **Draft PR #59** | **no** — the whole surface is gated, and both `VITE_CALENDAR_INGESTION_ENABLED` and `VITE_OUTLOOK_REVIEW_ENABLED` are unset |
 | Scheduler for the worker or for context expiry | no | no |
 | Entra registration, client secret, token-encryption key, `OUTLOOK_DISCLOSURE_VERSION` | no | no |
 
@@ -259,6 +271,8 @@ Draft branch and undeployed; it is not a Production fact.
 | 22 | Disconnect behaviour, and the exact difference between deleted and emptied | **Executed against a real Postgres**, not read off the source: `tests/sql/outlook-disconnect-runtime.sql` seeds two users with a connection, tokens, sync cursors, an OAuth state, a pending suggested interaction, a pending suggested contact and the mail links, calls `disconnect_my_outlook()` as one of them, and asserts the four deletions plus `outlook_candidate_refs`, that both candidate rows REMAIN with status `invalidated` and all content NULL, that the other user is untouched, and that no other user-scoped table in the schema retains a row. `ncc_terminal_erased` and `interaction_candidates_terminal_draft_erased` enforce the emptying independently of the RPC |
 | 23 | Provenance records hold no provider identifiers | `outlook_candidate_refs` stores connection id, fingerprints and key version only — no message/conversation id, address or subject |
 | 24 | The browser can read its own connection status without a service-role key or a table grant | `20260929000000` adds `get_my_outlook_connection()`: SECURITY DEFINER, STABLE, **zero arguments**, `REVOKE ALL … FROM PUBLIC, anon, service_role` then `GRANT EXECUTE … TO authenticated`. It returns mailbox, account type, status, needs_reauth, connected_at, consent version and scopes, and never a token, ciphertext, nonce, key version, connection id or Microsoft account/tenant id. `tests/sql/outlook-connection-status-runtime.sql` asserts the refusal without a session, the caller-follows-identity behaviour, an allowlist over the returned keys, the grants, and that `authenticated` still holds **no** SELECT on `microsoft_connections`. No file under `src/` mentions a service-role key (asserted by `tests/outlook-disconnect-ui.test.js`) |
+| 25 | A pending Outlook suggestion can be written only by the worker, only under a live lease, and only for a contact the user already has | `20260930000000` adds `upsert_outlook_interaction_candidate`: SECURITY DEFINER, `service_role` only (`REVOKE ALL … FROM PUBLIC, anon, authenticated`), fenced on `outlook_sync_state.sync_run_id` + `sync_status = running` + `sync_lease_until > now()` with the state row locked `FOR SHARE` in the release RPC's lock order, refusing `contact_required` when no contact is supplied and `contact_not_owned` when the contact belongs to someone else. It writes only `interaction_candidates` and `outlook_candidate_refs`, and every content column (`proposed_notes`, `retained_subject`, `draft_summary`, `draft_follow_up`, `summary_evidence`) is left NULL. Proven over real HTTP through PostgREST against a real Postgres by `tests/local/outlook-first-suggestion.mjs` |
+| 26 | No interaction exists until the user explicitly accepts, and the saved note is the user's own | The worker performs no `INSERT INTO interactions`; only `accept_interaction_candidate` does, and it is `authenticated`-only and keyed on `auth.uid()`. The same harness asserts zero interactions before the accept, then a single interaction carrying the user's overridden type, date and note, with `source = outlook`. A dismissed or accepted exchange is tombstoned and never suggested again |
 
 ---
 
