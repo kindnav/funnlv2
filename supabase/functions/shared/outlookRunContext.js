@@ -9,7 +9,11 @@
 // WHAT IT LOADS, AND NOTHING MORE. Scoped to the single connection the reservation
 // returned:
 //   * the owner (microsoft_connections.user_id) and mailbox address;
-//   * that owner's contacts, id + email only - the fields the participant matcher needs;
+//   * that owner's contacts - id, user_id and email only - read in bounded pages,
+//     because one response holding the whole supported set exceeds the port's body
+//     bound. If the owner has MORE than the supported number, the run FAILS here,
+//     before any Graph request and before any cursor could advance: matching against a
+//     subset would quietly treat a tracked person as a stranger;
 //   * the two encrypted delta cursors, decrypted in memory;
 //   * the encrypted access and refresh tokens, decrypted in memory.
 // It never lists connections, never reads another user's rows, and never selects a
@@ -43,8 +47,27 @@ import { GRAPH_FOLDERS } from './outlookGraphTransport.js'
 /** Refresh this far ahead of expiry, so a token cannot die mid-run. */
 export const EXPIRY_SKEW_SECONDS = 300
 
-/** Contacts are loaded for the matcher, so the read is bounded like the matcher is. */
+/**
+ * The largest contact set this worker supports, matching the participant matcher's own
+ * MAX_CONTACTS. Above it the run FAILS rather than matching against a subset.
+ */
 export const MAX_CONTACTS_LOADED = 5000
+
+/**
+ * How many contacts to ask for per request, and why it is not MAX_CONTACTS_LOADED.
+ *
+ * The database port bounds every JSON response at MAX_PROVIDER_BODY_BYTES (256 KiB).
+ * Asking for 5000 rows in one response did not work: measured, 5000 rows of
+ * {id, user_id, email} serialise to about 809 KB - three times the bound - so the read
+ * failed with `response_too_large` and the run reported `contacts_unreadable`. The
+ * previous version only appeared to work because its test stubbed the `select` port and
+ * never went through the bound.
+ *
+ * Worst case per row: a 36-character id, a 36-character user_id, an email at the
+ * schema's 320-character ceiling, plus JSON punctuation - about 430 bytes. 400 rows is
+ * therefore at most ~172 KB, comfortably inside the bound with room for longer keys.
+ */
+export const CONTACT_PAGE_SIZE = 400
 
 /** Every reason a context load can fail. Controlled; safe to log. */
 export const CONTEXT_FAILURES = Object.freeze([
@@ -57,6 +80,9 @@ export const CONTEXT_FAILURES = Object.freeze([
   'refresh_failed',          // Microsoft refused or was unreachable
   'rotation_not_persisted',  // the refreshed token could not be stored
   'contacts_unreadable',
+  // More contacts than this worker can match against. Failing is the only honest
+  // option: matching against a subset would treat a tracked person as a stranger.
+  'too_many_contacts',
   'sync_state_unreadable',
 ])
 
@@ -139,11 +165,38 @@ export function makeRunContextLoader ({ select, rpc, config, deps = {} }) {
     }
     const userId = conn.user_id
 
-    // ── that owner's contacts. id + email only: a name is not needed to match. ─
-    const contactRows = await read(
-      `contacts?user_id=eq.${userId}&email=not.is.null` +
-      `&select=id,user_id,email&limit=${MAX_CONTACTS_LOADED}`,
-      'contacts_unreadable')
+    // ── that owner's contacts, in bounded pages ──────────────────────────────
+    // Only id, user_id and email: the matcher needs the address to match on, the id to
+    // attach a suggestion to, and the owner so its own cross-user guard stays a real
+    // check rather than a value this module supplied. A name, company or note is never
+    // read.
+    //
+    // Paged because one 5000-row response exceeds the port's body bound. Ordered by id
+    // so the pages are stable - PostgREST offsets are not deterministic without it, and
+    // an unstable order could both skip and duplicate a contact.
+    const contactRows = []
+    while (contactRows.length < MAX_CONTACTS_LOADED) {
+      const chunk = await read(
+        `contacts?user_id=eq.${userId}&email=not.is.null` +
+        `&select=id,user_id,email&order=id.asc` +
+        `&limit=${CONTACT_PAGE_SIZE}&offset=${contactRows.length}`,
+        'contacts_unreadable')
+      for (const row of chunk) contactRows.push(row)
+      if (chunk.length < CONTACT_PAGE_SIZE) break     // the last page
+    }
+
+    // OVERFLOW, detected rather than ignored. Stopping at exactly MAX_CONTACTS_LOADED is
+    // indistinguishable from 'there are more', so ask for one beyond the limit. If it
+    // exists, refuse the whole run: a contact left out of the index is not an unknown
+    // person, and silently proposing one as a stranger - or deferring a real exchange -
+    // would be wrong in a way nobody could see.
+    if (contactRows.length >= MAX_CONTACTS_LOADED) {
+      const beyond = await read(
+        `contacts?user_id=eq.${userId}&email=not.is.null` +
+        `&select=id&order=id.asc&limit=1&offset=${MAX_CONTACTS_LOADED}`,
+        'contacts_unreadable')
+      if (beyond.length > 0) throw new RunContextError('too_many_contacts')
+    }
 
     // ── the encrypted cursors ────────────────────────────────────────────────
     const stateRows = await read(

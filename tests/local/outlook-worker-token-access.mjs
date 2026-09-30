@@ -46,6 +46,9 @@ import {
 import { PRODUCTION_TOKEN_URL } from '../../supabase/functions/outlook-import-worker/endpoints.js'
 import { MS_TOKEN_ENDPOINT } from '../../supabase/functions/shared/microsoftOauthHelpers.js'
 import { GRAPH_BASE } from '../../supabase/functions/shared/outlookGraphTransport.js'
+import {
+  MAX_CONTACTS_LOADED, CONTACT_PAGE_SIZE,
+} from '../../supabase/functions/shared/outlookRunContext.js'
 import { importKeyFromBase64, encryptToken, decryptToken } from '../../supabase/functions/shared/googleTokenCrypto.js'
 import { readJsonBounded, MAX_PROVIDER_BODY_BYTES } from '../../supabase/functions/shared/boundedJson.js'
 
@@ -87,6 +90,7 @@ function psql (sql, { user = 'postgres', tuplesOnly = true } = {}) {
   return execFileSync('docker', args, { input: sql, encoding: 'utf8', stdio: 'pipe' })
 }
 const one = (sql) => psql(sql).trim()
+const one2 = one
 
 function waitForPg (timeoutMs = 180000) {
   const deadline = Date.now() + timeoutMs
@@ -542,6 +546,89 @@ async function main () {
     assert.strictEqual(one(`SELECT count(*) FROM public.interaction_candidates WHERE user_id='${U1}';`), '1')
     // The access token is still valid, so NO refresh should have happened.
     assert.strictEqual(tok2.calls.length, 0, 'a valid token must not be refreshed again')
+  })
+
+  // ══ contact loading, against the REAL port and the REAL database ══════════
+  console.log('\ncontacts: bounded paging through real PostgREST')
+
+  /** Add `n` contacts for u1, with realistic addresses. */
+  const addContacts = (n) => psql(`
+    INSERT INTO public.contacts (user_id, name, email)
+    SELECT '${U1}', 'Bulk ' || i,
+           'contact.number.' || i || '@a-fairly-long-company-domain.example'
+      FROM generate_series(1, ${n}) AS i;`, { tuplesOnly: false })
+
+  await test('THE OVERSIZED RESPONSE: one request for the whole set is refused by the port', async () => {
+    await seed({ accessExpired: false })
+    addContacts(MAX_CONTACTS_LOADED)
+    const ports = makePorts()
+    // Exactly what the previous loader asked for: the whole supported set in one
+    // response. Against real PostgREST with real rows the port refuses it.
+    const one = await ports.select(
+      `contacts?user_id=eq.${U1}&email=not.is.null&select=id,user_id,email` +
+      `&order=id.asc&limit=${MAX_CONTACTS_LOADED}`)
+    assert.ok(one.error, `the single-request read must fail, got ${JSON.stringify(one.data?.length)}`)
+
+    // And one PAGE of the same data is accepted.
+    const page = await ports.select(
+      `contacts?user_id=eq.${U1}&email=not.is.null&select=id,user_id,email` +
+      `&order=id.asc&limit=${CONTACT_PAGE_SIZE}&offset=0`)
+    assert.strictEqual(page.error, null, JSON.stringify(page.error))
+    assert.strictEqual(page.data.length, CONTACT_PAGE_SIZE)
+  })
+
+  await test('a multi-page contact set is loaded in full, through the real handler', async () => {
+    await seed({ accessExpired: false })
+    // Enough to need several pages, plus the one contact the exchange is with.
+    addContacts(CONTACT_PAGE_SIZE * 2 + 37)
+    const before = Number(one2(`SELECT count(*) FROM public.contacts WHERE user_id='${U1}';`))
+    const graphC = graphFixture()
+    const ports = makePorts()
+    currentEnv = baseEnv()
+    currentDeps = {
+      tokenUrl: FIXTURE_TOKEN_URL, fetchImpl: tokenFixture().fetchImpl,
+      graphFetchImpl: graphC.fetchImpl, select: ports.select, rpc: ports.rpc,
+    }
+    const r = await callWorker({ secret: WORKER_SECRET })
+    assert.strictEqual(r.status, 200, r.raw.slice(0, 300))
+    assert.strictEqual(r.body.run.outcome, 'committed', JSON.stringify(r.body.run))
+    // The suggestion still found the RIGHT contact, which is only possible if the page
+    // holding it was actually read.
+    assert.strictEqual(one2(
+      `SELECT count(*) FROM public.interaction_candidates c JOIN public.contacts ct
+         ON ct.id = c.contact_id WHERE ct.email = '${RECRUITER}' AND ct.user_id = '${U1}';`), '1')
+    // Paged, not requested in one go.
+    const contactCalls = ports.calls.filter((c) => c.startsWith('contacts'))
+    assert.ok(contactCalls.length >= 3, `expected several pages, got ${contactCalls.length}`)
+    for (const c of contactCalls) {
+      assert.ok(c.includes(`limit=${CONTACT_PAGE_SIZE}`) || c.includes('limit=1'), c)
+      assert.ok(c.includes(`user_id=eq.${U1}`), `owner-scoped: ${c}`)
+    }
+    assert.ok(before > CONTACT_PAGE_SIZE * 2, 'the fixture must actually span pages')
+  })
+
+  await test('THE OVERFLOW CASE: one contact past the limit fails before Graph and before any cursor', async () => {
+    await seed({ accessExpired: false })
+    addContacts(MAX_CONTACTS_LOADED)   // plus the two seeded ones -> over the limit
+    const tokenC = tokenFixture()
+    const graphC = graphFixture()
+    const ports = makePorts()
+    currentEnv = baseEnv()
+    currentDeps = {
+      tokenUrl: FIXTURE_TOKEN_URL, fetchImpl: tokenC.fetchImpl,
+      graphFetchImpl: graphC.fetchImpl, select: ports.select, rpc: ports.rpc,
+    }
+    const r = await callWorker({ secret: WORKER_SECRET })
+    assert.strictEqual(r.status, 503, r.raw.slice(0, 200))
+    assert.strictEqual(r.body.run.outcome, 'released_error')
+    assert.strictEqual(r.body.run.reason, 'too_many_contacts')
+    assert.strictEqual(graphC.calls.length, 0, 'no mailbox may be read')
+    assert.strictEqual(tokenC.calls.length, 0, 'no token need even be fetched')
+    assert.strictEqual(r.body.run.cursors_advanced, 0)
+    assert.strictEqual(one2('SELECT count(*) FROM public.interaction_candidates;'), '0')
+    assert.strictEqual(one2(`SELECT coalesce(string_agg(coalesce(delta_link_ciphertext,'NULL'),','),'none')
+      FROM public.outlook_sync_state WHERE user_id='${U1}';`), 'NULL,NULL',
+    'no cursor may advance')
   })
 
   // ══ refusals ══════════════════════════════════════════════════════════════

@@ -272,18 +272,23 @@ export async function readFolderMetadata (p) {
     // cursor first meant a run that had already truncated a page reported itself
     // complete and handed back a cursor - storing it would have skipped every
     // dropped message forever. A cap breach now outranks the cursor.
+    // A per-page hook, awaited, fired for EVERY page INCLUDING THE FINAL ONE.
+    //
+    // IT USED TO SIT BELOW THE TWO BREAKS, which meant a folder whose stream ended on
+    // its first page never fired it at all - so a run with one final page per folder
+    // renewed its lease zero times and then lost it before the candidate write. The
+    // hook is the caller's only chance to notice that time has passed, so it must run
+    // whatever the page turned out to be.
+    //
+    // A hook that throws stops the pass, which is correct: the only caller uses it to
+    // renew the run's lease, and a run that has lost its lease must not keep reading.
+    if (typeof deps.onPageComplete === 'function') {
+      await deps.onPageComplete({ folder, pages, messages, final: page.complete === true })
+    }
+
     const overCap = checkRunCaps({ pages, messages })
     if (overCap) { stop = overCap; break }
     if (page.complete) { deltaLink = page.deltaLink; stop = 'complete'; break }
-    // A per-page hook, awaited. The only current caller uses it to renew the run's
-    // lease: the bounded worst case for a run is far longer than any lease the
-    // reservation RPC will grant, so a long run MUST renew or lose its claim. A hook
-    // that throws stops the pass, which is correct - a run that has lost its lease
-    // must not keep reading.
-    if (typeof deps.onPageComplete === 'function') {
-      await deps.onPageComplete({ folder, pages, messages })
-    }
-
     if (!page.nextLink) {
       // Neither a nextLink nor a deltaLink: the stream said nothing about how to
       // continue. Treat it as malformed rather than as finished, so the cursor is

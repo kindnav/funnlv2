@@ -5,6 +5,8 @@
 // THE ORDER IS THE CONTRACT, and it is the reason this module exists rather than the
 // steps being inlined somewhere:
 //
+//   0. before EVERY stage below, renew the lease if what remains would not cover that
+//      stage's worst case - see PAGE_WORST_MS / CONTEXT_WORST_MS / WRITE_STEP_MS
 //   1. reserve_due_outlook_connection          take the lease for both folders
 //   2. runOutlookMetadataPass                  envelope only; no body, no Anthropic
 //   3. if NOT commitReady -> release WITHOUT cursors, run_complete = false, and write
@@ -53,7 +55,9 @@
 // and no Microsoft, and it keeps key handling out of this file - `encryptCursor` is
 // handed in already bound to a key.
 
-import { GRAPH_FOLDERS } from './outlookGraphTransport.js'
+import {
+  GRAPH_FOLDERS, MAX_RETRIES, REQUEST_TIMEOUT_MS, MAX_TOTAL_RETRY_DELAY_MS,
+} from './outlookGraphTransport.js'
 import { runOutlookMetadataPass, summarizePass } from './outlookMetadataPass.js'
 
 /**
@@ -70,9 +74,42 @@ import { runOutlookMetadataPass, summarizePass } from './outlookMetadataPass.js'
  */
 export const LEASE_SECONDS = 300
 export const RENEW_SECONDS = 300
-/** Renew after this many pages. Small enough that a slow page cannot outlast the lease. */
-export const RENEW_EVERY_PAGES = 2
 export const DUE_AFTER_SECONDS = 900
+
+/**
+ * RENEWAL IS TIME-BASED, NOT PAGE-COUNTED, and this is the correction that matters.
+ *
+ * The previous schedule renewed after every two NON-FINAL pages, which failed twice
+ * over. A folder whose stream ended on its first page never fired the hook at all, so a
+ * run with one final page per folder renewed ZERO times; and the count ignored the time
+ * spent loading context and writing candidates, so the one renewal a longer run did
+ * attempt arrived after the lease had already died. Both were reproduced: a slow run
+ * lost its lease at 300s and had its candidate write refused `stale_run` at 485s, so a
+ * run that had done all its work committed nothing.
+ *
+ * The rule now: BEFORE any stage that could take longer than the lease has left, renew.
+ * Each margin below is the worst case for one stage, and each is <= RENEW_SECONDS, which
+ * is what makes the scheme sound - a single renewal always covers the stage that follows
+ * it. Nothing here is a heartbeat or a scheduler: it is one guard called at four places.
+ */
+
+/**
+ * One Graph page, worst case, straight from the transport's own bounds:
+ * (MAX_RETRIES + 1) attempts at REQUEST_TIMEOUT_MS plus MAX_TOTAL_RETRY_DELAY_MS of
+ * honoured backoff = 4 * 20s + 60s.
+ */
+export const PAGE_WORST_MS = (MAX_RETRIES + 1) * REQUEST_TIMEOUT_MS + MAX_TOTAL_RETRY_DELAY_MS
+
+/**
+ * Loading the run context, worst case: a bounded number of database reads plus at most
+ * one token refresh. The contact read is paged, so it is the dominant term -
+ * ceil(MAX_CONTACTS_LOADED / CONTACT_PAGE_SIZE) + 1 overflow probe + 3 other reads, each
+ * bounded by the port's 15s deadline, plus TOKEN_TIMEOUT_MS for the refresh.
+ */
+export const CONTEXT_WORST_MS = 255_000
+
+/** One candidate write, worst case: a single bounded RPC round trip. */
+export const WRITE_STEP_MS = 20_000
 
 /** Backoff requested when a run releases incomplete. */
 export const RETRY_BACKOFF_SECONDS = 300
@@ -212,15 +249,27 @@ export async function runOutlookImport (p) {
     }
   }
 
-  // Renew every RENEW_EVERY_PAGES pages. A renewal that does not confirm means the
-  // lease is gone, so the sentinel stops the pass rather than letting it keep reading
-  // a mailbox it no longer has a claim on.
-  let pagesSinceRenewal = 0
+  // ── the lease guard ───────────────────────────────────────────────────────
+  // The reservation just granted LEASE_SECONDS, so that is when it runs out. Every
+  // renewal moves the deadline; nothing else does.
+  const clock = typeof deps?.now === 'function' ? deps.now : Date.now
+  let leaseUntilMs = clock() + LEASE_SECONDS * 1000
   let leaseLost = false
-  const onPageComplete = async () => {
-    pagesSinceRenewal += 1
-    if (pagesSinceRenewal < RENEW_EVERY_PAGES) return
-    pagesSinceRenewal = 0
+
+  /**
+   * Make sure at least `marginMs` of lease remains before starting the next stage,
+   * renewing if it does not. A no-op when there is plenty of time left, so the common
+   * case costs nothing.
+   *
+   * A renewal that does not confirm means another run owns the connection now, so this
+   * throws and the caller stops without advancing either cursor.
+   */
+  const ensureLease = async (marginMs) => {
+    // STRICTLY greater, not >=. With exactly `marginMs` left, a stage costing its whole
+    // worst case finishes at the instant the lease expires, and the NEXT renewal then
+    // arrives too late to be granted. A test caught that: a write loop refused its
+    // renewal at remaining = 0 and lost a run that should have committed.
+    if (leaseUntilMs - clock() > marginMs) return
     let res
     try {
       res = await rpc('renew_outlook_sync_lease', {
@@ -236,12 +285,23 @@ export async function runOutlookImport (p) {
       leaseLost = true
       throw new Error('lease_lost')
     }
+    leaseUntilMs = clock() + RENEW_SECONDS * 1000
   }
+
+  // Fired for every page, including a final one. Renews only when the lease could not
+  // survive another worst-case page.
+  const onPageComplete = () => ensureLease(PAGE_WORST_MS)
 
   let pass
   let context
   try {
+    // Loading the context can take most of a lease on its own: a paged contact read
+    // plus a token refresh. Renew first if what remains would not cover it.
+    await ensureLease(CONTEXT_WORST_MS)
     context = await loadRunContext(connectionId, runId)
+    // And again before the first Graph page, because the context load may have consumed
+    // most of what was left.
+    await ensureLease(PAGE_WORST_MS)
     pass = await runOutlookMetadataPass({
       connection: {
         connectionId,
@@ -312,6 +372,10 @@ export async function runOutlookImport (p) {
 
   try {
     for (const entry of writable) {
+      // Before each write, not once before the loop: MAX_PLAN_ENTRIES round trips can
+      // outlast any lease, and a write refused `stale_run` halfway through would throw
+      // away a run that had otherwise succeeded.
+      await ensureLease(WRITE_STEP_MS)
       const res = await rpc('upsert_outlook_interaction_candidate', {
         p_connection_id: connectionId,
         p_run_id: runId,
@@ -334,6 +398,7 @@ export async function runOutlookImport (p) {
       break
     }
   } catch {
+    // A renewal refusal inside the loop sets leaseLost; anything else is a thrown write.
     threw = true
   }
 
@@ -346,6 +411,12 @@ export async function runOutlookImport (p) {
     skipped,
     cursorsAdvanced: 0,
     summary: summarizePass(pass),
+  }
+
+  if (leaseLost) {
+    // The lease went while writing. Whatever landed stays and is reported; no cursor.
+    await release('error', false, null, 'lease_lost')
+    return { ...partial, outcome: 'lease_lost', refusal: null }
   }
 
   if (threw) {
