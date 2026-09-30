@@ -1,0 +1,699 @@
+#!/usr/bin/env node
+// THE REAL WORKER HANDLER, over local HTTP, obtaining its own token.
+//
+// This is the positive control for the slice. An authorized HTTP request reaches the
+// actual `handleOutlookImportWorker` from
+// supabase/functions/outlook-import-worker/handler.js - not a copy, not a stub - and the
+// handler:
+//   1. checks its two flags, then the worker secret, then its configuration;
+//   2. reserves a connection through reserve_due_outlook_connection;
+//   3. loads THAT connection's owner, contacts, encrypted cursors and encrypted tokens
+//      from a real Postgres through real PostgREST;
+//   4. decrypts the tokens with the token-encryption key, finds the access token
+//      expired, refreshes it at a FIXTURE token endpoint, and persists the rotated
+//      refresh token through rotate_microsoft_access_token;
+//   5. runs the bounded metadata pass against FIXTURE Graph responses using the newly
+//      refreshed token;
+//   6. writes one pending known-contact suggestion and advances the encrypted cursors.
+//
+// THE REQUEST SUPPLIES NONE OF THAT. The positive control deliberately POSTs a body
+// containing another user's id, a bogus connection id, a bogus access token and a bogus
+// cursor, and asserts none of it has any effect - the handler never reads the body.
+//
+// FIXTURES ARE FIXTURES. Every Microsoft response here is written by this file. It shows
+// what the code does GIVEN a response of that shape; it is not evidence that Microsoft
+// produces that shape, and no request ever leaves this machine. The only things claimed
+// about the real provider are the two constants the deployed entry uses (Microsoft's
+// fixed token endpoint and the Graph origin), which are asserted to be what the
+// production modules export.
+//
+// NOT COVERED: the browser, Kong (the handler is called directly, so no apikey gateway
+// check), GoTrue, and any real mailbox. Nobody has operated the app.
+//
+// REQUIREMENTS: Docker, plus the two images the project already uses.
+// RUN: node tests/local/outlook-worker-token-access.mjs   (builds and tears down)
+
+import { execFileSync, spawnSync } from 'node:child_process'
+import { randomBytes, createHmac, webcrypto } from 'node:crypto'
+import { createServer } from 'node:http'
+import { readFileSync, readdirSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { dirname, join } from 'node:path'
+import assert from 'node:assert'
+import {
+  handleOutlookImportWorker,
+} from '../../supabase/functions/outlook-import-worker/handler.js'
+import { PRODUCTION_TOKEN_URL } from '../../supabase/functions/outlook-import-worker/endpoints.js'
+import { MS_TOKEN_ENDPOINT } from '../../supabase/functions/shared/microsoftOauthHelpers.js'
+import { GRAPH_BASE } from '../../supabase/functions/shared/outlookGraphTransport.js'
+import { importKeyFromBase64, encryptToken, decryptToken } from '../../supabase/functions/shared/googleTokenCrypto.js'
+import { readJsonBounded, MAX_PROVIDER_BODY_BYTES } from '../../supabase/functions/shared/boundedJson.js'
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
+const PG = 'funnl-token-pg'
+const REST = 'funnl-token-rest'
+const NET = 'funnl-token-net'
+const PG_IMAGE = 'public.ecr.aws/supabase/postgres:17.6.1.140'
+const REST_IMAGE = 'public.ecr.aws/supabase/postgrest:v14.14'
+const PGRST = 'http://127.0.0.1:53997'
+const WORKER = 'http://127.0.0.1:53996'
+
+const U1 = '11111111-1111-1111-1111-111111111111'
+const U2 = '22222222-2222-2222-2222-222222222222'
+const ME = 'student@getfunnl.test'
+const RECRUITER = 'ava@bank.test'
+
+// Per-run throwaway secrets. None is printed.
+const WORKER_SECRET = randomBytes(24).toString('hex')          // 48 chars
+const TOKEN_KEY_B64 = Buffer.from(randomBytes(32)).toString('base64')
+const CLIENT_SECRET = randomBytes(16).toString('hex')
+const FIXTURE_TOKEN_URL = 'https://login.microsoftonline.test/common/oauth2/v2.0/token'
+
+let passed = 0, failed = 0
+async function test (name, fn) {
+  try { await fn(); console.log(`  ✓ ${name}`); passed++ }
+  catch (e) { console.error(`  ✗ ${name}\n    ${e.message}`); failed++ }
+}
+
+// ── plumbing ─────────────────────────────────────────────────────────────────
+const docker = (a, o = {}) => execFileSync('docker', a, { encoding: 'utf8', stdio: 'pipe', ...o })
+const quiet = (a) => spawnSync('docker', a, { stdio: 'ignore' })
+const sleepSync = (ms) => spawnSync('node', ['-e', `setTimeout(()=>{},${ms})`], { stdio: 'ignore' })
+
+function psql (sql, { user = 'postgres', tuplesOnly = true } = {}) {
+  const args = ['exec', '-i', PG, 'psql', '-U', user, '-d', 'postgres', '-v', 'ON_ERROR_STOP=1', '-q']
+  if (tuplesOnly) args.push('-At')
+  args.push('-f', '-')
+  return execFileSync('docker', args, { input: sql, encoding: 'utf8', stdio: 'pipe' })
+}
+const one = (sql) => psql(sql).trim()
+
+function waitForPg (timeoutMs = 180000) {
+  const deadline = Date.now() + timeoutMs
+  let streak = 0
+  while (Date.now() < deadline) {
+    const r = spawnSync('docker',
+      ['exec', '-i', PG, 'psql', '-U', 'postgres', '-d', 'postgres', '-v', 'ON_ERROR_STOP=1', '-q', '-f', '-'],
+      { input: 'CREATE TABLE public._probe(i int); DROP TABLE public._probe;', encoding: 'utf8' })
+    if (r.status === 0) { streak += 1; if (streak >= 3) return } else { streak = 0 }
+    sleepSync(1000)
+  }
+  throw new Error('Postgres never became stably DDL-ready')
+}
+
+// ── the database ports, as the service role, over real PostgREST ─────────────
+// Deliberately the same SHAPE as endpoints.js makePostgrestPorts - plain fetch, bounded
+// read, redirect refused - rather than importing it, because the harness mints its own
+// service-role JWT for PostgREST instead of holding a project service key.
+let jwtSecret = null
+function mintServiceJwt () {
+  const seg = (o) => Buffer.from(JSON.stringify(o)).toString('base64url')
+  const now = Math.floor(Date.now() / 1000)
+  const head = seg({ alg: 'HS256', typ: 'JWT' })
+  const body = seg({ role: 'service_role', aud: 'authenticated', iat: now, exp: now + 3600 })
+  const sig = createHmac('sha256', jwtSecret).update(`${head}.${body}`).digest('base64url')
+  return `${head}.${body}.${sig}`
+}
+
+function makePorts () {
+  const calls = []
+  async function call (path, init) {
+    calls.push(path)
+    const ctrl = new AbortController()
+    const timer = setTimeout(() => ctrl.abort(), 15000)
+    try {
+      let res
+      try {
+        res = await fetch(`${PGRST}/${path}`, {
+          ...init,
+          headers: {
+            Authorization: `Bearer ${mintServiceJwt()}`,
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+          signal: ctrl.signal,
+          redirect: 'error',
+        })
+      } catch { return { data: null, error: { code: 'unreachable' } } }
+      if (res.status >= 400) {
+        return { data: null, error: { code: res.status >= 500 ? 'server_error' : 'rejected' } }
+      }
+      const read = await readJsonBounded(res, MAX_PROVIDER_BODY_BYTES)
+      if (!read.ok) return { data: null, error: { code: 'malformed' } }
+      return { data: read.value, error: null }
+    } finally { clearTimeout(timer) }
+  }
+  return {
+    calls,
+    select: (p) => call(p, { method: 'GET' }),
+    rpc: (n, a) => call(`rpc/${n}`, { method: 'POST', body: JSON.stringify(a ?? {}) }),
+  }
+}
+
+// ── fixture Microsoft endpoints ──────────────────────────────────────────────
+
+const REFRESHED_ACCESS = 'FIXTURE-ACCESS-TOKEN-v2'
+const ROTATED_REFRESH = 'FIXTURE-REFRESH-TOKEN-v2'
+
+/** The token endpoint. Records every request; never echoes a secret. */
+function tokenFixture ({ rotate = true, status = 200, body = null } = {}) {
+  const calls = []
+  const fetchImpl = async (url, init) => {
+    const form = new URLSearchParams(init.body)
+    calls.push({
+      url,
+      redirect: init.redirect,
+      grant: form.get('grant_type'),
+      hasSecret: form.get('client_secret') === CLIENT_SECRET,
+      hasRefresh: typeof form.get('refresh_token') === 'string' && form.get('refresh_token').length > 0,
+      scope: form.get('scope'),
+      sentRedirectUri: form.get('redirect_uri'),
+    })
+    const payload = body ?? {
+      access_token: REFRESHED_ACCESS,
+      expires_in: 3600,
+      scope: 'Mail.Read User.Read offline_access',
+      token_type: 'Bearer',
+      ...(rotate ? { refresh_token: ROTATED_REFRESH } : {}),
+    }
+    return { status, headers: { get: () => null }, json: async () => payload }
+  }
+  return { calls, fetchImpl }
+}
+
+/** The Graph delta endpoint. One two-sided exchange; records the bearer it was given. */
+function graphFixture () {
+  const calls = []
+  const addr = (e) => ({ emailAddress: { address: e, name: e.split('@')[0] } })
+  const m = (id, from, to, sent) => ({
+    id, conversationId: 'conv-1', receivedDateTime: sent, sentDateTime: sent, isDraft: false,
+    subject: 'Following up after the info session',
+    from: addr(from), sender: addr(from), toRecipients: to.map(addr), ccRecipients: [],
+  })
+  const fetchImpl = async (url, init) => {
+    calls.push({ url, bearer: init.headers?.Authorization ?? null, redirect: init.redirect })
+    const folder = url.includes('/mailFolders/inbox/') ? 'inbox' : 'sentitems'
+    const items = folder === 'inbox'
+      ? [m('ms-in-1', RECRUITER, [ME], '2026-09-20T14:05:00Z')]
+      : [m('ms-out-1', ME, [RECRUITER], '2026-09-21T09:12:00Z')]
+    return {
+      status: 200,
+      headers: { get: () => null },
+      json: async () => ({
+        value: items,
+        '@odata.deltaLink': `${GRAPH_BASE}/me/mailFolders/${folder}/messages/delta?$deltatoken=NEW-${folder}`,
+      }),
+    }
+  }
+  return { calls, fetchImpl }
+}
+
+// ── the worker, served over real HTTP ────────────────────────────────────────
+
+let currentEnv = null
+let currentDeps = null
+
+function startWorkerServer () {
+  const server = createServer((req, res) => {
+    const chunks = []
+    req.on('data', (c) => chunks.push(c))
+    req.on('end', async () => {
+      // A faithful web Request, body included. The handler is expected to ignore it.
+      const request = new Request(`http://worker.local${req.url}`, {
+        method: req.method,
+        headers: Object.entries(req.headers).filter(([, v]) => typeof v === 'string'),
+        body: ['GET', 'HEAD'].includes(req.method) ? undefined : Buffer.concat(chunks),
+      })
+      let out
+      try {
+        out = await handleOutlookImportWorker(request, currentEnv, currentDeps)
+      } catch (e) {
+        res.writeHead(500, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ harnessError: String(e && e.message) }))
+        return
+      }
+      const text = await out.text()
+      res.writeHead(out.status, { 'Content-Type': 'application/json' })
+      res.end(text)
+    })
+  })
+  return new Promise((resolve) => server.listen(53996, '127.0.0.1', () => resolve(server)))
+}
+
+async function callWorker ({ secret, body, method = 'POST' } = {}) {
+  const headers = { 'Content-Type': 'application/json' }
+  if (secret) headers.Authorization = `Bearer ${secret}`
+  const res = await fetch(WORKER, {
+    method, headers,
+    body: ['GET', 'HEAD'].includes(method) ? undefined : JSON.stringify(body ?? {}),
+  })
+  const text = await res.text()
+  let parsed = null
+  try { parsed = text.length ? JSON.parse(text) : null } catch { parsed = text }
+  return { status: res.status, body: parsed, raw: text }
+}
+
+// ── fixtures in the database ─────────────────────────────────────────────────
+
+async function seed ({ accessExpired = true, withAccessToken = true, withRefresh = true } = {}) {
+  const key = await importKeyFromBase64(TOKEN_KEY_B64, webcrypto.subtle)
+  const acc = await encryptToken('FIXTURE-ACCESS-TOKEN-v1', key, { subtle: webcrypto.subtle })
+  const ref = await encryptToken('FIXTURE-REFRESH-TOKEN-v1', key, { subtle: webcrypto.subtle })
+  const expiry = accessExpired
+    ? "now() - interval '10 minutes'"
+    : "now() + interval '2 hours'"
+  psql(`
+DELETE FROM public.interaction_candidates WHERE user_id IN ('${U1}','${U2}');
+DELETE FROM public.interactions WHERE user_id IN ('${U1}','${U2}');
+DELETE FROM public.contacts WHERE user_id IN ('${U1}','${U2}');
+DELETE FROM public.microsoft_connections WHERE user_id IN ('${U1}','${U2}');
+DO $seed$
+DECLARE k uuid;
+BEGIN
+  INSERT INTO public.microsoft_connections
+    (user_id, ms_account_id, ms_tenant_id, account_type, ms_email, scopes,
+     status, consented_at, consent_policy_version, token_expires_at)
+  VALUES ('${U1}', 'acct-1', 'consumers', 'personal', '${ME}',
+          ARRAY['Mail.Read','User.Read','offline_access'], 'active', now(),
+          'ol-disc-00000000000000000000000000000000', ${expiry})
+  RETURNING id INTO k;
+  INSERT INTO public.microsoft_tokens
+    (connection_id, user_id, access_token_ciphertext, access_token_nonce,
+     refresh_token_ciphertext, refresh_token_nonce, key_version, token_expires_at)
+  VALUES (k, '${U1}',
+          ${withAccessToken ? `'${acc.ciphertext}'` : 'NULL'},
+          ${withAccessToken ? `'${acc.nonce}'` : 'NULL'},
+          ${withRefresh ? `'${ref.ciphertext}'` : 'NULL'},
+          ${withRefresh ? `'${ref.nonce}'` : 'NULL'},
+          1, ${expiry});
+  INSERT INTO public.contacts (user_id, name, email) VALUES ('${U1}', 'Ava Recruiter', '${RECRUITER}');
+  -- The SAME address, tracked by a DIFFERENT user. Must never be matched.
+  INSERT INTO public.contacts (user_id, name, email) VALUES ('${U2}', 'Ava (someone else)', '${RECRUITER}');
+END $seed$;`, { tuplesOnly: false })
+}
+
+function teardown () {
+  quiet(['rm', '-f', REST]); quiet(['rm', '-f', PG]); quiet(['network', 'rm', NET])
+}
+
+let server = null
+
+async function main () {
+  console.log('\nbuilding a disposable Postgres + PostgREST, and serving the real handler')
+  teardown()
+  quiet(['network', 'create', NET])
+  docker(['run', '-d', '--name', PG, '--network', NET, '-e', 'POSTGRES_PASSWORD=disposable', PG_IMAGE])
+  waitForPg()
+  psql(readFileSync(join(ROOT, 'tests/sql/_bootstrap-disposable-db.sql'), 'utf8'),
+    { user: 'supabase_admin', tuplesOnly: false })
+  const migrations = readdirSync(join(ROOT, 'supabase/migrations')).filter((f) => f.endsWith('.sql')).sort()
+  for (const m of migrations) psql(readFileSync(join(ROOT, 'supabase/migrations', m), 'utf8'), { tuplesOnly: false })
+  console.log(`  applied ${migrations.length} migrations, none skipped`)
+
+  jwtSecret = randomBytes(32).toString('hex')
+  psql("ALTER ROLE authenticator WITH PASSWORD 'disposable';", { user: 'supabase_admin', tuplesOnly: false })
+  docker(['run', '-d', '--name', REST, '--network', NET, '-p', '53997:3000',
+    '-e', `PGRST_DB_URI=postgres://authenticator:disposable@${PG}:5432/postgres`,
+    '-e', 'PGRST_DB_SCHEMAS=public', '-e', 'PGRST_DB_ANON_ROLE=anon',
+    '-e', `PGRST_JWT_SECRET=${jwtSecret}`, REST_IMAGE])
+  for (let i = 0; i < 60; i++) {
+    try { const r = await fetch(`${PGRST}/`); if (r.status < 500) break } catch { /* not up */ }
+    await new Promise((r) => setTimeout(r, 400))
+  }
+  server = await startWorkerServer()
+  console.log('  PostgREST is serving; the worker handler is listening\n')
+
+  const FINGERPRINT_KEY = { current: { keyBytes: new Uint8Array(32).fill(13), keyVersion: 1 } }
+  const baseEnv = () => ({
+    integrationEnabled: 'true',
+    workerEnabled: 'true',
+    workerSecret: WORKER_SECRET,
+    clientId: 'fixture-client-id',
+    clientSecret: CLIENT_SECRET,
+    tokenKeyB64: TOKEN_KEY_B64,
+    fingerprintKey: FINGERPRINT_KEY,
+    keyVersion: 1,
+    scope: 'Mail.Read User.Read offline_access',
+  })
+
+  // ══ the deployed constants are the real ones ══════════════════════════════
+  console.log('the deployed entry points at Microsoft, not at a fixture')
+  await test('PRODUCTION_TOKEN_URL is Microsoft\'s fixed token endpoint', () => {
+    assert.strictEqual(PRODUCTION_TOKEN_URL, MS_TOKEN_ENDPOINT)
+    assert.ok(PRODUCTION_TOKEN_URL.startsWith('https://login.microsoftonline.com/'),
+      PRODUCTION_TOKEN_URL)
+    // Everything below uses a FIXTURE url, which is why it proves nothing about
+    // Microsoft's own responses.
+    assert.notStrictEqual(FIXTURE_TOKEN_URL, PRODUCTION_TOKEN_URL)
+  })
+
+  // ══ flags and secret still gate everything ════════════════════════════════
+  console.log('\nthe flag-first and worker-secret checks are unchanged')
+
+  await test('both flags off: 503 not_enabled, whatever else is configured', async () => {
+    currentEnv = { ...baseEnv(), integrationEnabled: null, workerEnabled: null }
+    currentDeps = { tokenUrl: FIXTURE_TOKEN_URL, select: () => {}, rpc: () => {} }
+    const r = await callWorker({ secret: WORKER_SECRET })
+    assert.strictEqual(r.status, 503)
+    assert.deepStrictEqual(r.body, { error: 'not_enabled' })
+  })
+
+  await test('dormancy is still checked BEFORE the secret', async () => {
+    currentEnv = { ...baseEnv(), workerEnabled: null }
+    currentDeps = { tokenUrl: FIXTURE_TOKEN_URL, select: () => {}, rpc: () => {} }
+    const wrong = await callWorker({ secret: 'w'.repeat(48) })
+    const right = await callWorker({ secret: WORKER_SECRET })
+    assert.strictEqual(wrong.status, 503)
+    assert.deepStrictEqual(right.body, { error: 'not_enabled' })
+  })
+
+  await test('enabled but unauthorized or GET is refused before any work', async () => {
+    const ports = makePorts()
+    currentEnv = baseEnv()
+    currentDeps = { tokenUrl: FIXTURE_TOKEN_URL, select: ports.select, rpc: ports.rpc }
+    const noAuth = await callWorker({})
+    assert.strictEqual(noAuth.status, 401)
+    const wrong = await callWorker({ secret: 'x'.repeat(48) })
+    assert.strictEqual(wrong.status, 401)
+    const get = await callWorker({ secret: WORKER_SECRET, method: 'GET' })
+    assert.strictEqual(get.status, 405)
+    assert.strictEqual(ports.calls.length, 0, 'no database call may happen before authorisation')
+  })
+
+  // ══ configuration fails closed ════════════════════════════════════════════
+  console.log('\nmissing Entra configuration or encryption key fails closed')
+
+  for (const key of ['clientId', 'clientSecret', 'tokenKeyB64', 'fingerprintKey']) {
+    await test(`a missing ${key} refuses with config_missing and touches no database`, async () => {
+      const ports = makePorts()
+      currentEnv = { ...baseEnv(), [key]: null }
+      currentDeps = { tokenUrl: FIXTURE_TOKEN_URL, select: ports.select, rpc: ports.rpc }
+      const r = await callWorker({ secret: WORKER_SECRET })
+      assert.strictEqual(r.status, 503)
+      assert.strictEqual(r.body.error, 'config_missing')
+      assert.deepStrictEqual(r.body.missing, [key])
+      assert.strictEqual(ports.calls.length, 0, 'nothing may be read before the config check')
+      // The refusal names the key, never its value.
+      assert.ok(!r.raw.includes(CLIENT_SECRET) && !r.raw.includes(TOKEN_KEY_B64))
+    })
+  }
+
+  await test('a missing token endpoint also fails closed', async () => {
+    const ports = makePorts()
+    currentEnv = baseEnv()
+    currentDeps = { tokenUrl: '', select: ports.select, rpc: ports.rpc }
+    const r = await callWorker({ secret: WORKER_SECRET })
+    assert.strictEqual(r.body.error, 'config_missing')
+    assert.ok(r.body.missing.includes('tokenUrl'))
+    assert.strictEqual(ports.calls.length, 0)
+  })
+
+  // ══ THE POSITIVE CONTROL ══════════════════════════════════════════════════
+  console.log('\nPOSITIVE CONTROL: one authorized request reaches a pending suggestion')
+
+  const tok = tokenFixture()
+  const graph = graphFixture()
+  let runBody = null
+
+  await test('the handler obtains its own token and leaves ONE pending suggestion', async () => {
+    await seed({ accessExpired: true })
+    const ports = makePorts()
+    currentEnv = baseEnv()
+    currentDeps = {
+      tokenUrl: FIXTURE_TOKEN_URL,
+      fetchImpl: tok.fetchImpl,
+      graphFetchImpl: graph.fetchImpl,
+      select: ports.select,
+      rpc: ports.rpc,
+    }
+    // The request carries values it must NOT be able to influence.
+    const r = await callWorker({
+      secret: WORKER_SECRET,
+      body: {
+        user_id: U2,
+        connection_id: '00000000-0000-0000-0000-000000000000',
+        access_token: 'ATTACKER-SUPPLIED-TOKEN',
+        cursor: 'ATTACKER-SUPPLIED-CURSOR',
+        proposed_notes: 'attacker-supplied note',
+      },
+    })
+    assert.strictEqual(r.status, 200, r.raw.slice(0, 300))
+    runBody = r.body
+    assert.strictEqual(r.body.error, null)
+    assert.strictEqual(r.body.run.outcome, 'committed', JSON.stringify(r.body.run))
+    assert.strictEqual(r.body.run.created, 1)
+    assert.strictEqual(r.body.run.accepted, 1)
+    assert.strictEqual(r.body.run.cursors_advanced, 2)
+    assert.strictEqual(one(
+      `SELECT count(*) FROM public.interaction_candidates WHERE user_id='${U1}' AND source='outlook' AND status='pending';`),
+    '1')
+  })
+
+  await test('the request body had NO effect: the run used the reserved connection', async () => {
+    // The body named U2, a bogus connection and a bogus token. None of it landed.
+    assert.strictEqual(one(`SELECT count(*) FROM public.interaction_candidates WHERE user_id='${U2}';`), '0')
+    assert.strictEqual(one(
+      `SELECT coalesce(proposed_notes,'NULL') FROM public.interaction_candidates WHERE user_id='${U1}';`), 'NULL')
+    // The Graph request carried the REFRESHED token, not the one the body offered.
+    assert.ok(graph.calls.length >= 2, 'both folders must have been read')
+    for (const c of graph.calls) {
+      assert.strictEqual(c.bearer, `Bearer ${REFRESHED_ACCESS}`,
+        'the run must use the token it obtained itself')
+      assert.ok(!c.bearer.includes('ATTACKER-SUPPLIED'))
+    }
+  })
+
+  await test('the token endpoint saw a refresh grant with the secret, and refused redirects', () => {
+    assert.strictEqual(tok.calls.length, 1, 'exactly one refresh')
+    const c = tok.calls[0]
+    assert.strictEqual(c.url, FIXTURE_TOKEN_URL)
+    assert.strictEqual(c.grant, 'refresh_token')
+    assert.strictEqual(c.hasSecret, true, 'a confidential client sends its secret')
+    assert.strictEqual(c.hasRefresh, true)
+    assert.strictEqual(c.redirect, 'error', 'this POST must never follow a redirect')
+    assert.strictEqual(c.sentRedirectUri, null, 'a refresh grant carries no redirect_uri')
+    assert.strictEqual(c.scope, 'Mail.Read User.Read offline_access')
+  })
+
+  await test('the ROTATED refresh token was persisted, encrypted, before the run used it', async () => {
+    const key = await importKeyFromBase64(TOKEN_KEY_B64, webcrypto.subtle)
+    const row = psql(`SELECT access_token_ciphertext, access_token_nonce,
+        refresh_token_ciphertext, refresh_token_nonce, key_version,
+        token_expires_at > now() AS future
+      FROM public.microsoft_tokens WHERE user_id='${U1}';`).trim().split('|')
+    const access = await decryptToken(row[0], row[1], key, { subtle: webcrypto.subtle })
+    const refresh = await decryptToken(row[2], row[3], key, { subtle: webcrypto.subtle })
+    assert.strictEqual(access, REFRESHED_ACCESS, 'the new access token must be stored')
+    assert.strictEqual(refresh, ROTATED_REFRESH,
+      'Microsoft invalidates the old refresh token when it rotates; losing the new one would break the connection')
+    assert.strictEqual(row[4], '1')
+    assert.strictEqual(row[5], 't', 'the stored expiry must now be in the future')
+    // Nothing is stored in the clear.
+    assert.ok(!row[0].includes(REFRESHED_ACCESS) && !row[2].includes(ROTATED_REFRESH))
+  })
+
+  await test('the cursors were stored ENCRYPTED and decrypt back to the fixture links', async () => {
+    const key = await importKeyFromBase64(TOKEN_KEY_B64, webcrypto.subtle)
+    const rows = psql(`SELECT folder, delta_link_ciphertext, delta_link_nonce
+      FROM public.outlook_sync_state WHERE user_id='${U1}' ORDER BY folder;`).trim().split('\n')
+    assert.strictEqual(rows.length, 2)
+    for (const r of rows) {
+      const [folder, ct, nonce] = r.split('|')
+      assert.ok(ct && ct.length > 0, `${folder} cursor not stored`)
+      assert.ok(!ct.includes('deltatoken') && !ct.includes('graph.microsoft.com'),
+        `${folder} cursor stored in plaintext`)
+      const plain = await decryptToken(ct, nonce, key, { subtle: webcrypto.subtle })
+      assert.ok(plain.includes(`NEW-${folder}`), `${folder} cursor did not round-trip`)
+    }
+  })
+
+  await test('no interaction and no contact were created by the worker', () => {
+    assert.strictEqual(one(`SELECT count(*) FROM public.interactions WHERE user_id='${U1}';`), '0')
+    assert.strictEqual(one(`SELECT count(*) FROM public.contacts WHERE user_id='${U1}';`), '1')
+    assert.strictEqual(one(`SELECT name FROM public.contacts WHERE user_id='${U1}';`), 'Ava Recruiter')
+  })
+
+  await test('the RESPONSE carries no token, cursor, id, address or fingerprint', () => {
+    const raw = JSON.stringify(runBody)
+    for (const secret of [REFRESHED_ACCESS, ROTATED_REFRESH, 'FIXTURE-REFRESH-TOKEN-v1',
+      CLIENT_SECRET, TOKEN_KEY_B64, WORKER_SECRET, U1, U2, RECRUITER, ME,
+      'deltatoken', 'NEW-inbox', 'Following up']) {
+      assert.ok(!raw.includes(secret), `the response leaked: ${String(secret).slice(0, 24)}`)
+    }
+    assert.ok(!/[0-9a-f]{64}/.test(raw), 'the response leaked a fingerprint')
+  })
+
+  await test('a second identical request does not duplicate', async () => {
+    psql(`UPDATE public.outlook_sync_state SET last_success_at = now() - interval '2 hours'
+          WHERE user_id='${U1}';`, { tuplesOnly: false })
+    const tok2 = tokenFixture()
+    const graph2 = graphFixture()
+    const ports = makePorts()
+    currentEnv = baseEnv()
+    currentDeps = {
+      tokenUrl: FIXTURE_TOKEN_URL, fetchImpl: tok2.fetchImpl,
+      graphFetchImpl: graph2.fetchImpl, select: ports.select, rpc: ports.rpc,
+    }
+    const r = await callWorker({ secret: WORKER_SECRET })
+    assert.strictEqual(r.status, 200, r.raw.slice(0, 200))
+    assert.strictEqual(r.body.run.outcome, 'committed')
+    assert.strictEqual(r.body.run.created, 0, 'nothing new')
+    assert.strictEqual(r.body.run.accepted, 1)
+    assert.strictEqual(one(`SELECT count(*) FROM public.interaction_candidates WHERE user_id='${U1}';`), '1')
+    // The access token is still valid, so NO refresh should have happened.
+    assert.strictEqual(tok2.calls.length, 0, 'a valid token must not be refreshed again')
+  })
+
+  // ══ refusals ══════════════════════════════════════════════════════════════
+  console.log('\nrefusals: nothing claims a cursor advanced')
+
+  await test('a REFRESH REJECTED by the provider commits nothing and advances nothing', async () => {
+    await seed({ accessExpired: true })
+    // Seeding deletes the connection, which cascades the sync-state rows, so there is
+    // nothing to compare against - the assertion below is simply that no cursor exists
+    // after the failed run.
+    const bad = tokenFixture({ status: 400, body: { error: 'invalid_grant' } })
+    const graph3 = graphFixture()
+    const ports = makePorts()
+    currentEnv = baseEnv()
+    currentDeps = {
+      tokenUrl: FIXTURE_TOKEN_URL, fetchImpl: bad.fetchImpl,
+      graphFetchImpl: graph3.fetchImpl, select: ports.select, rpc: ports.rpc,
+    }
+    const r = await callWorker({ secret: WORKER_SECRET })
+    assert.strictEqual(r.status, 503, r.raw.slice(0, 200))
+    assert.strictEqual(r.body.run.outcome, 'released_error')
+    assert.strictEqual(r.body.run.reason, 'refresh_failed')
+    assert.strictEqual(r.body.run.cursors_advanced, 0)
+    assert.strictEqual(graph3.calls.length, 0, 'Graph must not be called without a token')
+    assert.strictEqual(one(`SELECT count(*) FROM public.interaction_candidates;`), '0')
+    assert.strictEqual(one(`SELECT coalesce(string_agg(coalesce(delta_link_ciphertext,'NULL'),','),'none')
+      FROM public.outlook_sync_state WHERE user_id='${U1}';`), 'NULL,NULL',
+    'a failed refresh must leave both cursors unset')
+    // The lease was released, not left held.
+    assert.strictEqual(one(`SELECT DISTINCT sync_status FROM public.outlook_sync_state WHERE user_id='${U1}';`), 'error')
+  })
+
+  await test('a WRONG encryption key cannot decrypt, and nothing runs', async () => {
+    await seed({ accessExpired: false })
+    const graph4 = graphFixture()
+    const ports = makePorts()
+    currentEnv = { ...baseEnv(), tokenKeyB64: Buffer.from(randomBytes(32)).toString('base64') }
+    currentDeps = {
+      tokenUrl: FIXTURE_TOKEN_URL, fetchImpl: tokenFixture().fetchImpl,
+      graphFetchImpl: graph4.fetchImpl, select: ports.select, rpc: ports.rpc,
+    }
+    const r = await callWorker({ secret: WORKER_SECRET })
+    assert.strictEqual(r.status, 503)
+    assert.strictEqual(r.body.run.reason, 'token_undecryptable')
+    assert.strictEqual(graph4.calls.length, 0)
+    assert.strictEqual(one(`SELECT count(*) FROM public.interaction_candidates;`), '0')
+  })
+
+  await test('the SCHEMA guarantees a refresh token exists, so that branch is defensive', async () => {
+    // Observed, not assumed: microsoft_tokens.refresh_token_ciphertext is NOT NULL
+    // (20260921000000), while access_token_ciphertext is nullable. So a connection
+    // always has something to refresh WITH, and the loader's 'no refresh token' branch
+    // cannot be reached through the applied schema - it stays as a defensive guard
+    // rather than a tested path, which is worth stating instead of implying coverage.
+    const nullable = psql(`SELECT column_name, is_nullable FROM information_schema.columns
+      WHERE table_name='microsoft_tokens'
+        AND column_name IN ('access_token_ciphertext','refresh_token_ciphertext')
+      ORDER BY column_name;`).trim().split(String.fromCharCode(10))
+    assert.deepStrictEqual(nullable, ['access_token_ciphertext|YES', 'refresh_token_ciphertext|NO'])
+    // Trying to store one anyway is refused by the database.
+    const refused = spawnSync('docker',
+      ['exec', '-i', PG, 'psql', '-U', 'postgres', '-d', 'postgres', '-v', 'ON_ERROR_STOP=1', '-q', '-f', '-'],
+      { input: `UPDATE public.microsoft_tokens SET refresh_token_ciphertext = NULL;`, encoding: 'utf8' })
+    assert.notStrictEqual(refused.status, 0, 'the NOT NULL constraint must refuse it')
+  })
+
+  await test('an ABSENT access token is refreshed, which is the reachable stale case', async () => {
+    await seed({ accessExpired: false, withAccessToken: false })
+    const tok3 = tokenFixture()
+    const graph7 = graphFixture()
+    const ports = makePorts()
+    currentEnv = baseEnv()
+    currentDeps = {
+      tokenUrl: FIXTURE_TOKEN_URL, fetchImpl: tok3.fetchImpl,
+      graphFetchImpl: graph7.fetchImpl, select: ports.select, rpc: ports.rpc,
+    }
+    const r = await callWorker({ secret: WORKER_SECRET })
+    assert.strictEqual(r.status, 200, r.raw.slice(0, 200))
+    assert.strictEqual(r.body.run.outcome, 'committed')
+    assert.strictEqual(tok3.calls.length, 1, 'an absent access token must trigger a refresh')
+    for (const c of graph7.calls) {
+      assert.strictEqual(c.bearer, `Bearer ${REFRESHED_ACCESS}`)
+    }
+  })
+
+  await test('a GRAPH failure leaves an incomplete run with no cursor and no candidate', async () => {
+    await seed({ accessExpired: false })
+    const ports = makePorts()
+    currentEnv = baseEnv()
+    currentDeps = {
+      tokenUrl: FIXTURE_TOKEN_URL,
+      fetchImpl: tokenFixture().fetchImpl,
+      graphFetchImpl: async () => ({ status: 503, headers: { get: () => null }, json: async () => ({}) }),
+      select: ports.select, rpc: ports.rpc,
+    }
+    const r = await callWorker({ secret: WORKER_SECRET })
+    assert.strictEqual(r.status, 200, 'an incomplete run is a correct outcome, not a server error')
+    assert.strictEqual(r.body.run.outcome, 'incomplete')
+    assert.ok(r.body.run.incomplete_reasons.includes('folder_incomplete'))
+    assert.strictEqual(r.body.run.cursors_advanced, 0)
+    assert.strictEqual(one(`SELECT count(*) FROM public.interaction_candidates;`), '0')
+    assert.strictEqual(one(`SELECT coalesce(delta_link_ciphertext,'NULL') FROM public.outlook_sync_state
+      WHERE user_id='${U1}' AND folder='inbox';`), 'NULL')
+  })
+
+  await test('nothing due is a 200 that claims no work', async () => {
+    psql(`UPDATE public.microsoft_connections SET status='revoked' WHERE user_id='${U1}';`,
+      { tuplesOnly: false })
+    const ports = makePorts()
+    currentEnv = baseEnv()
+    currentDeps = {
+      tokenUrl: FIXTURE_TOKEN_URL, fetchImpl: tokenFixture().fetchImpl,
+      graphFetchImpl: graphFixture().fetchImpl, select: ports.select, rpc: ports.rpc,
+    }
+    const r = await callWorker({ secret: WORKER_SECRET })
+    assert.strictEqual(r.status, 200)
+    assert.strictEqual(r.body.run.outcome, 'none_due')
+    assert.strictEqual(r.body.run.cursors_advanced, 0)
+    assert.strictEqual(r.body.run.intended, 0)
+  })
+
+  await test('a rotation refused by the lease fence stops the run before any Graph call', async () => {
+    await seed({ accessExpired: true })
+    const graph6 = graphFixture()
+    const ports = makePorts()
+    // Break the rotation by expiring the lease the moment it is taken: the reserve
+    // succeeds, then the rotate RPC sees a stale run.
+    const fencedRpc = async (name, args) => {
+      const out = await ports.rpc(name, args)
+      if (name === 'reserve_due_outlook_connection' && out?.data?.result === 'reserved') {
+        psql(`UPDATE public.outlook_sync_state SET sync_lease_until = now() - interval '1 minute'
+              WHERE connection_id='${out.data.connection_id}';`, { tuplesOnly: false })
+      }
+      return out
+    }
+    currentEnv = baseEnv()
+    currentDeps = {
+      tokenUrl: FIXTURE_TOKEN_URL, fetchImpl: tokenFixture().fetchImpl,
+      graphFetchImpl: graph6.fetchImpl, select: ports.select, rpc: fencedRpc,
+    }
+    const r = await callWorker({ secret: WORKER_SECRET })
+    assert.strictEqual(r.status, 503)
+    assert.strictEqual(r.body.run.reason, 'rotation_not_persisted')
+    assert.strictEqual(graph6.calls.length, 0, 'no mailbox read may happen on a lost lease')
+    assert.strictEqual(one(`SELECT count(*) FROM public.interaction_candidates;`), '0')
+  })
+}
+
+try { await main() } catch (e) { console.error(`\nHARNESS ERROR: ${e.message}`); failed++ }
+finally {
+  if (server) server.close()
+  teardown()
+}
+console.log(`\n${passed + failed} checks: ${passed} passed, ${failed} failed\n`)
+if (failed > 0) process.exitCode = 1

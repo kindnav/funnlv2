@@ -193,8 +193,12 @@ test('every provider request sets redirect: error in source', async () => {
   ]
   for (const f of files) {
     const src = readFileSync(new URL('../' + f, import.meta.url), 'utf8')
-    const fetches = (src.match(/fetchImpl\(/g) ?? []).length
-    const policies = (src.match(/redirect: 'error'/g) ?? []).length
+    // Executable lines only. A doc comment that MENTIONS the policy is not a policy,
+    // and counting it inflated the total the moment a second request was documented.
+    const code = src.split(String.fromCharCode(10))
+      .filter((l) => !/^[ ]*([/][/]|[*]|[/][*])/.test(l)).join(String.fromCharCode(10))
+    const fetches = (code.match(/fetchImpl\(/g) ?? []).length
+    const policies = (code.match(/redirect: 'error'/g) ?? []).length
     assert.ok(fetches > 0, `${f} should perform a provider request`)
     assert.strictEqual(policies, fetches,
       `${f}: ${fetches} request(s) but ${policies} redirect policy declaration(s)`)

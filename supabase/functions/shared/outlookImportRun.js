@@ -56,8 +56,22 @@
 import { GRAPH_FOLDERS } from './outlookGraphTransport.js'
 import { runOutlookMetadataPass, summarizePass } from './outlookMetadataPass.js'
 
-/** Lease length and due interval for one manual run. Bounded by the RPC's own checks. */
-export const LEASE_SECONDS = 120
+/**
+ * Lease length and due interval for one run. Bounded by the RPC's own checks, which
+ * cap p_lease_seconds at 600.
+ *
+ * WHY RENEWAL IS REQUIRED, NOT OPTIONAL - measured from the transport's own bounds,
+ * not guessed: MAX_PAGES_PER_RUN is 20, and one page request can take
+ * (MAX_RETRIES + 1) * REQUEST_TIMEOUT_MS + MAX_TOTAL_RETRY_DELAY_MS =
+ * 4 * 20s + 60s = 140s in the worst case. Twenty of those is 2800s, which no lease
+ * the RPC will grant can cover - the ceiling is 600s. So a long run must renew or
+ * lose its claim while still reading, and another run could then start on the same
+ * connection.
+ */
+export const LEASE_SECONDS = 300
+export const RENEW_SECONDS = 300
+/** Renew after this many pages. Small enough that a slow page cannot outlast the lease. */
+export const RENEW_EVERY_PAGES = 2
 export const DUE_AFTER_SECONDS = 900
 
 /** Backoff requested when a run releases incomplete. */
@@ -78,6 +92,9 @@ export const RUN_OUTCOMES = Object.freeze([
   // dedupe makes that idempotent.
   'release_failed',
   'reserve_failed',      // the reservation RPC itself failed
+  // The run lost its lease mid-pass: a renewal returned false, meaning another run
+  // owns the connection now. Nothing is committed and no cursor is claimed.
+  'lease_lost',
   'released_error',      // the pass threw; the lease was released as an error
 ])
 
@@ -195,10 +212,36 @@ export async function runOutlookImport (p) {
     }
   }
 
+  // Renew every RENEW_EVERY_PAGES pages. A renewal that does not confirm means the
+  // lease is gone, so the sentinel stops the pass rather than letting it keep reading
+  // a mailbox it no longer has a claim on.
+  let pagesSinceRenewal = 0
+  let leaseLost = false
+  const onPageComplete = async () => {
+    pagesSinceRenewal += 1
+    if (pagesSinceRenewal < RENEW_EVERY_PAGES) return
+    pagesSinceRenewal = 0
+    let res
+    try {
+      res = await rpc('renew_outlook_sync_lease', {
+        p_connection_id: connectionId,
+        p_run_id: runId,
+        p_lease_seconds: RENEW_SECONDS,
+      })
+    } catch {
+      res = { data: null, error: { code: 'renew_threw' } }
+    }
+    // renew_outlook_sync_lease returns true only when BOTH folder rows were renewed.
+    if (res?.error || res?.data !== true) {
+      leaseLost = true
+      throw new Error('lease_lost')
+    }
+  }
+
   let pass
   let context
   try {
-    context = await loadRunContext(connectionId)
+    context = await loadRunContext(connectionId, runId)
     pass = await runOutlookMetadataPass({
       connection: {
         connectionId,
@@ -211,14 +254,29 @@ export async function runOutlookImport (p) {
       contacts: context.contacts,
       userId: context.userId,
       keyRing: context.keyRing,
-      deps,
+      deps: { ...deps, onPageComplete },
     })
-  } catch {
-    // The lease must never be left held. The message is deliberately not read: it can
-    // contain a URL or an address.
-    await release('error', false, null, 'pass_failed')
+  } catch (e) {
+    // The lease must never be left held. A thrown message is deliberately NOT read or
+    // forwarded - it can contain a URL or an address. The only thing read is whether
+    // the sentinel flag was set, and a controlled reason is derived from the loader's
+    // own `reason` field when it has one.
+    const contextReason = typeof e?.reason === 'string' ? e.reason : null
+    if (leaseLost) {
+      await release('error', false, null, 'lease_lost')
+      return {
+        outcome: 'lease_lost',
+        connectionId,
+        intended: 0,
+        accepted: 0,
+        created: 0,
+        cursorsAdvanced: 0,
+      }
+    }
+    await release('error', false, null, contextReason ?? 'pass_failed')
     return {
       outcome: 'released_error',
+      reason: contextReason,
       connectionId,
       intended: 0,
       accepted: 0,
@@ -356,6 +414,9 @@ export function summarizeRun (result) {
     entry_skipped: result.skipped ?? {},
     incomplete_reasons: Array.isArray(result.incompleteReasons) ? result.incompleteReasons : [],
     refusal: typeof result.refusal === 'string' ? result.refusal : null,
+    // A controlled context-failure reason (config_missing, refresh_failed, ...). Never
+    // a provider message.
+    reason: typeof result.reason === 'string' ? result.reason : null,
     cursors_advanced: Number.isInteger(result.cursorsAdvanced) ? result.cursorsAdvanced : 0,
     pass: result.summary ?? null,
   }
