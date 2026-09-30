@@ -185,7 +185,8 @@ export function localDateFor (iso, timeZone) {
  * @param {string|null} [p.startLink]  a previously stored deltaLink, or null for a
  *                                     first pass. Validated by the transport.
  * @param {string} p.accessToken
- * @param {{executeGraphRequest?:Function, fetchImpl:Function, sleepImpl?:Function, now?:Function}} p.deps
+ * @param {{executeGraphRequest?:Function, fetchImpl:Function, sleepImpl?:Function,
+ *          now?:Function, onPageComplete?:Function}} p.deps
  * @param {{pagesUsed?:number, messagesUsed?:number}} [p.used] counts already spent by
  *        an earlier folder in the SAME run, so the caps are per run, not per folder.
  */
@@ -274,6 +275,15 @@ export async function readFolderMetadata (p) {
     const overCap = checkRunCaps({ pages, messages })
     if (overCap) { stop = overCap; break }
     if (page.complete) { deltaLink = page.deltaLink; stop = 'complete'; break }
+    // A per-page hook, awaited. The only current caller uses it to renew the run's
+    // lease: the bounded worst case for a run is far longer than any lease the
+    // reservation RPC will grant, so a long run MUST renew or lose its claim. A hook
+    // that throws stops the pass, which is correct - a run that has lost its lease
+    // must not keep reading.
+    if (typeof deps.onPageComplete === 'function') {
+      await deps.onPageComplete({ folder, pages, messages })
+    }
+
     if (!page.nextLink) {
       // Neither a nextLink nor a deltaLink: the stream said nothing about how to
       // continue. Treat it as malformed rather than as finished, so the cursor is

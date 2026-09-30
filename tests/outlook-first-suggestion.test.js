@@ -135,6 +135,8 @@ function port ({ reserve, writes = ['created'], release = true } = {}) {
       writeAt += 1
       return typeof r === 'object' ? r : { data: { result: r }, error: null }
     }
+    // A long fixture run triggers a renewal; confirming it keeps the run alive.
+    if (name === 'renew_outlook_sync_lease') return { data: true, error: null }
     if (name === 'release_outlook_sync_lease') return { data: release, error: null }
     throw new Error(`unexpected RPC: ${name}`)
   }
@@ -425,9 +427,12 @@ test('the migration fences on outlook_sync_state, never on the Gmail tables', ()
 
 test('the run module calls only the three permitted RPCs', () => {
   const names = [...new Set([...codeOnly(RUN_SRC).matchAll(/rpc\('([a-z_]+)'/g)].map((m) => m[1]))]
+  // FOUR now, not three: a long run must renew its lease or lose it, because the
+  // bounded worst case for a run is far longer than any lease the reservation RPC
+  // will grant. See the timing assertion in outlook-worker-token-access.test.js.
   assert.deepStrictEqual(names.sort(), [
-    'release_outlook_sync_lease', 'reserve_due_outlook_connection',
-    'upsert_outlook_interaction_candidate',
+    'release_outlook_sync_lease', 'renew_outlook_sync_lease',
+    'reserve_due_outlook_connection', 'upsert_outlook_interaction_candidate',
   ])
   assert.ok(!codeOnly(RUN_SRC).includes('upsert_email_candidate'))
 })
