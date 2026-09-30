@@ -5,8 +5,12 @@
 // THE ORDER IS THE CONTRACT, and it is the reason this module exists rather than the
 // steps being inlined somewhere:
 //
-//   0. before EVERY stage below, renew the lease if what remains would not cover that
-//      stage's worst case - see PAGE_WORST_MS / CONTEXT_WORST_MS / WRITE_STEP_MS
+//   0. before EVERY stage below - context load, first page, each page, each candidate
+//      write, and the cursor-encryption/release - renew the lease if what remains would
+//      not cover that
+//      stage's worst case - see PAGE_WORST_MS / CONTEXT_WORST_MS / WRITE_STEP_MS /
+//      RELEASE_WORST_MS. Every deadline is anchored to when its RPC STARTED, because the
+//      database begins the lease then rather than when the response arrives.
 //   1. reserve_due_outlook_connection          take the lease for both folders
 //   2. runOutlookMetadataPass                  envelope only; no body, no Anthropic
 //   3. if NOT commitReady -> release WITHOUT cursors, run_complete = false, and write
@@ -58,6 +62,8 @@
 import {
   GRAPH_FOLDERS, MAX_RETRIES, REQUEST_TIMEOUT_MS, MAX_TOTAL_RETRY_DELAY_MS,
 } from './outlookGraphTransport.js'
+import { TOKEN_TIMEOUT_MS } from './microsoftTokenExchange.js'
+import { MAX_CONTACTS_LOADED, CONTACT_PAGE_SIZE } from './outlookRunContext.js'
 import { runOutlookMetadataPass, summarizePass } from './outlookMetadataPass.js'
 
 /**
@@ -72,8 +78,26 @@ import { runOutlookMetadataPass, summarizePass } from './outlookMetadataPass.js'
  * lose its claim while still reading, and another run could then start on the same
  * connection.
  */
-export const LEASE_SECONDS = 300
-export const RENEW_SECONDS = 300
+/**
+ * One bounded database call. Mirrors the worker port's own deadline (endpoints.js
+ * DB_TIMEOUT_MS); a test pins the two together so they cannot drift apart.
+ */
+export const RPC_ROUND_TRIP_MS = 15_000
+
+/**
+ * Lease length and due interval. Both are bounded by the reservation RPC, which caps
+ * p_lease_seconds at 600.
+ *
+ * WHY 420 AND NOT 300. A fresh reservation must STRICTLY cover the longest stage that
+ * follows it, which is loading the run context at CONTEXT_WORST_MS. And the lease the
+ * worker can actually rely on is shorter than the number it asked for: the database
+ * starts the lease when the RPC runs, not when its response arrives, so up to one round
+ * trip is already gone. 300 - 15 = 285 did not strictly cover a 285s context path, and
+ * a 300s renewal would not have either - the guard would have renewed forever without
+ * ever clearing the margin. 420 - 15 = 405 clears every margin with room to spare.
+ */
+export const LEASE_SECONDS = 420
+export const RENEW_SECONDS = 420
 export const DUE_AFTER_SECONDS = 900
 
 /**
@@ -101,15 +125,38 @@ export const DUE_AFTER_SECONDS = 900
 export const PAGE_WORST_MS = (MAX_RETRIES + 1) * REQUEST_TIMEOUT_MS + MAX_TOTAL_RETRY_DELAY_MS
 
 /**
- * Loading the run context, worst case: a bounded number of database reads plus at most
- * one token refresh. The contact read is paged, so it is the dominant term -
- * ceil(MAX_CONTACTS_LOADED / CONTACT_PAGE_SIZE) + 1 overflow probe + 3 other reads, each
- * bounded by the port's 15s deadline, plus TOKEN_TIMEOUT_MS for the refresh.
+ * Every database call on the longest path through loadRunContext, counted rather than
+ * estimated. An earlier value of 255s was a guess that left out the token refresh and
+ * the rotation RPC, and a run whose context took its real worst case then lost its lease
+ * mid-load and committed nothing.
  */
-export const CONTEXT_WORST_MS = 255_000
+export const CONTEXT_DB_CALLS =
+  1 +                                                    // the reserved connection
+  Math.ceil(MAX_CONTACTS_LOADED / CONTACT_PAGE_SIZE) +   // the paged contact read
+  1 +                                                    // the overflow probe
+  1 +                                                    // outlook_sync_state (cursors)
+  1 +                                                    // microsoft_tokens
+  1                                                      // rotate_microsoft_access_token
 
-/** One candidate write, worst case: a single bounded RPC round trip. */
-export const WRITE_STEP_MS = 20_000
+/**
+ * Loading the run context, worst case: every one of those calls at the port's deadline,
+ * plus one token refresh at the exchange's own timeout. Derived from the constants so it
+ * cannot silently fall behind them - adding a contact page or another read moves it.
+ */
+export const CONTEXT_WORST_MS = CONTEXT_DB_CALLS * RPC_ROUND_TRIP_MS + TOKEN_TIMEOUT_MS
+
+/** One candidate write: a bounded RPC round trip, plus slack for local work. */
+export const WRITE_STEP_MS = RPC_ROUND_TRIP_MS + 5_000
+
+/**
+ * Encrypting both cursors and calling release. The encryption is local and sub-second;
+ * the release is one bounded RPC. This stage had NO guard before, so a write loop that
+ * had topped itself up to just above WRITE_STEP_MS left the release with less lease than
+ * it needed: reproduced, the release began with the lease already 6s dead, returned
+ * false, and a run with 16 suggestions written advanced no cursor and had to redo
+ * everything next time.
+ */
+export const RELEASE_WORST_MS = RPC_ROUND_TRIP_MS + 5_000
 
 /** Backoff requested when a run releases incomplete. */
 export const RETRY_BACKOFF_SECONDS = 300
@@ -213,6 +260,12 @@ export async function runOutlookImport (p) {
   if (typeof loadRunContext !== 'function') throw new Error('load_run_context_not_injected')
 
   // ── 1. reserve ─────────────────────────────────────────────────────────────
+  // The clock is read BEFORE the call, because the database starts the lease when the
+  // RPC runs - not when its response gets back here. Anchoring the deadline to the
+  // response would overstate what is left by a whole round trip, which is exactly how a
+  // run with a 285s context path lost a 300s lease it believed ran to 315s.
+  const clock = typeof deps?.now === 'function' ? deps.now : Date.now
+  const reserveStartedMs = clock()
   const reserved = await rpc('reserve_due_outlook_connection', {
     p_lease_seconds: LEASE_SECONDS,
     p_due_after_seconds: DUE_AFTER_SECONDS,
@@ -250,10 +303,8 @@ export async function runOutlookImport (p) {
   }
 
   // ── the lease guard ───────────────────────────────────────────────────────
-  // The reservation just granted LEASE_SECONDS, so that is when it runs out. Every
-  // renewal moves the deadline; nothing else does.
-  const clock = typeof deps?.now === 'function' ? deps.now : Date.now
-  let leaseUntilMs = clock() + LEASE_SECONDS * 1000
+  // Anchored to when the reservation RAN, not to when it answered.
+  let leaseUntilMs = reserveStartedMs + LEASE_SECONDS * 1000
   let leaseLost = false
 
   /**
@@ -270,6 +321,8 @@ export async function runOutlookImport (p) {
     // arrives too late to be granted. A test caught that: a write loop refused its
     // renewal at remaining = 0 and lost a run that should have committed.
     if (leaseUntilMs - clock() > marginMs) return
+    // Same anchoring as the reservation: the renewed lease starts when the RPC runs.
+    const renewStartedMs = clock()
     let res
     try {
       res = await rpc('renew_outlook_sync_lease', {
@@ -285,7 +338,7 @@ export async function runOutlookImport (p) {
       leaseLost = true
       throw new Error('lease_lost')
     }
-    leaseUntilMs = clock() + RENEW_SECONDS * 1000
+    leaseUntilMs = renewStartedMs + RENEW_SECONDS * 1000
   }
 
   // Fired for every page, including a final one. Renews only when the lease could not
@@ -437,6 +490,19 @@ export async function runOutlookImport (p) {
   // Only now: encrypt and advance the cursors. Encryption can throw (a missing or
   // unusable key). That is the same class of failure as a thrown write: nothing may be
   // committed, and the lease must not be left held.
+  //
+  // GUARDED, because the write loop only ever guarantees enough lease for the NEXT
+  // WRITE. A loop that topped itself up to just above WRITE_STEP_MS used to leave the
+  // release short, so a run that had written every suggestion still advanced no cursor.
+  try {
+    await ensureLease(RELEASE_WORST_MS)
+  } catch {
+    // The lease went before the release could be attempted. Whatever landed stays and is
+    // reported; no cursor is claimed.
+    await release('error', false, null, 'lease_lost')
+    return { ...partial, outcome: 'lease_lost', refusal: null }
+  }
+
   const cursors = {}
   try {
     for (const folder of GRAPH_FOLDERS) {
