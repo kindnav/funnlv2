@@ -3,11 +3,16 @@ import { Link } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { SUGGESTION_REVIEW_ENABLED } from '../lib/suggestionReview'
 
-// Compact, secondary Dashboard entry into the source-neutral Suggestions queue.
-// Google Calendar is currently the only connected source, but the entry is worded and
-// styled to stay source-neutral (it will later cover email sources too). Only mounts a
-// query when the ingestion flag is enabled, and only renders when there is at least one
-// pending suggestion. Shows a count only — never any candidate/contact detail.
+// Compact, secondary Dashboard entry into the source-neutral Suggestions queue. Only
+// mounts a query when the review gate is enabled, and only renders when there is at
+// least one pending suggestion. Shows a count only — never any candidate/contact detail.
+//
+// THE COPY SAYS 'suggestions', NOT 'people'. An earlier version counted "N people to
+// review", which was wrong for the only kind of suggestion that exists today: an
+// INTERACTION with a contact the user already has. Nobody new is being proposed, so
+// calling it a person to review told the user something untrue about their own data.
+// 'suggestion' is also the term that stays correct when new-contact proposals do
+// arrive, since the queue mixes both.
 export default function SuggestionsEntry() {
   const [count, setCount] = useState(null)   // null until loaded; number afterwards
 
@@ -41,7 +46,7 @@ export default function SuggestionsEntry() {
       <span className="min-w-0 flex-1">
         <span className="block font-display font-semibold text-[13.5px] text-hi">Suggestions</span>
         <span className="block text-[12px] text-muted">
-          {count} {count === 1 ? 'person' : 'people'} to review from your connected sources.
+          {count} {count === 1 ? 'suggestion' : 'suggestions'} to review from your connected sources.
         </span>
       </span>
       <span className="flex-none font-mono text-[11px] font-semibold px-2 py-[3px] rounded-full bg-accent text-surface">{count}</span>
