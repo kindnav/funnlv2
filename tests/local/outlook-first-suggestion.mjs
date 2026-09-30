@@ -19,13 +19,18 @@
 //   4. an incomplete pass writes no candidate and advances no cursor;
 //   5. no interaction exists until the user explicitly accepts, and the note saved is
 //      the note the USER typed - the worker fabricates none;
-//   6. a dismissal creates no interaction and is never resurrected by a later run.
+//   6. a dismissal creates no interaction and is never resurrected by a later run;
+//   7. the real release RPC answers literal true on success and literal false when the
+//      run no longer owns the lease - which is what `committed` rests on;
+//   8. a write is refused unless the run owns BOTH folder leases.
 //
 // WHAT IT DOES NOT COVER, stated rather than implied:
-//   * The browser and supabase-js. The review reads/writes go straight to PostgREST
-//     with a minted JWT, so Kong's apikey check and the React components are not
-//     exercised here. The page's own query shape IS exercised: the select string is
-//     imported from src/lib/calendarReview.js rather than retyped.
+//   * THE BROWSER. No click-through happens anywhere. The review reads and writes go
+//     straight to PostgREST with a minted JWT, so Kong's apikey check, supabase-js and
+//     every React component are unexercised. What IS exercised is the page's own query
+//     shape: the select string is imported from src/lib/calendarReview.js rather than
+//     retyped. Nobody has operated the app - this proves the DATA PATH a click would
+//     reach, not the click.
 //   * GoTrue. JWTs are minted locally with a throwaway secret; no sign-in happens.
 //   * Token acquisition. The access token is injected. A deployed worker has no way to
 //     obtain one, which is why the endpoint answers 501.
@@ -39,7 +44,9 @@ import { readFileSync, readdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import assert from 'node:assert'
-import { runOutlookImport, summarizeRun } from '../../supabase/functions/shared/outlookImportRun.js'
+import {
+  runOutlookImport, summarizeRun, releaseConfirmed,
+} from '../../supabase/functions/shared/outlookImportRun.js'
 import { CANDIDATE_SELECT } from '../../src/lib/calendarReview.js'
 import { GRAPH_BASE } from '../../supabase/functions/shared/outlookGraphTransport.js'
 
@@ -279,7 +286,9 @@ async function main () {
 
   await test('the run commits, writing exactly one suggestion', () => {
     assert.strictEqual(run.outcome, 'committed', JSON.stringify(summarizeRun(run)))
-    assert.strictEqual(run.written, 1)
+    assert.strictEqual(run.intended, 1)
+    assert.strictEqual(run.accepted, 1)
+    assert.strictEqual(run.created, 1)
     assert.strictEqual(run.writeResults.created, 1)
     assert.strictEqual(one(
       `SELECT count(*) FROM public.interaction_candidates WHERE user_id='${U1}' AND source='outlook';`), '1')
@@ -510,7 +519,9 @@ async function main () {
     })
     assert.strictEqual(r.outcome, 'incomplete', JSON.stringify(summarizeRun(r)))
     assert.deepStrictEqual(r.incompleteReasons, ['folder_incomplete'])
-    assert.strictEqual(r.written, 0)
+    assert.strictEqual(r.intended, 0)
+    assert.strictEqual(r.accepted, 0)
+    assert.strictEqual(r.created, 0)
     assert.strictEqual(one(`SELECT count(*) FROM public.interaction_candidates;`), before,
       'an incomplete pass must write no candidate')
     const cursors = psql(`SELECT folder, coalesce(delta_link_ciphertext,'NULL'), last_run_complete
@@ -541,6 +552,94 @@ async function main () {
     })
     assert.strictEqual(w.body?.result, 'stale_run', w.raw.slice(0, 200))
     assert.strictEqual(one(`SELECT count(*) FROM public.interaction_candidates;`), '0')
+  })
+
+  await test('the REAL release RPC returns literal true, which is what commit rests on', async () => {
+    // runOutlookImport only reports `committed` when releaseConfirmed() sees data === true.
+    // This checks the real function actually answers that, rather than the harness
+    // assuming it - and that a bogus run id answers false instead of raising.
+    psql(SEED, { tuplesOnly: false })
+    const reserved = await http('POST', '/rpc/reserve_due_outlook_connection',
+      { token: TOK.worker(), body: { p_lease_seconds: 120, p_due_after_seconds: 900 } })
+    const { connection_id: conn, run_id: runId } = reserved.body
+    const good = await http('POST', '/rpc/release_outlook_sync_lease', {
+      token: TOK.worker(),
+      body: {
+        p_connection_id: conn, p_run_id: runId, p_status: 'idle', p_error_code: null,
+        p_run_complete: false, p_inbox_delta_ct: null, p_inbox_delta_nonce: null,
+        p_sentitems_delta_ct: null, p_sentitems_delta_nonce: null,
+        p_delta_key_version: null, p_initial_done: false, p_retry_backoff_seconds: 300,
+      },
+    })
+    assert.strictEqual(good.body, true, `expected literal true, got ${good.raw.slice(0, 120)}`)
+    assert.strictEqual(releaseConfirmed({ data: good.body, error: null }), true)
+
+    // A run id that no longer owns the lease: false, not an exception.
+    const stale = await http('POST', '/rpc/release_outlook_sync_lease', {
+      token: TOK.worker(),
+      body: {
+        p_connection_id: conn, p_run_id: '00000000-0000-0000-0000-000000000000',
+        p_status: 'idle', p_error_code: null, p_run_complete: true,
+        p_inbox_delta_ct: 'CT', p_inbox_delta_nonce: 'N',
+        p_sentitems_delta_ct: 'CT', p_sentitems_delta_nonce: 'N',
+        p_delta_key_version: 1, p_initial_done: true, p_retry_backoff_seconds: null,
+      },
+    })
+    assert.strictEqual(stale.body, false, `expected literal false, got ${stale.raw.slice(0, 120)}`)
+    assert.strictEqual(releaseConfirmed({ data: stale.body, error: null }), false,
+      'a lost lease must never be read as a commit')
+    // And it advanced nothing.
+    const ct = one(`SELECT coalesce(delta_link_ciphertext,'NULL') FROM public.outlook_sync_state
+      WHERE connection_id='${conn}' AND folder='inbox';`)
+    assert.strictEqual(ct, 'NULL', 'a false release must not have moved the cursor')
+  })
+
+  await test('TWO-FOLDER LEASE: Inbox live but Sent Items stale is refused over HTTP', async () => {
+    psql(SEED, { tuplesOnly: false })
+    const fresh = ownContacts()
+    const reserved = await http('POST', '/rpc/reserve_due_outlook_connection',
+      { token: TOK.worker(), body: { p_lease_seconds: 120, p_due_after_seconds: 900 } })
+    const { connection_id: conn, run_id: runId } = reserved.body
+    // Expire ONLY the sentitems lease. The earlier fence checked the inbox row alone
+    // and would have admitted this write.
+    psql(`UPDATE public.outlook_sync_state SET sync_lease_until = now() - interval '1 minute'
+          WHERE connection_id='${conn}' AND folder='sentitems';`, { tuplesOnly: false })
+    const w = await http('POST', '/rpc/upsert_outlook_interaction_candidate', {
+      token: TOK.worker(),
+      body: {
+        p_connection_id: conn, p_run_id: runId,
+        p_contact_id: fresh.find((c) => c.user_id === U1).id,
+        p_episode_fingerprint: 'a'.repeat(64), p_person_fingerprint: 'b'.repeat(64),
+        p_key_version: 1, p_proposed_type: 'Email', p_proposed_date: '2026-09-21',
+      },
+    })
+    assert.strictEqual(w.body?.result, 'stale_run', w.raw.slice(0, 200))
+    assert.strictEqual(one('SELECT count(*) FROM public.interaction_candidates;'), '0')
+  })
+
+  await test('TWO-FOLDER LEASE: Sent Items owned by ANOTHER run is refused over HTTP', async () => {
+    psql(SEED, { tuplesOnly: false })
+    const fresh = ownContacts()
+    const reserved = await http('POST', '/rpc/reserve_due_outlook_connection',
+      { token: TOK.worker(), body: { p_lease_seconds: 120, p_due_after_seconds: 900 } })
+    const { connection_id: conn, run_id: runId } = reserved.body
+    const other = '99999999-9999-9999-9999-999999999999'
+    psql(`UPDATE public.outlook_sync_state
+             SET sync_run_id='${other}', sync_lease_until = now() + interval '2 minutes'
+           WHERE connection_id='${conn}' AND folder='sentitems';`, { tuplesOnly: false })
+    const body = {
+      p_connection_id: conn, p_contact_id: fresh.find((c) => c.user_id === U1).id,
+      p_episode_fingerprint: 'c'.repeat(64), p_person_fingerprint: null,
+      p_key_version: 1, p_proposed_type: 'Email', p_proposed_date: '2026-09-21',
+    }
+    // Neither run may write: each holds only one folder.
+    const a = await http('POST', '/rpc/upsert_outlook_interaction_candidate',
+      { token: TOK.worker(), body: { ...body, p_run_id: runId } })
+    const b = await http('POST', '/rpc/upsert_outlook_interaction_candidate',
+      { token: TOK.worker(), body: { ...body, p_run_id: other } })
+    assert.strictEqual(a.body?.result, 'stale_run', `inbox-only run: ${a.raw.slice(0, 160)}`)
+    assert.strictEqual(b.body?.result, 'stale_run', `sent-only run: ${b.raw.slice(0, 160)}`)
+    assert.strictEqual(one('SELECT count(*) FROM public.interaction_candidates;'), '0')
   })
 
   await test('a user cannot call the worker write RPC at all', async () => {

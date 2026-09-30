@@ -9,6 +9,7 @@ import {
   keysetFilter, cursorFrom, dedupeById, computeHasMore,
 } from '../lib/calendarReview'
 import { SUGGESTION_REVIEW_ENABLED } from '../lib/suggestionReview'
+import { SUGGESTION_EVENTS, suggestionEventProps } from '../lib/suggestionAnalytics'
 
 import { dismissConfirmFocusTarget } from '../lib/dismissConfirmFocus'
 import InteractionSourceBadge from '../components/InteractionSourceBadge'
@@ -83,7 +84,8 @@ function CandidateCard({ candidate, onResolved }) {
       if (rpcErr) { setError(acceptResultOutcome('unknown').message); setBusy(false); return }
       const outcome = acceptResultOutcome(resultCode(data))
       if (outcome.removeFromQueue) {
-        track('calendar_candidate_accepted', { edited: !!edited })
+        track(SUGGESTION_EVENTS.accepted,
+          suggestionEventProps(candidate.source, { edited: !!edited }))
         window.dispatchEvent(new Event('funnl:interactions-changed'))
         onResolved(candidate.id, outcome.message)
       } else {
@@ -105,7 +107,7 @@ function CandidateCard({ candidate, onResolved }) {
       if (rpcErr) { setError(dismissResultOutcome('unknown').message); setBusy(false); return }
       const outcome = dismissResultOutcome(resultCode(data))
       if (outcome.removeFromQueue) {
-        track('calendar_candidate_dismissed')
+        track(SUGGESTION_EVENTS.dismissed, suggestionEventProps(candidate.source))
         onResolved(candidate.id, outcome.message)
       } else {
         setError(outcome.message); setBusy(false)
@@ -239,7 +241,14 @@ export default function SuggestionsPage() {
       setItems(rows)
       setHasMore(computeHasMore(rows.length))
       setStatus('ready')
-      if (!viewedRef.current) { viewedRef.current = true; track('calendar_review_viewed') }
+      if (!viewedRef.current) {
+        viewedRef.current = true
+        // One event per distinct source in the first page. A queue holding both a
+        // Calendar and an Outlook suggestion must not be recorded as calendar-only.
+        for (const s of [...new Set(rows.map((r) => r.source))]) {
+          track(SUGGESTION_EVENTS.viewed, suggestionEventProps(s))
+        }
+      }
     } catch {
       if (!aliveRef.current || gen !== initGenRef.current) return
       setStatus('error')

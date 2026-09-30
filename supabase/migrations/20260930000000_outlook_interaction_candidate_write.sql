@@ -24,12 +24,17 @@
 --     `accept_interaction_candidate` call can do that.
 --
 -- LEASE FENCING. The write is admitted only while the caller still holds the run's
--- lease: `outlook_sync_state.sync_run_id = p_run_id`, status 'running', and
--- `sync_lease_until > now()`. The state row is locked FOR SHARE first, in the same
--- order `release_outlook_sync_lease` takes it, so a concurrent release cannot
--- interleave. A run whose lease has expired gets 'stale_run' and writes nothing -
--- otherwise a timed-out worker could keep appending suggestions while another run is
--- already advancing the cursor.
+-- lease on BOTH folders: `outlook_sync_state` must have exactly two rows for the
+-- connection and every one of them must carry `sync_run_id = p_run_id`, status
+-- 'running' and `sync_lease_until > now()`. Both rows are locked FOR SHARE first, in
+-- the same order `release_outlook_sync_lease` and
+-- `invalidate_outlook_candidates_by_fingerprint` take them, so a concurrent claim or
+-- release cannot interleave.
+--
+-- WHY BOTH, not just Inbox: a reservation claims the two folders under one run id, and
+-- an episode is assembled from Inbox AND Sent Items. A run holding only Inbox has not
+-- seen the whole exchange, and another run may already be reading Sent Items. Anything
+-- short of both gets 'stale_run' and writes nothing.
 --
 -- DEDUPLICATION, so a rerun does not duplicate. The episode fingerprint is the key.
 -- A terminal row (accepted / dismissed / invalidated) is a TOMBSTONE and is never
@@ -102,24 +107,32 @@ BEGIN
     RETURN jsonb_build_object('result', 'invalid_key_version');
   END IF;
 
-  -- ── lease fence ───────────────────────────────────────────────────────────
-  -- Lock the sync-state row FOR SHARE first (the same lock order the release RPC
-  -- uses), then read the connection's owner from the join.
-  SELECT (s.sync_run_id = p_run_id
-          AND s.sync_status = 'running'
-          AND s.sync_lease_until IS NOT NULL
-          AND s.sync_lease_until > now()),
-         c.user_id
-    INTO v_leaseok, v_uid
-  FROM public.outlook_sync_state s
-  JOIN public.microsoft_connections c ON c.id = s.connection_id
-  WHERE s.connection_id = p_connection_id
-    AND s.folder = 'inbox'
-  FOR SHARE OF s;
+  -- ── lease fence: the run must own BOTH folders ────────────────────────────
+  -- Deterministic lock order, matching reserve/renew/release and
+  -- invalidate_outlook_candidates_by_fingerprint: take the connection's sync-state
+  -- rows FOR SHARE first, then check them.
+  PERFORM 1 FROM public.outlook_sync_state s
+   WHERE s.connection_id = p_connection_id FOR SHARE;
 
+  SELECT c.user_id INTO v_uid
+  FROM public.microsoft_connections c WHERE c.id = p_connection_id;
   IF v_uid IS NULL THEN
     RETURN jsonb_build_object('result', 'unknown_connection');
   END IF;
+
+  -- CORRECTED: an earlier version checked only the 'inbox' row. A reservation claims
+  -- BOTH folders under one run id, and an episode is assembled from Inbox AND Sent
+  -- Items, so a run holding only one of them has not seen the whole exchange - and a
+  -- second run could already be reading the other folder. Requiring both rows to
+  -- belong to the same live run is what the reservation and invalidation RPCs already
+  -- do; this now matches them.
+  SELECT count(*) = 2 AND bool_and(s.sync_run_id = p_run_id
+                                   AND s.sync_status = 'running'
+                                   AND s.sync_lease_until IS NOT NULL
+                                   AND s.sync_lease_until > now())
+    INTO v_leaseok
+  FROM public.outlook_sync_state s
+  WHERE s.connection_id = p_connection_id;
   IF v_leaseok IS NOT TRUE THEN
     RETURN jsonb_build_object('result', 'stale_run');
   END IF;

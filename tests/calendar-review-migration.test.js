@@ -133,11 +133,20 @@ test('no scheduler/cron/webhook/Gmail/AI/incremental/auto-accept', () => {
   // no automatic acceptance: accept only runs from an explicit handler, never on mount
   assert.ok(!/useEffect\([\s\S]{0,120}accept_interaction_candidate/.test(PAGE))
 })
-test('analytics events carry no identifiers', () => {
-  // only the three privacy-safe events, and accepted carries at most { edited: bool }
-  assert.ok(/track\('calendar_review_viewed'\)/.test(PAGE))
-  assert.ok(/track\('calendar_candidate_accepted', \{ edited: /.test(PAGE))
-  assert.ok(/track\('calendar_candidate_dismissed'\)/.test(PAGE))
+test('analytics events are SOURCE-CORRECT and carry no identifiers', () => {
+  // RENAMED DELIBERATELY. The queue has always been source-neutral, but it fired
+  // calendar_review_viewed / calendar_candidate_accepted / calendar_candidate_dismissed
+  // for every row - so an Outlook suggestion emitted a Calendar event, which is a false
+  // record. The names are now source-neutral and the source travels as a property.
+  // Safe because the whole surface is gated and the gate has never been enabled, so no
+  // event has ever been emitted and no insight can rest on the old names.
+  assert.ok(/track\(SUGGESTION_EVENTS\.viewed, suggestionEventProps\(s\)\)/.test(PAGE))
+  assert.ok(/track\(SUGGESTION_EVENTS\.accepted,/.test(PAGE))
+  assert.ok(/edited: !!edited/.test(PAGE), 'accepted still carries at most an edited boolean')
+  assert.ok(/track\(SUGGESTION_EVENTS\.dismissed, suggestionEventProps\(candidate\.source\)\)/.test(PAGE))
+  // The old calendar-named events must be gone, not merely supplemented.
+  assert.ok(!/calendar_review_viewed|calendar_candidate_accepted|calendar_candidate_dismissed/.test(PAGE))
+  // And still no identifier or content in any event.
   assert.ok(!/track\([^)]*candidate\.id|track\([^)]*\.name|track\([^)]*email/.test(PAGE))
 })
 

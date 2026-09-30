@@ -39,7 +39,8 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { transformWithOxc } from 'vite'
 import {
   LEASE_SECONDS, DUE_AFTER_SECONDS, RETRY_BACKOFF_SECONDS, RUN_OUTCOMES,
-  ENTRY_SKIP_CODES, WRITE_OK, writeAccepted, partitionPlan, runOutlookImport, summarizeRun,
+  ENTRY_SKIP_CODES, WRITE_OK, writeAccepted, releaseConfirmed, partitionPlan,
+  runOutlookImport, summarizeRun,
 } from '../supabase/functions/shared/outlookImportRun.js'
 import {
   SOURCE_PROVIDERS, getSourceProvider, isValidInteractionSource,
@@ -49,6 +50,9 @@ import {
   SUGGESTION_REVIEW_ENABLED,
 } from '../src/lib/suggestionReview.js'
 import { CANDIDATE_SELECT, validateOverrides } from '../src/lib/calendarReview.js'
+import {
+  SUGGESTION_EVENTS, SUGGESTION_SOURCES, suggestionSourceLabel, suggestionEventProps,
+} from '../src/lib/suggestionAnalytics.js'
 
 let passed = 0, failed = 0
 const pending = []
@@ -70,6 +74,7 @@ const MIGRATION = read('supabase/migrations/20260930000000_outlook_interaction_c
 const PAGE = read('src/pages/SuggestionsPage.jsx')
 const BADGE_SRC = read('src/components/InteractionSourceBadge.jsx')
 const GATE_SRC = read('src/lib/suggestionReview.js')
+const ENTRY = read('src/components/SuggestionsEntry.jsx')
 const codeOnly = (src) => src.split(String.fromCharCode(10))
   .filter((l) => !/^[ ]*([/][/]|[*]|[/][*])/.test(l)).join(String.fromCharCode(10))
 
@@ -169,6 +174,33 @@ function graphFixture ({ complete = true } = {}) {
   })
 }
 
+/** Three distinct two-sided episodes, so three writes are intended. */
+function threeEpisodeFixture () {
+  const base = 'https://graph.microsoft.com/v1.0'
+  const addr = (e) => ({ emailAddress: { address: e, name: e.split('@')[0] } })
+  const ME = 'student@getfunnl.test'
+  const OTHER = 'ava@bank.test'
+  const m = (id, conv, from, to, sent) => ({
+    id, conversationId: conv, receivedDateTime: sent, sentDateTime: sent, isDraft: false,
+    subject: 'Following up', from: addr(from), sender: addr(from),
+    toRecipients: to.map(addr), ccRecipients: [],
+  })
+  const convs = ['c1', 'c2', 'c3']
+  return async (url) => ({
+    status: 200,
+    headers: { get: () => null },
+    json: async () => (url.includes('/mailFolders/inbox/')
+      ? {
+          value: convs.map((c, i) => m(`in-${i}`, c, OTHER, [ME], '2026-09-20T14:00:00Z')),
+          '@odata.deltaLink': `${base}/me/mailFolders/inbox/messages/delta?$deltatoken=A`,
+        }
+      : {
+          value: convs.map((c, i) => m(`out-${i}`, c, ME, [OTHER], '2026-09-21T09:00:00Z')),
+          '@odata.deltaLink': `${base}/me/mailFolders/sentitems/messages/delta?$deltatoken=B`,
+        }),
+  })
+}
+
 function context (contacts) {
   return async () => ({
     primaryEmail: 'student@getfunnl.test',
@@ -196,7 +228,9 @@ test('a commit-ready pass writes one suggestion, then releases with both cursors
     deps: { fetchImpl: graphFixture() },
   })
   assert.strictEqual(r.outcome, 'committed', JSON.stringify(summarizeRun(r)))
-  assert.strictEqual(r.written, 1)
+  assert.strictEqual(r.intended, 1)
+  assert.strictEqual(r.accepted, 1)
+  assert.strictEqual(r.created, 1)
   const names = p.calls.map((c) => c.name)
   assert.deepStrictEqual(names, [
     'reserve_due_outlook_connection',
@@ -253,7 +287,9 @@ test('no candidate write is attempted at all, and the release carries no cursor'
   })
   assert.strictEqual(r.outcome, 'incomplete')
   assert.deepStrictEqual(r.incompleteReasons, ['folder_incomplete'])
-  assert.strictEqual(r.written, 0)
+  assert.strictEqual(r.intended, 0)
+  assert.strictEqual(r.accepted, 0)
+  assert.strictEqual(r.created, 0)
   assert.ok(!p.calls.some((c) => c.name === 'upsert_outlook_interaction_candidate'),
     'an incomplete pass must not attempt a write')
   const rel = p.calls.at(-1).args
@@ -273,7 +309,9 @@ test('a REFUSED write downgrades the whole run: no cursor, retry later', async (
   })
   assert.strictEqual(r.outcome, 'write_failed')
   assert.strictEqual(r.refusal, 'stale_run')
-  assert.strictEqual(r.written, 0)
+  assert.strictEqual(r.intended, 1)
+  assert.strictEqual(r.accepted, 0, 'the only write was refused')
+  assert.strictEqual(r.created, 0)
   const rel = p.calls.at(-1).args
   assert.strictEqual(rel.p_run_complete, false)
   assert.strictEqual(rel.p_inbox_delta_ct, null,
@@ -363,8 +401,19 @@ console.log('\nthe write path is Outlook-specific and lease-fenced')
 
 test('the migration fences on outlook_sync_state, never on the Gmail tables', () => {
   assert.ok(/FROM public\.outlook_sync_state s/.test(MIGRATION))
-  assert.ok(/JOIN public\.microsoft_connections c/.test(MIGRATION))
-  assert.ok(/FOR SHARE OF s/.test(MIGRATION), 'the lock order must match the release RPC')
+  assert.ok(/FROM public\.microsoft_connections c WHERE c\.id = p_connection_id/.test(MIGRATION),
+    'the owner comes from the Microsoft connection')
+  // The fence requires BOTH folder rows to belong to the same live run, matching
+  // reserve_due_outlook_connection and invalidate_outlook_candidates_by_fingerprint.
+  assert.ok(/count\(\*\) = 2 AND bool_and\(s\.sync_run_id = p_run_id/.test(MIGRATION),
+    'one folder lease must not be enough')
+  assert.ok(!/AND s\.folder = 'inbox'/.test(MIGRATION),
+    'the single-folder fence must be gone')
+  // Both state rows locked FOR SHARE first, as the invalidation RPC does. Checked as
+  // substrings rather than one multi-line pattern, which is easy to get wrong.
+  assert.ok(MIGRATION.includes('PERFORM 1 FROM public.outlook_sync_state s'))
+  assert.ok(MIGRATION.includes('WHERE s.connection_id = p_connection_id FOR SHARE;'),
+    'the lock must cover BOTH folder rows, not one named row')
   assert.ok(/sync_lease_until > now\(\)/.test(MIGRATION))
   assert.ok(/'stale_run'/.test(MIGRATION))
   const code = MIGRATION.split(String.fromCharCode(10))
@@ -428,7 +477,9 @@ test('summarizeRun reports counts and controlled codes only', async () => {
   }
   assert.ok(!/[0-9a-f]{64}/.test(s), 'the summary leaked a fingerprint')
   assert.strictEqual(summarizeRun(r).outcome, 'committed')
-  assert.strictEqual(summarizeRun(r).written, 1)
+  assert.strictEqual(summarizeRun(r).accepted, 1)
+  assert.strictEqual(summarizeRun(r).created, 1)
+  assert.strictEqual(summarizeRun(r).intended, 1)
 })
 
 test('summarizeRun normalises an unknown outcome and tolerates junk', () => {
@@ -553,6 +604,286 @@ test('no file under src/ mentions a service-role key', () => {
     'src/pages/SuggestionsPage.jsx', 'src/components/InteractionSourceBadge.jsx']) {
     assert.ok(!/service_role|SERVICE_ROLE|serviceRoleKey/.test(read(f)), f)
   }
+})
+
+console.log('')
+console.log('COMMITTED requires the release RPC to confirm success')
+
+test('releaseConfirmed is the narrow reading: no error AND data === true', () => {
+  assert.strictEqual(releaseConfirmed({ data: true, error: null }), true)
+  for (const bad of [
+    { data: false, error: null },          // the RPC answered false: lease lost
+    { data: null, error: null },
+    { data: 'true', error: null },
+    { data: 1, error: null },
+    { data: true, error: { code: 'x' } },  // transport error alongside a body
+    { data: undefined, error: undefined },
+    null, undefined, {},
+  ]) {
+    assert.strictEqual(releaseConfirmed(bad), false, JSON.stringify(bad))
+  }
+})
+
+test('a release returning FALSE is release_failed, not committed', async () => {
+  // release_outlook_sync_lease returns false without raising when the run id is null or
+  // no row matched - exactly the lost-lease case. An earlier version reported committed
+  // with two cursors advanced here.
+  const p = port({ release: false })
+  const r = await runOutlookImport({
+    rpc: p.rpc, encryptCursor, loadRunContext: context(OWN_CONTACT),
+    deps: { fetchImpl: graphFixture() },
+  })
+  assert.strictEqual(r.outcome, 'release_failed')
+  assert.strictEqual(r.cursorsAdvanced, 0, 'the cursor state is UNKNOWN, so claim nothing')
+  // The write DID land, and that is reported honestly.
+  assert.strictEqual(r.intended, 1)
+  assert.strictEqual(r.accepted, 1)
+  assert.strictEqual(r.created, 1)
+  // The cursors were still SUPPLIED to the release - the run did everything right.
+  const rel = p.calls.at(-1).args
+  assert.strictEqual(rel.p_run_complete, true)
+  assert.ok(rel.p_inbox_delta_ct)
+})
+
+test('a release that ERRORS is release_failed, not committed', async () => {
+  const p = port({ release: { data: null, error: { status: 500 } } })
+  const r = await runOutlookImport({
+    rpc: p.rpc, encryptCursor, loadRunContext: context(OWN_CONTACT),
+    deps: { fetchImpl: graphFixture() },
+  })
+  assert.strictEqual(r.outcome, 'release_failed')
+  assert.strictEqual(r.cursorsAdvanced, 0)
+  assert.strictEqual(r.accepted, 1)
+})
+
+test('a release that THROWS is release_failed, and does not escape the run', async () => {
+  const calls = []
+  const rpc = async (name, args) => {
+    calls.push({ name, args })
+    if (name === 'reserve_due_outlook_connection') {
+      return { data: { result: 'reserved', connection_id: CONN, run_id: RUN }, error: null }
+    }
+    if (name === 'upsert_outlook_interaction_candidate') return { data: { result: 'created' }, error: null }
+    throw new Error('network down at https://secret.example')
+  }
+  const r = await runOutlookImport({
+    rpc, encryptCursor, loadRunContext: context(OWN_CONTACT),
+    deps: { fetchImpl: graphFixture() },
+  })
+  assert.strictEqual(r.outcome, 'release_failed')
+  assert.strictEqual(r.cursorsAdvanced, 0)
+  assert.strictEqual(r.accepted, 1, 'the write that landed is still reported')
+  assert.ok(!JSON.stringify(summarizeRun(r)).includes('secret.example'))
+})
+
+console.log('')
+console.log('a thrown write or encryption is an error release, never a commit')
+
+test('a THROWN candidate write releases as an error and commits nothing', async () => {
+  const calls = []
+  let released = null
+  const rpc = async (name, args) => {
+    calls.push({ name, args })
+    if (name === 'reserve_due_outlook_connection') {
+      return { data: { result: 'reserved', connection_id: CONN, run_id: RUN }, error: null }
+    }
+    if (name === 'upsert_outlook_interaction_candidate') throw new Error('connection reset')
+    released = args
+    return { data: true, error: null }
+  }
+  const r = await runOutlookImport({
+    rpc, encryptCursor, loadRunContext: context(OWN_CONTACT),
+    deps: { fetchImpl: graphFixture() },
+  })
+  assert.strictEqual(r.outcome, 'write_error')
+  assert.strictEqual(r.accepted, 0)
+  assert.strictEqual(r.intended, 1)
+  assert.strictEqual(r.cursorsAdvanced, 0)
+  // The lease is not left held: an error release was attempted.
+  assert.ok(released, 'a best-effort release must still happen')
+  assert.strictEqual(released.p_status, 'error')
+  assert.strictEqual(released.p_error_code, 'write_failed')
+  assert.strictEqual(released.p_inbox_delta_ct, null)
+  assert.strictEqual(released.p_run_complete, false)
+})
+
+test('a THROWN cursor encryption releases as an error, after the writes landed', async () => {
+  const p = port()
+  const r = await runOutlookImport({
+    rpc: p.rpc,
+    encryptCursor: async () => { throw new Error('key unavailable') },
+    loadRunContext: context(OWN_CONTACT),
+    deps: { fetchImpl: graphFixture() },
+  })
+  assert.strictEqual(r.outcome, 'write_error')
+  assert.strictEqual(r.cursorsAdvanced, 0)
+  // The suggestion IS in the database. Saying zero would be false.
+  assert.strictEqual(r.accepted, 1)
+  assert.strictEqual(r.created, 1)
+  const rel = p.calls.at(-1).args
+  assert.strictEqual(rel.p_status, 'error')
+  assert.strictEqual(rel.p_error_code, 'cursor_encrypt_failed')
+  assert.strictEqual(rel.p_inbox_delta_ct, null, 'no cursor may be supplied')
+})
+
+test('a best-effort release that ALSO throws still returns a controlled outcome', async () => {
+  const rpc = async (name) => {
+    if (name === 'reserve_due_outlook_connection') {
+      return { data: { result: 'reserved', connection_id: CONN, run_id: RUN }, error: null }
+    }
+    throw new Error('everything is down')
+  }
+  const r = await runOutlookImport({
+    rpc, encryptCursor, loadRunContext: context(OWN_CONTACT),
+    deps: { fetchImpl: graphFixture() },
+  })
+  assert.strictEqual(r.outcome, 'write_error')
+  assert.ok(RUN_OUTCOMES.includes(r.outcome))
+  assert.strictEqual(r.cursorsAdvanced, 0)
+})
+
+console.log('')
+console.log('partial writes are reported, not erased')
+
+test('two of three accepted then a refusal: the two are still counted', async () => {
+  const p = port({ writes: ['created', 'refreshed', 'stale_run'] })
+  const r = await runOutlookImport({
+    rpc: p.rpc, encryptCursor,
+    loadRunContext: context(OWN_CONTACT),
+    deps: { fetchImpl: threeEpisodeFixture() },
+  })
+  assert.strictEqual(r.outcome, 'write_failed')
+  assert.strictEqual(r.refusal, 'stale_run')
+  assert.strictEqual(r.intended, 3)
+  assert.strictEqual(r.accepted, 2, 'the writes that landed must not be reported as zero')
+  assert.strictEqual(r.created, 1)
+  // writeResults is a null-prototype object, so compare its entries rather than the
+  // object itself.
+  assert.deepStrictEqual({ ...r.writeResults }, { created: 1, refreshed: 1, stale_run: 1 })
+  assert.strictEqual(r.cursorsAdvanced, 0, 'and still no cursor')
+  const rel = p.calls.at(-1).args
+  assert.strictEqual(rel.p_run_complete, false)
+  assert.strictEqual(rel.p_inbox_delta_ct, null)
+})
+
+test('the run STOPS at the first refusal rather than piling up uncommittable work', async () => {
+  const p = port({ writes: ['created', 'stale_run', 'created'] })
+  const r = await runOutlookImport({
+    rpc: p.rpc, encryptCursor,
+    loadRunContext: context(OWN_CONTACT),
+    deps: { fetchImpl: threeEpisodeFixture() },
+  })
+  const writes = p.calls.filter((c) => c.name === 'upsert_outlook_interaction_candidate')
+  assert.strictEqual(writes.length, 2, 'the third write must not be attempted')
+  assert.strictEqual(r.accepted, 1)
+  assert.strictEqual(r.intended, 3)
+})
+
+test('a partial run keeps the RETRY idempotent - no rollback, no new machinery', async () => {
+  // First run: one lands, the next is refused.
+  const first = port({ writes: ['created', 'stale_run'] })
+  const a = await runOutlookImport({
+    rpc: first.rpc, encryptCursor, loadRunContext: context(OWN_CONTACT),
+    deps: { fetchImpl: threeEpisodeFixture() },
+  })
+  assert.strictEqual(a.accepted, 1)
+  // The retry re-attempts the SAME episodes. The one that landed answers 'refreshed',
+  // which is an accepted result, so the run can commit without any rollback having
+  // happened in between.
+  const second = port({ writes: ['refreshed', 'created', 'created'] })
+  const b = await runOutlookImport({
+    rpc: second.rpc, encryptCursor, loadRunContext: context(OWN_CONTACT),
+    deps: { fetchImpl: threeEpisodeFixture() },
+  })
+  assert.strictEqual(b.outcome, 'committed')
+  assert.strictEqual(b.accepted, 3)
+  assert.strictEqual(b.created, 2)
+  assert.strictEqual(b.cursorsAdvanced, 2)
+  // Nothing in the module rolls anything back or opens a transaction.
+  for (const banned of ['BEGIN', 'ROLLBACK', 'COMMIT', 'savepoint', 'transaction(']) {
+    assert.ok(!codeOnly(RUN_SRC).includes(banned), `no transaction machinery: ${banned}`)
+  }
+})
+
+test('summarizeRun exposes intended, accepted and created separately', async () => {
+  const p = port({ writes: ['created', 'refreshed', 'rpc_error'] })
+  const r = await runOutlookImport({
+    rpc: p.rpc, encryptCursor, loadRunContext: context(OWN_CONTACT),
+    deps: { fetchImpl: threeEpisodeFixture() },
+  })
+  const s = summarizeRun(r)
+  assert.strictEqual(s.intended, 3)
+  assert.strictEqual(s.accepted, 2)
+  assert.strictEqual(s.created, 1)
+  assert.strictEqual(s.cursors_advanced, 0)
+  assert.strictEqual(s.refusal, 'rpc_error')
+  assert.ok(!/[0-9a-f]{64}/.test(JSON.stringify(s)))
+})
+
+console.log('')
+console.log('the review analytics are source-correct')
+
+test('the event names are source-neutral and the source travels as a property', () => {
+  assert.deepStrictEqual(Object.values(SUGGESTION_EVENTS).sort(),
+    ['suggestion_accepted', 'suggestion_dismissed', 'suggestion_review_viewed'])
+  for (const name of Object.values(SUGGESTION_EVENTS)) {
+    assert.ok(!/calendar|gmail|outlook/i.test(name),
+      `a source must not be baked into the event name: ${name}`)
+  }
+})
+
+test('an unrecognised source becomes a controlled label, never passed through', () => {
+  for (const s of SUGGESTION_SOURCES) assert.strictEqual(suggestionSourceLabel(s), s)
+  for (const bad of ['Outlook', ' outlook', 'manual', 'microsoft', '', null, undefined, 7, {}]) {
+    assert.strictEqual(suggestionSourceLabel(bad), 'unknown', JSON.stringify(bad))
+  }
+})
+
+test('the event properties carry behaviour only, never content', () => {
+  assert.deepStrictEqual(suggestionEventProps('outlook'), { source: 'outlook' })
+  assert.deepStrictEqual(suggestionEventProps('outlook', { edited: true }),
+    { source: 'outlook', edited: true })
+  assert.deepStrictEqual(suggestionEventProps('outlook', { edited: false }),
+    { source: 'outlook', edited: false })
+  // Anything else offered is dropped rather than forwarded.
+  const props = suggestionEventProps('outlook', {
+    edited: 'yes', contactId: 'c1', notes: 'private', email: 'a@b.test', candidateId: 'x',
+  })
+  assert.deepStrictEqual(props, { source: 'outlook' })
+})
+
+test('STRUCTURAL: the page emits the source-neutral events with the ROW source', () => {
+  // renderToStaticMarkup dispatches no events, so the wiring is asserted on source.
+  assert.ok(!/calendar_candidate_accepted|calendar_candidate_dismissed|calendar_review_viewed/.test(PAGE),
+    'the calendar-named events must be gone: an Outlook row emitted them before')
+  assert.ok(/track\(SUGGESTION_EVENTS\.accepted,/.test(PAGE))
+  assert.ok(/track\(SUGGESTION_EVENTS\.dismissed, suggestionEventProps\(candidate\.source\)\)/.test(PAGE))
+  assert.ok(/suggestionEventProps\(candidate\.source, \{ edited: !!edited \}\)/.test(PAGE),
+    'the accept event must carry the row source and the edited flag')
+  assert.ok(/track\(SUGGESTION_EVENTS\.viewed, suggestionEventProps\(s\)\)/.test(PAGE),
+    'the viewed event must carry a source too')
+  assert.ok(/new Set\(rows\.map\(\(r\) => r\.source\)\)/.test(PAGE),
+    'a queue holding two sources must not be recorded as one')
+})
+
+console.log('')
+console.log('the entry count does not call an interaction a person')
+
+test('the copy counts SUGGESTIONS, in both singular and plural', () => {
+  assert.ok(/'suggestion' : 'suggestions'/.test(ENTRY),
+    'an interaction suggestion for an existing contact is not a person to review')
+  assert.ok(!/'person' : 'people'/.test(ENTRY))
+  assert.ok(!/\bpeople to review\b/.test(ENTRY))
+  assert.ok(/to review from your connected sources/.test(ENTRY), 'and stays source-neutral')
+})
+
+test('the entry still shows a count only, never any candidate or contact detail', () => {
+  const code = codeOnly(ENTRY)
+  for (const banned of ['proposed_notes', 'retained_subject', 'contacts(', 'name', 'email',
+    'source_fingerprint']) {
+    assert.ok(!code.includes(banned), `the entry must not read ${banned}`)
+  }
+  assert.ok(/count: 'exact', head: true/.test(code), 'a head count is all it needs')
 })
 
 async function finish () {
