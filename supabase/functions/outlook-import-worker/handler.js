@@ -15,33 +15,43 @@
 //      compared in constant time. A user JWT grants no authority here.
 //   3. Only then would a run happen.
 //
-// WHY STEP 3 RETURNS 501 RATHER THAN RUNNING.
-// The pass itself is implemented and tested (shared/outlookMetadataPass.js), but it
-// has nowhere to put its output yet, and that is a real gap rather than an oversight:
-// `upsert_email_candidate` LOOKS provider-neutral - it accepts p_source 'outlook' -
-// but its lease check reads `gmail_sync_state JOIN google_connections`, and it writes
-// `email_candidate_refs`, whose connection_id references `google_connections`. Given a
-// Microsoft connection id it therefore returns 'unknown_connection'. Writing Outlook
-// suggestions needs its own RPC against `outlook_candidate_refs`, which is a forward
-// migration and a separate reviewed slice.
+// WHY STEP 3 STILL RETURNS 501 RATHER THAN RUNNING.
 //
-// A SECOND BLOCKER, INDEPENDENT OF THE FIRST: NO CONTINUATION DESIGN.
-// Even with a write path, this endpoint could not be turned on for a large mailbox.
-// shared/outlookMetadataPass.js refuses to hand back a delta cursor whenever work was
-// dropped or left unfinished, which is the safe failure but not a working one: a
-// mailbox that exceeds the per-run ceilings would restart from the same cursor every
-// run, hit the same ceiling, commit nothing, and make no progress forever.
+// The run itself is now implemented and verified: shared/outlookImportRun.js reserves
+// the lease, runs the metadata pass, writes pending suggestions through
+// upsert_outlook_interaction_candidate, and advances the encrypted cursors only after
+// every write succeeded on a commit-ready pass. It is exercised end to end against a
+// real local Postgres through PostgREST by tests/local/outlook-first-suggestion.mjs.
 //
-// Before this endpoint becomes operational, someone must design and review DURABLE
-// CONTINUATION: where partial progress inside a delta stream is persisted (an
+// What is missing is a way for a DEPLOYED function to obtain a Graph access token.
+// `microsoft_tokens` holds ciphertext and a nonce; turning that into a usable token
+// needs the token-encryption key (which does not exist in any environment) and a
+// refresh exchange against an Entra application (which does not exist at all). So a
+// deployed run has no credential to present, and this endpoint answers 501
+// `not_implemented` with `reason: 'no_token_access_path'`.
+//
+// THE MANUAL TRIGGER IS LOCAL, DELIBERATELY. The milestone this slice delivers is
+// demonstrable by running tests/local/outlook-first-suggestion.mjs, which supplies
+// fixture Microsoft responses and an injected token to the same run module this
+// endpoint would call. Nothing about that path reaches a real mailbox.
+//
+// PREVIOUS BLOCKER, NOW CLEARED - recorded so the change of reason is visible:
+// `upsert_email_candidate` LOOKS provider-neutral (it accepts p_source 'outlook') but
+// its lease fence reads `gmail_sync_state JOIN google_connections` and it writes
+// `email_candidate_refs`, whose connection_id references `google_connections`. A
+// Microsoft connection id therefore returned 'unknown_connection'. Migration
+// 20260930000000 adds the Outlook equivalent, fenced on `outlook_sync_state` and
+// recording provenance in `outlook_candidate_refs`. It is UNAPPLIED.
+//
+// A THIRD BLOCKER REMAINS: NO CONTINUATION DESIGN. The pass refuses to hand back a
+// cursor whenever work was dropped or left unfinished, which is the safe failure but
+// not a working one - a mailbox past the per-run ceilings restarts from the same
+// cursor every run, hits the same ceiling, commits nothing, and makes no progress
+// forever. Durable continuation must be designed and reviewed before this endpoint
+// becomes operational: where partial progress inside a delta stream is persisted (an
 // intermediate nextLink is opaque and time-limited, so storing one is not obviously
 // safe), how a run resumes mid-stream, and what a user sees while a first import is
-// still incomplete. That is deliberately not in this slice.
-//
-// So when both flags are on, this endpoint answers 501 `not_implemented` with
-// `reason: 'no_outlook_candidate_write_path'`. It deliberately does NOT reserve a
-// lease, call Microsoft, or touch the database: a run that quietly discarded its own
-// output would look like success while importing nothing.
+// still incomplete.
 //
 // WHAT THIS FILE NEVER DOES: no Microsoft Graph request, no Supabase client, no
 // Anthropic call, no scheduling. A test asserts each of those by scanning this source
@@ -100,8 +110,10 @@ export async function handleOutlookImportWorker (req, env) {
   if (!auth.ok) return json(auth.status, { error: auth.code })
 
   // 3. There is no write path for an Outlook suggestion yet. Refuse loudly.
+  // A deployed run has no way to obtain a Graph access token. Refusing loudly is the
+  // point: a run that quietly did nothing would look like success.
   return json(501, {
     error: 'not_implemented',
-    reason: 'no_outlook_candidate_write_path',
+    reason: 'no_token_access_path',
   })
 }

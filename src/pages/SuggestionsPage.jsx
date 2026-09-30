@@ -4,10 +4,12 @@ import { getAvatarColor, getInitials } from '../lib/avatarUtils'
 import { track } from '../lib/analytics'
 import TopBar from '../components/TopBar'
 import {
-  CALENDAR_INGESTION_ENABLED, CANDIDATE_SELECT, INTERACTION_TYPES, REVIEW_PAGE_SIZE, REVIEW_NOTES_MAX,
+  CANDIDATE_SELECT, INTERACTION_TYPES, REVIEW_PAGE_SIZE, REVIEW_NOTES_MAX,
   validateOverrides, acceptResultOutcome, dismissResultOutcome, resultCode,
   keysetFilter, cursorFrom, dedupeById, computeHasMore,
 } from '../lib/calendarReview'
+import { SUGGESTION_REVIEW_ENABLED } from '../lib/suggestionReview'
+
 import { dismissConfirmFocusTarget } from '../lib/dismissConfirmFocus'
 import InteractionSourceBadge from '../components/InteractionSourceBadge'
 
@@ -245,7 +247,7 @@ export default function SuggestionsPage() {
   }, [fetchPage])
 
   useEffect(() => {
-    if (!CALENDAR_INGESTION_ENABLED) return   // disabled → no query runs at all
+    if (!SUGGESTION_REVIEW_ENABLED) return   // disabled → no query runs at all
     loadInitial()
   }, [loadInitial])
 
@@ -284,7 +286,7 @@ export default function SuggestionsPage() {
   }
 
   // Flag off → render nothing (route is also flag-gated).
-  if (!CALENDAR_INGESTION_ENABLED) return null
+  if (!SUGGESTION_REVIEW_ENABLED) return null
 
   return (
     <div className="flex flex-col h-full">
