@@ -25,7 +25,7 @@ import {
 } from '../supabase/functions/shared/microsoftTokenExchange.js'
 import {
   makeRunContextLoader, makeCursorEncryptor, RunContextError,
-  CONTEXT_FAILURES, EXPIRY_SKEW_SECONDS, MAX_CONTACTS_LOADED,
+  CONTEXT_FAILURES, EXPIRY_SKEW_SECONDS, MAX_CONTACTS_LOADED, CONTACT_PAGE_SIZE,
 } from '../supabase/functions/shared/outlookRunContext.js'
 import {
   importKeyFromBase64, encryptToken, decryptToken,
@@ -37,11 +37,14 @@ import {
 import { makePostgrestPorts, PRODUCTION_TOKEN_URL, DB_TIMEOUT_MS } from '../supabase/functions/outlook-import-worker/endpoints.js'
 import { MS_TOKEN_ENDPOINT } from '../supabase/functions/shared/microsoftOauthHelpers.js'
 import {
-  LEASE_SECONDS, RENEW_SECONDS, RENEW_EVERY_PAGES, RUN_OUTCOMES, runOutlookImport, summarizeRun,
+  LEASE_SECONDS, RENEW_SECONDS, PAGE_WORST_MS, CONTEXT_WORST_MS, WRITE_STEP_MS,
+  RUN_OUTCOMES, runOutlookImport, summarizeRun,
 } from '../supabase/functions/shared/outlookImportRun.js'
 import {
   MAX_PAGES_PER_RUN, MAX_RETRIES, REQUEST_TIMEOUT_MS, MAX_TOTAL_RETRY_DELAY_MS, GRAPH_BASE,
 } from '../supabase/functions/shared/outlookGraphTransport.js'
+import { readFolderMetadata } from '../supabase/functions/shared/outlookMetadataPass.js'
+import { MAX_PROVIDER_BODY_BYTES } from '../supabase/functions/shared/boundedJson.js'
 
 let passed = 0, failed = 0
 const pending = []
@@ -69,6 +72,7 @@ const codeOnly = (src) => src.split(String.fromCharCode(10))
 const CONN = 'cccccccc-cccc-cccc-cccc-cccccccccccc'
 const RUN = 'rrrrrrrr-rrrr-rrrr-rrrr-rrrrrrrrrrrr'
 const U1 = '11111111-1111-1111-1111-111111111111'
+const CONTACT = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
 const KEY_B64 = Buffer.from(new Uint8Array(32).fill(5)).toString('base64')
 const subtle = webcrypto.subtle
 
@@ -231,7 +235,9 @@ test('it reads ONLY the reserved connection, and only the columns it uses', asyn
   for (const forbidden of ['name', 'company', 'relationship_note', 'linkedin_url']) {
     assert.ok(!contactRead.includes(forbidden), `the matcher does not need ${forbidden}`)
   }
-  assert.ok(contactRead.includes(`limit=${MAX_CONTACTS_LOADED}`), 'the contact read must be bounded')
+  assert.ok(contactRead.includes(`limit=${CONTACT_PAGE_SIZE}`),
+    'each contact request must be bounded well inside the port body limit')
+  assert.ok(contactRead.includes('order=id.asc'), 'paging needs a deterministic order')
 })
 
 test('a token within the skew window is treated as stale and refreshed', async () => {
@@ -572,79 +578,6 @@ test('the deployed entry builds a fingerprint key ring and fails closed without 
   assert.ok(!/@supabase\/supabase-js|createClient/.test(ENTRY_SRC))
 })
 
-console.log('\nthe lease is renewed, because the bounded worst case demands it')
-
-test('the worst-case run is longer than any lease the RPC will grant', () => {
-  const perRequest = (MAX_RETRIES + 1) * REQUEST_TIMEOUT_MS + MAX_TOTAL_RETRY_DELAY_MS
-  const worstRun = MAX_PAGES_PER_RUN * perRequest
-  assert.strictEqual(perRequest, 140_000)
-  assert.strictEqual(worstRun, 2_800_000)
-  assert.ok(worstRun / 1000 > 600,
-    'the reservation RPC caps p_lease_seconds at 600, so one lease cannot cover a long run')
-  assert.ok(LEASE_SECONDS <= 600 && RENEW_SECONDS <= 600, 'both must satisfy the RPC bound')
-  assert.ok(RENEW_EVERY_PAGES * perRequest < RENEW_SECONDS * 1000 * 2,
-    'renewal must happen often enough that a slow page cannot outlast the lease')
-})
-
-test('a renewal that does not confirm stops the run as lease_lost, with no cursor', async () => {
-  const calls = []
-  const rpc = async (name, args) => {
-    calls.push({ name, args })
-    if (name === 'reserve_due_outlook_connection') {
-      return { data: { result: 'reserved', connection_id: CONN, run_id: RUN }, error: null }
-    }
-    if (name === 'renew_outlook_sync_lease') return { data: false, error: null }
-    if (name === 'release_outlook_sync_lease') return { data: true, error: null }
-    return { data: { result: 'created' }, error: null }
-  }
-  // Enough pages to trigger a renewal.
-  let served = 0
-  const fetchImpl = async (url) => {
-    served += 1
-    const folder = url.includes('/mailFolders/inbox/') ? 'inbox' : 'sentitems'
-    return { status: 200, headers: { get: () => null }, json: async () => ({
-      value: [],
-      '@odata.nextLink': `${GRAPH_BASE}/me/mailFolders/${folder}/messages/delta?$skiptoken=n${served}`,
-    }) }
-  }
-  const r = await runOutlookImport({
-    rpc, encryptCursor: async () => ({ ciphertext: 'CT', nonce: 'N', keyVersion: 1 }),
-    loadRunContext: async () => ({
-      primaryEmail: 'me@x.test', userId: U1, contacts: [], cursors: {}, timeZone: 'UTC',
-      accessToken: 'tok', keyRing: { current: { keyBytes: new Uint8Array(32), keyVersion: 1 } },
-    }),
-    deps: { fetchImpl },
-  })
-  assert.strictEqual(r.outcome, 'lease_lost')
-  assert.strictEqual(r.cursorsAdvanced, 0)
-  assert.ok(calls.some((c) => c.name === 'renew_outlook_sync_lease'), 'a renewal must be attempted')
-  const rel = calls.filter((c) => c.name === 'release_outlook_sync_lease').at(-1).args
-  assert.strictEqual(rel.p_status, 'error')
-  assert.strictEqual(rel.p_error_code, 'lease_lost')
-  assert.strictEqual(rel.p_inbox_delta_ct, null)
-  assert.ok(RUN_OUTCOMES.includes(summarizeRun(r).outcome))
-})
-
-test('a context failure reaches the run as a controlled reason, and releases the lease', async () => {
-  const calls = []
-  const rpc = async (name) => {
-    calls.push(name)
-    if (name === 'reserve_due_outlook_connection') {
-      return { data: { result: 'reserved', connection_id: CONN, run_id: RUN }, error: null }
-    }
-    return { data: true, error: null }
-  }
-  const r = await runOutlookImport({
-    rpc, encryptCursor: async () => ({ ciphertext: 'C', nonce: 'N', keyVersion: 1 }),
-    loadRunContext: async () => { throw new RunContextError('refresh_failed') },
-    deps: { fetchImpl: async () => { throw new Error('must not be called') } },
-  })
-  assert.strictEqual(r.outcome, 'released_error')
-  assert.strictEqual(r.reason, 'refresh_failed')
-  assert.strictEqual(summarizeRun(r).reason, 'refresh_failed')
-  assert.ok(calls.includes('release_outlook_sync_lease'), 'the lease must not be left held')
-})
-
 console.log('\nthe rotation migration')
 
 test('it is service_role only, SECURITY DEFINER, and unapplied', () => {
@@ -690,6 +623,529 @@ test('the handler records what still blocks enablement', () => {
   for (const blocker of ['DURABLE CONTINUATION', 'Entra application', 'Mail.Read', 'No scheduler']) {
     assert.ok(HANDLER_SRC.includes(blocker), `the handler must still record: ${blocker}`)
   }
+})
+
+console.log('')
+console.log('the lease survives a slow but successful run')
+
+/**
+ * A virtual clock plus a lease the database would actually enforce: a renewal succeeds
+ * only while the lease is still live, and a write or release is refused once it is not.
+ * That is what makes these tests about lease LIFETIME rather than about call counts.
+ */
+function slowRun ({ pagesPerFolder, contextMs = 200_000, writeMs = 5_000, pageMs = PAGE_WORST_MS }) {
+  let clock = 0
+  const now = () => clock
+  let leaseUntil = LEASE_SECONDS * 1000
+  const events = []
+  let renewals = 0
+  let renewalsRefused = 0
+
+  const rpc = async (name) => {
+    if (name === 'reserve_due_outlook_connection') {
+      return { data: { result: 'reserved', connection_id: CONN, run_id: RUN }, error: null }
+    }
+    if (name === 'renew_outlook_sync_lease') {
+      renewals += 1
+      if (leaseUntil <= clock) { renewalsRefused += 1; return { data: false, error: null } }
+      leaseUntil = clock + RENEW_SECONDS * 1000
+      events.push(`renew@${clock / 1000}`)
+      return { data: true, error: null }
+    }
+    if (name === 'upsert_outlook_interaction_candidate') {
+      clock += writeMs
+      const live = leaseUntil > clock
+      events.push(`write@${clock / 1000}:${live ? 'live' : 'EXPIRED'}`)
+      return { data: { result: live ? 'created' : 'stale_run' }, error: null }
+    }
+    if (name === 'release_outlook_sync_lease') {
+      const live = leaseUntil > clock
+      events.push(`release@${clock / 1000}:${live}`)
+      return { data: live, error: null }
+    }
+    return { data: null, error: null }
+  }
+
+  const served = { inbox: 0, sentitems: 0 }
+  const addr = (e) => ({ emailAddress: { address: e, name: 'x' } })
+  const m = (id, from, to, sent) => ({
+    id, conversationId: 'c1', receivedDateTime: sent, sentDateTime: sent, isDraft: false,
+    subject: 's', from: addr(from), sender: addr(from), toRecipients: to.map(addr), ccRecipients: [],
+  })
+  const ME = 'me@x.test'
+  const OTHER = 'ava@bank.test'
+  const fetchImpl = async (url) => {
+    clock += pageMs
+    const folder = url.includes('/mailFolders/inbox/') ? 'inbox' : 'sentitems'
+    served[folder] += 1
+    const last = served[folder] >= pagesPerFolder
+    const items = folder === 'inbox'
+      ? [m(`in-${served[folder]}`, OTHER, [ME], '2026-09-20T14:00:00Z')]
+      : [m(`out-${served[folder]}`, ME, [OTHER], '2026-09-21T09:00:00Z')]
+    return {
+      status: 200, headers: { get: () => null },
+      json: async () => (last
+        ? { value: items, '@odata.deltaLink': `${GRAPH_BASE}/me/mailFolders/${folder}/messages/delta?$deltatoken=F` }
+        : { value: items, '@odata.nextLink': `${GRAPH_BASE}/me/mailFolders/${folder}/messages/delta?$skiptoken=n${served[folder]}` }),
+    }
+  }
+
+  const loadRunContext = async () => {
+    clock += contextMs
+    return {
+      primaryEmail: ME, userId: U1, timeZone: 'UTC',
+      contacts: [{ id: CONTACT, user_id: U1, email: OTHER }],
+      cursors: {}, accessToken: 'tok',
+      keyRing: { current: { keyBytes: new Uint8Array(32).fill(1), keyVersion: 1 } },
+    }
+  }
+
+  const run = () => runOutlookImport({
+    rpc,
+    encryptCursor: async () => ({ ciphertext: 'CT', nonce: 'N', keyVersion: 1 }),
+    loadRunContext,
+    deps: { fetchImpl, now },
+  })
+  return { run, events, stats: () => ({ renewals, renewalsRefused, clock, leaseUntil }) }
+}
+
+test('ONE FINAL PAGE PER FOLDER: the run commits, where before it renewed zero times', async () => {
+  // REPRODUCED BEFORE THE FIX: readFolderMetadata fired the per-page hook only below its
+  // two breaks, so a folder whose stream ended on its first page never fired it at all.
+  // With 200s of context loading and two 140s pages, the lease died at 300s, the
+  // candidate write at 485s was refused `stale_run`, the release returned false, and the
+  // outcome was write_failed with nothing committed - a run that had done all its work.
+  const h = slowRun({ pagesPerFolder: 1 })
+  const r = await h.run()
+  const s = h.stats()
+  assert.strictEqual(r.outcome, 'committed',
+    `${r.outcome} / ${JSON.stringify(r.writeResults)} / ${h.events.join(' ')}`)
+  assert.strictEqual(r.created, 1)
+  assert.strictEqual(r.cursorsAdvanced, 2)
+  assert.ok(s.renewals > 0, 'a slow run must renew at least once')
+  assert.strictEqual(s.renewalsRefused, 0)
+  assert.ok(s.clock > LEASE_SECONDS * 1000,
+    `the run must actually outlast one lease to be a real test (ran ${s.clock / 1000}s)`)
+  assert.ok(h.events.every((e) => !e.includes('EXPIRED')), h.events.join(' '))
+  assert.ok(h.events.at(-1).startsWith('release@') && h.events.at(-1).endsWith(':true'),
+    `the release must confirm: ${h.events.join(' ')}`)
+})
+
+test('THREE PAGES PER FOLDER: still committed, with renewals arriving in time', async () => {
+  // Before the fix this reached its single renewal at 480s, long after the 300s lease had
+  // died, and ended lease_lost.
+  const h = slowRun({ pagesPerFolder: 3 })
+  const r = await h.run()
+  const s = h.stats()
+  assert.strictEqual(r.outcome, 'committed', `${r.outcome} / ${h.events.join(' ')}`)
+  assert.strictEqual(r.cursorsAdvanced, 2)
+  assert.strictEqual(s.renewalsRefused, 0, h.events.join(' '))
+  assert.ok(s.clock > 3 * LEASE_SECONDS * 1000,
+    `a six-page run must span several leases (ran ${s.clock / 1000}s)`)
+})
+
+test('a run slow enough to need renewal DURING the writes still commits', async () => {
+  // Many plan entries, each a slow round trip: MAX_PLAN_ENTRIES writes can outlast any
+  // lease, so the guard runs before EVERY write, not once before the loop.
+  let clock = 0
+  let leaseUntil = LEASE_SECONDS * 1000
+  let writes = 0
+  let refusedWrites = 0
+  let renewals = 0
+  const rpc = async (name) => {
+    if (name === 'reserve_due_outlook_connection') {
+      return { data: { result: 'reserved', connection_id: CONN, run_id: RUN }, error: null }
+    }
+    if (name === 'renew_outlook_sync_lease') {
+      renewals += 1
+      if (leaseUntil <= clock) return { data: false, error: null }
+      leaseUntil = clock + RENEW_SECONDS * 1000
+      return { data: true, error: null }
+    }
+    if (name === 'upsert_outlook_interaction_candidate') {
+      clock += WRITE_STEP_MS            // each write takes its whole worst case
+      writes += 1
+      if (leaseUntil <= clock) { refusedWrites += 1; return { data: { result: 'stale_run' }, error: null } }
+      return { data: { result: 'created' }, error: null }
+    }
+    if (name === 'release_outlook_sync_lease') return { data: leaseUntil > clock, error: null }
+    return { data: null, error: null }
+  }
+  // 40 distinct two-sided episodes -> 40 writes -> 800s of writing on a 300s lease.
+  const addr = (e) => ({ emailAddress: { address: e, name: 'x' } })
+  const mk = (id, conv, from, to, sent) => ({
+    id, conversationId: conv, receivedDateTime: sent, sentDateTime: sent, isDraft: false,
+    subject: 's', from: addr(from), sender: addr(from), toRecipients: to.map(addr), ccRecipients: [],
+  })
+  const ME = 'me@x.test'
+  const OTHER = 'ava@bank.test'
+  const convs = Array.from({ length: 40 }, (_, i) => `c${i}`)
+  const fetchImpl = async (url) => {
+    clock += 1000
+    const inbox = url.includes('/mailFolders/inbox/')
+    return {
+      status: 200, headers: { get: () => null },
+      json: async () => ({
+        value: convs.map((c, i) => (inbox
+          ? mk(`in-${i}`, c, OTHER, [ME], '2026-09-20T14:00:00Z')
+          : mk(`out-${i}`, c, ME, [OTHER], '2026-09-21T09:00:00Z'))),
+        '@odata.deltaLink': `${GRAPH_BASE}/me/mailFolders/${inbox ? 'inbox' : 'sentitems'}/messages/delta?$deltatoken=F`,
+      }),
+    }
+  }
+  const r = await runOutlookImport({
+    rpc,
+    encryptCursor: async () => ({ ciphertext: 'CT', nonce: 'N', keyVersion: 1 }),
+    loadRunContext: async () => ({
+      primaryEmail: ME, userId: U1, timeZone: 'UTC',
+      contacts: [{ id: CONTACT, user_id: U1, email: OTHER }],
+      cursors: {}, accessToken: 'tok',
+      keyRing: { current: { keyBytes: new Uint8Array(32).fill(1), keyVersion: 1 } },
+    }),
+    deps: { fetchImpl, now: () => clock },
+  })
+  assert.strictEqual(writes, 40, `all writes must be attempted (got ${writes})`)
+  assert.ok(clock > 2 * LEASE_SECONDS * 1000, `the writing must outlast a lease (${clock / 1000}s)`)
+  assert.strictEqual(refusedWrites, 0, 'no write may be refused for a dead lease')
+  assert.ok(renewals >= 2, `the guard must renew during the loop (renewals=${renewals})`)
+  assert.strictEqual(r.outcome, 'committed')
+  assert.strictEqual(r.accepted, 40)
+  assert.strictEqual(r.cursorsAdvanced, 2)
+})
+
+test('the lease is renewed BEFORE context loading, not after', async () => {
+  // Context loading can consume most of a lease on its own, so the guard runs first.
+  const order = []
+  let clock = 0
+  const rpc = async (name) => {
+    order.push(name)
+    if (name === 'reserve_due_outlook_connection') {
+      return { data: { result: 'reserved', connection_id: CONN, run_id: RUN }, error: null }
+    }
+    if (name === 'renew_outlook_sync_lease') return { data: true, error: null }
+    if (name === 'release_outlook_sync_lease') return { data: true, error: null }
+    return { data: { result: 'created' }, error: null }
+  }
+  await runOutlookImport({
+    rpc,
+    encryptCursor: async () => ({ ciphertext: 'C', nonce: 'N', keyVersion: 1 }),
+    loadRunContext: async () => {
+      order.push('loadRunContext')
+      return { primaryEmail: 'me@x.test', userId: U1, timeZone: 'UTC', contacts: [],
+        cursors: {}, accessToken: 't', keyRing: { current: { keyBytes: new Uint8Array(32), keyVersion: 1 } } }
+    },
+    // Start with almost no lease left so the guard must act.
+    deps: {
+      now: () => { clock += LEASE_SECONDS * 1000; return clock },
+      fetchImpl: async () => ({ status: 200, headers: { get: () => null },
+        json: async () => ({ value: [], '@odata.deltaLink': `${GRAPH_BASE}/me/mailFolders/inbox/messages/delta?$deltatoken=F` }) }),
+    },
+  })
+  const firstRenew = order.indexOf('renew_outlook_sync_lease')
+  const load = order.indexOf('loadRunContext')
+  assert.ok(firstRenew !== -1, `a renewal must happen: ${order.join(',')}`)
+  assert.ok(firstRenew < load, `renewal must precede context loading: ${order.join(',')}`)
+})
+
+test('a FAILED renewal stops the run and advances NEITHER cursor', async () => {
+  for (const failAt of ['context', 'page', 'write']) {
+    let clock = 0
+    let released = null
+    let renewCalls = 0
+    const rpc = async (name, args) => {
+      if (name === 'reserve_due_outlook_connection') {
+        return { data: { result: 'reserved', connection_id: CONN, run_id: RUN }, error: null }
+      }
+      if (name === 'renew_outlook_sync_lease') {
+        renewCalls += 1
+        // Refuse the renewal for the stage under test; allow earlier ones.
+        const refuse = (failAt === 'context' && renewCalls >= 1)
+          || (failAt === 'page' && renewCalls >= 2)
+          || (failAt === 'write' && renewCalls >= 3)
+        return { data: !refuse, error: null }
+      }
+      if (name === 'release_outlook_sync_lease') { released = args; return { data: true, error: null } }
+      return { data: { result: 'created' }, error: null }
+    }
+    const r = await runOutlookImport({
+      rpc,
+      encryptCursor: async () => ({ ciphertext: 'C', nonce: 'N', keyVersion: 1 }),
+      loadRunContext: async () => ({
+        primaryEmail: 'me@x.test', userId: U1, timeZone: 'UTC',
+        contacts: [{ id: CONTACT, user_id: U1, email: 'ava@bank.test' }],
+        cursors: {}, accessToken: 't',
+        keyRing: { current: { keyBytes: new Uint8Array(32), keyVersion: 1 } },
+      }),
+      deps: {
+        // Time always jumps a whole lease, so every guard must renew.
+        now: () => { clock += LEASE_SECONDS * 1000; return clock },
+        fetchImpl: async (url) => {
+          const inbox = url.includes('/mailFolders/inbox/')
+          const addr = (e) => ({ emailAddress: { address: e, name: 'x' } })
+          const m = (id, from, to, sent) => ({ id, conversationId: 'c1', receivedDateTime: sent,
+            sentDateTime: sent, isDraft: false, subject: 's', from: addr(from), sender: addr(from),
+            toRecipients: to.map(addr), ccRecipients: [] })
+          return { status: 200, headers: { get: () => null }, json: async () => ({
+            value: [inbox ? m('in', 'ava@bank.test', ['me@x.test'], '2026-09-20T14:00:00Z')
+              : m('out', 'me@x.test', ['ava@bank.test'], '2026-09-21T09:00:00Z')],
+            '@odata.deltaLink': `${GRAPH_BASE}/me/mailFolders/${inbox ? 'inbox' : 'sentitems'}/messages/delta?$deltatoken=F`,
+          }) }
+        },
+      },
+    })
+    assert.strictEqual(r.outcome, 'lease_lost', `${failAt}: got ${r.outcome}`)
+    assert.strictEqual(r.cursorsAdvanced, 0, failAt)
+    assert.ok(released, `${failAt}: the lease must still be released`)
+    assert.strictEqual(released.p_inbox_delta_ct, null, failAt)
+    assert.strictEqual(released.p_sentitems_delta_ct, null, failAt)
+    assert.strictEqual(released.p_run_complete, false, failAt)
+    assert.strictEqual(released.p_error_code, 'lease_lost', failAt)
+    // And the loggable summary says so too, with no cursor claimed.
+    const s = summarizeRun(r)
+    assert.strictEqual(s.outcome, 'lease_lost', failAt)
+    assert.strictEqual(s.cursors_advanced, 0, failAt)
+  }
+})
+
+test('the per-page hook fires for a FINAL page, which is what the old order missed', async () => {
+  const fired = []
+  const res = await readFolderMetadata({
+    folder: 'inbox', accessToken: 't',
+    deps: {
+      onPageComplete: (info) => { fired.push(info) },
+      fetchImpl: async () => ({ status: 200, headers: { get: () => null },
+        json: async () => ({ value: [], '@odata.deltaLink': `${GRAPH_BASE}/me/mailFolders/inbox/messages/delta?$deltatoken=F` }) }),
+    },
+  })
+  assert.strictEqual(res.stop, 'complete')
+  assert.strictEqual(fired.length, 1, 'a single final page must still fire the hook')
+  assert.strictEqual(fired[0].final, true, 'and say that it was the final one')
+})
+
+test('a hook that throws on the final page stops the folder without a cursor', async () => {
+  await assert.rejects(() => readFolderMetadata({
+    folder: 'inbox', accessToken: 't',
+    deps: {
+      onPageComplete: () => { throw new Error('lease_lost') },
+      fetchImpl: async () => ({ status: 200, headers: { get: () => null },
+        json: async () => ({ value: [], '@odata.deltaLink': `${GRAPH_BASE}/me/mailFolders/inbox/messages/delta?$deltatoken=F` }) }),
+    },
+  }), /lease_lost/)
+})
+
+console.log('')
+console.log('the timing invariant, stated correctly')
+
+test('EVERY stage margin fits inside one renewal - the invariant the scheme rests on', () => {
+  // THE OLD ASSERTION WAS RENEW_EVERY_PAGES * perRequest < RENEW_SECONDS * 1000 * 2,
+  // i.e. 280s < 600s. That compared two pages against TWICE the renewal period, which
+  // establishes nothing: the lease is 300s, not 600s, and the comparison ignored context
+  // loading and candidate writes entirely. Under it a run could - and did - exceed its
+  // lease while the assertion passed.
+  //
+  // The real invariant is per STAGE: a single renewal must cover whatever comes next.
+  for (const [name, ms] of [
+    ['one Graph page', PAGE_WORST_MS],
+    ['loading the run context', CONTEXT_WORST_MS],
+    ['one candidate write', WRITE_STEP_MS],
+  ]) {
+    assert.ok(ms <= RENEW_SECONDS * 1000,
+      `${name} (${ms / 1000}s) must fit inside one renewal (${RENEW_SECONDS}s)`)
+  }
+  // And the numbers are derived from the transport, not invented.
+  assert.strictEqual(PAGE_WORST_MS, (MAX_RETRIES + 1) * REQUEST_TIMEOUT_MS + MAX_TOTAL_RETRY_DELAY_MS)
+  assert.strictEqual(PAGE_WORST_MS, 140_000)
+  // The initial lease must itself cover the first stage that runs without a prior renewal
+  // opportunity - which is why a fresh reservation is enough to start.
+  assert.ok(LEASE_SECONDS * 1000 >= CONTEXT_WORST_MS,
+    'a fresh reservation must cover a full context load')
+  assert.ok(LEASE_SECONDS <= 600 && RENEW_SECONDS <= 600,
+    'both must satisfy the reservation RPC bound')
+  // What the old assertion could not say: a whole worst-case run vastly exceeds any
+  // lease, which is exactly why per-stage renewal is required rather than optional.
+  assert.ok(MAX_PAGES_PER_RUN * PAGE_WORST_MS > RENEW_SECONDS * 1000 * 5)
+})
+
+console.log('')
+console.log('contacts are loaded in bounded pages, and overflow fails the run')
+
+// A real ciphertext under the test key, so the loader's decryption succeeds and these
+// tests are about the contact read rather than the token path.
+const VALID_TOKEN = await (async () => {
+  const k = await importKeyFromBase64(KEY_B64, subtle)
+  return encryptToken('VALID-ACCESS', k, { subtle })
+})()
+
+/** A select port whose contacts table is `total` rows, honouring limit and offset. */
+function contactPort (total, { calls = [], rowBytes = null } = {}) {
+  const mkRow = (i) => ({
+    id: `00000000-0000-0000-0000-${String(i).padStart(12, '0')}`,
+    user_id: U1,
+    email: rowBytes
+      ? `${'x'.repeat(Math.max(1, rowBytes - 20))}@e.test`
+      : `c${i}@e.test`,
+  })
+  return async (path) => {
+    calls.push(path)
+    if (path.startsWith('contacts')) {
+      const u = new URLSearchParams(path.split('?')[1])
+      const limit = Number(u.get('limit'))
+      const offset = Number(u.get('offset') ?? 0)
+      const rows = []
+      for (let i = offset; i < Math.min(total, offset + limit); i++) rows.push(mkRow(i))
+      // The port bounds every response; a chunk that would exceed it must not be asked for.
+      const size = Buffer.byteLength(JSON.stringify(rows))
+      if (size > MAX_PROVIDER_BODY_BYTES) return { data: null, error: { code: 'response_too_large' } }
+      return { data: rows, error: null }
+    }
+    if (path.startsWith('microsoft_connections')) {
+      return { data: [{ user_id: U1, ms_email: 'me@x.test', scopes: ['Mail.Read'],
+        token_expires_at: new Date(Date.now() + 7_200_000).toISOString() }], error: null }
+    }
+    if (path.startsWith('outlook_sync_state')) return { data: [], error: null }
+    if (path.startsWith('microsoft_tokens')) {
+      // A REAL encrypted, still-valid access token, so these tests exercise the contact
+      // paging rather than the refresh path.
+      return { data: [{ access_token_ciphertext: VALID_TOKEN.ciphertext,
+        access_token_nonce: VALID_TOKEN.nonce,
+        refresh_token_ciphertext: VALID_TOKEN.ciphertext,
+        refresh_token_nonce: VALID_TOKEN.nonce, key_version: 1,
+        token_expires_at: new Date(Date.now() + 7_200_000).toISOString() }], error: null }
+    }
+    return { data: null, error: { code: 'rejected' } }
+  }
+}
+
+function loaderFor (select, over = {}) {
+  return makeRunContextLoader({
+    select,
+    rpc: async () => ({ data: { result: 'rotated' }, error: null }),
+    config: { clientId: 'c', clientSecret: 's', tokenUrl: 'https://t', tokenKeyB64: KEY_B64, keyVersion: 1 },
+    deps: {
+      subtle,
+      fetchImpl: async () => ({ status: 200, headers: { get: () => null },
+        json: async () => ({ access_token: 'FRESH', expires_in: 3600, scope: 'Mail.Read User.Read' }) }),
+      ...over,
+    },
+  })
+}
+
+test('THE OVERSIZED RESPONSE: one request for the whole supported set exceeds the bound', () => {
+  // Measured, which is how the defect was found. The previous read asked for
+  // limit=MAX_CONTACTS_LOADED in a single response.
+  const rows = Array.from({ length: MAX_CONTACTS_LOADED }, (_, i) => ({
+    id: `00000000-0000-0000-0000-${String(i).padStart(12, '0')}`,
+    user_id: U1,
+    email: `contact.number.${i}@a-fairly-long-company-domain.example`,
+  }))
+  const bytes = Buffer.byteLength(JSON.stringify(rows))
+  assert.ok(bytes > MAX_PROVIDER_BODY_BYTES,
+    `${MAX_CONTACTS_LOADED} rows are ${bytes} bytes, bound is ${MAX_PROVIDER_BODY_BYTES}`)
+  // The page size chosen instead stays inside the bound even at the schema's worst case:
+  // a 36-char id, a 36-char user_id and a 320-char email.
+  const worst = Array.from({ length: CONTACT_PAGE_SIZE }, () => ({
+    id: 'x'.repeat(36), user_id: 'y'.repeat(36), email: `${'z'.repeat(311)}@e.test`,
+  }))
+  assert.ok(Buffer.byteLength(JSON.stringify(worst)) < MAX_PROVIDER_BODY_BYTES,
+    'a full page must fit even with the longest addresses the schema allows')
+})
+
+test('a large set is read in pages that each fit, and every contact arrives', async () => {
+  const calls = []
+  const ctx = await loaderFor(contactPort(1_234, { calls }))(CONN, RUN)
+  assert.strictEqual(ctx.contacts.length, 1_234, 'no contact may be dropped')
+  const contactCalls = calls.filter((p) => p.startsWith('contacts'))
+  assert.strictEqual(contactCalls.length, Math.ceil(1_234 / CONTACT_PAGE_SIZE))
+  for (const p of contactCalls) {
+    assert.ok(p.includes(`limit=${CONTACT_PAGE_SIZE}`), p)
+    assert.ok(p.includes(`user_id=eq.${U1}`), `every page must stay owner-scoped: ${p}`)
+    assert.ok(p.includes('select=id,user_id,email'), `no unused field may be read: ${p}`)
+    assert.ok(p.includes('order=id.asc'), `paging needs a deterministic order: ${p}`)
+    for (const unused of ['name', 'company', 'relationship_note', 'linkedin_url', 'tags']) {
+      assert.ok(!p.includes(unused), `${unused} must not be requested`)
+    }
+  }
+  // Offsets advance by a page and never repeat, so nothing is skipped or duplicated.
+  const offsets = contactCalls.map((p) => Number(new URLSearchParams(p.split('?')[1]).get('offset')))
+  assert.deepStrictEqual(offsets, offsets.map((_, i) => i * CONTACT_PAGE_SIZE))
+  const ids = new Set(ctx.contacts.map((c) => c.id))
+  assert.strictEqual(ids.size, 1_234, 'no duplicates')
+})
+
+test('a set at EXACTLY the supported limit loads, and is not mistaken for overflow', async () => {
+  const calls = []
+  const ctx = await loaderFor(contactPort(MAX_CONTACTS_LOADED, { calls }))(CONN, RUN)
+  assert.strictEqual(ctx.contacts.length, MAX_CONTACTS_LOADED)
+  // The probe beyond the limit must have been made, and found nothing.
+  const probe = calls.find((p) => p.includes(`offset=${MAX_CONTACTS_LOADED}`))
+  assert.ok(probe, `the overflow probe must run: ${calls.filter((c) => c.startsWith('contacts')).join(' | ')}`)
+  assert.ok(probe.includes('limit=1'), 'the probe must ask for one row only')
+  assert.ok(probe.includes('select=id'), 'and only one column')
+})
+
+test('THE OVERFLOW CASE: one contact beyond the limit fails the run outright', async () => {
+  const calls = []
+  await assert.rejects(
+    () => loaderFor(contactPort(MAX_CONTACTS_LOADED + 1, { calls }))(CONN, RUN),
+    (e) => {
+      assert.strictEqual(e.reason, 'too_many_contacts')
+      assert.ok(CONTEXT_FAILURES.includes(e.reason))
+      return true
+    })
+  // It failed BEFORE the token refresh, so before anything could reach Graph.
+  assert.ok(!calls.some((p) => p.startsWith('microsoft_tokens')),
+    'the run must fail before it even loads a token')
+})
+
+test('an overflowing set NEVER silently treats a tracked contact as unknown', async () => {
+  // The whole point: the alternative to failing is matching against a subset, which turns
+  // a person the user tracks into a stranger and defers - or would later propose - their
+  // exchanges as if they were new.
+  let graphCalled = 0
+  let released = null
+  const rpc = async (name, args) => {
+    if (name === 'reserve_due_outlook_connection') {
+      return { data: { result: 'reserved', connection_id: CONN, run_id: RUN }, error: null }
+    }
+    if (name === 'renew_outlook_sync_lease') return { data: true, error: null }
+    if (name === 'release_outlook_sync_lease') { released = args; return { data: true, error: null } }
+    return { data: { result: 'created' }, error: null }
+  }
+  const r = await runOutlookImport({
+    rpc,
+    encryptCursor: async () => ({ ciphertext: 'C', nonce: 'N', keyVersion: 1 }),
+    loadRunContext: loaderFor(contactPort(MAX_CONTACTS_LOADED + 1)),
+    deps: { fetchImpl: async () => { graphCalled += 1; throw new Error('must not be called') } },
+  })
+  assert.strictEqual(r.outcome, 'released_error')
+  assert.strictEqual(r.reason, 'too_many_contacts')
+  assert.strictEqual(graphCalled, 0, 'no Graph request may be made')
+  assert.strictEqual(r.cursorsAdvanced, 0)
+  assert.strictEqual(released.p_inbox_delta_ct, null, 'no cursor may advance')
+  assert.strictEqual(released.p_sentitems_delta_ct, null)
+  assert.strictEqual(released.p_run_complete, false)
+})
+
+test('a page the port refuses is a controlled failure, not a partial contact set', async () => {
+  // If a chunk ever did exceed the bound, the read must fail rather than proceed with
+  // whatever arrived.
+  const select = contactPort(1000)
+  const wrapped = async (path) => {
+    if (path.startsWith('contacts') && path.includes('offset=400')) {
+      return { data: null, error: { code: 'response_too_large' } }
+    }
+    return select(path)
+  }
+  await assert.rejects(() => loaderFor(wrapped)(CONN, RUN),
+    (e) => e.reason === 'contacts_unreadable')
+})
+
+test('an owner with no contacts loads cleanly, with one request', async () => {
+  const calls = []
+  const ctx = await loaderFor(contactPort(0, { calls }))(CONN, RUN)
+  assert.deepStrictEqual(ctx.contacts, [])
+  assert.strictEqual(calls.filter((p) => p.startsWith('contacts')).length, 1,
+    'an empty first page ends the paging immediately')
 })
 
 async function finish () {
