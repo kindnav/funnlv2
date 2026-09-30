@@ -634,27 +634,32 @@ test('dormancy is checked BEFORE the secret, so a disabled endpoint is no oracle
     HANDLER_SRC.indexOf('authorizeWorkerRequest('))
 })
 
-test('enabled but unauthenticated is refused, and enabled+authorised is 501, not a silent run', async () => {
+test('enabled but unauthenticated is refused; enabled+authorised now RUNS', () => {
+  // The 501 is gone: the token-access slice connected this endpoint to the real run, so
+  // an authorised request with a full configuration performs one. The refusals below are
+  // unchanged, and a run that does not commit still says so rather than answering 200.
   const env = { integrationEnabled: 'true', workerEnabled: 'true', workerSecret: 's'.repeat(40) }
-  const noAuth = await handleOutlookImportWorker(workerRequest(), env)
-  assert.strictEqual(noAuth.status, 401)
-
-  const getOnly = await handleOutlookImportWorker(
-    workerRequest({ method: 'GET', authorization: 'Bearer ' + 's'.repeat(40) }), env)
-  assert.strictEqual(getOnly.status, 405)
-
-  const unconfigured = await handleOutlookImportWorker(
-    workerRequest({ authorization: 'Bearer short' }),
-    { ...env, workerSecret: 'tooshort' })
-  assert.strictEqual(unconfigured.status, 503)
-  assert.deepStrictEqual(await unconfigured.json(), { error: 'worker_not_configured' })
-
-  const ok = await handleOutlookImportWorker(
-    workerRequest({ authorization: 'Bearer ' + 's'.repeat(40) }), env)
-  assert.strictEqual(ok.status, 501)
-  const body = await ok.json()
-  assert.strictEqual(body.error, 'not_implemented')
-  assert.strictEqual(body.reason, 'no_token_access_path')
+  const deps = { tokenUrl: 'https://fixture/token', select: async () => ({ data: [], error: null }),
+    rpc: async () => ({ data: { result: 'none_due' }, error: null }) }
+  return Promise.all([
+    handleOutlookImportWorker(workerRequest(), env, deps).then(async (r) =>
+      assert.strictEqual(r.status, 401)),
+    handleOutlookImportWorker(workerRequest({ method: 'GET', authorization: 'Bearer ' + 's'.repeat(40) }), env, deps)
+      .then((r) => assert.strictEqual(r.status, 405)),
+    handleOutlookImportWorker(workerRequest({ authorization: 'Bearer short' }),
+      { ...env, workerSecret: 'tooshort' }, deps).then(async (r) => {
+      assert.strictEqual(r.status, 503)
+      assert.deepStrictEqual(await r.json(), { error: 'worker_not_configured' })
+    }),
+    // Authorised but UNCONFIGURED: fails closed rather than half-running.
+    handleOutlookImportWorker(workerRequest({ authorization: 'Bearer ' + 's'.repeat(40) }), env, deps)
+      .then(async (r) => {
+        assert.strictEqual(r.status, 503)
+        const body = await r.json()
+        assert.strictEqual(body.error, 'config_missing')
+        assert.ok(body.missing.length > 0)
+      }),
+  ])
 })
 
 test('the handler touches no provider, no database and no scheduler', () => {
