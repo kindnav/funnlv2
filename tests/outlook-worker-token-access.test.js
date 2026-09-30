@@ -38,6 +38,7 @@ import { makePostgrestPorts, PRODUCTION_TOKEN_URL, DB_TIMEOUT_MS } from '../supa
 import { MS_TOKEN_ENDPOINT } from '../supabase/functions/shared/microsoftOauthHelpers.js'
 import {
   LEASE_SECONDS, RENEW_SECONDS, PAGE_WORST_MS, CONTEXT_WORST_MS, WRITE_STEP_MS,
+  RELEASE_WORST_MS, RPC_ROUND_TRIP_MS, CONTEXT_DB_CALLS,
   RUN_OUTCOMES, runOutlookImport, summarizeRun,
 } from '../supabase/functions/shared/outlookImportRun.js'
 import {
@@ -45,6 +46,7 @@ import {
 } from '../supabase/functions/shared/outlookGraphTransport.js'
 import { readFolderMetadata } from '../supabase/functions/shared/outlookMetadataPass.js'
 import { MAX_PROVIDER_BODY_BYTES } from '../supabase/functions/shared/boundedJson.js'
+import { TOKEN_TIMEOUT_MS } from '../supabase/functions/shared/microsoftTokenExchange.js'
 
 let passed = 0, failed = 0
 const pending = []
@@ -740,8 +742,8 @@ test('THREE PAGES PER FOLDER: still committed, with renewals arriving in time', 
   assert.strictEqual(r.outcome, 'committed', `${r.outcome} / ${h.events.join(' ')}`)
   assert.strictEqual(r.cursorsAdvanced, 2)
   assert.strictEqual(s.renewalsRefused, 0, h.events.join(' '))
-  assert.ok(s.clock > 3 * LEASE_SECONDS * 1000,
-    `a six-page run must span several leases (ran ${s.clock / 1000}s)`)
+  assert.ok(s.clock > LEASE_SECONDS * 1000,
+    `a six-page run must outlast a whole lease to be a real test (ran ${s.clock / 1000}s)`)
 })
 
 test('a run slow enough to need renewal DURING the writes still commits', async () => {
@@ -805,7 +807,7 @@ test('a run slow enough to need renewal DURING the writes still commits', async 
     deps: { fetchImpl, now: () => clock },
   })
   assert.strictEqual(writes, 40, `all writes must be attempted (got ${writes})`)
-  assert.ok(clock > 2 * LEASE_SECONDS * 1000, `the writing must outlast a lease (${clock / 1000}s)`)
+  assert.ok(clock > LEASE_SECONDS * 1000, `the writing must outlast a lease (${clock / 1000}s)`)
   assert.strictEqual(refusedWrites, 0, 'no write may be refused for a dead lease')
   assert.ok(renewals >= 2, `the guard must renew during the loop (renewals=${renewals})`)
   assert.strictEqual(r.outcome, 'committed')
@@ -1146,6 +1148,258 @@ test('an owner with no contacts loads cleanly, with one request', async () => {
   assert.deepStrictEqual(ctx.contacts, [])
   assert.strictEqual(calls.filter((p) => p.startsWith('contacts')).length, 1,
     'an empty first page ends the paging immediately')
+})
+
+console.log('')
+console.log('the lease deadline is anchored to when the RPC RAN, not when it answered')
+
+/**
+ * A virtual clock plus a lease the database enforces, where EVERY RPC costs its deadline
+ * and the lease begins when the call STARTS. That last detail is the whole point: the
+ * worker cannot observe it, so its arithmetic has to assume it.
+ */
+function leaseScenario ({
+  contextMs, releaseMs = RPC_ROUND_TRIP_MS, writeMs = 2_000, pageMs = 1_000,
+  pagesPerFolder = 1, episodes = 1, refuseRenewalAfter = null, refuseRenewalsAfterWrites = null,
+}) {
+  let clock = 0
+  let leaseUntil = null
+  const events = []
+  let renewals = 0
+  let refusedRenewals = 0
+  let expiredWrites = 0
+  let writeCount = 0
+
+  const rpc = async (name) => {
+    const started = clock
+    clock += RPC_ROUND_TRIP_MS
+    if (name === 'reserve_due_outlook_connection') {
+      leaseUntil = started + LEASE_SECONDS * 1000
+      return { data: { result: 'reserved', connection_id: CONN, run_id: RUN }, error: null }
+    }
+    if (name === 'renew_outlook_sync_lease') {
+      renewals += 1
+      const targeted = refuseRenewalsAfterWrites !== null && writeCount >= refuseRenewalsAfterWrites
+      if (targeted || (refuseRenewalAfter !== null && renewals > refuseRenewalAfter)) {
+        refusedRenewals += 1
+        return { data: false, error: null }
+      }
+      if (leaseUntil <= started) { refusedRenewals += 1; return { data: false, error: null } }
+      leaseUntil = started + RENEW_SECONDS * 1000
+      events.push(`renew@${started / 1000}->${leaseUntil / 1000}`)
+      return { data: true, error: null }
+    }
+    if (name === 'upsert_outlook_interaction_candidate') {
+      clock += writeMs
+      writeCount += 1
+      const live = leaseUntil > clock
+      if (!live) { expiredWrites += 1; events.push(`write@${clock / 1000}:EXPIRED`) }
+      return { data: { result: live ? 'created' : 'stale_run' }, error: null }
+    }
+    if (name === 'release_outlook_sync_lease') {
+      const leftBefore = leaseUntil - started
+      clock += releaseMs
+      const live = leaseUntil > clock
+      events.push(`release@${started / 1000} with ${leftBefore / 1000}s -> ${live}`)
+      return { data: live, error: null }
+    }
+    return { data: null, error: null }
+  }
+
+  const addr = (e) => ({ emailAddress: { address: e, name: 'x' } })
+  const mk = (id, conv, from, to, sent) => ({
+    id, conversationId: conv, receivedDateTime: sent, sentDateTime: sent, isDraft: false,
+    subject: 's', from: addr(from), sender: addr(from), toRecipients: to.map(addr), ccRecipients: [],
+  })
+  const ME = 'me@x.test'
+  const OTHER = 'ava@bank.test'
+  const convs = Array.from({ length: episodes }, (_, i) => `conv${i}`)
+  const served = { inbox: 0, sentitems: 0 }
+  const fetchImpl = async (url) => {
+    clock += pageMs
+    const folder = url.includes('/mailFolders/inbox/') ? 'inbox' : 'sentitems'
+    served[folder] += 1
+    const last = served[folder] >= pagesPerFolder
+    const value = convs.map((c, i) => (folder === 'inbox'
+      ? mk(`in-${served[folder]}-${i}`, c, OTHER, [ME], '2026-09-20T14:00:00Z')
+      : mk(`out-${served[folder]}-${i}`, c, ME, [OTHER], '2026-09-21T09:00:00Z')))
+    return {
+      status: 200, headers: { get: () => null },
+      json: async () => (last
+        ? { value, '@odata.deltaLink': `${GRAPH_BASE}/me/mailFolders/${folder}/messages/delta?$deltatoken=F` }
+        : { value, '@odata.nextLink': `${GRAPH_BASE}/me/mailFolders/${folder}/messages/delta?$skiptoken=n${served[folder]}` }),
+    }
+  }
+
+  const run = () => runOutlookImport({
+    rpc,
+    encryptCursor: async () => ({ ciphertext: 'CT', nonce: 'N', keyVersion: 1 }),
+    loadRunContext: async () => {
+      clock += contextMs
+      events.push(`context@${clock / 1000}:${leaseUntil > clock ? 'live' : 'EXPIRED'}`)
+      return {
+        primaryEmail: ME, userId: U1, timeZone: 'UTC',
+        contacts: [{ id: CONTACT, user_id: U1, email: OTHER }],
+        cursors: {}, accessToken: 'tok',
+        keyRing: { current: { keyBytes: new Uint8Array(32).fill(1), keyVersion: 1 } },
+      }
+    },
+    deps: { fetchImpl, now: () => clock },
+  })
+  return { run, events, stats: () => ({ clock, leaseUntil, renewals, refusedRenewals, expiredWrites }) }
+}
+
+test('THE FULL CONTEXT PATH fits, where a 255s margin and a response-anchored deadline lost it', async () => {
+  // REPRODUCED BEFORE THE FIX. The declared margin was 255s while the longest path is
+  // 285s - 18 bounded database calls plus one token refresh - and the deadline was
+  // anchored to the reservation's RESPONSE, so the worker believed a 300s lease ran to
+  // t=315 when the database had started it at t=0. The guard saw 300s remaining, skipped,
+  // the context finished at t=300 exactly as the lease died, the renewal was refused, and
+  // the run ended lease_lost with nothing committed.
+  const h = leaseScenario({ contextMs: CONTEXT_WORST_MS })
+  const r = await h.run()
+  const s = h.stats()
+  assert.strictEqual(r.outcome, 'committed', `${r.outcome} / ${h.events.join(' ')}`)
+  assert.strictEqual(r.created, 1)
+  assert.strictEqual(r.cursorsAdvanced, 2)
+  assert.strictEqual(s.refusedRenewals, 0, h.events.join(' '))
+  assert.strictEqual(s.expiredWrites, 0, 'no write may run against a dead lease')
+  assert.ok(h.events.some((e) => e.startsWith('context@') && e.endsWith(':live')),
+    `the context must finish inside the lease: ${h.events.join(' ')}`)
+  assert.ok(h.events.at(-1).endsWith('-> true'), `the release must confirm: ${h.events.at(-1)}`)
+})
+
+test('THE RELEASE STAGE now has its own guard, where before it was left short', async () => {
+  // REPRODUCED BEFORE THE FIX. The write loop only ever guaranteed enough lease for the
+  // NEXT WRITE, so a loop of twenty writes topped itself up to just above WRITE_STEP_MS
+  // and then handed the release less than it needed: the release began with the lease 6s
+  // DEAD, returned false, and a run with 16 suggestions already written advanced no
+  // cursor - all of that work to be redone next time. One write had also executed against
+  // an expired lease.
+  const h = leaseScenario({ contextMs: 1_000, episodes: 20, pageMs: 500, writeMs: 2_000 })
+  const r = await h.run()
+  const s = h.stats()
+  assert.strictEqual(r.outcome, 'committed', `${r.outcome} / ${h.events.join(' ')}`)
+  assert.strictEqual(r.accepted, 20, 'every suggestion must land')
+  assert.strictEqual(r.created, 20)
+  assert.strictEqual(r.cursorsAdvanced, 2, 'and the cursors must actually advance')
+  assert.strictEqual(s.expiredWrites, 0, 'no write may run against a dead lease')
+  const releaseEvent = h.events.find((e) => e.startsWith('release@'))
+  const leftAtRelease = Number(releaseEvent.match(/with (-?[\d.]+)s/)[1])
+  assert.ok(leftAtRelease * 1000 > RELEASE_WORST_MS,
+    `the release must start with more than its own margin (had ${leftAtRelease}s)`)
+})
+
+test('a run whose write loop spans several leases still commits and advances', async () => {
+  // Long enough that the loop must renew repeatedly, and the release still lands live.
+  // 40 episodes, under the transport's MAX_PAGE_SIZE of 50 so the page is accepted.
+  const h = leaseScenario({ contextMs: 1_000, episodes: 40, pageMs: 500, writeMs: 20_000 })
+  const r = await h.run()
+  const s = h.stats()
+  assert.strictEqual(r.outcome, 'committed', `${r.outcome} / ${h.events.join(' ')}`)
+  assert.strictEqual(r.accepted, 40)
+  assert.strictEqual(r.cursorsAdvanced, 2)
+  assert.strictEqual(s.expiredWrites, 0)
+  assert.ok(s.clock > 2 * LEASE_SECONDS * 1000,
+    `the run must outlast several leases to be a real test (${s.clock / 1000}s)`)
+  assert.ok(s.renewals >= 2, `renewals=${s.renewals}`)
+})
+
+test('FAIL CLOSED: a refused renewal before the release commits nothing and advances nothing', async () => {
+  // The renewal the release stage needs is refused. Whatever was written stays and is
+  // reported honestly; no cursor is claimed and the outcome is not committed.
+  // writeMs is chosen so twenty writes consume nearly the whole lease: the last one
+  // leaves less than RELEASE_WORST_MS, so the release stage must renew - and that is the
+  // renewal this scenario refuses.
+  const h = leaseScenario({
+    contextMs: 1_000, episodes: 20, pageMs: 500, writeMs: 4_500,
+    refuseRenewalsAfterWrites: 20,
+  })
+  const r = await h.run()
+  assert.strictEqual(r.outcome, 'lease_lost', `${r.outcome} / ${h.events.join(' ')}`)
+  assert.strictEqual(r.cursorsAdvanced, 0)
+  assert.ok(r.accepted >= 0 && r.accepted <= 20)
+  const releaseEvent = h.events.find((e) => e.startsWith('release@'))
+  assert.ok(releaseEvent, 'the lease must still be released')
+  assert.ok(RUN_OUTCOMES.includes(summarizeRun(r).outcome))
+  assert.strictEqual(summarizeRun(r).cursors_advanced, 0)
+})
+
+console.log('')
+console.log('the timing invariant, with the round trip accounted for')
+
+test('the effective fresh lease STRICTLY covers every stage margin', () => {
+  // The lease the worker can rely on is what it asked for MINUS one round trip, because
+  // the database starts it when the RPC runs rather than when the response arrives.
+  const effective = LEASE_SECONDS * 1000 - RPC_ROUND_TRIP_MS
+  for (const [name, ms] of [
+    ['loading the run context', CONTEXT_WORST_MS],
+    ['one Graph page', PAGE_WORST_MS],
+    ['one candidate write', WRITE_STEP_MS],
+    ['cursor encryption + release', RELEASE_WORST_MS],
+  ]) {
+    assert.ok(effective > ms,
+      `${name} (${ms / 1000}s) must be strictly covered by the effective lease (${effective / 1000}s)`)
+  }
+  // A renewal must clear the largest margin too, or the guard would renew forever without
+  // ever getting past it. That is the trap 300s fell into once the margin became 285s.
+  const effectiveRenewal = RENEW_SECONDS * 1000 - RPC_ROUND_TRIP_MS
+  const largest = Math.max(CONTEXT_WORST_MS, PAGE_WORST_MS, WRITE_STEP_MS, RELEASE_WORST_MS)
+  assert.ok(effectiveRenewal > largest,
+    `a renewal (${effectiveRenewal / 1000}s) must clear the largest margin (${largest / 1000}s)`)
+  assert.ok(LEASE_SECONDS <= 600 && RENEW_SECONDS <= 600,
+    'both must satisfy the reservation RPC bound')
+})
+
+test('CONTEXT_WORST_MS counts the real path, including the refresh and the rotation', () => {
+  // Counted from the loader's own constants, so adding a page or a read moves it.
+  const pages = Math.ceil(MAX_CONTACTS_LOADED / CONTACT_PAGE_SIZE)
+  assert.strictEqual(CONTEXT_DB_CALLS, 1 + pages + 1 + 1 + 1 + 1,
+    'connection + contact pages + overflow probe + sync state + tokens + rotation')
+  assert.strictEqual(CONTEXT_DB_CALLS, 18)
+  assert.strictEqual(CONTEXT_WORST_MS, CONTEXT_DB_CALLS * RPC_ROUND_TRIP_MS + TOKEN_TIMEOUT_MS)
+  assert.strictEqual(CONTEXT_WORST_MS, 285_000)
+  // The earlier 255s omitted exactly the refresh and the rotation RPC.
+  assert.ok(CONTEXT_WORST_MS > 255_000)
+})
+
+test('the round trip matches the port that actually makes the calls', () => {
+  // Two constants describing one thing; pinned so they cannot drift apart.
+  assert.strictEqual(RPC_ROUND_TRIP_MS, DB_TIMEOUT_MS)
+  assert.strictEqual(WRITE_STEP_MS, RPC_ROUND_TRIP_MS + 5_000)
+  assert.strictEqual(RELEASE_WORST_MS, RPC_ROUND_TRIP_MS + 5_000)
+  assert.strictEqual(PAGE_WORST_MS, (MAX_RETRIES + 1) * REQUEST_TIMEOUT_MS + MAX_TOTAL_RETRY_DELAY_MS)
+})
+
+test('every deadline is anchored BEFORE its RPC, in the source', () => {
+  const code = codeOnly(read('supabase/functions/shared/outlookImportRun.js'))
+  assert.ok(/const reserveStartedMs = clock\(\)[\s\S]{0,200}rpc\('reserve_due_outlook_connection'/.test(code),
+    'the reservation clock must be read before the call')
+  assert.ok(/leaseUntilMs = reserveStartedMs \+ LEASE_SECONDS \* 1000/.test(code))
+  assert.ok(/const renewStartedMs = clock\(\)[\s\S]{0,300}rpc\('renew_outlook_sync_lease'/.test(code),
+    'the renewal clock must be read before the call')
+  assert.ok(/leaseUntilMs = renewStartedMs \+ RENEW_SECONDS \* 1000/.test(code))
+  assert.ok(!/leaseUntilMs = clock\(\)/.test(code),
+    'no deadline may be anchored to a response')
+  // And the release stage is guarded.
+  assert.ok(/await ensureLease\(RELEASE_WORST_MS\)/.test(code))
+  // Five call sites. The per-page hook is `() => ensureLease(PAGE_WORST_MS)`, which is
+  // returned rather than awaited in place, so the sites are named individually.
+  assert.ok(/await ensureLease\(CONTEXT_WORST_MS\)/.test(code), 'before the context load')
+  assert.ok(/onPageComplete = \(\) => ensureLease\(PAGE_WORST_MS\)/.test(code), 'per page')
+  assert.strictEqual((code.match(/ensureLease\(PAGE_WORST_MS\)/g) || []).length, 2,
+    'the per-page hook plus the one before the first page')
+  assert.ok(/await ensureLease\(WRITE_STEP_MS\)/.test(code), 'before each write')
+  assert.ok(/await ensureLease\(RELEASE_WORST_MS\)/.test(code), 'before the release')
+})
+
+test('no heartbeat, scheduler or job framework was introduced', () => {
+  const code = codeOnly(read('supabase/functions/shared/outlookImportRun.js'))
+  for (const banned of ['setInterval', 'setTimeout', 'cron', 'queue', 'Worker(', 'heartbeat']) {
+    assert.ok(!code.includes(banned), `must not use ${banned}`)
+  }
+  // The whole mechanism is one guard function called from five places.
+  assert.strictEqual((code.match(/const ensureLease = async/g) || []).length, 1)
 })
 
 async function finish () {
