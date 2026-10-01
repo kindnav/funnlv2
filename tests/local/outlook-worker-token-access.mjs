@@ -212,6 +212,46 @@ function graphFixture () {
   return { calls, fetchImpl }
 }
 
+/**
+ * A mailbox big enough to need several invocations.
+ *
+ * Each folder serves `pages` pages of one message. The QUALIFYING inbound sits on inbox
+ * page `inboundAt` and the qualifying outbound on sent page `outboundAt`, chosen so the
+ * two halves of the exchange cannot be read in the same invocation. Every other message
+ * is from the user to the user, which the rules exclude as self_only - so it creates no
+ * conversation record while still being counted as read.
+ */
+function pagedGraphFixture ({ pages = 25, inboundAt = 22, outboundAt = 18, rejectSaved = false } = {}) {
+  const calls = []
+  const addr = (e) => ({ emailAddress: { address: e, name: e.split('@')[0] } })
+  const m = (id, conv, from, to, sent) => ({
+    id, conversationId: conv, receivedDateTime: sent, sentDateTime: sent, isDraft: false,
+    subject: 'Following up after the info session',
+    from: addr(from), sender: addr(from), toRecipients: to.map(addr), ccRecipients: [],
+  })
+  const fetchImpl = async (url, init) => {
+    calls.push({ url, bearer: init.headers?.Authorization ?? null })
+    if (rejectSaved && url.includes('$skiptoken=')) {
+      // Exactly how Graph reports an expired or invalidated delta token.
+      return { status: 410, headers: { get: () => null }, json: async () => ({ error: { code: 'resyncRequired' } }) }
+    }
+    const folder = url.includes('/mailFolders/inbox/') ? 'inbox' : 'sentitems'
+    const mm = /[$]skiptoken=p(\d+)/.exec(url)
+    const n = mm ? Number(mm[1]) : 1
+    const qualifying = folder === 'inbox' ? n === inboundAt : n === outboundAt
+    const items = [qualifying
+      ? (folder === 'inbox'
+          ? m(`ms-in-${n}`, 'conv-split', RECRUITER, [ME], '2026-09-20T14:05:00Z')
+          : m(`ms-out-${n}`, 'conv-split', ME, [RECRUITER], '2026-09-21T09:12:00Z'))
+      : m(`ms-${folder}-filler-${n}`, `filler-${folder}-${n}`, ME, [ME], '2026-09-19T08:00:00Z')]
+    const tail = n >= pages
+      ? { '@odata.deltaLink': `${GRAPH_BASE}/me/mailFolders/${folder}/messages/delta?$deltatoken=NEW-${folder}` }
+      : { '@odata.nextLink': `${GRAPH_BASE}/me/mailFolders/${folder}/messages/delta?$skiptoken=p${n + 1}` }
+    return { status: 200, headers: { get: () => null }, json: async () => ({ value: items, ...tail }) }
+  }
+  return { calls, fetchImpl }
+}
+
 // ── the worker, served over real HTTP ────────────────────────────────────────
 
 let currentEnv = null
@@ -629,6 +669,191 @@ async function main () {
     assert.strictEqual(one2(`SELECT coalesce(string_agg(coalesce(delta_link_ciphertext,'NULL'),','),'none')
       FROM public.outlook_sync_state WHERE user_id='${U1}';`), 'NULL,NULL',
     'no cursor may advance')
+  })
+
+  // ══ durable continuation, against the REAL database ══════════════════════
+  console.log('\ncontinuation: several invocations, one suggestion, real SQL')
+
+  /** Make the connection due again. See the note in the first test. */
+  const makeDueNow = () => psql(
+    `UPDATE public.outlook_sync_state SET next_retry_at = NULL WHERE user_id = '${U1}';`,
+    { tuplesOnly: false })
+
+  const roundRows = () => psql(`SELECT folder,
+      coalesce(round_id::text,'NULL'), round_page_seq, round_pages,
+      coalesce(next_link_ciphertext,'NULL'), coalesce(pending_delta_ciphertext,'NULL'),
+      round_folder_complete, coalesce(delta_link_ciphertext,'NULL')
+    FROM public.outlook_sync_state WHERE user_id='${U1}' ORDER BY folder;`)
+    .trim().split(String.fromCharCode(10)).filter((l) => l.length > 0)
+    .map((l) => l.split('|').map((s) => s.trim()))
+
+  await test('a mailbox needing SEVERAL invocations makes progress and commits ONCE', async () => {
+    await seed({ accessExpired: false })
+    const graphC = pagedGraphFixture({ pages: 25, inboundAt: 22, outboundAt: 18 })
+    const ports = makePorts()
+    currentEnv = baseEnv()
+    currentDeps = {
+      tokenUrl: FIXTURE_TOKEN_URL, fetchImpl: tokenFixture().fetchImpl,
+      graphFetchImpl: graphC.fetchImpl, select: ports.select, rpc: ports.rpc,
+    }
+
+    const outcomes = []
+    for (let i = 0; i < 8; i += 1) {
+      const r = await callWorker({ secret: WORKER_SECRET })
+      outcomes.push(r)
+      if (r.body?.run?.outcome !== 'continued') break
+      // A CONTINUED invocation answers 200 and has committed nothing.
+      assert.strictEqual(r.status, 200, r.raw.slice(0, 200))
+      assert.strictEqual(r.body.run.cursors_advanced, 0)
+      assert.strictEqual(one(`SELECT count(*) FROM public.interaction_candidates;`), '0',
+        'no suggestion may exist while the round is half-read')
+      assert.strictEqual(one(`SELECT coalesce(string_agg(coalesce(delta_link_ciphertext,'NULL'),','),'none')
+        FROM public.outlook_sync_state WHERE user_id='${U1}';`), 'NULL,NULL',
+      'no cursor may advance while the round is half-read')
+      // THE POSITION IS SAVED, AND IT IS CIPHERTEXT.
+      const rows = roundRows()
+      const saved = rows.map((r2) => r2[4]).filter((c) => c !== 'NULL')
+      for (const ct of saved) {
+        assert.ok(!ct.includes('skiptoken') && !ct.includes('graph.microsoft.com'),
+          'the nextLink must be stored encrypted')
+      }
+      // A HEALTHY round asks to be retried soon - but nothing calls the worker, which is
+      // the still-open scheduler gap. Here the harness plays the caller.
+      assert.strictEqual(one(`SELECT count(*) FROM public.outlook_sync_state
+        WHERE user_id='${U1}' AND next_retry_at > now();`), '2',
+      'an incomplete release must set a retry time on both folders')
+      makeDueNow()
+    }
+
+    assert.ok(outcomes.length >= 3, `this mailbox must need 3+ invocations (took ${outcomes.length})`)
+    for (const r of outcomes.slice(0, -1)) {
+      assert.strictEqual(r.body.run.outcome, 'continued', JSON.stringify(r.body.run))
+    }
+    const last = outcomes.at(-1)
+    assert.strictEqual(last.status, 200, last.raw.slice(0, 300))
+    assert.strictEqual(last.body.run.outcome, 'committed', JSON.stringify(last.body.run))
+    assert.strictEqual(last.body.run.intended, 1)
+    assert.strictEqual(last.body.run.accepted, 1)
+    assert.strictEqual(last.body.run.created, 1)
+    assert.strictEqual(last.body.run.cursors_advanced, 2)
+
+    // MORE THAN THE OLD PER-INVOCATION CEILING: 50 pages in total.
+    const pageRequests = graphC.calls.length
+    assert.ok(pageRequests >= 50, `the round must exceed 20 pages (${pageRequests})`)
+
+    // EXACTLY ONE pending suggestion, for the contact the user already had.
+    assert.strictEqual(one(`SELECT count(*) FROM public.interaction_candidates
+      WHERE user_id='${U1}' AND source='outlook' AND status='pending';`), '1')
+    assert.strictEqual(one(`SELECT count(*) FROM public.interaction_candidates c
+      JOIN public.contacts ct ON ct.id = c.contact_id
+      WHERE ct.email='${RECRUITER}' AND ct.user_id='${U1}';`), '1')
+    // No content was invented from an envelope-only pass.
+    assert.strictEqual(one(`SELECT count(*) FROM public.interaction_candidates
+      WHERE user_id='${U1}' AND (proposed_notes IS NOT NULL OR retained_subject IS NOT NULL
+        OR draft_summary IS NOT NULL OR draft_follow_up IS NOT NULL);`), '0')
+
+    // NO CONTACT, NO INTERACTION - review before save is intact.
+    assert.strictEqual(one(`SELECT count(*) FROM public.interactions WHERE user_id='${U1}';`), '0')
+    assert.strictEqual(one(`SELECT count(*) FROM public.contacts WHERE user_id='${U1}';`), '1')
+
+    // THE ROUND IS ERASED by the committing release, in the same transaction.
+    assert.strictEqual(one(`SELECT count(*) FROM public.outlook_conversation_progress;`), '0',
+      'a committed round must leave no accumulator rows')
+    for (const row of roundRows()) {
+      assert.strictEqual(row[1], 'NULL', 'the round id must be cleared')
+      assert.strictEqual(row[4], 'NULL', 'the saved nextLink must be cleared')
+      assert.strictEqual(row[5], 'NULL', 'the pending cursor must be cleared')
+      assert.notStrictEqual(row[7], 'NULL', 'the committed cursor must now be set')
+    }
+  })
+
+  await test('the accumulator held ONLY fingerprints while the round was open', async () => {
+    await seed({ accessExpired: false })
+    const graphC = pagedGraphFixture({ pages: 25, inboundAt: 22, outboundAt: 18 })
+    const ports = makePorts()
+    currentEnv = baseEnv()
+    currentDeps = {
+      tokenUrl: FIXTURE_TOKEN_URL, fetchImpl: tokenFixture().fetchImpl,
+      graphFetchImpl: graphC.fetchImpl, select: ports.select, rpc: ports.rpc,
+    }
+    const r = await callWorker({ secret: WORKER_SECRET })
+    assert.strictEqual(r.body.run.outcome, 'continued', JSON.stringify(r.body.run))
+
+    // Every row of the real table, as text. Nothing in it may identify anyone.
+    const dump = psql(`SELECT coalesce(string_agg(to_jsonb(p)::text, ' '), 'none')
+      FROM public.outlook_conversation_progress p;`).trim()
+    for (const leak of [RECRUITER, ME, 'Following up', 'conv-split', 'ms-in-', 'ms-out-',
+      'bank.test', 'getfunnl.test']) {
+      assert.ok(!dump.includes(leak), `the accumulator must never hold ${leak}`)
+    }
+    // And what it DOES hold is the shape the migration promises.
+    const cols = psql(`SELECT string_agg(column_name, ',' ORDER BY column_name)
+      FROM information_schema.columns
+      WHERE table_schema='public' AND table_name='outlook_conversation_progress';`).trim()
+    for (const forbidden of ['body', 'subject', 'snippet', 'header', 'email', 'address',
+      'message_id', 'conversation_id']) {
+      assert.ok(!cols.includes(forbidden), `no ${forbidden} column may exist`)
+    }
+    for (const required of ['conversation_fingerprint', 'person_fingerprint',
+      'episode_fingerprint', 'first_message_fingerprint', 'key_version', 'expires_at']) {
+      assert.ok(cols.includes(required), `${required} must exist`)
+    }
+  })
+
+  await test('a REJECTED saved nextLink restarts the round and keeps the committed cursor', async () => {
+    await seed({ accessExpired: false })
+    const good = pagedGraphFixture({ pages: 25, inboundAt: 22, outboundAt: 18 })
+    const ports = makePorts()
+    currentEnv = baseEnv()
+    currentDeps = {
+      tokenUrl: FIXTURE_TOKEN_URL, fetchImpl: tokenFixture().fetchImpl,
+      graphFetchImpl: good.fetchImpl, select: ports.select, rpc: ports.rpc,
+    }
+    // Invocation 1 saves a position.
+    const first = await callWorker({ secret: WORKER_SECRET })
+    assert.strictEqual(first.body.run.outcome, 'continued', JSON.stringify(first.body.run))
+    const savedBefore = roundRows().map((row) => row[4]).filter((c) => c !== 'NULL')
+    assert.ok(savedBefore.length >= 1, 'a position must have been saved')
+    // Give the connection a committed cursor to protect, as a second round would have.
+    // It must be REAL ciphertext: the run context decrypts the committed cursor before the
+    // round starts, so a placeholder would fail the run with cursor_undecryptable and
+    // never reach the restart path at all.
+    const key = await importKeyFromBase64(TOKEN_KEY_B64, webcrypto.subtle)
+    const committed = {}
+    for (const folder of ['inbox', 'sentitems']) {
+      const link = `${GRAPH_BASE}/me/mailFolders/${folder}/messages/delta?$deltatoken=PRIOR-${folder}`
+      const sealed = await encryptToken(link, key, { subtle: webcrypto.subtle })
+      committed[folder] = sealed
+      psql(`UPDATE public.outlook_sync_state
+        SET delta_link_ciphertext = '${sealed.ciphertext}', delta_link_nonce = '${sealed.nonce}'
+        WHERE user_id = '${U1}' AND folder = '${folder}';`, { tuplesOnly: false })
+    }
+    makeDueNow()
+
+    // Invocation 2: Microsoft refuses the saved link.
+    const rejecting = pagedGraphFixture({ pages: 25, rejectSaved: true })
+    currentDeps = { ...currentDeps, graphFetchImpl: rejecting.fetchImpl }
+    const r = await callWorker({ secret: WORKER_SECRET })
+
+    // Deliberately NOT a 200: a round of reading was discarded for an external reason.
+    assert.strictEqual(r.status, 503, r.raw.slice(0, 300))
+    assert.strictEqual(r.body.run.outcome, 'restart_required', JSON.stringify(r.body.run))
+    assert.strictEqual(r.body.run.reason, 'next_link_rejected')
+    assert.strictEqual(r.body.run.round_reset, 'reset')
+    assert.strictEqual(r.body.run.cursors_advanced, 0)
+    assert.strictEqual(one(`SELECT count(*) FROM public.interaction_candidates;`), '0')
+    assert.strictEqual(one(`SELECT count(*) FROM public.outlook_conversation_progress;`), '0',
+      'the discarded round must leave no accumulator rows')
+    for (const row of roundRows()) {
+      assert.strictEqual(row[1], 'NULL', 'the round id must be cleared')
+      assert.strictEqual(row[4], 'NULL', 'the rejected position must be cleared')
+      // AND THE COMMITTED CURSOR SURVIVES, byte for byte. That is what stops a rejected
+      // continuation token turning into a full re-import, and what stops it skipping
+      // anything: the next round restarts from the last position that genuinely was
+      // ingested.
+      assert.strictEqual(row[7], committed[row[0]].ciphertext,
+        'the committed cursor must be untouched')
+    }
   })
 
   // ══ refusals ══════════════════════════════════════════════════════════════
