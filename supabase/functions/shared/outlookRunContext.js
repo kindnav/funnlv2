@@ -84,6 +84,10 @@ export const CONTEXT_FAILURES = Object.freeze([
   // option: matching against a subset would treat a tracked person as a stranger.
   'too_many_contacts',
   'sync_state_unreadable',
+  // The round's saved progress could not be read or written. Not strictly a CONTEXT
+  // failure, but it belongs in the same controlled vocabulary: it is a reason a run ends
+  // without touching a cursor, and it is reported through the same field.
+  'progress_unreadable',
 ])
 
 const isNonEmpty = (v) => typeof v === 'string' && v.length > 0
@@ -328,5 +332,34 @@ export function makeCursorEncryptor ({ tokenKeyB64, keyVersion = 1, subtle = glo
     const key = await keyPromise
     const { ciphertext, nonce } = await encryptToken(plaintext, key, { subtle })
     return { ciphertext, nonce, keyVersion }
+  }
+}
+
+/**
+ * The matching decryptor, for ONE thing only: a saved @odata.nextLink written by an
+ * earlier invocation of the same round.
+ *
+ * A committed or pending deltaLink never needs this - release takes ciphertext and the
+ * ciphertext is already in the row - so the plaintext of a delta cursor exists in exactly
+ * the two places it has to: the moment it arrives from Microsoft, and the moment a resumed
+ * request uses it.
+ *
+ * It THROWS on failure rather than returning null. A cursor that will not decrypt must not
+ * silently become "start this folder over", which would re-read mail and hide a key
+ * problem; the run reports `cursor_undecryptable` and advances nothing.
+ */
+export function makeCursorDecryptor ({ tokenKeyB64, subtle = globalThis.crypto?.subtle }) {
+  let keyPromise = null
+  return async function decryptCursor (ciphertext, nonce) {
+    if (keyPromise === null) {
+      keyPromise = importKeyFromBase64(tokenKeyB64, subtle)
+        .catch(() => { throw new RunContextError('key_unusable') })
+    }
+    const key = await keyPromise
+    try {
+      return await decryptToken(ciphertext, nonce, key, { subtle })
+    } catch {
+      throw new RunContextError('cursor_undecryptable')
+    }
   }
 }

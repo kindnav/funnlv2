@@ -308,6 +308,38 @@ Draft branch and undeployed; it is not a Production fact.
 - [ ] 12. Authorization for a one-account real-mailbox pilot.
 - [ ] 13. Whether disconnect must also revoke the grant at Microsoft before the pilot. A local
       disconnect is implemented and verified; upstream revocation is not implemented and is not claimed.
+- [ ] 14. **The per-conversation continuation record — one policy bullet, and one product choice.**
+      Durable continuation (migration `20261002000000`, dormant and unapplied) persists a
+      per-conversation record while a sync round is being read, because a two-sided exchange can
+      span pages, invocations and both folders and hosted Edge Functions cannot read a mailbox in
+      one invocation. Two things need an owner.
+
+      **(a) The policy list does not name it.** The published `What Funnl would keep` list is
+      exhaustive. Every *field kind* in the new record is already disclosed there — one-way keyed
+      fingerprints with a key version, timestamps, counts, short result codes — but the record
+      itself is not, and the synchronization bullet says "position", not "partial conversation
+      state". Proposed wording, to be added as a new bullet **inside** the existing
+      `What Funnl would keep` list and nowhere else:
+
+      > *while a mailbox is being read:* a temporary record per conversation, holding only one-way
+      > keyed fingerprints (with the key version) of the conversation, the person and the first
+      > message, whether each side has replied, how many messages were seen, the first and last
+      > times, and short result codes. It exists so an exchange split across several reads is
+      > recognized as one conversation, contains no message content, subject, email address or
+      > Microsoft identifier, and is erased when that read finishes.
+
+      **(b) How long may it live?** As implemented it is **round-scoped**: erased when the round
+      commits, and erased for any superseded or expired round the moment a new round starts. That
+      recognizes an exchange split across pages, invocations, or Inbox and Sent Items. It does
+      **not** recognize one where the reply arrives in a *later* round — you email someone today,
+      they answer next week — because by then the earlier half is no longer remembered. Nothing is
+      skipped and no cursor moves past unprocessed mail; that exchange is simply never suggested.
+      Making it work means keeping per-conversation state *between* rounds, which is a materially
+      heavier commitment: a durable, growing record of how many conversations a user has, when each
+      was last active, and which involve a tracked contact — needing a retention window, a deletion
+      path, an answer for what disconnecting does to it, and a different policy bullet.
+      **The implementation deliberately chose the minimal option and did not decide this.** Full
+      reasoning: `docs/outlook-durable-continuation-design.md` §6.
 
 ---
 
@@ -319,6 +351,12 @@ Draft branch and undeployed; it is not a Production fact.
 4. OAuth start and callback, including token encryption at rest and the refusal path.
 5. Worker, lease, bounded cursor reset, and candidate persistence — **including scheduling or
    otherwise invoking `expire_pending_outlook_context`**, without which §5's retention gap stands.
+5a. Durable continuation is now built and dormant (migration `20261002000000`,
+   `outlookContinuedPass.js`, `outlookRoundState.js`). It removes the old blocker that a mailbox
+   past the per-invocation ceilings could never make progress. It adds §6.14 above — one policy
+   bullet and one retention decision — and leaves two ceilings open: worst-case context loading
+   (285 s) still exceeds one free-plan invocation, and an invalid *committed* deltaLink still has no
+   restart (only a saved `nextLink` does).
 6. Review UI and accept / dismiss / defer wiring.
 7. Pilot authorization.
 8. Scheduling, last.
