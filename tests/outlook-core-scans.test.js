@@ -431,15 +431,16 @@ test('applied migrations are unmodified; the only addition is the forward scope 
   const files = readdirSync(join(ROOT, 'supabase/migrations')).sort()
   assert.ok(files.includes('20260921000000_add_outlook_content_draft_primitives.sql'))
   assert.ok(files.includes('20260922175616_revoke_service_role_from_outlook_user_rpcs.sql'))
-  // FOUR UNAPPLIED forward migrations now exist. Every one must sort after every
+  // FIVE UNAPPLIED forward migrations now exist. Every one must sort after every
   // applied one, and in this order, so `db push` applies them as reviewed: the scope
-  // widening, the connection-status read path, the candidate write path, then the
-  // token rotation.
+  // widening, the connection-status read path, the candidate write path, the token
+  // rotation, then durable continuation.
   const UNAPPLIED = [
     '20260928000000_outlook_add_user_read_scope.sql',
     '20260929000000_outlook_connection_status_rpc.sql',
     '20260930000000_outlook_interaction_candidate_write.sql',
     '20261001000000_outlook_rotate_access_token.sql',
+    '20261002000000_outlook_durable_continuation.sql',
   ]
   assert.deepStrictEqual(files.slice(-UNAPPLIED.length), UNAPPLIED,
     'the unapplied forward migrations must be the newest, in this order')
