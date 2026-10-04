@@ -327,28 +327,58 @@ export function finalizeRound (p) {
   const entries = []
   const skipped = Object.create(null)
   const bump = (code) => { skipped[code] = (skipped[code] || 0) + 1 }
-
   for (const r of rows) {
-    if (!isPlainObject(r)) { bump('no_eligible_messages'); continue }
+    const one = finalizeConversation(r, localDateFor)
+    if (one.entry === null) bump(one.skip)
+    else entries.push(one.entry)
+  }
+  return { entries, skipped }
+}
+
+/**
+ * The same decision for ONE accumulated conversation.
+ *
+ * Separate from finalizeRound because the run has to walk the rows one at a time: the
+ * suggestions of a finished round are written one bounded RPC at a time, and an
+ * invocation that runs out of budget mid-batch must be able to say exactly how far it
+ * got. Reproduced before this existed: a hard stop after 6 of 40 writes left the next
+ * invocation re-listing all 40 and starting again at the first entry, forever.
+ *
+ * Returns the plan entry, or the controlled code saying why there is none. Either way
+ * the caller may advance its write cursor past this conversation - a skip is a decision,
+ * not unfinished work.
+ *
+ * @param {object} r  one row from list_outlook_round_conversations
+ * @param {(iso:string)=>string|null} localDateFor  bound to the user's time zone
+ * @returns {{entry: object, skip: null}|{entry: null, skip: string}}
+ */
+export function finalizeConversation (r, localDateFor) {
+  if (typeof localDateFor !== 'function') throw new Error('local_date_required')
+  const bump = (code) => ({ entry: null, skip: code })
+  {
+    if (!isPlainObject(r)) return bump('no_eligible_messages')
     const taint = typeof r.taint === 'string' && r.taint.length > 0 ? r.taint : null
-    if (taint !== null) { bump(ROUND_TAINT_CODES.includes(taint) ? taint : 'no_eligible_messages'); continue }
+    if (taint !== null) return bump(ROUND_TAINT_CODES.includes(taint) ? taint : 'no_eligible_messages')
 
     const efp = typeof r.efp === 'string' ? r.efp : null
     const pfp = typeof r.pfp === 'string' ? r.pfp : null
-    if (efp === null || pfp === null) { bump('no_eligible_messages'); continue }
+    if (efp === null || pfp === null) return bump('no_eligible_messages')
 
     const inbound = Number.isInteger(r.inbound) ? r.inbound : 0
     const outbound = Number.isInteger(r.outbound) ? r.outbound : 0
     // The whole reason this state is persisted: the two halves may have arrived in
     // different pages, invocations or folders, and only the accumulated counts can say
     // whether the exchange was ever two-sided.
-    if (inbound === 0 || outbound === 0) { bump('not_two_sided'); continue }
+    if (inbound === 0 || outbound === 0) return bump('not_two_sided')
 
     const proposedDate = localDateFor(r.last_at)
-    if (proposedDate === null) { bump('invalid_timestamp'); continue }
+    if (proposedDate === null) return bump('invalid_timestamp')
 
     const contactId = typeof r.contact_id === 'string' && r.contact_id.length > 0 ? r.contact_id : null
-    entries.push(Object.freeze({
+    return { skip: null, entry: Object.freeze({
+      // Carried so the caller can advance its write cursor past this conversation. It is a
+      // keyed fingerprint, never logged.
+      conversationFingerprint: typeof r.cfp === 'string' ? r.cfp : null,
       kind: contactId ? 'known_contact_interaction' : 'new_contact_suggestion',
       contactId,
       // Not stored, and not needed: only a new-contact proposal would use them, and this
@@ -366,10 +396,8 @@ export function finalizeRound (p) {
         : [],
       personFingerprint: pfp,
       keyVersion: Number.isInteger(r.key_version) ? r.key_version : null,
-    }))
+    }) }
   }
-
-  return { entries, skipped }
 }
 
 /**

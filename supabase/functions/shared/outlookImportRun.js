@@ -85,13 +85,16 @@ import {
   GRAPH_FOLDERS, MAX_RETRIES, REQUEST_TIMEOUT_MS, MAX_TOTAL_RETRY_DELAY_MS,
 } from './outlookGraphTransport.js'
 import { TOKEN_TIMEOUT_MS } from './microsoftTokenExchange.js'
-import { MAX_CONTACTS_LOADED, CONTACT_PAGE_SIZE } from './outlookRunContext.js'
+import {
+  MAX_CONTACTS_LOADED, CONTACT_PAGE_SIZE, CONTEXT_STEP_MS,
+} from './outlookRunContext.js'
 import { localDateFor } from './outlookMetadataPass.js'
 import {
   INVOCATION_BUDGET_MS, CHECKPOINT_RESERVE_MS, runOutlookRoundSlice,
 } from './outlookContinuedPass.js'
 import {
-  ROUND_TTL_SECONDS, MAX_CONVERSATIONS_PER_ROUND, finalizeRound, summarizeRoundProgress,
+  ROUND_TTL_SECONDS, MAX_CONVERSATIONS_PER_ROUND, finalizeConversation,
+  summarizeRoundProgress,
 } from './outlookRoundState.js'
 
 /**
@@ -192,6 +195,37 @@ export const RELEASE_WORST_MS = RPC_ROUND_TRIP_MS + 5_000
  */
 export const PROGRESS_STEP_MS = RPC_ROUND_TRIP_MS + 5_000
 
+/**
+ * What the FINALISATION stage must keep in hand before starting one more suggestion:
+ * the write itself, the call that records how far it got, and the release.
+ *
+ * WHY THIS EXISTS. The write loop used to run with no reference to the invocation budget
+ * at all. Reproduced: 40 qualifying conversations at one bounded RPC each spent 800s
+ * against a 120s budget; with the platform stopping the instance after six, six valid
+ * pending suggestions existed, the round was still saved, both cursors were correctly
+ * NULL - and because nothing recorded those six, the next invocation re-listed all 40 and
+ * began again at the first entry. A batch larger than one invocation could never finish.
+ */
+export const WRITE_STEP_RESERVE_MS = WRITE_STEP_MS + PROGRESS_STEP_MS + RELEASE_WORST_MS
+
+/**
+ * What reading the accumulator back and finalising at least one suggestion needs: the
+ * list call plus one write's reserve. Below this the invocation stops before listing,
+ * rather than listing and then being unable to act on it.
+ */
+export const FINALIZE_RESERVE_MS = PROGRESS_STEP_MS + WRITE_STEP_RESERVE_MS
+
+/**
+ * What the FINALISATION stage must keep in hand before starting one more suggestion:
+ * the write itself, the call that records how far it got, and the release.
+ *
+ * WHY THIS EXISTS. The write loop used to run with no reference to the invocation budget
+ * at all. Reproduced: 40 qualifying conversations at one bounded RPC each spent 800s
+ * against a 120s budget; with the platform stopping the instance after six, six valid
+ * pending suggestions existed, the round was still saved, both cursors were correctly
+ * NULL - and because nothing recorded those six, the next invocation re-listed all 40 and
+ * began again at the first entry. A batch larger than one invocation could never finish.
+ */
 /** Backoff requested when a run releases incomplete. */
 export const RETRY_BACKOFF_SECONDS = 300
 
@@ -223,6 +257,13 @@ export const RUN_OUTCOMES = Object.freeze([
   // advanced and no suggestion is written. The next invocation resumes from here. This is
   // a SUCCESSFUL outcome, not a failure - it is the point of the whole slice.
   'continued',
+  // The invocation budget ran out BEFORE any durable progress was possible - no page
+  // checkpointed, no suggestion written, no write cursor advanced. Distinct from
+  // 'continued' on purpose: 'continued' means the round moved forward and the next
+  // invocation will carry on, while this means the invocation could do nothing and the
+  // next one may well do nothing either. That is a no-progress loop an operator has to
+  // see, so it is NOT a 200.
+  'budget_exhausted',
   // A SAVED @odata.nextLink was rejected by Microsoft. The round's saved position and
   // accumulators are discarded; the COMMITTED cursor is untouched, so the next round
   // restarts from the last position that genuinely was ingested.
@@ -445,6 +486,19 @@ export async function runOutlookImport (p) {
     ? requestEntryMs + INVOCATION_BUDGET_MS
     : Number.POSITIVE_INFINITY
 
+  /** Will `marginMs` of invocation budget still be there when this stage starts? */
+  const budgetAllows = (marginMs) => invocationDeadlineMs - clock() > marginMs
+
+  /**
+   * Did THIS invocation move the round forward in a way that survives it?
+   *
+   * The distinction matters for one reason: an invocation that saved progress can
+   * honestly say 'continued', while one that saved nothing may be in a loop that never
+   * finishes, and must say so instead. Set by a committed page checkpoint, by a confirmed
+   * suggestion write, and by advancing the finalisation write cursor.
+   */
+  let durableProgress = false
+
   let slice
   let context
   let roundId = null
@@ -453,7 +507,32 @@ export async function runOutlookImport (p) {
     // Loading the context can take most of a lease on its own: a paged contact read
     // plus a token refresh. Renew first if what remains would not cover it.
     await ensureLease(CONTEXT_WORST_MS)
-    context = await loadRunContext(connectionId, runId)
+    // THE INVOCATION BUDGET, not just the lease. Loading the context is the longest stage
+    // of a run (CONTEXT_WORST_MS = 285s) and it used to run with no reference to the
+    // hosted limit at all - reproduced: a 200s load against a 120s budget answered 200
+    // 'continued' having read no mail and saved no checkpoint, and on the real platform
+    // was killed at 150s mid-load with the lease still held. If there is not even enough
+    // budget to load and release, do not start.
+    if (!budgetAllows(CONTEXT_STEP_MS + RELEASE_WORST_MS)) {
+      await release('idle', false, null, 'context_budget_exhausted', CONTINUE_BACKOFF_SECONDS)
+      return {
+        outcome: 'budget_exhausted',
+        reason: 'context_budget_exhausted',
+        connectionId,
+        intended: 0,
+        accepted: 0,
+        created: 0,
+        cursorsAdvanced: 0,
+      }
+    }
+    // The loader checks the same deadline between its own bounded steps, so a load that
+    // cannot finish stops at a step boundary and gives the lease back instead of being
+    // killed. It does NOT make the load resumable - see the enablement blocker in
+    // docs/outlook-durable-continuation-design.md.
+    context = await loadRunContext(connectionId, runId, {
+      deadlineMs: invocationDeadlineMs,
+      now: clock,
+    })
 
     // ── where did the last invocation get to? ────────────────────────────────
     await ensureLease(PROGRESS_STEP_MS)
@@ -529,7 +608,9 @@ export async function runOutlookImport (p) {
         p_round_ttl_seconds: ROUND_TTL_SECONDS,
       })
       if (res?.error) return { result: 'rpc_error' }
-      return res?.data ?? { result: 'unknown' }
+      const out = res?.data ?? { result: 'unknown' }
+      if (out.result === 'recorded') durableProgress = true
+      return out
     }
 
     // And again before the first Graph page, because the context load may have consumed
@@ -657,8 +738,30 @@ export async function runOutlookImport (p) {
     }
   }
 
-  // ── 3d. the round IS complete: read the accumulator back and finalize ──────
-  let finalized
+  // ── 3d. the round IS complete: finalise it, resumably ─────────────────────
+  // The suggestions of a finished round are written one bounded RPC at a time, in
+  // conversation-fingerprint order, and the round remembers how far that got. Without
+  // that memory a batch bigger than one invocation restarts from its first entry every
+  // time and never finishes - reproduced: a hard stop after 6 of 40 writes left 6 valid
+  // pending suggestions, the round saved, both cursors correctly NULL, and the next
+  // invocation beginning the same 40 again.
+  if (!budgetAllows(FINALIZE_RESERVE_MS)) {
+    // Not enough budget to list the accumulator AND act on even one row. The round is
+    // untouched and still complete, so a later invocation finalises it.
+    await release('idle', false, null, null, CONTINUE_BACKOFF_SECONDS)
+    return {
+      ...nothingWritten,
+      outcome: durableProgress ? 'continued' : 'budget_exhausted',
+      reason: durableProgress ? null : 'finalize_budget_exhausted',
+    }
+  }
+
+  // Where finalisation left off. NULL means the whole round is still to do.
+  const writeCursorBefore = GRAPH_FOLDERS
+    .map((f) => progress?.[f]?.write_cursor)
+    .find((v) => typeof v === 'string' && v.length > 0) ?? null
+
+  let rows
   let convTruncated = false
   try {
     await ensureLease(PROGRESS_STEP_MS)
@@ -667,16 +770,15 @@ export async function runOutlookImport (p) {
       p_run_id: runId,
       p_round_id: roundId,
       p_limit: MAX_ROUND_CONVERSATIONS_READ,
+      // RESUME POINT: only conversations after the ones already dealt with.
+      p_after: writeCursorBefore,
     })
     if (listed?.error || listed?.data?.result !== 'ok') {
       await release('idle', false, null, 'progress_unreadable')
       return { ...nothingWritten, outcome: 'incomplete', incompleteReasons: ['accumulator_unreadable'] }
     }
     convTruncated = listed.data.truncated === true
-    finalized = finalizeRound({
-      conversations: listed.data.conversations,
-      localDateFor: (iso) => localDateFor(iso, context.timeZone),
-    })
+    rows = Array.isArray(listed.data.conversations) ? listed.data.conversations : []
   } catch {
     if (leaseLost) {
       await release('error', false, null, 'lease_lost')
@@ -690,72 +792,157 @@ export async function runOutlookImport (p) {
   // Same principle as before: a delta cursor claims everything before it was INGESTED, so
   // any dropped or shortened work forfeits every cursor of the round - including the case
   // where Inbox finished cleanly and Sent Items did not, because a conversation can span
-  // both folders.
+  // both folders. Checked BEFORE any write, so a doomed round writes nothing.
   const incompleteReasons = []
   if (slice.totals.messagesDropped > 0) incompleteReasons.push('messages_dropped')
   if (slice.totals.conversationsDropped > 0) incompleteReasons.push('conversations_dropped')
-  if (Number.isInteger(finalized.skipped.episode_truncated) && finalized.skipped.episode_truncated > 0) {
-    incompleteReasons.push('episode_truncated')
-  }
   if (convTruncated) incompleteReasons.push('plan_truncated')
 
-  if (incompleteReasons.length > 0) {
-    await release('idle', false, null, null)
-    return { ...nothingWritten, outcome: 'incomplete', incompleteReasons }
-  }
-
-  // 4. Write the suggestions FIRST.
-  const { writable, skipped } = partitionPlan(finalized.entries)
+  // 4. Write the suggestions FIRST, one row at a time, remembering how far we got.
   const results = Object.create(null)
+  const skipped = Object.create(null)
+  const bumpSkip = (c) => { skipped[c] = (skipped[c] || 0) + 1 }
   // Counted honestly. A later failure does not erase the fact that earlier writes
   // landed, and reporting zero while rows exist would send a reader looking for a bug
   // in the wrong place.
   let accepted = 0
   let firstRefusal = null
   let threw = false
+  let outOfBudget = false
+  // The last conversation DEALT WITH - written, or deliberately skipped. A skip is a
+  // decision, not unfinished work, so the cursor may pass it.
+  let processedThrough = null
+  let rowsProcessed = 0
 
-  try {
-    for (const entry of writable) {
-      // Before each write, not once before the loop: MAX_PLAN_ENTRIES round trips can
-      // outlast any lease, and a write refused `stale_run` halfway through would throw
-      // away a run that had otherwise succeeded.
-      await ensureLease(WRITE_STEP_MS)
-      const res = await rpc('upsert_outlook_interaction_candidate', {
-        p_connection_id: connectionId,
-        p_run_id: runId,
-        p_contact_id: entry.contactId,
-        p_episode_fingerprint: entry.episodeFingerprint,
-        p_person_fingerprint: entry.personFingerprint,
-        p_key_version: entry.keyVersion,
-        p_proposed_type: entry.proposedType,
-        p_proposed_date: entry.proposedDate,
-        p_lookup_fingerprints: entry.episodeLookupFingerprints?.length
-          ? entry.episodeLookupFingerprints
-          : null,
-      })
-      const code = res?.error ? 'rpc_error' : (res?.data?.result ?? 'unknown')
-      results[code] = (results[code] || 0) + 1
-      if (writeAccepted(code)) { accepted += 1; continue }
-      if (firstRefusal === null) firstRefusal = code
-      // Stop at the first refusal. Continuing would pile up work that cannot be
-      // committed anyway, because the cursor is already forfeit.
-      break
+  // ── decide every row FIRST, then write ────────────────────────────────────
+  // Deciding is pure and cheap; writing is a bounded round trip each. Separating them
+  // keeps `intended` meaning what it has always meant - how many writes this batch needs -
+  // even when the invocation budget stops the writing part-way. Without the pre-pass,
+  // `intended` would silently become 'how many we got round to', which is the number
+  // `accepted` already reports.
+  const decisions = []
+  for (const row of rows) {
+    const one = finalizeConversation(row, (iso) => localDateFor(iso, context.timeZone))
+    const cfp = typeof row?.cfp === 'string' ? row.cfp : null
+    if (one.entry === null) {
+      bumpSkip(one.skip)
+      decisions.push({ cfp, entry: null })
+      continue
     }
-  } catch {
-    // A renewal refusal inside the loop sets leaseLost; anything else is a thrown write.
-    threw = true
+    const { writable, skipped: entrySkipped } = partitionPlan([one.entry])
+    for (const [code, n] of Object.entries(entrySkipped)) {
+      skipped[code] = (skipped[code] || 0) + n
+    }
+    decisions.push({ cfp, entry: writable[0] ?? null })
+  }
+  const intended = decisions.filter((x) => x.entry !== null).length
+
+  if (incompleteReasons.length === 0) {
+    try {
+      for (const { cfp, entry } of decisions) {
+        if (entry === null) {
+          // Skipped on purpose - a tainted, one-sided or unsupported conversation. A skip
+          // is a decision, not unfinished work, so finalisation may pass it.
+          rowsProcessed += 1
+          if (cfp !== null) processedThrough = cfp
+          continue
+        }
+
+        // THE INVOCATION BUDGET, before each write rather than once before the loop.
+        // Enough must remain for the write, for recording that it happened, and for the
+        // release - otherwise stop here and let a later invocation carry on.
+        if (!budgetAllows(WRITE_STEP_RESERVE_MS)) { outOfBudget = true; break }
+        // And the LEASE, which is a different deadline: MAX_PLAN_ENTRIES round trips can
+        // outlast any lease, and a write refused `stale_run` halfway through would throw
+        // away a run that had otherwise succeeded.
+        await ensureLease(WRITE_STEP_MS)
+
+        const res = await rpc('upsert_outlook_interaction_candidate', {
+          p_connection_id: connectionId,
+          p_run_id: runId,
+          p_contact_id: entry.contactId,
+          p_episode_fingerprint: entry.episodeFingerprint,
+          p_person_fingerprint: entry.personFingerprint,
+          p_key_version: entry.keyVersion,
+          p_proposed_type: entry.proposedType,
+          p_proposed_date: entry.proposedDate,
+          p_lookup_fingerprints: entry.episodeLookupFingerprints?.length
+            ? entry.episodeLookupFingerprints
+            : null,
+        })
+        const code = res?.error ? 'rpc_error' : (res?.data?.result ?? 'unknown')
+        results[code] = (results[code] || 0) + 1
+        if (writeAccepted(code)) {
+          accepted += 1
+          rowsProcessed += 1
+          if (cfp !== null) processedThrough = cfp
+          continue
+        }
+        if (firstRefusal === null) firstRefusal = code
+        // Stop at the first refusal, and do NOT pass it: the cursor is already forfeit,
+        // and the next attempt must retry this conversation rather than skip it.
+        break
+      }
+    } catch {
+      // A renewal refusal inside the loop sets leaseLost; anything else is a thrown write.
+      threw = true
+    }
   }
 
+  // Record how far finalisation got, while the lease is still held. Doing this once per
+  // invocation rather than once per write keeps the round trips down; the cost of a hard
+  // stop before it lands is re-writing rows that are already there, which the candidate
+  // upsert answers 'refreshed' - bounded rework, never a lost or duplicated suggestion.
+  let writeCursorAdvanced = false
+  if (processedThrough !== null && processedThrough !== writeCursorBefore) {
+    try {
+      await ensureLease(PROGRESS_STEP_MS)
+      const adv = await rpc('advance_outlook_round_write_cursor', {
+        p_connection_id: connectionId,
+        p_run_id: runId,
+        p_round_id: roundId,
+        p_after: processedThrough,
+      })
+      writeCursorAdvanced = !adv?.error && adv?.data?.result === 'advanced'
+      if (writeCursorAdvanced) durableProgress = true
+    } catch {
+      // The lease went, or the call failed. Nothing is lost: the suggestions that landed
+      // are valid, and the next invocation re-walks from the last recorded point.
+      writeCursorAdvanced = false
+    }
+  }
+  if (accepted > 0) durableProgress = true
+
+  // EVERY intended write must be confirmed before a cursor may move, and the batch must
+  // be exhausted: `truncated` or an unprocessed row means there is more of this round to
+  // write, so the cursor stays where it is.
+  const batchComplete = rowsProcessed === decisions.length && !convTruncated
   const partial = {
     connectionId,
-    intended: writable.length,
+    intended,
     accepted,
     created: results.created ?? 0,
     writeResults: results,
-    skipped: { ...finalized.skipped, ...skipped },
+    skipped,
     cursorsAdvanced: 0,
     round: roundSummary,
     stops,
+    // How much of the round's finalisation is done, as counts only.
+    finalize: {
+      rows: rows.length,
+      processed: rowsProcessed,
+      resumed: writeCursorBefore !== null,
+      cursor_advanced: writeCursorAdvanced,
+      complete: batchComplete,
+    },
+  }
+
+  // ── the round did not finish for a reason that forfeits every cursor ──────
+  // Checked here rather than before the loop so the reasons are reported alongside
+  // whatever finalisation managed to do. No write was attempted when this is non-empty.
+  if (incompleteReasons.length > 0) {
+    await release('idle', false, null, null)
+    return { ...partial, outcome: 'incomplete', incompleteReasons, refusal: null }
   }
 
   if (leaseLost) {
@@ -777,6 +964,21 @@ export async function runOutlookImport (p) {
     // fingerprint dedupe makes that retry idempotent.
     await release('idle', false, null, null)
     return { ...partial, outcome: 'write_failed', refusal: firstRefusal }
+  }
+
+  // ── finalisation ran out of invocation budget part-way ────────────────────
+  // The suggestions written so far are valid pending rows, the write cursor records
+  // exactly how far the batch got, and NEITHER cursor moves - every intended write must
+  // be confirmed before a cursor may claim the mail was ingested. The next invocation
+  // continues the batch instead of restarting it.
+  if (outOfBudget || !batchComplete) {
+    await release('idle', false, null, null, CONTINUE_BACKOFF_SECONDS)
+    return {
+      ...partial,
+      outcome: durableProgress ? 'continued' : 'budget_exhausted',
+      reason: durableProgress ? null : 'finalize_budget_exhausted',
+      refusal: null,
+    }
   }
 
   // Only now: encrypt and advance the cursors. Encryption can throw (a missing or
@@ -900,5 +1102,8 @@ export function summarizeRun (result) {
     round: result.round ?? null,
     stops: result.stops ?? null,
     round_reset: typeof result.roundReset === 'string' ? result.roundReset : null,
+    // How much of a finished round's finalisation is done. Counts and flags only - never a
+    // fingerprint, so the write cursor itself is not reported.
+    finalize: result.finalize ?? null,
   }
 }

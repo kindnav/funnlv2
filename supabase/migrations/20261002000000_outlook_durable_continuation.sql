@@ -67,6 +67,14 @@ ALTER TABLE public.outlook_sync_state
   ADD COLUMN IF NOT EXISTS round_messages_dropped      integer NOT NULL DEFAULT 0,
   ADD COLUMN IF NOT EXISTS round_conversations_dropped integer NOT NULL DEFAULT 0,
   ADD COLUMN IF NOT EXISTS round_folder_complete       boolean NOT NULL DEFAULT false,
+  -- How far the FINALISATION stage got. The suggestions of a finished round are written
+  -- in conversation-fingerprint order, and this is the last fingerprint already dealt
+  -- with (written, or deliberately skipped). Without it a large final batch restarts from
+  -- its first entry on every invocation, so a batch too big for one invocation can never
+  -- finish - reproduced before this column existed: a hard stop after 6 of 40 writes left
+  -- 6 pending suggestions, the round intact, both cursors NULL, and the next invocation
+  -- beginning the same 40 again.
+  ADD COLUMN IF NOT EXISTS round_write_cursor          text,
   -- Microsoft's @odata.nextLink: opaque, time-limited, stored unchanged and encrypted
   -- for exactly the same reason the deltaLink is (it embeds provider state).
   ADD COLUMN IF NOT EXISTS next_link_ciphertext        text,
@@ -120,7 +128,16 @@ ALTER TABLE public.outlook_sync_state
          OR (next_link_ciphertext IS NULL AND pending_delta_ciphertext IS NULL
              AND round_pages = 0 AND round_messages = 0 AND round_page_seq = 0
              AND round_messages_dropped = 0 AND round_conversations_dropped = 0
-             AND round_folder_complete = false));
+             AND round_folder_complete = false AND round_write_cursor IS NULL));
+
+-- The write cursor is a conversation fingerprint, so it has the same shape as one. A free
+-- text column here would let a malformed value silently exclude every row from the next
+-- finalisation pass, which would look exactly like "nothing left to write".
+ALTER TABLE public.outlook_sync_state
+  DROP CONSTRAINT IF EXISTS oss_round_write_cursor_shape;
+ALTER TABLE public.outlook_sync_state
+  ADD CONSTRAINT oss_round_write_cursor_shape
+  CHECK (round_write_cursor IS NULL OR round_write_cursor ~ '^[0-9a-f]{64}$');
 
 -- A folder is either still mid-stream (a nextLink) or finished (a pending deltaLink).
 -- Holding both at once would leave two contradictory answers to "where do I resume".
@@ -621,6 +638,7 @@ BEGIN
            'messages_dropped', CASE WHEN s.round_expires_at > now() THEN s.round_messages_dropped ELSE 0 END,
            'conversations_dropped', CASE WHEN s.round_expires_at > now() THEN s.round_conversations_dropped ELSE 0 END,
            'folder_complete', CASE WHEN s.round_expires_at > now() THEN s.round_folder_complete ELSE false END,
+           'write_cursor', CASE WHEN s.round_expires_at > now() THEN s.round_write_cursor ELSE NULL END,
            'next_link_ciphertext', CASE WHEN s.round_expires_at > now() THEN s.next_link_ciphertext ELSE NULL END,
            'next_link_nonce', CASE WHEN s.round_expires_at > now() THEN s.next_link_nonce ELSE NULL END,
            'next_link_key_version', CASE WHEN s.round_expires_at > now() THEN s.next_link_key_version ELSE NULL END,
@@ -646,11 +664,15 @@ GRANT EXECUTE ON FUNCTION public.read_outlook_round_progress(uuid, uuid) TO serv
 -- Read back the round's conversation records so the worker can turn the complete ones
 -- into suggestions. Bounded and lease fenced. Returns fingerprints and counts only -
 -- there is nothing else in the table to return.
+-- p_after is the FINALISATION RESUME POINT: only conversations ordered strictly after it
+-- are returned. The worker passes the round's stored write cursor, so a finalisation that
+-- spanned invocations continues instead of restarting.
 CREATE OR REPLACE FUNCTION public.list_outlook_round_conversations(
   p_connection_id uuid,
   p_run_id        uuid,
   p_round_id      uuid,
-  p_limit         integer
+  p_limit         integer,
+  p_after         text DEFAULT NULL
 )
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -697,6 +719,7 @@ BEGIN
      WHERE p.connection_id = p_connection_id
        AND p.round_id      = p_round_id
        AND p.expires_at    > now()
+       AND (p_after IS NULL OR p.conversation_fingerprint > p_after)
      ORDER BY p.conversation_fingerprint
      LIMIT v_limit + 1
   ) q;
@@ -709,9 +732,94 @@ BEGIN
 END;
 $$;
 
-REVOKE ALL ON FUNCTION public.list_outlook_round_conversations(uuid, uuid, uuid, integer)
+REVOKE ALL ON FUNCTION public.list_outlook_round_conversations(uuid, uuid, uuid, integer, text)
   FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.list_outlook_round_conversations(uuid, uuid, uuid, integer)
+GRANT EXECUTE ON FUNCTION public.list_outlook_round_conversations(uuid, uuid, uuid, integer, text)
+  TO service_role;
+
+
+-- ══════════════════════════════════════════════════════════════════════════════
+--  E2. advance_outlook_round_write_cursor — finalisation survives an invocation
+-- ══════════════════════════════════════════════════════════════════════════════
+-- Records how far the suggestion-writing stage got, so it resumes instead of restarting.
+--
+-- WHY THIS IS NEEDED, reproduced before it existed: a round with 40 qualifying
+-- conversations spends 40 bounded RPC round trips writing them - 800s against a 120s
+-- invocation budget. A hard platform stop after 6 left 6 valid pending suggestions, the
+-- round saved, both cursors correctly NULL, and NO record of those 6. The next invocation
+-- found the round complete, re-listed all 40, and began again at the first entry - so a
+-- batch larger than one invocation could never finish, forever.
+--
+-- MONOTONE, and that matters: it only ever moves forward. A late or duplicated call with
+-- an older fingerprint cannot rewind finalisation and cause rows to be written twice.
+-- Rewriting is harmless anyway (the candidate upsert answers 'refreshed'), but a cursor
+-- that could go backwards would make "how far did we get" unanswerable.
+--
+-- It is set on BOTH folder rows, because finalisation belongs to the round rather than to
+-- either folder, and both rows already carry the round id.
+CREATE OR REPLACE FUNCTION public.advance_outlook_round_write_cursor(
+  p_connection_id uuid,
+  p_run_id        uuid,
+  p_round_id      uuid,
+  p_after         text
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_n integer;
+BEGIN
+  IF p_run_id IS NULL OR p_round_id IS NULL THEN
+    RETURN jsonb_build_object('result', 'stale_run');
+  END IF;
+  IF p_after IS NULL OR p_after !~ '^[0-9a-f]{64}$' THEN
+    RETURN jsonb_build_object('result', 'invalid_cursor');
+  END IF;
+
+  PERFORM 1 FROM public.outlook_sync_state s
+   WHERE s.connection_id = p_connection_id FOR SHARE;
+
+  SELECT count(*) INTO v_n FROM public.outlook_sync_state s
+   WHERE s.connection_id = p_connection_id
+     AND s.sync_run_id = p_run_id
+     AND s.sync_status = 'running'
+     AND s.sync_lease_until > now();
+  IF v_n <> 2 THEN
+    RETURN jsonb_build_object('result', 'stale_run');
+  END IF;
+
+  SELECT count(*) INTO v_n FROM public.outlook_sync_state s
+   WHERE s.connection_id = p_connection_id AND s.round_id = p_round_id;
+  IF v_n <> 2 THEN
+    RETURN jsonb_build_object('result', 'round_mismatch');
+  END IF;
+
+  UPDATE public.outlook_sync_state s
+     SET round_write_cursor = GREATEST(COALESCE(s.round_write_cursor, ''), p_after),
+         updated_at         = now()
+   WHERE s.connection_id = p_connection_id
+     AND s.round_id       = p_round_id
+     AND s.sync_run_id    = p_run_id
+     AND s.sync_status    = 'running'
+     AND s.sync_lease_until > now();
+
+  GET DIAGNOSTICS v_n = ROW_COUNT;
+  IF v_n <> 2 THEN
+    RAISE EXCEPTION 'lease_lost_during_write_cursor';
+  END IF;
+
+  RETURN jsonb_build_object(
+    'result', 'advanced',
+    'write_cursor', (SELECT s.round_write_cursor FROM public.outlook_sync_state s
+                      WHERE s.connection_id = p_connection_id AND s.folder = 'inbox'));
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.advance_outlook_round_write_cursor(uuid, uuid, uuid, text)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.advance_outlook_round_write_cursor(uuid, uuid, uuid, text)
   TO service_role;
 
 
@@ -774,6 +882,7 @@ BEGIN
          round_messages_dropped      = 0,
          round_conversations_dropped = 0,
          round_folder_complete       = false,
+         round_write_cursor          = NULL,
          next_link_ciphertext        = NULL,
          next_link_nonce             = NULL,
          next_link_key_version       = NULL,
@@ -893,6 +1002,7 @@ BEGIN
         round_messages_dropped      = CASE WHEN v_complete THEN 0 ELSE s.round_messages_dropped END,
         round_conversations_dropped = CASE WHEN v_complete THEN 0 ELSE s.round_conversations_dropped END,
         round_folder_complete       = CASE WHEN v_complete THEN false ELSE s.round_folder_complete END,
+        round_write_cursor          = CASE WHEN v_complete THEN NULL ELSE s.round_write_cursor END,
         next_link_ciphertext        = CASE WHEN v_complete THEN NULL ELSE s.next_link_ciphertext END,
         next_link_nonce             = CASE WHEN v_complete THEN NULL ELSE s.next_link_nonce END,
         next_link_key_version       = CASE WHEN v_complete THEN NULL ELSE s.next_link_key_version END,

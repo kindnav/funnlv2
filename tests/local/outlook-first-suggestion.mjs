@@ -357,14 +357,14 @@ async function main () {
     // The three original ones, plus the four durable continuation added. Each of those
     // does one narrow job: read where the last invocation got to, checkpoint one page,
     // read the accumulator back to finalize, and discard a round whose saved token was
-    // rejected. Nothing else may be called - no scheduler, no job table, no generic
+    // rejected, and record how far finalising its suggestions got. Nothing else may be called - no scheduler, no job table, no generic
     // key-value store. (renew_outlook_sync_lease is reachable too, but this run is fast
     // enough that the lease guard never needs it.)
     const allowed = new Set(['reserve_due_outlook_connection',
       'upsert_outlook_interaction_candidate', 'release_outlook_sync_lease',
       'renew_outlook_sync_lease', 'read_outlook_round_progress',
       'record_outlook_page_progress', 'list_outlook_round_conversations',
-      'reset_outlook_round'])
+      'reset_outlook_round', 'advance_outlook_round_write_cursor'])
     for (const c of calls) assert.ok(allowed.has(c), `unexpected RPC: ${c}`)
     assert.ok(calls.includes('reserve_due_outlook_connection'))
     assert.ok(calls.indexOf('upsert_outlook_interaction_candidate') <

@@ -68,9 +68,13 @@
 //     a reply arriving next week be paired with its earlier half - is a product decision.
 //     Both are written up as D1 and D2 in docs/outlook-durable-continuation-design.md and
 //     neither is decided in code.
-//   * Worst-case context loading (CONTEXT_WORST_MS, 285s) still exceeds one free-plan
-//     invocation. It is a ceiling rather than a typical cost, and the run is fenced and
-//     re-entrant, but it is not solved.
+//   * CONTEXT PREPARATION IS BOUNDED BUT NOT RESUMABLE. CONTEXT_WORST_MS is 285s against a
+//     120s budget. The load now checks the invocation deadline between its bounded steps, so
+//     it stops at a step boundary and gives the lease back instead of being killed mid-load
+//     holding it - but it keeps no partial state, so the next invocation repeats it from the
+//     start. A connection whose real load exceeds the budget answers `budget_exhausted`
+//     every time and never imports anything. So the hosted runtime limit is addressed for
+//     the import loop and for finalisation, and NOT for context preparation.
 //   * An invalid COMMITTED deltaLink still has no restart; only a saved nextLink does.
 //   * No Entra application, client secret, token-encryption key or fingerprint HMAC key
 //     exists in any environment, and none is configured here.

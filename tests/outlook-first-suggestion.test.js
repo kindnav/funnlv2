@@ -261,11 +261,16 @@ test('a commit-ready pass writes one suggestion, then releases with both cursors
   assert.strictEqual(r.accepted, 1)
   assert.strictEqual(r.created, 1)
   const names = p.calls.map((c) => c.name)
+  // Every round-progress RPC - including the call that records how far finalisation got -
+  // answers from the in-memory mirror, so only these three reach this port. What must be
+  // visible here is their ORDER: the suggestion is written before the release that
+  // advances the cursors. (That the finalisation cursor also lands before the release is
+  // asserted in tests/outlook-durable-continuation.test.js, where the mirror is inspected.)
   assert.deepStrictEqual(names, [
     'reserve_due_outlook_connection',
     'upsert_outlook_interaction_candidate',
     'release_outlook_sync_lease',
-  ], 'the write must precede the release')
+  ], 'the write must precede the cursor-advancing release')
   const rel = p.calls.at(-1).args
   assert.strictEqual(rel.p_run_complete, true)
   assert.ok(rel.p_inbox_delta_ct && rel.p_sentitems_delta_ct, 'both cursors supplied')
@@ -495,9 +500,12 @@ test('the run module calls only the three permitted RPCs', () => {
   //   record_outlook_page_progress     ONE atomic checkpoint per Graph page
   //   list_outlook_round_conversations read the accumulator back to finalize
   //   reset_outlook_round              the controlled restart after a rejected nextLink
+  //   advance_outlook_round_write_cursor  how far finalising the round's suggestions got,
+  //                                     so a batch bigger than one invocation resumes
   // Nothing else may be called from here: no scheduler, no job table, no generic
   // key-value store.
   assert.deepStrictEqual(names.sort(), [
+    'advance_outlook_round_write_cursor',
     'list_outlook_round_conversations',
     'read_outlook_round_progress',
     'record_outlook_page_progress',

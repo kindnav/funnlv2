@@ -197,6 +197,48 @@ platform kill loses at most the page in flight and can never advance a cursor. T
 stated here rather than implied, because a budget described as a guarantee is worse than
 one described honestly.
 
+### 5a. The budget covers the WHOLE invocation, not just the page loop
+
+The first version of this design checked the budget in one place: the page loop. Two stages
+ran outside it entirely, and both were reproduced before being fixed.
+
+**The context load.** It ran before the only check. A 200 s load against a 120 s budget
+returned a **200 `continued`** having read no mail and saved no checkpoint — and on the real
+platform the instance was already killed at 150 s mid-load, leaving the lease held until it
+expired. Now: the invocation deadline is passed into `loadRunContext`, which checks it
+between its bounded steps — per contact page, and before the token stage. A load that cannot
+finish stops at a **step boundary**, releases the lease, and reports
+`context_budget_exhausted`. That makes it **bounded, not resumable** — see §7.1.
+
+**Finalisation.** Writing a finished round's suggestions is one bounded RPC each, and the
+loop had no budget check. Reproduced: 40 qualifying conversations spent **800 s** against a
+120 s budget; with the platform stopping the instance after six, six valid pending
+suggestions existed, the round was still saved, both cursors were correctly NULL — and
+because nothing recorded those six, the next invocation re-listed all 40 and **began again
+at the first entry**. A batch larger than one invocation could never finish.
+
+Now the round carries a `round_write_cursor`: the last conversation **dealt with** (written,
+or deliberately skipped — a skip is a decision, not unfinished work). `list_outlook_round_conversations`
+takes `p_after`, so finalisation resumes rather than restarting, and the budget is checked
+before each write with enough held back for the write, the cursor update and the release.
+`advance_outlook_round_write_cursor` is lease-fenced on both folders and **monotone**, so a
+late or duplicated call cannot rewind it.
+
+**The cursor still does not move until every intended write is confirmed.** A batch that is
+unfinished — out of budget, truncated, or holding an unprocessed row — releases without a
+cursor and reports `continued`.
+
+**A deliberate trade-off, stated.** The write cursor is persisted **once per invocation**,
+after the loop, rather than after every write. One extra round trip per invocation instead
+of per suggestion. The cost of a hard stop before it lands is re-writing rows that are
+already there, which the candidate upsert answers `refreshed`: bounded rework, never a lost
+or duplicated suggestion. A test exercises exactly that.
+
+**`continued` versus `budget_exhausted`.** An invocation that saved progress says
+`continued` (200). One that could do **nothing** — no page checkpointed, no suggestion
+written, no cursor advanced — says `budget_exhausted` and does **not** answer 200, because
+that is a no-progress loop an operator has to see rather than a healthy partial.
+
 The budget is driven by an injected clock, so its behaviour is tested with a virtual clock
 rather than by hoping a local Deno reproduces a hosted timeout.
 
@@ -252,13 +294,100 @@ should make quietly, so the minimal one is implemented and this is written down 
 
 ---
 
+### D2 as a decision sheet — the concrete proposal to approve or reject
+
+Nothing below is implemented. `outlook_conversation_progress` is round-scoped today and
+this branch does not change that. This is here so the decision can be made on specifics
+rather than in the abstract.
+
+**The gap, stated once.** You email someone on the 1st. That round completes, commits its
+cursors, and erases its recognition state. They reply on the 8th. The round that reads the
+reply sees one inbound message in a thread it no longer remembers, so the exchange is
+one-sided as far as the worker can tell and **no suggestion is ever made**. Nothing is
+skipped and no cursor passes unprocessed mail — the exchange is simply never surfaced.
+For a networking tool whose whole point is "you emailed them, they replied, log it", that
+is the common case, not an edge case.
+
+**Minimum retained fields** — one row per conversation that has been seen at all, and
+nothing else would be added:
+
+| Field | Why it is the minimum |
+|---|---|
+| `user_id`, `connection_id` | Ownership and cascade on delete. |
+| `conversation_fingerprint` + `key_version` | The only way to recognise the thread again. Keyed one-way HMAC; **not** Microsoft's `conversationId`. |
+| `person_fingerprint` | Detect a thread that changes counterparty without storing an address. |
+| `contact_id` (nullable) | Funnl's own id, so the later half can be attached to the right person. |
+| `inbound_seen`, `outbound_seen` (booleans) | **Booleans, not counts.** Two-sidedness is all that is needed across rounds; a running message count would be a measure of how much someone emails, which is more than the question requires. |
+| `first_seen_at`, `last_seen_at` | The proposed interaction date, and the basis for expiry. |
+| `episode_fingerprint`, `first_message_fingerprint` | So the suggestion is written under a stable dedupe key and a tombstone still suppresses it. |
+| `expires_at` | The retention window below, enforced in the row rather than only in code. |
+
+Deliberately **not** added: message counts per round, a per-message history, any subject,
+address, display name or Microsoft identifier, and anything resembling a timeline of when
+a user was active.
+
+**Proposed retention period: 90 days from `last_seen_at`, rolling.** The reasoning, not a
+round number: it spans a recruiting cycle, so an email in early September can still pair
+with a reply in November; it is short enough that an abandoned thread disappears within
+one season; and it matches the longest follow-up horizon the product itself suggests. A
+row is deleted when it expires, when its exchange becomes a suggestion (the provenance
+record then carries the dedupe key), or on disconnect. **Alternatives worth rejecting
+explicitly:** 30 days (misses the common "replied three weeks later" case, so it buys
+little over round-scoped); 1 year (a year-long record of who someone corresponds with,
+for a feature that only needs to pair two halves).
+
+**Deletion on disconnect.** `run_microsoft_local_cleanup()` must **delete** these rows, in
+the same statement that deletes the connection, tokens and sync state — not empty them.
+They are worker recognition state, not user content: there is nothing in them a user would
+want back, and the `ON DELETE CASCADE` from `microsoft_connections(id, user_id)` already in
+the table definition gives this for free. That must be asserted by the disconnect runtime
+test, alongside the existing DELETED-vs-EMPTIED assertions, before enablement. Account
+deletion is covered by the `auth.users` cascade.
+
+**Exact privacy wording for review.** To be added as one bullet inside the existing
+`What Funnl would keep` list — replacing the round-scoped bullet proposed for D1, not
+joining it:
+
+> *to recognize a reply that arrives later:* for each conversation Funnl has looked at, a
+> record holding only one-way keyed fingerprints (with the key version) of the
+> conversation, the person and the first message, whether each side has replied, the first
+> and last times Funnl saw a message in it, and which of your contacts it matches. It
+> holds no message content, subject, email address or Microsoft identifier, and it exists
+> so that an email you send and a reply that arrives weeks later are recognized as one
+> exchange. Funnl deletes it 90 days after the last message it saw in that conversation,
+> when the exchange becomes a suggestion, or when you disconnect Outlook — whichever comes
+> first.
+
+**What approving this costs.** One migration (the new columns plus a cleanup path), a
+change to `run_microsoft_local_cleanup`, something to enforce expiry — and note that the
+existing `expire_pending_outlook_context` is **already unscheduled**, which is open item 5
+in `docs/outlook-privacy-consent-readiness.md` §7; a second unscheduled expiry job would
+make that gap worse rather than adding a new one. And a published policy change, which
+means the `/privacy` edit cannot be deferred past it.
+
+**What rejecting it costs.** Outlook only ever suggests exchanges whose two halves land in
+the same sync round. That should then be said plainly in the product copy, because a user
+who sees some conversations suggested and not others will otherwise read it as a bug.
+
+---
+
 ## 7. Remaining ceilings after this slice
 
-1. **Worst-case context load exceeds a free-plan invocation.** `CONTEXT_WORST_MS` is 285 s
-   against a 120 s budget. It is a ceiling, not a typical cost, and the run is fenced and
-   re-entrant so nothing is corrupted — but a pathological context load cannot complete on
-   the conservative plan. Fixing it means checkpointing *inside* the context load, which is
-   out of scope.
+1. **ENABLEMENT BLOCKER — the context load is bounded but NOT resumable.**
+   `CONTEXT_WORST_MS` is 285 s against a 120 s budget. The load now checks the invocation
+   deadline between its bounded steps, so it stops at a step boundary, gives the lease back
+   and reports `context_budget_exhausted` instead of being killed mid-load with the lease
+   held. But it keeps **no partial state**: the next invocation starts the same load from
+   the beginning. So a connection whose real context load exceeds the budget —
+   realistically, one approaching `MAX_CONTACTS_LOADED` while the database is slow — will
+   answer `budget_exhausted` every time and **never import anything**. It cannot corrupt
+   anything and it cannot progress.
+
+   Fixing it means making the load itself resumable (persisting the contact index across
+   invocations, or matching against the database rather than loading it), which is a
+   different slice. **Until then the hosted runtime limit is addressed for the import loop
+   and finalisation, and NOT addressed for context preparation.** `budget_exhausted` is
+   deliberately not a 200 so this is visible rather than silent.
 2. **An invalid committed `deltaLink`** (as opposed to a saved `nextLink`) still has no
    restart. The run reports incomplete and retries the same cursor. Clearing it means a full
    re-import, which is its own product question (what the user is shown during one).

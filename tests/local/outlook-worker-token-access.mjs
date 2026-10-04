@@ -252,6 +252,37 @@ function pagedGraphFixture ({ pages = 25, inboundAt = 22, outboundAt = 18, rejec
   return { calls, fetchImpl }
 }
 
+/**
+ * A mailbox whose round finishes on the FIRST page of each folder but yields many
+ * qualifying conversations, so the expensive part is FINALISATION - writing one bounded
+ * RPC per suggestion.
+ */
+function manyConversationsFixture (n) {
+  const calls = []
+  const addr = (e) => ({ emailAddress: { address: e, name: e.split('@')[0] } })
+  const m = (id, conv, from, to, sent) => ({
+    id, conversationId: conv, receivedDateTime: sent, sentDateTime: sent, isDraft: false,
+    subject: 'Following up after the info session',
+    from: addr(from), sender: addr(from), toRecipients: to.map(addr), ccRecipients: [],
+  })
+  const convs = Array.from({ length: n }, (_, i) => `conv-${String(i).padStart(3, '0')}`)
+  const fetchImpl = async (url, init) => {
+    calls.push({ url, bearer: init.headers?.Authorization ?? null })
+    const folder = url.includes('/mailFolders/inbox/') ? 'inbox' : 'sentitems'
+    return {
+      status: 200,
+      headers: { get: () => null },
+      json: async () => ({
+        value: convs.map((c, i) => (folder === 'inbox'
+          ? m(`ms-in-${i}`, c, RECRUITER, [ME], '2026-09-20T14:05:00Z')
+          : m(`ms-out-${i}`, c, ME, [RECRUITER], '2026-09-21T09:12:00Z'))),
+        '@odata.deltaLink': `${GRAPH_BASE}/me/mailFolders/${folder}/messages/delta?$deltatoken=NEW-${folder}`,
+      }),
+    }
+  }
+  return { calls, fetchImpl, count: n }
+}
+
 // ── the worker, served over real HTTP ────────────────────────────────────────
 
 let currentEnv = null
@@ -854,6 +885,109 @@ async function main () {
       assert.strictEqual(row[7], committed[row[0]].ciphertext,
         'the committed cursor must be untouched')
     }
+  })
+
+  // ══ finalisation spans invocations, against the REAL database ═════════════
+  console.log('\nfinalisation: a large final batch resumes instead of restarting')
+
+  await test('a batch too big for one invocation finishes across invocations, ONCE each', async () => {
+    // REPRODUCED BEFORE THE FIX, with the same shape as this fixture: 40 qualifying
+    // conversations at one bounded RPC each spent 800s against a 120s budget. A hard stop
+    // after six left six valid pending suggestions, the round saved, both cursors
+    // correctly NULL - and nothing recorded those six, so the next invocation re-listed
+    // all 40 and began again at the first entry, forever.
+    //
+    // Here the budget is made to bite by DELAYING the database port: every RPC costs real
+    // time, so the write loop cannot finish in one invocation. Nothing about the hosted
+    // timeout is simulated - the worker simply measures its own clock.
+    await seed({ accessExpired: false })
+    const graphC = manyConversationsFixture(12)
+    const ports = makePorts()
+    // 1.2s per candidate write: twelve of them cannot fit inside one budget once the
+    // reserve (a write, recording how far we got, and the release) is held back.
+    // 300ms of real delay per write, on a clock that reports time passing 100x faster, so
+    // each write costs about 30s of the 120s invocation budget. Nothing about the hosted
+    // timeout is faked: the worker measures the clock it is given and stops ITSELF. A real
+    // 120s budget with real 30s writes would behave identically and take minutes to run.
+    const slowRpc = async (name, args) => {
+      if (name === 'upsert_outlook_interaction_candidate') {
+        await new Promise((r) => setTimeout(r, 300))
+      }
+      return ports.rpc(name, args)
+    }
+    const SCALE = 100
+    let scaleFrom = Date.now()
+    const fastClock = () => scaleFrom + (Date.now() - scaleFrom) * SCALE
+    currentEnv = baseEnv()
+    currentDeps = {
+      tokenUrl: FIXTURE_TOKEN_URL, fetchImpl: tokenFixture().fetchImpl,
+      graphFetchImpl: graphC.fetchImpl, select: ports.select, rpc: slowRpc,
+      now: fastClock,
+    }
+    const outcomes = []
+    for (let i = 0; i < 20; i += 1) {
+      const r = await callWorker({ secret: WORKER_SECRET })
+      outcomes.push(r.body?.run?.outcome)
+      if (r.body?.run?.outcome !== 'continued') break
+      assert.strictEqual(r.status, 200, r.raw.slice(0, 200))
+      // NO CURSOR while suggestions remain unwritten.
+      assert.strictEqual(r.body.run.cursors_advanced, 0)
+      assert.strictEqual(one(`SELECT coalesce(string_agg(coalesce(delta_link_ciphertext,'NULL'),','),'none')
+        FROM public.outlook_sync_state WHERE user_id='${U1}';`), 'NULL,NULL',
+      'no cursor may advance while the batch is unfinished')
+      // The finalisation resume point IS recorded, on both folder rows.
+      assert.strictEqual(one(`SELECT count(*) FROM public.outlook_sync_state
+        WHERE user_id='${U1}' AND round_write_cursor ~ '^[0-9a-f]{64}$';`), '2',
+      'how far finalisation got must be saved')
+      makeDueNow()
+      scaleFrom = Date.now()        // a fresh invocation gets a fresh budget
+    }
+
+    const last = outcomes.at(-1)
+    assert.strictEqual(last, 'committed', JSON.stringify(outcomes))
+    assert.ok(outcomes.length >= 3,
+      `finalisation must span invocations and then finish: ${JSON.stringify(outcomes)}`)
+    for (const o of outcomes.slice(0, -1)) {
+      assert.strictEqual(o, 'continued', JSON.stringify(outcomes))
+    }
+    // EXACTLY ONE suggestion per conversation - no duplicates, none dropped.
+    assert.strictEqual(one(`SELECT count(*) FROM public.interaction_candidates
+      WHERE user_id='${U1}' AND source='outlook' AND status='pending';`), '12')
+    assert.strictEqual(one(`SELECT count(DISTINCT episode_fingerprint)
+      FROM public.outlook_candidate_refs WHERE user_id='${U1}';`), '12')
+    // No contact, no interaction: review before save is intact.
+    assert.strictEqual(one(`SELECT count(*) FROM public.interactions WHERE user_id='${U1}';`), '0')
+    assert.strictEqual(one(`SELECT count(*) FROM public.contacts WHERE user_id='${U1}';`), '1')
+    // And the committed round leaves no resume point behind.
+    assert.strictEqual(one(`SELECT count(*) FROM public.outlook_sync_state
+      WHERE user_id='${U1}' AND round_write_cursor IS NOT NULL;`), '0')
+    assert.strictEqual(one('SELECT count(*) FROM public.outlook_conversation_progress;'), '0')
+  })
+
+  await test('the finalisation resume point is lease-fenced, through real PostgREST', async () => {
+    await seed({ accessExpired: false })
+    const graphC = manyConversationsFixture(2)
+    const ports = makePorts()
+    currentEnv = baseEnv()
+    currentDeps = {
+      tokenUrl: FIXTURE_TOKEN_URL, fetchImpl: tokenFixture().fetchImpl,
+      graphFetchImpl: graphC.fetchImpl, select: ports.select, rpc: ports.rpc,
+    }
+    const r = await callWorker({ secret: WORKER_SECRET })
+    assert.strictEqual(r.body.run.outcome, 'committed', JSON.stringify(r.body.run))
+
+    // A run that does not own the leases cannot move the resume point. Asked as the
+    // service role over real HTTP, which is the only way the worker ever asks.
+    const stale = await ports.rpc('advance_outlook_round_write_cursor', {
+      p_connection_id: one(`SELECT id FROM public.microsoft_connections WHERE user_id='${U1}';`),
+      p_run_id: '99999999-9999-9999-9999-999999999999',
+      p_round_id: '88888888-8888-8888-8888-888888888888',
+      p_after: 'a'.repeat(64),
+    })
+    assert.strictEqual(stale.error, null, JSON.stringify(stale.error))
+    assert.strictEqual(stale.data.result, 'stale_run', JSON.stringify(stale.data))
+    assert.strictEqual(one(`SELECT count(*) FROM public.outlook_sync_state
+      WHERE user_id='${U1}' AND round_write_cursor IS NOT NULL;`), '0')
   })
 
   // ══ refusals ══════════════════════════════════════════════════════════════

@@ -338,8 +338,17 @@ Draft branch and undeployed; it is not a Production fact.
       heavier commitment: a durable, growing record of how many conversations a user has, when each
       was last active, and which involve a tracked contact — needing a retention window, a deletion
       path, an answer for what disconnecting does to it, and a different policy bullet.
-      **The implementation deliberately chose the minimal option and did not decide this.** Full
-      reasoning: `docs/outlook-durable-continuation-design.md` §6.
+      **The implementation deliberately chose the minimal option and did not decide this.**
+
+      A **concrete decision sheet** for the cross-round option — the minimum retained fields
+      (keyed fingerprints, two booleans rather than message counts, two timestamps, the matched
+      contact id), a proposed **90-day rolling retention** from the last message seen with the
+      reasoning and the rejected alternatives, **deletion on disconnect** via the existing
+      cascade plus an assertion in the disconnect runtime test, and the **exact replacement
+      privacy wording** — is in `docs/outlook-durable-continuation-design.md` §6, under "D2 as a
+      decision sheet". Nothing in it is implemented; it exists so the choice can be made on
+      specifics. Note that approving it would add a second expiry path while
+      `expire_pending_outlook_context` is still unscheduled (§7 item 5).
 
 ---
 

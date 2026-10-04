@@ -38,6 +38,10 @@ DECLARE
   mfp_mid text := repeat('e', 64);
   mfp_1st text := repeat('f', 64);
   committed_ct text;
+  -- Deliberately ordered AFTER cfp: the resume filter is `> cursor`, so a fingerprint
+  -- that sorted before it would be skipped and prove nothing. ('2' < 'a' - the first
+  -- attempt at this fixture got that wrong and the filter correctly returned nothing.)
+  cfp2    text := repeat('a', 63) || 'b';
 BEGIN
   -- ── fixtures ──────────────────────────────────────────────────────────────
   DELETE FROM public.outlook_conversation_progress WHERE user_id = u1;
@@ -209,6 +213,76 @@ BEGIN
   ASSERT NOT (v::text LIKE '%ava@bank.test%'), 'no address may come back';
   ASSERT NOT (v::text LIKE '%Following up%'), 'no subject may come back';
 
+  -- ── 9b. THE FINALISATION RESUME POINT ─────────────────────────────────────
+  -- A finished round writes its suggestions one bounded RPC at a time, and this is how
+  -- it remembers how far that got. Reproduced before this existed: a hard stop after 6
+  -- of 40 writes left 6 pending suggestions, the round intact, both cursors NULL and no
+  -- record of the 6 - so the next invocation re-listed all 40 and began again at the
+  -- first entry, forever.
+  --
+  -- Add a second conversation so there is something for the resume filter to skip.
+  v := public.record_outlook_page_progress(
+         conn, run1, 'sentitems', round1, 1,
+         'NEXT-S1', 'NS1', NULL, NULL, 1::smallint, false, 4, 0,
+         jsonb_build_array(jsonb_build_object(
+           'cfp', cfp2, 'pfp', pfp, 'efp', repeat('8', 64),
+           'elookup', jsonb_build_array(repeat('8', 64)), 'first_fp', repeat('9', 64),
+           'first_at', '2026-09-23T09:00:00Z', 'last_at', '2026-09-23T10:00:00Z',
+           'contact_id', c1::text, 'key_version', 1,
+           'inbound', 1, 'outbound', 1, 'messages', 2, 'taint', NULL)),
+         86400);
+  ASSERT v ->> 'result' = 'recorded', v::text;
+  ASSERT (SELECT count(*) FROM public.outlook_conversation_progress
+           WHERE connection_id = conn) = 2, 'two conversations now';
+
+  -- With no cursor the whole round is listed.
+  v := public.list_outlook_round_conversations(conn, run1, round1, 500, NULL);
+  ASSERT jsonb_array_length(v -> 'conversations') = 2, v::text;
+
+  -- Record that the first (lowest-ordered) conversation is dealt with.
+  v := public.advance_outlook_round_write_cursor(conn, run1, round1, cfp);
+  ASSERT v ->> 'result' = 'advanced', v::text;
+  ASSERT v ->> 'write_cursor' = cfp, v::text;
+  -- It is recorded on BOTH folder rows, because finalisation belongs to the round.
+  ASSERT (SELECT count(*) FROM public.outlook_sync_state
+           WHERE connection_id = conn AND round_write_cursor = cfp) = 2,
+         'the write cursor belongs to the round, not to one folder';
+
+  -- AND THE RESUME WORKS: the conversation already dealt with is not offered again.
+  v := public.list_outlook_round_conversations(conn, run1, round1, 500, cfp);
+  ASSERT jsonb_array_length(v -> 'conversations') = 1, v::text;
+  ASSERT v #>> '{conversations,0,cfp}' = cfp2, v::text;
+
+  -- MONOTONE: a late or duplicated call with an older fingerprint cannot rewind
+  -- finalisation and cause rows to be written again.
+  v := public.advance_outlook_round_write_cursor(conn, run1, round1, repeat('0', 64));
+  ASSERT v ->> 'result' = 'advanced', v::text;
+  ASSERT (SELECT round_write_cursor = cfp FROM public.outlook_sync_state
+           WHERE connection_id = conn AND folder = 'inbox'),
+         'THE WRITE CURSOR MUST NEVER GO BACKWARDS';
+
+  -- Malformed input is refused rather than stored: a bad value would exclude every row
+  -- from the next pass and look exactly like `nothing left to write`.
+  ASSERT public.advance_outlook_round_write_cursor(conn, run1, round1, 'not-a-fingerprint')
+           ->> 'result' = 'invalid_cursor';
+  ASSERT public.advance_outlook_round_write_cursor(conn, run1, round1, NULL)
+           ->> 'result' = 'invalid_cursor';
+  ASSERT public.advance_outlook_round_write_cursor(conn, run1, round2, cfp2)
+           ->> 'result' = 'round_mismatch', 'another round may not move this cursor';
+
+  -- FENCED on both folder leases, exactly like every other round RPC.
+  UPDATE public.outlook_sync_state
+     SET sync_lease_until = now() - interval '1 minute'
+   WHERE connection_id = conn AND folder = 'sentitems';
+  ASSERT public.advance_outlook_round_write_cursor(conn, run1, round1, cfp2)
+           ->> 'result' = 'stale_run', 'a run holding one lease must not move it';
+  ASSERT (SELECT round_write_cursor = cfp FROM public.outlook_sync_state
+           WHERE connection_id = conn AND folder = 'inbox'),
+         'a refused advance must change nothing';
+  UPDATE public.outlook_sync_state
+     SET sync_lease_until = now() + interval '10 minutes'
+   WHERE connection_id = conn AND folder = 'sentitems';
+
   -- ── 10. Finishing a folder stages a PENDING cursor, still not the real one ─
   v := public.record_outlook_page_progress(
          conn, run1, 'inbox', round1, 4,
@@ -227,7 +301,7 @@ BEGIN
   ASSERT v ->> 'result' = 'folder_already_complete', v::text;
 
   v := public.record_outlook_page_progress(
-         conn, run1, 'sentitems', round1, 1,
+         conn, run1, 'sentitems', round1, 2,
          NULL, NULL, 'PENDING-sentitems', 'PS', 1::smallint, true, 7, 0, '[]'::jsonb, 86400);
   ASSERT v ->> 'result' = 'recorded', v::text;
 
@@ -242,8 +316,12 @@ BEGIN
            WHERE connection_id = conn AND round_id = round1) = 2,
          'AN INCOMPLETE RELEASE MUST NOT ERASE THE ROUND';
   ASSERT (SELECT count(*) FROM public.outlook_conversation_progress
-           WHERE connection_id = conn) = 1,
+           WHERE connection_id = conn) = 2,
          'an incomplete release must keep the accumulator';
+  ASSERT (SELECT count(*) FROM public.outlook_sync_state
+           WHERE connection_id = conn AND round_write_cursor = cfp) = 2,
+         'AN INCOMPLETE RELEASE MUST KEEP THE FINALISATION RESUME POINT - that is what
+          lets the next invocation continue the batch instead of restarting it';
   ASSERT (SELECT delta_link_ciphertext = 'COMMITTED-inbox'
           FROM public.outlook_sync_state WHERE connection_id = conn AND folder = 'inbox'),
          'an incomplete release must not advance a cursor';
@@ -280,7 +358,8 @@ BEGIN
            WHERE connection_id = conn
              AND (round_id IS NOT NULL OR next_link_ciphertext IS NOT NULL
                   OR pending_delta_ciphertext IS NOT NULL OR round_pages <> 0
-                  OR round_page_seq <> 0 OR round_folder_complete)) = 0,
+                  OR round_page_seq <> 0 OR round_folder_complete
+                  OR round_write_cursor IS NOT NULL)) = 0,
          'a committed round must leave no round state behind';
   ASSERT (SELECT count(*) FROM public.outlook_conversation_progress
            WHERE connection_id = conn) = 0,
@@ -325,9 +404,9 @@ BEGIN
          'the reset must discard the accumulator';
   ASSERT (SELECT round_id IS NULL AND next_link_ciphertext IS NULL
                  AND pending_delta_ciphertext IS NULL AND round_pages = 0
-                 AND round_page_seq = 0
+                 AND round_page_seq = 0 AND round_write_cursor IS NULL
           FROM public.outlook_sync_state WHERE connection_id = conn AND folder = 'inbox'),
-         'the reset must discard the saved position';
+         'the reset must discard the saved position and the finalisation resume point';
   ASSERT (SELECT delta_link_ciphertext = committed_ct
           FROM public.outlook_sync_state WHERE connection_id = conn AND folder = 'inbox'),
          'THE RESET MUST NOT TOUCH THE COMMITTED CURSOR';
@@ -384,7 +463,8 @@ BEGIN
       ('record_outlook_page_progress'),
       ('read_outlook_round_progress'),
       ('list_outlook_round_conversations'),
-      ('reset_outlook_round')) AS x(name)
+      ('reset_outlook_round'),
+      ('advance_outlook_round_write_cursor')) AS x(name)
   LOOP
     ASSERT (SELECT bool_and(p.prosecdef) FROM pg_proc p
              JOIN pg_namespace n ON n.oid = p.pronamespace
@@ -403,6 +483,12 @@ BEGIN
   ASSERT NOT has_function_privilege('anon',
            'public.reset_outlook_round(uuid,uuid,text)', 'EXECUTE'),
          'anon gained EXECUTE on the restart RPC';
+  ASSERT NOT has_function_privilege('authenticated',
+           'public.advance_outlook_round_write_cursor(uuid,uuid,uuid,text)', 'EXECUTE'),
+         'authenticated gained EXECUTE on the finalisation cursor RPC';
+  ASSERT has_function_privilege('service_role',
+           'public.advance_outlook_round_write_cursor(uuid,uuid,uuid,text)', 'EXECUTE'),
+         'service_role must be able to record finalisation progress';
   ASSERT has_function_privilege('service_role',
            'public.record_outlook_page_progress(uuid,uuid,text,uuid,integer,text,text,text,text,smallint,boolean,integer,integer,jsonb,integer)',
            'EXECUTE'),

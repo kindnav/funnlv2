@@ -19,10 +19,16 @@
 
 import assert from 'node:assert'
 import { readFileSync } from 'node:fs'
+import { webcrypto } from 'node:crypto'
 import {
   runOutlookImport, summarizeRun, RUN_OUTCOMES, CONTINUE_BACKOFF_SECONDS,
-  ROUND_INCOMPLETE_REASONS,
+  ROUND_INCOMPLETE_REASONS, RPC_ROUND_TRIP_MS, WRITE_STEP_RESERVE_MS, WRITE_STEP_MS,
+  PROGRESS_STEP_MS, RELEASE_WORST_MS,
+  FINALIZE_RESERVE_MS,
 } from '../supabase/functions/shared/outlookImportRun.js'
+import {
+  makeRunContextLoader, CONTEXT_FAILURES, CONTEXT_STEP_MS, CONTACT_PAGE_SIZE,
+} from '../supabase/functions/shared/outlookRunContext.js'
 import {
   INVOCATION_BUDGET_MS, HOSTED_WALL_MS, INVOCATION_SAFETY_MS, PAGE_ADMIT_FLOOR_MS,
   CHECKPOINT_RESERVE_MS, budgetAllowsPage, FOLDER_STOP_CODES, CONTINUABLE_STOPS,
@@ -70,6 +76,7 @@ const DESIGN = read('docs/outlook-durable-continuation-design.md')
 const POLICY = read('src/pages/PrivacyPage.jsx')
 const ROUND_SRC = read('supabase/functions/shared/outlookRoundState.js')
 const PASS_SRC = read('supabase/functions/shared/outlookContinuedPass.js')
+const READINESS = read('docs/outlook-privacy-consent-readiness.md')
 
 const CONN = 'cccccccc-cccc-cccc-cccc-cccccccccccc'
 const RUN = 'rrrrrrrr-rrrr-rrrr-rrrr-rrrrrrrrrrrr'
@@ -140,10 +147,18 @@ const DECRYPT = async (ct) => String(ct).replace(/^CT:/, '')
  * One connection, many invocations. The store and the call log persist across them, which
  * is the whole point: invocation N+1 must find what invocation N wrote.
  */
-function harness ({ now } = {}) {
+function harness ({ now, advance, writeCostMs = 0 } = {}) {
   const store = makeRoundStore()
   const calls = []
   let leaseLive = true
+  let killAfter = Infinity
+  let refuseAt = -1
+  let refuseCode = 'contact_not_owned'
+  let writeCount = 0
+  const results = Object.create(null)
+  // Which episode fingerprints are already pending, so a repeat answers 'refreshed'
+  // exactly as upsert_outlook_interaction_candidate does for a row that already exists.
+  const pendingRows = new Set()
 
   const rpc = async (name, args) => {
     calls.push({ name, args })
@@ -152,7 +167,24 @@ function harness ({ now } = {}) {
     }
     if (name === 'renew_outlook_sync_lease') return { data: leaseLive, error: null }
     if (name === 'upsert_outlook_interaction_candidate') {
-      return { data: { result: 'created' }, error: null }
+      // Each write costs a bounded round trip of virtual time, which is what makes the
+      // invocation budget bite during FINALISATION rather than during the page loop.
+      if (typeof advance === 'function' && writeCostMs > 0) advance(writeCostMs)
+      if (writeCount >= killAfter) {
+        // THE HARD STOP: the platform shuts the instance down. Nothing after this runs.
+        throw Object.assign(new Error('instance terminated'), { __kill: true })
+      }
+      if (writeCount === refuseAt) {
+        writeCount += 1
+        results[refuseCode] = (results[refuseCode] || 0) + 1
+        return { data: { result: refuseCode }, error: null }
+      }
+      writeCount += 1
+      const fp = args.p_episode_fingerprint
+      const code = pendingRows.has(fp) ? 'refreshed' : 'created'
+      pendingRows.add(fp)
+      results[code] = (results[code] || 0) + 1
+      return { data: { result: code }, error: null }
     }
     if (name === 'release_outlook_sync_lease') {
       if (args?.p_run_complete === true) store.commitRelease()
@@ -180,6 +212,12 @@ function harness ({ now } = {}) {
     checkpoints: () => calls.filter((c) => c.name === 'record_outlook_page_progress'),
     releases: () => calls.filter((c) => c.name === 'release_outlook_sync_lease'),
     setLease: (v) => { leaseLive = v },
+    rpc,
+    // Results ACROSS invocations, which is what a resumed finalisation has to be judged on.
+    results: () => ({ ...results }),
+    distinctWritten: () => pendingRows.size,
+    killWritesAfter: (n) => { killAfter = n },
+    refuseWriteAt: (n, code) => { refuseAt = n; refuseCode = code ?? refuseCode },
   }
 }
 
@@ -331,7 +369,11 @@ test('an invocation that is already out of budget reads NOTHING and saves NOTHIN
   const mb = bigMailbox({ inboxPages: 5, sentPages: 5, inboundAt: 1, outboundAt: 1 })
   // Handler entry was long ago: the budget is already spent before the first page.
   const r = await h.invoke({ fetchImpl: mb.fetchImpl, requestEntryMs: 0 })
-  assert.strictEqual(r.outcome, 'continued')
+  // NOT 'continued'. An invocation that saved nothing must not look like one that moved
+  // the round forward: 'continued' promises the next invocation will carry on from here,
+  // and there is no 'here'. A no-progress invocation says so, and does not answer 200.
+  assert.strictEqual(r.outcome, 'budget_exhausted', JSON.stringify(summarizeRun(r)))
+  assert.strictEqual(r.reason, 'context_budget_exhausted')
   assert.strictEqual(mb.served.length, 0, 'not one Graph request may be made')
   assert.strictEqual(h.checkpoints().length, 0)
   assert.strictEqual(r.cursorsAdvanced, 0)
@@ -482,6 +524,321 @@ test('after the reset, a fresh round starts from the committed cursor and commit
   }
   assert.strictEqual(outcome, 'committed')
   assert.strictEqual(h.writes().length, 1, 'exactly one pending suggestion, still')
+})
+
+// ══════════════════════════════════════════════════════════════════════════════
+console.log('\n5. the WHOLE invocation is budgeted, not only the page loop')
+// ══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * A mailbox with `n` qualifying conversations, all on one page per folder, so the round
+ * finishes immediately and the expensive part is FINALISATION.
+ */
+function manyConversations (n) {
+  const convs = Array.from({ length: n }, (_, i) => `conv-${String(i).padStart(3, '0')}`)
+  const served = []
+  const fetchImpl = async (url) => {
+    const inbox = url.includes('/mailFolders/inbox/')
+    served.push(inbox ? 'inbox' : 'sentitems')
+    return {
+      status: 200,
+      headers: { get: () => null },
+      json: async () => ({
+        value: convs.map((c, i) => (inbox
+          ? msg(`in-${i}`, c, OTHER, [ME], '2026-09-20T14:00:00Z')
+          : msg(`out-${i}`, c, ME, [OTHER], '2026-09-21T09:00:00Z'))),
+        '@odata.deltaLink': `${GRAPH_BASE}/me/mailFolders/${inbox ? 'inbox' : 'sentitems'}/messages/delta?$deltatoken=D`,
+      }),
+    }
+  }
+  return { fetchImpl, served, count: n }
+}
+
+test('REPRODUCED: a context load longer than the budget is bounded, not killed', async () => {
+  // BEFORE: loadRunContext ran before the only budget check, which lived inside the page
+  // loop. A 200s load against a 120s budget returned a 200 'continued' having read no
+  // mail and saved no checkpoint - and on the real platform the instance was already
+  // killed at 150s mid-load, leaving the lease held until it expired. Reproduced exactly
+  // that way before this test existed.
+  let clock = 0
+  const h = harness({ now: () => clock })
+  const mb = bigMailbox({ inboxPages: 2, sentPages: 2, inboundAt: 1, outboundAt: 1 })
+  const r = await runOutlookImport({
+    rpc: h.rpc,
+    encryptCursor: ENCRYPT,
+    decryptCursor: DECRYPT,
+    // The real loader checks the same deadline between its bounded steps; this stub stands
+    // in for one that has already spent the budget by the time it is asked to continue.
+    loadRunContext: async (_c, _r, budgetOpts) => {
+      assert.ok(Number.isFinite(budgetOpts?.deadlineMs),
+        'the loader must be TOLD the invocation deadline')
+      clock += 200_000
+      throw Object.assign(new Error('x'), { reason: 'context_budget_exhausted' })
+    },
+    requestEntryMs: 0,
+    deps: { fetchImpl: mb.fetchImpl, now: () => clock },
+  })
+  // The run gives the lease back and says why, instead of being killed holding it.
+  assert.strictEqual(r.outcome, 'released_error', JSON.stringify(summarizeRun(r)))
+  assert.strictEqual(r.reason, 'context_budget_exhausted')
+  assert.strictEqual(mb.served.length, 0, 'no mail may be read')
+  assert.strictEqual(r.cursorsAdvanced, 0)
+  const rel = h.releases().at(-1).args
+  assert.strictEqual(rel.p_run_complete, false)
+  assert.strictEqual(rel.p_inbox_delta_ct, null)
+})
+
+test('an invocation with no budget left does not even start the context load', async () => {
+  let clock = 118_000          // 2s left of a 120s budget
+  const h = harness({ now: () => clock })
+  const mb = bigMailbox({ inboxPages: 1, sentPages: 1, inboundAt: 1, outboundAt: 1 })
+  let loads = 0
+  const r = await runOutlookImport({
+    rpc: h.rpc,
+    encryptCursor: ENCRYPT,
+    decryptCursor: DECRYPT,
+    loadRunContext: async () => { loads += 1; return context()() },
+    requestEntryMs: 0,
+    deps: { fetchImpl: mb.fetchImpl, now: () => clock },
+  })
+  assert.strictEqual(loads, 0, 'not one database read may be made')
+  assert.strictEqual(r.outcome, 'budget_exhausted', JSON.stringify(summarizeRun(r)))
+  assert.strictEqual(r.reason, 'context_budget_exhausted')
+  assert.strictEqual(mb.served.length, 0)
+  // The lease is RELEASED rather than left held until it expires - which is the whole
+  // difference between stopping ourselves and being killed.
+  assert.strictEqual(h.releases().length, 1)
+  assert.strictEqual(h.releases()[0].args.p_status, 'idle')
+})
+
+test('the real loader stops at a PAGE BOUNDARY when a delayed port eats the budget', async () => {
+  // Delayed ports rather than a stubbed loader: every PostgREST read costs 20s of virtual
+  // time, so the paged contact read - 13 of the load's 18 bounded calls - cannot finish.
+  let clock = 0
+  const reads = []
+  const select = async (path) => {
+    reads.push(path.split('?')[0])
+    clock += 20_000
+    if (path.startsWith('microsoft_connections')) {
+      return { data: [{ user_id: U1, ms_email: ME, scopes: ['Mail.Read'], token_expires_at: null }], error: null }
+    }
+    if (path.startsWith('contacts')) {
+      // A full page every time, so the loop keeps going until something stops it.
+      return {
+        data: Array.from({ length: CONTACT_PAGE_SIZE }, (_, i) => ({
+          id: `c${reads.length}-${i}`, user_id: U1, email: `p${reads.length}-${i}@x.test`,
+        })),
+        error: null,
+      }
+    }
+    return { data: [], error: null }
+  }
+  const loader = makeRunContextLoader({
+    select,
+    rpc: async () => ({ data: { result: 'rotated' }, error: null }),
+    config: {
+      clientId: 'id', clientSecret: 'secret', tokenUrl: 'https://t.test',
+      tokenKeyB64: Buffer.from(new Uint8Array(32).fill(3)).toString('base64'),
+      keyRing: KEY_RING,
+    },
+    deps: { now: () => clock, subtle: webcrypto.subtle },
+  })
+
+  let thrown = null
+  try {
+    await loader(CONN, RUN, { deadlineMs: INVOCATION_BUDGET_MS, now: () => clock })
+  } catch (e) { thrown = e }
+
+  assert.ok(thrown, 'the load must not run past the budget')
+  assert.strictEqual(thrown.reason, 'context_budget_exhausted')
+  assert.ok(CONTEXT_FAILURES.includes(thrown.reason), 'the reason must be controlled')
+  // It stopped BETWEEN reads, not mid-read: 120s of budget at 20s a read is five reads,
+  // and the margin means the sixth is never started.
+  assert.ok(reads.length <= 6, `stopped at a page boundary, after ${reads.length} reads`)
+  assert.ok(reads.length >= 2, 'it must have got past the connection read')
+  assert.ok(clock < INVOCATION_BUDGET_MS + 20_000,
+    `it must not overrun the budget by more than one step (${clock}ms)`)
+})
+
+test('the finalisation reserves are derived, not guessed', () => {
+  // What a write must keep in hand: the write itself, the call that records it, and the
+  // release. Derived from those three so adding a step cannot silently shrink the margin.
+  assert.strictEqual(WRITE_STEP_RESERVE_MS, WRITE_STEP_MS + PROGRESS_STEP_MS + RELEASE_WORST_MS)
+  // And starting finalisation at all needs the list call on top of one write's reserve.
+  assert.strictEqual(FINALIZE_RESERVE_MS, PROGRESS_STEP_MS + WRITE_STEP_RESERVE_MS)
+  // Both must fit inside one invocation, or finalisation could never start.
+  assert.ok(FINALIZE_RESERVE_MS < INVOCATION_BUDGET_MS,
+    'the invocation budget must be able to cover listing plus one write')
+})
+
+test('CONTEXT_STEP_MS is the same bounded round trip the run budgets with', () => {
+  // Two modules, one number. The loader cannot import endpoints.js (that belongs to the
+  // worker function, not shared/), so the only thing stopping them drifting is this.
+  assert.strictEqual(CONTEXT_STEP_MS, RPC_ROUND_TRIP_MS)
+})
+
+// ══════════════════════════════════════════════════════════════════════════════
+console.log('\n6. finalising a large batch spans invocations instead of restarting')
+// ══════════════════════════════════════════════════════════════════════════════
+
+test('REPRODUCED AND FIXED: 40 suggestions finish across invocations, each written ONCE', async () => {
+  // BEFORE: the write loop had no budget check. 40 qualifying conversations at one bounded
+  // RPC each spent 800s against a 120s budget; with the platform stopping the instance
+  // after six, six valid pending suggestions existed, the round was still saved, both
+  // cursors were correctly NULL - and nothing recorded those six, so the next invocation
+  // re-listed all 40 and began again at the first entry, forever.
+  let clock = 0
+  const h = harness({ now: () => clock, advance: (ms) => { clock += ms }, writeCostMs: 20_000 })
+  const mb = manyConversations(40)
+
+  // 120s of budget, 60s reserved before admitting a write (the write, recording how far
+  // we got, and the release), and 20s a write: three writes an invocation, so 40 needs
+  // fourteen of them.
+  const perInvocation = []
+  let committedAt = -1
+  for (let i = 0; i < 25; i += 1) {
+    clock = 0                                  // a fresh invocation, a fresh 120s budget
+    const before = h.writes().length
+    const r = await h.invoke({ fetchImpl: mb.fetchImpl, requestEntryMs: 0 })
+    perInvocation.push({ outcome: r.outcome, wrote: h.writes().length - before, r })
+    if (r.outcome === 'committed') { committedAt = i; break }
+    assert.strictEqual(r.outcome, 'continued', JSON.stringify(summarizeRun(r)))
+    // NO CURSOR until every intended write is confirmed.
+    assert.strictEqual(r.cursorsAdvanced, 0)
+    assert.strictEqual(h.store.folders.inbox.delta_link_ciphertext, null,
+      'the committed cursor must not move while suggestions remain unwritten')
+    // Progress IS recorded, so the next invocation starts further along.
+    assert.match(h.store.folders.inbox.write_cursor ?? '', /^[0-9a-f]{64}$/,
+      'the finalisation cursor must be saved')
+  }
+
+  assert.ok(committedAt > 0,
+    `finalisation must need more than one invocation and then finish (${JSON.stringify(perInvocation.map((x) => x.outcome))})`)
+  // Every invocation before the last did real work, so this is progress and not a loop.
+  for (const inv of perInvocation.slice(0, -1)) {
+    assert.ok(inv.wrote > 0, 'each continued invocation must write some suggestions')
+    assert.ok(inv.wrote < 40, 'and must not write them all')
+  }
+
+  // EXACTLY 40 writes, each conversation once - no duplicates, none dropped.
+  assert.strictEqual(h.writes().length, 40, `40 writes in total, got ${h.writes().length}`)
+  const fps = h.writes().map((c) => c.args.p_episode_fingerprint)
+  assert.strictEqual(new Set(fps).size, 40, 'no suggestion may be written twice')
+
+  const last = perInvocation.at(-1).r
+  assert.strictEqual(last.outcome, 'committed')
+  assert.strictEqual(last.cursorsAdvanced, 2, 'both cursors advance, together, at the end')
+  assert.strictEqual(summarizeRun(last).finalize.complete, true)
+  // And the round is erased, write cursor included.
+  assert.strictEqual(h.store.folders.inbox.write_cursor, null)
+  assert.strictEqual(h.store.conversations.size, 0)
+})
+
+test('intended still means "writes this batch needs", not "writes we got round to"', async () => {
+  let clock = 0
+  const h = harness({ now: () => clock, advance: (ms) => { clock += ms }, writeCostMs: 20_000 })
+  const mb = manyConversations(40)
+  const r = await h.invoke({ fetchImpl: mb.fetchImpl, requestEntryMs: 0 })
+  const s = summarizeRun(r)
+  assert.strictEqual(r.outcome, 'continued')
+  assert.strictEqual(s.intended, 40, 'the whole batch is intended')
+  assert.ok(s.accepted > 0 && s.accepted < 40, `part of it landed (${s.accepted})`)
+  assert.strictEqual(s.finalize.rows, 40)
+  assert.strictEqual(s.finalize.processed, s.accepted)
+  assert.strictEqual(s.finalize.complete, false)
+  assert.strictEqual(s.finalize.cursor_advanced, true)
+  assert.strictEqual(s.cursors_advanced, 0)
+})
+
+test('A THROWN write still records how far finalisation got', async () => {
+  // Worth separating from a hard stop: a write that THROWS (a reset connection, say) is
+  // caught by the run, so the write cursor is still recorded and the next invocation
+  // resumes. Only a platform kill loses that.
+  let clock = 0
+  const h = harness({ now: () => clock, advance: (ms) => { clock += ms }, writeCostMs: 1_000 })
+  const mb = manyConversations(10)
+  h.killWritesAfter(3)
+  const r = await h.invoke({ fetchImpl: mb.fetchImpl, requestEntryMs: 0 })
+  assert.strictEqual(r.outcome, 'write_error', JSON.stringify(summarizeRun(r)))
+  assert.strictEqual(r.accepted, 3, 'the three that landed are reported')
+  assert.strictEqual(r.cursorsAdvanced, 0, 'and no cursor moved')
+  assert.match(h.store.folders.inbox.write_cursor ?? '', /^[0-9a-f]{64}$/,
+    'how far it got is still recorded, so the retry resumes')
+  const rows = [...h.store.conversations.values()].map((c) => c.cfp).sort()
+  assert.strictEqual(h.store.folders.inbox.write_cursor, rows[2])
+})
+
+test('A HARD STOP mid-batch loses no suggestion and duplicates none', async () => {
+  let clock = 0
+  // A CHEAP write here on purpose: this test is about the kill, not about the budget, so
+  // the budget must not be what stops the loop before the kill point is reached.
+  const h = harness({ now: () => clock, advance: (ms) => { clock += ms }, writeCostMs: 1_000 })
+  const mb = manyConversations(40)
+
+  // A FAITHFUL platform kill: the instance dies on the 4th write and NOTHING after it
+  // runs - so the call that records how far finalisation got never lands either. (A
+  // thrown write alone is caught by the run and does record it; that is the test above.)
+  h.killWritesAfter(3)
+  h.store.refuse('advance_outlook_round_write_cursor', 'stale_run')
+  let crashed = null
+  try {
+    await h.invoke({ fetchImpl: mb.fetchImpl, requestEntryMs: 0 })
+  } catch (e) { crashed = e }
+  const writtenBeforeKill = h.writes().length
+  assert.strictEqual(writtenBeforeKill, 4, 'three landed; the fourth is where it died')
+  assert.strictEqual(h.distinctWritten(), 3, 'three pending suggestions exist')
+  assert.strictEqual(h.store.folders.inbox.write_cursor, null,
+    'the stop happened before the cursor could be recorded')
+  assert.strictEqual(h.store.folders.inbox.delta_link_ciphertext, null,
+    'and NO cursor advanced')
+  assert.strictEqual(h.store.folders.inbox.folder_complete, true, 'the round is still saved')
+  assert.strictEqual(h.store.conversations.size, 40, 'with its accumulator intact')
+  // The run itself returns (it catches a thrown write), but the state is exactly what a
+  // kill leaves: suggestions written, round saved, nothing recorded about the batch.
+  assert.ok(crashed === null, 'the simulated kill is observed through the state, not a throw')
+
+  // The retry re-walks from the last RECORDED point, which is the start: bounded rework,
+  // and the candidate upsert answers 'refreshed' for the three already there.
+  h.killWritesAfter(Infinity)
+  h.store.allow('advance_outlook_round_write_cursor')
+  let outcome = null
+  for (let i = 0; i < 25; i += 1) {
+    clock = 0
+    const r = await h.invoke({ fetchImpl: mb.fetchImpl, requestEntryMs: 0 })
+    outcome = r.outcome
+    if (outcome !== 'continued') break
+  }
+  assert.strictEqual(outcome, 'committed')
+  // 40 distinct conversations, whatever the rework.
+  const fps = h.writes().map((c) => c.args.p_episode_fingerprint)
+  assert.strictEqual(new Set(fps).size, 40, 'every conversation is suggested, exactly once')
+  assert.strictEqual(h.distinctWritten(), 40)
+  const refreshed = h.results().refreshed ?? 0
+  assert.ok(refreshed >= 3,
+    `the three before the stop were re-sent and deduped, not lost: ${refreshed} refreshed`)
+  // BOUNDED rework: the batch restarted from the last RECORDED point, which was the
+  // start - so at most one invocation's worth of writes was repeated, not all 40 on every
+  // attempt, which is what the old behaviour did.
+  assert.ok(h.writes().length < 40 * 3,
+    `rework must be bounded, not repeated forever (${h.writes().length} writes)`)
+})
+
+test('a REFUSED write does not let the finalisation cursor pass it', async () => {
+  let clock = 0
+  const h = harness({ now: () => clock, advance: (ms) => { clock += ms }, writeCostMs: 1_000 })
+  const mb = manyConversations(5)
+  h.refuseWriteAt(3, 'contact_not_owned')      // the 4th write is refused
+  const r = await h.invoke({ fetchImpl: mb.fetchImpl, requestEntryMs: 0 })
+  assert.strictEqual(r.outcome, 'write_failed', JSON.stringify(summarizeRun(r)))
+  assert.strictEqual(r.refusal, 'contact_not_owned')
+  assert.strictEqual(r.accepted, 3, 'the three that landed are reported honestly')
+  assert.strictEqual(r.cursorsAdvanced, 0)
+  // The cursor stops BEFORE the refused conversation, so the retry reattempts it rather
+  // than skipping it.
+  const cursor = h.store.folders.inbox.write_cursor
+  const rows = [...h.store.conversations.values()].map((c) => c.cfp).sort()
+  assert.strictEqual(cursor, rows[2], 'the cursor stops at the last ACCEPTED conversation')
+  assert.ok(cursor < rows[3], 'and never passes the refused one')
 })
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -781,6 +1138,53 @@ test('the design names the decision instead of making it', () => {
   assert.ok(/Background tasks do not remove the wall limit/.test(DESIGN))
 })
 
+test('the design records that the WHOLE invocation is budgeted, and what still is not', () => {
+  // The two stages that used to run outside the budget, and the honest verdict on each.
+  assert.ok(DESIGN.includes('5a. The budget covers the WHOLE invocation'))
+  assert.ok(DESIGN.includes('having read no mail and saved no checkpoint'),
+    'the context-load reproduction must be recorded')
+  assert.ok(DESIGN.includes('800 s'),
+    'the finalisation reproduction must be recorded with its real number')
+  assert.ok(DESIGN.includes('began again'))
+  assert.ok(DESIGN.includes('at the first entry'))
+  // The remaining ceiling is named an ENABLEMENT BLOCKER, not a footnote.
+  assert.ok(DESIGN.includes('ENABLEMENT BLOCKER'))
+  assert.ok(DESIGN.includes('bounded but NOT resumable'))
+  assert.ok(DESIGN.includes('NOT addressed for context preparation'),
+    'the hosted limit must NOT be described as solved')
+  // And the trade-off in persisting the write cursor once per invocation is stated.
+  assert.ok(DESIGN.includes('once per invocation'))
+  assert.ok(DESIGN.includes('bounded rework, never a lost'))
+})
+
+test('the cross-round decision sheet names fields, retention, deletion and wording', () => {
+  // The owner has to be able to decide on specifics, not in the abstract.
+  assert.ok(DESIGN.includes('D2 as a decision sheet'))
+  assert.ok(DESIGN.includes('Minimum retained fields'))
+  assert.ok(DESIGN.includes('Booleans, not counts'),
+    'the minimum must be argued, not just listed')
+  assert.ok(DESIGN.includes('90 days from'))
+  assert.ok(DESIGN.includes('Alternatives worth rejecting'))
+  assert.ok(DESIGN.includes('Deletion on disconnect'))
+  assert.ok(DESIGN.includes('Exact privacy wording for review'))
+  // It must still be a PROPOSAL: nothing implemented, and the live policy untouched.
+  assert.ok(DESIGN.includes('Nothing below is implemented'))
+  assert.ok(!MIGRATION.includes('inbound_seen'),
+    'the cross-round fields must NOT be implemented by this branch')
+  // Checked on a phrase unique to the PROPOSAL. '90 days' alone appears in the live
+  // policy already - for Gmail's initial lookback window, which is unrelated.
+  assert.ok(POLICY.includes('looks back roughly 90 days'),
+    'sanity: the unrelated Gmail lookback is what the live policy says about 90 days')
+  for (const proposed of ['whether each side has replied',
+    'after the last message it saw', 'recognize a reply that arrives later']) {
+    assert.ok(!POLICY.includes(proposed),
+      `the proposed retention wording must not be published: ${proposed}`)
+  }
+  // The readiness packet must point at it, so the decision is not buried in a design doc.
+  assert.ok(READINESS.includes('decision sheet'))
+  assert.ok(READINESS.includes('expire_pending_outlook_context'),
+    'approving it would add a second expiry path while the first is unscheduled')
+})
 test('the migration says the accumulator is round-scoped and promises nothing more', () => {
   assert.ok(/ROUND-SCOPED/.test(MIGRATION))
   assert.ok(/No\s*\n?-- scheduler is introduced and no retention window is promised/.test(MIGRATION)

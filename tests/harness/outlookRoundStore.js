@@ -32,6 +32,7 @@ const blankFolder = () => ({
   messages_dropped: 0,
   conversations_dropped: 0,
   folder_complete: false,
+  write_cursor: null,
   next_link_ciphertext: null,
   next_link_nonce: null,
   next_link_key_version: null,
@@ -50,6 +51,7 @@ export function makeRoundStore () {
   const calls = []
 
   const refuse = (name, result) => { refusals.set(name, result) }
+  const allow = (name) => { refusals.delete(name) }
 
   const handle = async (name, args) => {
     calls.push(name)
@@ -81,7 +83,13 @@ export function makeRoundStore () {
     }
 
     if (name === 'list_outlook_round_conversations') {
+      // p_after is the finalisation resume point: only conversations ordered strictly
+      // after it, exactly as the SQL filters them.
+      const after = typeof args?.p_after === 'string' && args.p_after.length > 0
+        ? args.p_after
+        : null
       const rows = [...conversations.values()]
+        .filter((r) => after === null || r.cfp > after)
         .sort((a, b) => a.cfp.localeCompare(b.cfp))
       const limit = Number.isInteger(args?.p_limit) ? args.p_limit : 500
       return {
@@ -90,6 +98,28 @@ export function makeRoundStore () {
           truncated: rows.length > limit,
           conversations: rows.slice(0, limit),
         },
+        error: null,
+      }
+    }
+
+    if (name === 'advance_outlook_round_write_cursor') {
+      const after = args?.p_after
+      if (typeof after !== 'string' || !/^[0-9a-f]{64}$/.test(after)) {
+        return { data: { result: 'invalid_cursor' }, error: null }
+      }
+      for (const f of GRAPH_FOLDERS) {
+        if (folders[f].round_id !== args.p_round_id) {
+          return { data: { result: 'round_mismatch' }, error: null }
+        }
+      }
+      // MONOTONE, like the SQL: a late or duplicated call cannot rewind finalisation.
+      for (const f of GRAPH_FOLDERS) {
+        if (folders[f].write_cursor === null || after > folders[f].write_cursor) {
+          folders[f].write_cursor = after
+        }
+      }
+      return {
+        data: { result: 'advanced', write_cursor: folders.inbox.write_cursor },
         error: null,
       }
     }
@@ -233,6 +263,7 @@ export function makeRoundStore () {
   return {
     handle,
     refuse,
+    allow,
     commitRelease,
     folders,
     conversations,
