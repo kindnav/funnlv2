@@ -1238,9 +1238,7 @@ test('the design records the expiry rule, its cost and its remaining limit', () 
   assert.ok(DESIGN.includes('Can a long import still make progress'))
   assert.ok(DESIGN.includes('re-reading pages from the committed cursor'))
   assert.ok(DESIGN.includes('The remaining limit, stated'))
-  // And the two things that must stay open.
-  assert.ok(DESIGN.includes('NOT addressed for context preparation'),
-    'the context-load blocker must stay explicit')
+  // And the thing that must stay open.
   assert.ok(DESIGN.includes('D2 as a decision sheet'),
     'the cross-round privacy decision must stay open')
 })
@@ -1571,11 +1569,21 @@ test('the design records that the WHOLE invocation is budgeted, and what still i
     'the finalisation reproduction must be recorded with its real number')
   assert.ok(DESIGN.includes('began again'))
   assert.ok(DESIGN.includes('at the first entry'))
-  // The remaining ceiling is named an ENABLEMENT BLOCKER, not a footnote.
-  assert.ok(DESIGN.includes('ENABLEMENT BLOCKER'))
-  assert.ok(DESIGN.includes('bounded but NOT resumable'))
-  assert.ok(DESIGN.includes('NOT addressed for context preparation'),
-    'the hosted limit must NOT be described as solved')
+  // The context load was listed as an enablement blocker on the strength of a ceiling.
+  // It is now MEASURED, so the design must carry the numbers rather than the claim - and
+  // must not quietly drop the limits the measurement does not cover.
+  assert.ok(DESIGN.includes('sum of per-call timeout ceilings'),
+    'the 285s figure must be explained as a ceiling, not a path')
+  assert.ok(DESIGN.includes('245-268 ms') || DESIGN.includes('245–268 ms'),
+    'the measured cost at the supported maximum must be recorded')
+  assert.ok(DESIGN.includes('What was NOT measured: hosted latency'),
+    'the measurement must state what it cannot cover')
+  assert.ok(DESIGN.includes('6.7 s per call'),
+    'the hosted threshold that would exhaust the budget must be stated')
+  assert.ok(DESIGN.includes('The residual, stated honestly'),
+    'the liveness residual must stay visible')
+  assert.ok(DESIGN.includes('Supported capacity'),
+    'the supported account size must be stated')
   // And the trade-off in persisting the write cursor once per invocation is stated.
   assert.ok(DESIGN.includes('once per invocation'))
   assert.ok(DESIGN.includes('bounded rework, never a lost'))

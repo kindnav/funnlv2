@@ -68,13 +68,26 @@
 //     a reply arriving next week be paired with its earlier half - is a product decision.
 //     Both are written up as D1 and D2 in docs/outlook-durable-continuation-design.md and
 //     neither is decided in code.
-//   * CONTEXT PREPARATION IS BOUNDED BUT NOT RESUMABLE. CONTEXT_WORST_MS is 285s against a
-//     120s budget. The load now checks the invocation deadline between its bounded steps, so
-//     it stops at a step boundary and gives the lease back instead of being killed mid-load
-//     holding it - but it keeps no partial state, so the next invocation repeats it from the
-//     start. A connection whose real load exceeds the budget answers `budget_exhausted`
-//     every time and never imports anything. So the hosted runtime limit is addressed for
-//     the import loop and for finalisation, and NOT for context preparation.
+// NOT A BLOCKER, AND IT WAS LISTED AS ONE: CONTEXT PREPARATION. CONTEXT_WORST_MS is 285s
+// against a 120s budget, but that is the SUM OF PER-CALL TIMEOUT CEILINGS - 18 bounded calls
+// at the port's 15s deadline plus a 30s token exchange - which is what the guards must
+// survive, not a path anyone walks. Measured through the real port against real PostgREST
+// (tests/local/outlook-context-load-budget.mjs), with an expired access token so the refresh
+// and the rotation RPC are on the path:
+//     25 contacts      5 calls,  1 contact read,   5.6 KiB,  ~73 ms
+//   1,200 contacts     8 calls,  4 contact reads, 236.3 KiB,  ~88 ms
+//   5,000 contacts    18 calls, 14 contact reads, 985.9 KiB, ~245-268 ms
+// A Graph page plus its checkpoint needs 45,000 ms; the worst case leaves ~119,750 ms. So
+// the supported capacity is MAX_CONTACTS_LOADED (5,000) contacts per account, above which
+// the run already fails closed with `too_many_contacts` before any Graph request.
+//
+// HOSTED LATENCY IS NOT MEASURED - those containers are local. The useful threshold is that
+// at 18 calls the loader would need to average ~6.7s PER CALL before it alone consumed the
+// budget; and if it ever does, it stops at a step boundary with `context_budget_exhausted`,
+// gives the lease back, and the invocation answers `budget_exhausted` (503, not 200) rather
+// than being killed mid-load holding the lease. The residual is liveness only: the load
+// keeps no partial state, so a PERSISTENTLY degraded database would cost every invocation
+// rather than one. That corrupts nothing and is visible as a 503.
 //   * An invalid COMMITTED deltaLink still has no restart; only a saved nextLink does.
 //   * No Entra application, client secret, token-encryption key or fingerprint HMAC key
 //     exists in any environment, and none is configured here.

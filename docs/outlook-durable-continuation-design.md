@@ -41,10 +41,12 @@ any single invocation may live. The two deadlines are independent and both are e
 * the **invocation deadline**, anchored to handler entry, new here.
 
 A consequence worth stating plainly: `CONTEXT_WORST_MS` is 285 s, which is larger than the
-whole conservative wall limit. The worst-case context load (13 contact pages + probe + 3
-reads + a token refresh, each at its 15 s ceiling) therefore cannot fit in one free-plan
-invocation. That worst case is a ceiling, not a typical cost — locally the same load runs
-in well under a second — but it is a real remaining ceiling and is listed as one in §7.
+whole conservative wall limit. That is the **sum of per-call timeout ceilings** (13 contact
+pages + probe + 3 reads at the port's 15 s deadline, plus a 30 s token exchange) — the
+number the lease and budget guards must survive, not a path anyone walks. Measured, the
+same load at the supported maximum of 5,000 contacts takes **245-268 ms** over 18 bounded
+calls and under 1 MiB; see §7.1 for the table and
+`tests/local/outlook-context-load-budget.mjs` for the harness.
 
 ---
 
@@ -84,7 +86,8 @@ scoped to **one round** and erased when the round commits.
 | `pending_delta_ciphertext` / `pending_delta_nonce` | The folder's `deltaLink`, staged but **not** committed. Moves into `delta_link_ciphertext` only when the whole round commits. |
 | `round_pages` / `round_messages` | The per-**round** ceilings, so continuation cannot become an unbounded crawl. |
 | `round_page_seq` | Makes the per-page checkpoint RPC idempotent under retry. |
-| `round_started_at` / `round_expires_at` | A partial round is not allowed to sit forever. |
+| `round_write_cursor` | How far finalisation got, in conversation-fingerprint order, so a suggestion batch bigger than one invocation resumes instead of restarting — see §5a. |
+| `round_started_at` / `round_expires_at` | The round's ONE deadline, fixed at adoption and identical on both folder rows. A partial round is not allowed to sit forever, and it cannot extend its own life — see §5d. |
 
 No message, address, subject or identifier is added here. The committed-cursor columns and
 the lease columns are unchanged.
@@ -104,7 +107,7 @@ record, and it is the reason for the DECISION section.
 | `contact_id` | Funnl's own id | The matched contact. Funnl data, not Microsoft data. |
 | `inbound_count`, `outbound_count`, `message_count` | bounded counts | Two-sidedness across invocations. |
 | `taint_code` | controlled enum | `mixed_counterparties`, `ambiguous_contact`, `episode_truncated`, … A tainted conversation produces no suggestion. |
-| `expires_at` | timestamp | Round-scoped retention bound. |
+| *(no `expires_at`)* | — | These records have **no deadline of their own**: they live and die with their round, whose single deadline is `outlook_sync_state.round_expires_at`. An independent one let an early exchange age out while the round that needed it stayed valid — see §5d. |
 
 **Why a fingerprint of the first message key, and not the key.** The episode fingerprint is
 an HMAC over `(provider, connectionId, contactId, conversationKey, firstMessageKey)`. It
@@ -477,21 +480,46 @@ who sees some conversations suggested and not others will otherwise read it as a
 
 ## 7. Remaining ceilings after this slice
 
-1. **ENABLEMENT BLOCKER — the context load is bounded but NOT resumable.**
-   `CONTEXT_WORST_MS` is 285 s against a 120 s budget. The load now checks the invocation
-   deadline between its bounded steps, so it stops at a step boundary, gives the lease back
-   and reports `context_budget_exhausted` instead of being killed mid-load with the lease
-   held. But it keeps **no partial state**: the next invocation starts the same load from
-   the beginning. So a connection whose real context load exceeds the budget —
-   realistically, one approaching `MAX_CONTACTS_LOADED` while the database is slow — will
-   answer `budget_exhausted` every time and **never import anything**. It cannot corrupt
-   anything and it cannot progress.
+1. **The context load is NOT an enablement blocker — measured, not argued.** It was listed
+   as one on the strength of `CONTEXT_WORST_MS` (285 s) exceeding the 120 s budget. That
+   number is the **sum of per-call timeout ceilings** — 18 bounded calls at the port's 15 s
+   deadline plus a 30 s token exchange — which is what the guards must survive, not a path
+   anyone walks. `tests/local/outlook-context-load-budget.mjs` measures the real
+   `makeRunContextLoader` through the real deployed port against real PostgREST, with an
+   expired access token so the refresh and the rotation RPC are on the path:
 
-   Fixing it means making the load itself resumable (persisting the contact index across
-   invocations, or matching against the database rather than loading it), which is a
-   different slice. **Until then the hosted runtime limit is addressed for the import loop
-   and finalisation, and NOT addressed for context preparation.** `budget_exhausted` is
-   deliberately not a 200 so this is visible rather than silent.
+   | account | contacts | requests | contact reads | total bytes | largest response | elapsed | budget left |
+   |---|---|---|---|---|---|---|---|
+   | small | 25 | 5 | 1 | 5.6 KiB | 4.9 KiB | **73 ms** | 119,927 ms |
+   | medium | 1,200 | 8 | 4 | 236.3 KiB | 78.6 KiB | **88 ms** | 119,912 ms |
+   | supported maximum | 5,000 | 18 | 14 | 985.9 KiB | 78.8 KiB | **245–268 ms** | ~119,750 ms |
+
+   A Graph page plus its checkpoint needs 45,000 ms; the worst account leaves ~119,750 ms.
+   The ceiling is about **1,100× the measured cost**. No single response comes within half
+   the port's 256 KiB bound. The cost is linear in the contact count, and an exact multiple
+   of the page size costs one extra empty read — there is no other way to learn the set
+   ended.
+
+   **Supported capacity: up to `MAX_CONTACTS_LOADED` (5,000) contacts per account.** Above
+   it the run fails closed with `too_many_contacts` before any Graph request and before any
+   cursor advance, because matching against a subset would treat a tracked person as a
+   stranger.
+
+   **What was NOT measured: hosted latency.** Postgres and PostgREST are containers on the
+   same machine here, so per-call round trips are faster than from a deployed Edge Function.
+   What transfers is the *shape* — 18 bounded calls, under 1 MiB total, nothing quadratic or
+   unbounded. The useful hosted figure is the threshold: at 18 calls, the loader would need
+   to average **~6.7 s per call** before it alone consumed the whole budget. And if it ever
+   does, it stops at a **step boundary** with `context_budget_exhausted`, hands the lease
+   back, and the invocation answers `budget_exhausted` (503, deliberately not a 200) rather
+   than being killed mid-load holding the lease — verified in the same harness with a port
+   that costs 20 s a call.
+
+   **The residual, stated honestly:** the load keeps no partial state, so a *persistently*
+   degraded database would cost every invocation rather than one. That is a liveness
+   problem under conditions roughly 25× worse than anything measured, it corrupts nothing,
+   and it is visible as a 503. It is not a reason to persist a 5,000-contact snapshot or to
+   build a resumable-job framework.
 2. **An invalid committed `deltaLink`** (as opposed to a saved `nextLink`) still has no
    restart. The run reports incomplete and retries the same cursor. Clearing it means a full
    re-import, which is its own product question (what the user is shown during one).

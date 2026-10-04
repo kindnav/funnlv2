@@ -1084,7 +1084,16 @@ test('the worker no longer claims continuation is missing, and names what replac
   // What replaced it: the two things code cannot settle, and the ceilings that remain.
   assert.ok(/A PRODUCT DECISION AND A POLICY EDIT/.test(HANDLER_SRC))
   assert.ok(/D1 and D2/.test(HANDLER_SRC), 'the decisions must be pointed at by name')
-  assert.ok(/CONTEXT_WORST_MS/.test(HANDLER_SRC), 'the remaining ceiling must be recorded')
+  // CONTEXT_WORST_MS must still be NAMED, but no longer as a blocker: it is measured now,
+  // and the handler must carry the numbers so nobody re-asserts the ceiling as a verdict.
+  assert.ok(/CONTEXT_WORST_MS/.test(HANDLER_SRC), 'the ceiling must still be named')
+  assert.ok(/SUM OF PER-CALL TIMEOUT CEILINGS/.test(HANDLER_SRC),
+    'and explained as a ceiling rather than a path')
+  assert.ok(/5,000 contacts/.test(HANDLER_SRC), 'with the measured supported maximum')
+  assert.ok(/HOSTED LATENCY IS NOT MEASURED/.test(HANDLER_SRC),
+    'and what the measurement does not cover')
+  assert.ok(!/NOT for context preparation/.test(HANDLER_SRC),
+    'the superseded blocker claim must be gone')
   assert.ok(/COMMITTED deltaLink still has no restart/.test(HANDLER_SRC))
   // And the hosted limits that forced the design must be stated, not implied.
   assert.ok(/150s/.test(HANDLER_SRC), 'the idle timeout and wall clock must be named')
