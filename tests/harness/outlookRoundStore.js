@@ -23,6 +23,8 @@ export const MAX_PAGES_PER_ROUND = 200
 export const MAX_MESSAGES_PER_ROUND = 10_000
 export const MAX_CONVERSATIONS_PER_ROUND = 2_000
 export const MAX_EPISODE_MESSAGES = 50
+/** The measured safe page size the SQL caps every read-back at. */
+export const CONVERSATION_PAGE_SIZE = 200
 
 const blankFolder = () => ({
   round_id: null,
@@ -91,11 +93,20 @@ export function makeRoundStore () {
       const rows = [...conversations.values()]
         .filter((r) => after === null || r.cfp > after)
         .sort((a, b) => a.cfp.localeCompare(b.cfp))
-      const limit = Number.isInteger(args?.p_limit) ? args.p_limit : 500
+      // Capped exactly as the SQL caps it: a caller asking for more than fits would
+      // otherwise get a body its own port refuses to read.
+      const limit = Math.min(
+        Number.isInteger(args?.p_limit) ? args.p_limit : CONVERSATION_PAGE_SIZE,
+        CONVERSATION_PAGE_SIZE)
+      // WHOLE-ROUND, not per page: a shortened exchange anywhere in the round forfeits
+      // every cursor of it, however many pages later the caller reaches the end.
+      const truncatedEpisodes = [...conversations.values()]
+        .filter((r) => r.taint === 'episode_truncated').length
       return {
         data: {
           result: 'ok',
-          truncated: rows.length > limit,
+          more_rows: rows.length > limit,
+          round_truncated_episodes: truncatedEpisodes,
           conversations: rows.slice(0, limit),
         },
         error: null,

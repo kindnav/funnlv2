@@ -93,8 +93,7 @@ import {
   INVOCATION_BUDGET_MS, CHECKPOINT_RESERVE_MS, runOutlookRoundSlice,
 } from './outlookContinuedPass.js'
 import {
-  ROUND_TTL_SECONDS, MAX_CONVERSATIONS_PER_ROUND, finalizeConversation,
-  summarizeRoundProgress,
+  ROUND_TTL_SECONDS, finalizeConversation, summarizeRoundProgress,
 } from './outlookRoundState.js'
 
 /**
@@ -239,12 +238,21 @@ export const RETRY_BACKOFF_SECONDS = 300
 export const CONTINUE_BACKOFF_SECONDS = 15
 
 /**
- * How many of a round's conversation records may be read back at finalisation. Matches
- * MAX_CONVERSATIONS_PER_ROUND, so the read can only be truncated if the database somehow
- * holds more than it allows - and a truncated read is treated as an INCOMPLETE round
- * rather than as a short list, because the missing rows might be the two-sided ones.
+ * How many of a round's conversation records are read back AT A TIME.
+ *
+ * NOT the round ceiling, which is what this used to be. A record serialises to about 602
+ * bytes at its widest realistic shape - every fingerprint present and a lookup array
+ * carrying two keys, as a key rotation in flight would - so the 2000-record round ceiling
+ * is about 1.18 MiB in ONE response. The worker's own database port refuses any JSON
+ * response over MAX_PROVIDER_BODY_BYTES (256 KiB), so the read-back failed outright on a
+ * large round: measured and reproduced through the deployed port against 2000 real rows.
+ *
+ * 200 records measures 118 KiB - under half the bound, with room for a longer lookup
+ * array or a wider contact id. The round ceiling of MAX_CONVERSATIONS_PER_ROUND is
+ * unchanged and still enforced in record_outlook_page_progress; this is only how many
+ * are carried at once, and `more_rows` means CONTINUE rather than `incomplete`.
  */
-export const MAX_ROUND_CONVERSATIONS_READ = MAX_CONVERSATIONS_PER_ROUND
+export const CONVERSATION_PAGE_SIZE = 200
 
 /** Every outcome a run can report. Controlled; safe to log. */
 export const RUN_OUTCOMES = Object.freeze([
@@ -293,8 +301,15 @@ export const ROUND_INCOMPLETE_REASONS = Object.freeze([
   'folder_incomplete',        // a folder never reached its deltaLink and cannot continue
   'messages_dropped',         // a page was truncated
   'conversations_dropped',    // the per-round conversation ceiling discarded threads
-  'episode_truncated',        // a thread exceeded the bound a suggestion may rest on
-  'plan_truncated',           // the accumulator read back truncated
+  // A thread exceeded the bound a suggestion may rest on, so the round saw only part of
+  // an exchange. Decided from a WHOLE-ROUND aggregate, not from the page in hand: a
+  // tainted conversation on an earlier finalisation page must still stop a commit the
+  // run reaches several pages later.
+  'episode_truncated',
+  // `plan_truncated` is gone on purpose. It used to mean `the read-back was cut short, so
+  // rows may exist that were never looked at`. The read-back is now PAGED, and a page
+  // saying more rows remain means continue - the run only commits once a page comes back
+  // with none left, which is a stronger guarantee than the old one.
   'accumulator_unreadable',   // the round's own conversation records could not be read
   // The two folders staged their cursors under DIFFERENT key versions, which release
   // cannot record - it takes one version for both. Re-reading the round is cheaper than
@@ -756,49 +771,11 @@ export async function runOutlookImport (p) {
     }
   }
 
-  // Where finalisation left off. NULL means the whole round is still to do.
+  // Where finalisation left off WITHIN THE ROUND. NULL means none of it is done yet.
   const writeCursorBefore = GRAPH_FOLDERS
     .map((f) => progress?.[f]?.write_cursor)
     .find((v) => typeof v === 'string' && v.length > 0) ?? null
 
-  let rows
-  let convTruncated = false
-  try {
-    await ensureLease(PROGRESS_STEP_MS)
-    const listed = await rpc('list_outlook_round_conversations', {
-      p_connection_id: connectionId,
-      p_run_id: runId,
-      p_round_id: roundId,
-      p_limit: MAX_ROUND_CONVERSATIONS_READ,
-      // RESUME POINT: only conversations after the ones already dealt with.
-      p_after: writeCursorBefore,
-    })
-    if (listed?.error || listed?.data?.result !== 'ok') {
-      await release('idle', false, null, 'progress_unreadable')
-      return { ...nothingWritten, outcome: 'incomplete', incompleteReasons: ['accumulator_unreadable'] }
-    }
-    convTruncated = listed.data.truncated === true
-    rows = Array.isArray(listed.data.conversations) ? listed.data.conversations : []
-  } catch {
-    if (leaseLost) {
-      await release('error', false, null, 'lease_lost')
-      return { ...nothingWritten, outcome: 'lease_lost' }
-    }
-    await release('error', false, null, 'progress_unreadable')
-    return { ...nothingWritten, outcome: 'released_error', reason: 'progress_unreadable' }
-  }
-
-  // ── the commit gate, for the whole ROUND ──────────────────────────────────
-  // Same principle as before: a delta cursor claims everything before it was INGESTED, so
-  // any dropped or shortened work forfeits every cursor of the round - including the case
-  // where Inbox finished cleanly and Sent Items did not, because a conversation can span
-  // both folders. Checked BEFORE any write, so a doomed round writes nothing.
-  const incompleteReasons = []
-  if (slice.totals.messagesDropped > 0) incompleteReasons.push('messages_dropped')
-  if (slice.totals.conversationsDropped > 0) incompleteReasons.push('conversations_dropped')
-  if (convTruncated) incompleteReasons.push('plan_truncated')
-
-  // 4. Write the suggestions FIRST, one row at a time, remembering how far we got.
   const results = Object.create(null)
   const skipped = Object.create(null)
   const bumpSkip = (c) => { skipped[c] = (skipped[c] || 0) + 1 }
@@ -806,43 +783,94 @@ export async function runOutlookImport (p) {
   // landed, and reporting zero while rows exist would send a reader looking for a bug
   // in the wrong place.
   let accepted = 0
+  let intended = 0
   let firstRefusal = null
   let threw = false
   let outOfBudget = false
+  let listFailed = false
   // The last conversation DEALT WITH - written, or deliberately skipped. A skip is a
   // decision, not unfinished work, so the cursor may pass it.
   let processedThrough = null
+  let rowsListed = 0
   let rowsProcessed = 0
+  let pagesRead = 0
+  let moreRows = false
+  let roundTruncatedEpisodes = 0
 
-  // ── decide every row FIRST, then write ────────────────────────────────────
-  // Deciding is pure and cheap; writing is a bounded round trip each. Separating them
-  // keeps `intended` meaning what it has always meant - how many writes this batch needs -
-  // even when the invocation budget stops the writing part-way. Without the pre-pass,
-  // `intended` would silently become 'how many we got round to', which is the number
-  // `accepted` already reports.
-  const decisions = []
-  for (const row of rows) {
-    const one = finalizeConversation(row, (iso) => localDateFor(iso, context.timeZone))
-    const cfp = typeof row?.cfp === 'string' ? row.cfp : null
-    if (one.entry === null) {
-      bumpSkip(one.skip)
-      decisions.push({ cfp, entry: null })
-      continue
-    }
-    const { writable, skipped: entrySkipped } = partitionPlan([one.entry])
-    for (const [code, n] of Object.entries(entrySkipped)) {
-      skipped[code] = (skipped[code] || 0) + n
-    }
-    decisions.push({ cfp, entry: writable[0] ?? null })
-  }
-  const intended = decisions.filter((x) => x.entry !== null).length
+  // ── the commit gate, for the whole ROUND ──────────────────────────────────
+  // A delta cursor claims everything before it was INGESTED, so any dropped or shortened
+  // work forfeits every cursor of the round - including the case where Inbox finished
+  // cleanly and Sent Items did not, because a conversation can span both folders. These
+  // two are known from the folder counters before anything is listed.
+  const incompleteReasons = []
+  if (slice.totals.messagesDropped > 0) incompleteReasons.push('messages_dropped')
+  if (slice.totals.conversationsDropped > 0) incompleteReasons.push('conversations_dropped')
 
-  if (incompleteReasons.length === 0) {
-    try {
+  try {
+    let cursor = writeCursorBefore
+    for (;;) {
+      // Enough budget to list a page AND act on at least one row of it, or stop.
+      if (!budgetAllows(FINALIZE_RESERVE_MS)) { outOfBudget = true; break }
+
+      await ensureLease(PROGRESS_STEP_MS)
+      const listed = await rpc('list_outlook_round_conversations', {
+        p_connection_id: connectionId,
+        p_run_id: runId,
+        p_round_id: roundId,
+        // ONE PAGE. The whole round in one response is about 1.18 MiB against a 256 KiB
+        // port bound, which is the whole reason this is paged.
+        p_limit: CONVERSATION_PAGE_SIZE,
+        // RESUME POINT: only conversations after the ones already dealt with, in the same
+        // fingerprint order the write cursor is kept in.
+        p_after: cursor,
+      })
+      if (listed?.error || listed?.data?.result !== 'ok') { listFailed = true; break }
+      pagesRead += 1
+      moreRows = listed.data.more_rows === true
+      const rows = Array.isArray(listed.data.conversations) ? listed.data.conversations : []
+      rowsListed += rows.length
+
+      // THE WHOLE-ROUND TRUNCATION CHECK, and it must be whole-round. A conversation
+      // whose exchange exceeded MAX_EPISODE_MESSAGES was shortened, so a suggestion from
+      // it would rest on a partial view and no cursor from this round may be stored. The
+      // database answers for the ENTIRE round on every page, so a tainted row on page one
+      // still blocks a commit the run reaches on page five - which is precisely the
+      // regression this replaced: per-row finalisation skipped the tainted conversation
+      // and then committed both cursors past the work it had discarded.
+      const t = listed.data.round_truncated_episodes
+      if (Number.isInteger(t) && t > roundTruncatedEpisodes) roundTruncatedEpisodes = t
+      if (roundTruncatedEpisodes > 0 && !incompleteReasons.includes('episode_truncated')) {
+        incompleteReasons.push('episode_truncated')
+      }
+      // A round that cannot commit writes NOTHING, so this is checked before any write.
+      if (incompleteReasons.length > 0) break
+
+      // ── decide every row of the page FIRST, then write ────────────────────
+      // Deciding is pure and cheap; writing is a bounded round trip each. Separating them
+      // keeps `intended` meaning what it has always meant - how many writes are needed -
+      // even when the budget stops the writing part-way. Without the pre-pass it would
+      // silently become `how many we got round to`, which `accepted` already reports.
+      const decisions = []
+      for (const row of rows) {
+        const one = finalizeConversation(row, (iso) => localDateFor(iso, context.timeZone))
+        const cfp = typeof row?.cfp === 'string' ? row.cfp : null
+        if (one.entry === null) {
+          bumpSkip(one.skip)
+          decisions.push({ cfp, entry: null })
+          continue
+        }
+        const { writable, skipped: entrySkipped } = partitionPlan([one.entry])
+        for (const [code, n] of Object.entries(entrySkipped)) {
+          skipped[code] = (skipped[code] || 0) + n
+        }
+        decisions.push({ cfp, entry: writable[0] ?? null })
+      }
+      intended += decisions.filter((x) => x.entry !== null).length
+
       for (const { cfp, entry } of decisions) {
         if (entry === null) {
-          // Skipped on purpose - a tainted, one-sided or unsupported conversation. A skip
-          // is a decision, not unfinished work, so finalisation may pass it.
+          // Skipped on purpose - a one-sided or unsupported conversation. A skip is a
+          // decision, not unfinished work, so finalisation may pass it.
           rowsProcessed += 1
           if (cfp !== null) processedThrough = cfp
           continue
@@ -852,7 +880,7 @@ export async function runOutlookImport (p) {
         // Enough must remain for the write, for recording that it happened, and for the
         // release - otherwise stop here and let a later invocation carry on.
         if (!budgetAllows(WRITE_STEP_RESERVE_MS)) { outOfBudget = true; break }
-        // And the LEASE, which is a different deadline: MAX_PLAN_ENTRIES round trips can
+        // And the LEASE, which is a different deadline: a round's worth of round trips can
         // outlast any lease, and a write refused `stale_run` halfway through would throw
         // away a run that had otherwise succeeded.
         await ensureLease(WRITE_STEP_MS)
@@ -883,12 +911,26 @@ export async function runOutlookImport (p) {
         // and the next attempt must retry this conversation rather than skip it.
         break
       }
-    } catch {
-      // A renewal refusal inside the loop sets leaseLost; anything else is a thrown write.
-      threw = true
+
+      if (outOfBudget || firstRefusal !== null) break
+      if (!moreRows || rows.length === 0) break
+      // Carry on from the last conversation dealt with, which is where the write cursor
+      // will be recorded too.
+      cursor = processedThrough ?? cursor
     }
+  } catch {
+    // A renewal refusal inside the loop sets leaseLost; anything else is a thrown write.
+    threw = true
   }
 
+  if (listFailed) {
+    await release('idle', false, null, 'progress_unreadable')
+    return {
+      ...nothingWritten,
+      outcome: 'incomplete',
+      incompleteReasons: ['accumulator_unreadable'],
+    }
+  }
   // Record how far finalisation got, while the lease is still held. Doing this once per
   // invocation rather than once per write keeps the round trips down; the cost of a hard
   // stop before it lands is re-writing rows that are already there, which the candidate
@@ -913,10 +955,14 @@ export async function runOutlookImport (p) {
   }
   if (accepted > 0) durableProgress = true
 
-  // EVERY intended write must be confirmed before a cursor may move, and the batch must
-  // be exhausted: `truncated` or an unprocessed row means there is more of this round to
-  // write, so the cursor stays where it is.
-  const batchComplete = rowsProcessed === decisions.length && !convTruncated
+  // EVERY intended write must be confirmed before a cursor may move, AND the round must be
+  // exhausted. Three separate ways it might not be: a page said more rows remain, a row of
+  // the page in hand was never processed, or the listing itself failed. Any of them means
+  // there is more of this round to finalise, so no cursor moves.
+  const batchComplete = !moreRows
+    && !listFailed
+    && !outOfBudget
+    && rowsProcessed === rowsListed
   const partial = {
     connectionId,
     intended,
@@ -929,8 +975,10 @@ export async function runOutlookImport (p) {
     stops,
     // How much of the round's finalisation is done, as counts only.
     finalize: {
-      rows: rows.length,
+      pages: pagesRead,
+      rows: rowsListed,
       processed: rowsProcessed,
+      more_rows: moreRows,
       resumed: writeCursorBefore !== null,
       cursor_advanced: writeCursorAdvanced,
       complete: batchComplete,

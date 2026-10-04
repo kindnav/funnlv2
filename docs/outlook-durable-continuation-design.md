@@ -239,6 +239,55 @@ or duplicated suggestion. A test exercises exactly that.
 written, no cursor advanced — says `budget_exhausted` and does **not** answer 200, because
 that is a no-progress loop an operator has to see rather than a healthy partial.
 
+### 5b. The accumulator read-back is paged, because the port bounds every response
+
+`list_outlook_round_conversations` first asked for the whole round — up to
+`MAX_CONVERSATIONS_PER_ROUND` (2000) records in one response. Measured against 2000 real
+rows at their widest realistic shape (every fingerprint present and a lookup array carrying
+two keys, as a key rotation in flight would):
+
+| | |
+|---|---|
+| bytes per record | **602** |
+| whole round, 2000 records | **1,204,055 bytes = 1,175.8 KiB** |
+| the worker port's bound | **262,144 bytes = 256 KiB** |
+| one page of 200 | **118 KiB** — under half the bound |
+
+So the read-back was **4.6× over the bound** and the deployed port refused it outright: a
+large round could not be finalised at all. Reproduced through that port on those rows, where
+the refusal is specifically `readJsonBounded` rejecting the body.
+
+`CONVERSATION_PAGE_SIZE` is 200, and the SQL **clamps** `p_limit` to it rather than merely
+defaulting to it — a caller asking for the whole round would otherwise produce a body its
+own port cannot read. The run walks the pages using the **same ordered write cursor**
+finalisation already keeps, so paging and resumption are one mechanism rather than two.
+`more_rows` means **continue**, not "incomplete": the run commits only when a page comes
+back with none left. The whole-round ceiling of 2000 is unchanged and still enforced in
+`record_outlook_page_progress`.
+
+`plan_truncated` is gone as an incomplete reason. It used to mean "the read-back was cut
+short, so rows may exist that were never looked at" — which paging replaces with a stronger
+guarantee: the run has provably reached the end of the round before any cursor moves.
+
+### 5c. A shortened exchange forfeits the round's cursors — decided whole-round
+
+The original whole-round gate treated `episode_truncated` as incomplete. When finalisation
+became per-row, the tainted conversation was *skipped* and nothing else happened, so the run
+**committed both cursors past an exchange it had discarded** — permanently, because a delta
+stream never offers those messages again. That was a regression, and it is fixed.
+
+The fix cannot be a check on the page in hand. Finalisation may already have passed the
+page holding the shortened exchange and recorded the write cursor beyond it, so the page a
+later invocation lists is clean while the round is not. `list_outlook_round_conversations`
+therefore returns `round_truncated_episodes`, a **whole-round** aggregate computed before
+paging is applied and returned on *every* page. Any non-zero value adds `episode_truncated`
+to `incompleteReasons`, which is checked **before any write**, so a round that cannot commit
+writes nothing at all.
+
+Both cases are tested: the tainted row on the page in hand, and the tainted row behind the
+write cursor and therefore absent from the page — with a clean round of the same shape
+committing normally, so the gate is not simply always on.
+
 The budget is driven by an injected clock, so its behaviour is tested with a virtual clock
 rather than by hoping a local Deno reproduces a hosted timeout.
 

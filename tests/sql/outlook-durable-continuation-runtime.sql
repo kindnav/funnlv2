@@ -38,6 +38,7 @@ DECLARE
   mfp_mid text := repeat('e', 64);
   mfp_1st text := repeat('f', 64);
   committed_ct text;
+  i       integer;
   -- Deliberately ordered AFTER cfp: the resume filter is `> cursor`, so a fingerprint
   -- that sorted before it would be skipped and prove nothing. ('2' < 'a' - the first
   -- attempt at this fixture got that wrong and the filter correctly returned nothing.)
@@ -204,9 +205,9 @@ BEGIN
   ASSERT (v #>> '{folders,inbox,page_seq}')::int = 3, v::text;
   ASSERT (v #>> '{folders,sentitems,page_seq}')::int = 0, v::text;
 
-  v := public.list_outlook_round_conversations(conn, run1, round1, 500);
+  v := public.list_outlook_round_conversations(conn, run1, round1, 200);
   ASSERT v ->> 'result' = 'ok', v::text;
-  ASSERT (v ->> 'truncated')::boolean = false, v::text;
+  ASSERT (v ->> 'more_rows')::boolean = false, v::text;
   ASSERT jsonb_array_length(v -> 'conversations') = 1, v::text;
   ASSERT v #>> '{conversations,0,taint}' = 'mixed_counterparties', v::text;
   -- The read-back carries fingerprints and counts, and there is nothing else to carry.
@@ -236,7 +237,7 @@ BEGIN
            WHERE connection_id = conn) = 2, 'two conversations now';
 
   -- With no cursor the whole round is listed.
-  v := public.list_outlook_round_conversations(conn, run1, round1, 500, NULL);
+  v := public.list_outlook_round_conversations(conn, run1, round1, 200, NULL);
   ASSERT jsonb_array_length(v -> 'conversations') = 2, v::text;
 
   -- Record that the first (lowest-ordered) conversation is dealt with.
@@ -249,9 +250,10 @@ BEGIN
          'the write cursor belongs to the round, not to one folder';
 
   -- AND THE RESUME WORKS: the conversation already dealt with is not offered again.
-  v := public.list_outlook_round_conversations(conn, run1, round1, 500, cfp);
+  v := public.list_outlook_round_conversations(conn, run1, round1, 200, cfp);
   ASSERT jsonb_array_length(v -> 'conversations') = 1, v::text;
   ASSERT v #>> '{conversations,0,cfp}' = cfp2, v::text;
+  ASSERT (v ->> 'more_rows')::boolean = false, v::text;
 
   -- MONOTONE: a late or duplicated call with an older fingerprint cannot rewind
   -- finalisation and cause rows to be written again.
@@ -426,6 +428,82 @@ BEGIN
          'an expired round must not be resumed';
   ASSERT v #>> '{folders,inbox,next_link_ciphertext}' IS NULL,
          'an expired resume position must not be handed back';
+
+  -- ── 14b. THE READ-BACK IS PAGED, AND TRUNCATION IS WHOLE-ROUND ────────────
+  -- A record serialises to about 602 bytes at its widest, so the 2000-record round
+  -- ceiling is about 1.18 MiB in one response - four and a half times the 256 KiB the
+  -- worker's database port will read. Reproduced through the deployed port before this
+  -- was paged. These assertions prove the SQL side: the cap holds whatever is asked for,
+  -- `more_rows` means continue, and the truncation count covers the WHOLE round.
+  v := public.reset_outlook_round(conn, run1, NULL);
+  ASSERT v ->> 'result' = 'reset', v::text;
+  UPDATE public.outlook_sync_state
+     SET round_id = round2, round_started_at = now(),
+         round_expires_at = now() + interval '1 day'
+   WHERE connection_id = conn;
+
+  -- 450 clean records plus one whose exchange exceeded the episode bound.
+  FOR i IN 1..450 LOOP
+    INSERT INTO public.outlook_conversation_progress (
+      connection_id, user_id, round_id, conversation_fingerprint,
+      person_fingerprint, episode_fingerprint, episode_lookup_fingerprints,
+      first_message_fingerprint, key_version, contact_id,
+      first_seen_at, last_seen_at, inbound_count, outbound_count, message_count,
+      taint_code, expires_at)
+    VALUES (conn, u1, round2, lpad(to_hex(i), 64, '0'),
+            lpad(to_hex(i + 9000000), 64, '0'), lpad(to_hex(i + 8000000), 64, '0'),
+            ARRAY[lpad(to_hex(i + 8000000), 64, '0'), lpad(to_hex(i + 7000000), 64, '0')],
+            lpad(to_hex(i + 6000000), 64, '0'), 1, c1,
+            now() - interval '2 days', now() - interval '1 day', 1, 1,
+            CASE WHEN i = 1 THEN 60 ELSE 2 END,
+            CASE WHEN i = 1 THEN 'episode_truncated' ELSE NULL END,
+            now() + interval '1 day');
+  END LOOP;
+
+  -- THE CAP HOLDS whatever is asked for, so a caller cannot produce a body its own port
+  -- refuses to read.
+  v := public.list_outlook_round_conversations(conn, run1, round2, 2000, NULL);
+  ASSERT jsonb_array_length(v -> 'conversations') = 200,
+         'asking for the whole round must still yield one page: ' ||
+         jsonb_array_length(v -> 'conversations')::text;
+  ASSERT (v ->> 'more_rows')::boolean = true, v::text;
+  ASSERT octet_length(v::text) < 262144,
+         'a page must fit the port bound: ' || octet_length(v::text)::text;
+
+  -- THE TRUNCATION COUNT IS WHOLE-ROUND. Page one holds the shortened exchange...
+  ASSERT (v ->> 'round_truncated_episodes')::int = 1, v::text;
+  -- ...and so does a page that does NOT contain it. This is the case a per-page check
+  -- cannot catch: finalisation resumed past the tainted row, yet the round must still
+  -- refuse to commit, because the discarded work belongs to the round.
+  v := public.list_outlook_round_conversations(conn, run1, round2, 200,
+         lpad(to_hex(300), 64, '0'));
+  ASSERT NOT EXISTS (
+    SELECT 1 FROM jsonb_array_elements(v -> 'conversations') e
+     WHERE e ->> 'taint' = 'episode_truncated'),
+         'the page in hand must be clean, which is the point of this case';
+  ASSERT (v ->> 'round_truncated_episodes')::int = 1,
+         'A SHORTENED EXCHANGE ON AN EARLIER PAGE MUST STILL BE REPORTED';
+
+  -- Walking the pages reaches every record exactly once.
+  DECLARE
+    cur text := NULL;
+    seen integer := 0;
+    pages integer := 0;
+  BEGIN
+    LOOP
+      v := public.list_outlook_round_conversations(conn, run1, round2, 200, cur);
+      pages := pages + 1;
+      seen := seen + jsonb_array_length(v -> 'conversations');
+      EXIT WHEN NOT (v ->> 'more_rows')::boolean OR pages > 10;
+      -- #>> takes a text[] path, not a text literal.
+      cur := v #>> ARRAY['conversations',
+        (jsonb_array_length(v -> 'conversations') - 1)::text, 'cfp'];
+    END LOOP;
+    ASSERT pages = 3, 'three pages for 450 records: ' || pages::text;
+    ASSERT seen = 450, 'every record exactly once: ' || seen::text;
+  END;
+
+  DELETE FROM public.outlook_conversation_progress WHERE connection_id = conn;
 
   -- ── 15. No suggestion, no interaction, no contact was created anywhere ────
   ASSERT (SELECT count(*) FROM public.interaction_candidates WHERE user_id = u1) = 0,

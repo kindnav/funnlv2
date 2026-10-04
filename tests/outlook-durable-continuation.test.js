@@ -23,6 +23,7 @@ import { webcrypto } from 'node:crypto'
 import {
   runOutlookImport, summarizeRun, RUN_OUTCOMES, CONTINUE_BACKOFF_SECONDS,
   ROUND_INCOMPLETE_REASONS, RPC_ROUND_TRIP_MS, WRITE_STEP_RESERVE_MS, WRITE_STEP_MS,
+  CONVERSATION_PAGE_SIZE,
   PROGRESS_STEP_MS, RELEASE_WORST_MS,
   FINALIZE_RESERVE_MS,
 } from '../supabase/functions/shared/outlookImportRun.js'
@@ -39,7 +40,7 @@ import {
   ROUND_SKIP_CODES, canonicalIso, summarizeRoundProgress,
 } from '../supabase/functions/shared/outlookRoundState.js'
 import {
-  MAX_PAGES_PER_RUN, GRAPH_BASE,
+  MAX_PAGES_PER_RUN, GRAPH_BASE, GRAPH_FOLDERS,
 } from '../supabase/functions/shared/outlookGraphTransport.js'
 import {
   buildSelfIdentitySet, indexContactsByEmail, qualifyEpisode,
@@ -47,7 +48,9 @@ import {
 } from '../supabase/functions/shared/outlookParticipants.js'
 import { localDateFor } from '../supabase/functions/shared/outlookMetadataPass.js'
 import { normalizeGraphPage } from '../supabase/functions/shared/outlookMessageNormalize.js'
-import { makeRoundStore } from './harness/outlookRoundStore.js'
+import {
+  makeRoundStore, CONVERSATION_PAGE_SIZE as STORE_PAGE_SIZE,
+} from './harness/outlookRoundStore.js'
 
 let passed = 0, failed = 0
 const pending = []
@@ -842,6 +845,199 @@ test('a REFUSED write does not let the finalisation cursor pass it', async () =>
 })
 
 // ══════════════════════════════════════════════════════════════════════════════
+console.log('\n7. the accumulator read-back is PAGED, and truncation is whole-round')
+// ══════════════════════════════════════════════════════════════════════════════
+
+const hexFp = (n) => n.toString(16).padStart(64, '0')
+
+/**
+ * Put the store in the state a FINISHED round leaves behind: both folders complete with
+ * a staged cursor, and `n` accumulator rows waiting to be finalised.
+ *
+ * Seeded directly rather than through Graph pages because these tests are about
+ * finalisation, and 450 qualifying conversations would otherwise need 450 fixture
+ * messages to say nothing extra.
+ */
+function seedCompletedRound (store, { n, taintAt = [] }) {
+  const ROUND = 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee'
+  for (const f of GRAPH_FOLDERS) {
+    store.folders[f].round_id = ROUND
+    store.folders[f].page_seq = 1
+    store.folders[f].pages = 1
+    store.folders[f].messages = n
+    store.folders[f].folder_complete = true
+    store.folders[f].pending_delta_ciphertext = `CT:delta-${f}`
+    store.folders[f].pending_delta_nonce = 'N'
+    store.folders[f].pending_delta_key_version = 1
+  }
+  for (let i = 0; i < n; i += 1) {
+    const cfp = hexFp(i + 1)
+    store.conversations.set(cfp, {
+      cfp,
+      pfp: hexFp(i + 1_000_000),
+      efp: hexFp(i + 2_000_000),
+      elookup: [hexFp(i + 2_000_000)],
+      first_fp: hexFp(i + 3_000_000),
+      first_at: '2026-09-20T14:00:00.000Z',
+      last_at: '2026-09-21T09:00:00.000Z',
+      contact_id: CONTACT,
+      key_version: 1,
+      inbound: 1,
+      outbound: 1,
+      messages: taintAt.includes(i) ? 60 : 2,
+      taint: taintAt.includes(i) ? 'episode_truncated' : null,
+    })
+  }
+  return ROUND
+}
+
+/** A round that is already finished needs no Graph page at all. */
+const noGraph = async () => { throw new Error('no Graph request should happen') }
+
+test('the JS page size is the one the SQL caps every read-back at', () => {
+  assert.strictEqual(CONVERSATION_PAGE_SIZE, STORE_PAGE_SIZE)
+  // And it is well under the round ceiling, or paging would buy nothing.
+  assert.ok(CONVERSATION_PAGE_SIZE < MAX_CONVERSATIONS_PER_ROUND)
+  // The SQL must cap it too, not merely default to it: a caller asking for the whole
+  // round would otherwise get a body its own port refuses to read.
+  assert.ok(MIGRATION.includes('LEAST(GREATEST(COALESCE(p_limit, 200), 1), 200)'),
+    'the SQL must clamp p_limit to the measured page size')
+  assert.ok(MIGRATION.includes('about 1.18 MiB'),
+    'the measured size that forced paging must be recorded')
+})
+
+test('450 conversations finalise across THREE pages and commit once', async () => {
+  const h = harness()
+  seedCompletedRound(h.store, { n: 450 })
+  const r = await h.invoke({ fetchImpl: noGraph })
+  const s = summarizeRun(r)
+  assert.strictEqual(r.outcome, 'committed', JSON.stringify(s))
+  assert.strictEqual(s.finalize.pages, 3, `450 rows at ${CONVERSATION_PAGE_SIZE} a page`)
+  assert.strictEqual(s.finalize.rows, 450)
+  assert.strictEqual(s.finalize.processed, 450)
+  assert.strictEqual(s.finalize.more_rows, false)
+  assert.strictEqual(s.finalize.complete, true)
+  assert.strictEqual(r.intended, 450)
+  assert.strictEqual(r.accepted, 450)
+  assert.strictEqual(r.cursorsAdvanced, 2)
+  // Every conversation written exactly once, across the pages.
+  assert.strictEqual(h.distinctWritten(), 450)
+  assert.strictEqual(h.writes().length, 450)
+  // No page ever asked for more than fits.
+  for (const c of h.calls.filter((x) => x.name === 'list_outlook_round_conversations')) {
+    assert.ok(c.args.p_limit <= CONVERSATION_PAGE_SIZE, `asked for ${c.args.p_limit}`)
+  }
+})
+
+test('the pages resume on the ORDERED write cursor, with no overlap and no gap', async () => {
+  const h = harness()
+  seedCompletedRound(h.store, { n: 450 })
+  await h.invoke({ fetchImpl: noGraph })
+  const lists = h.calls.filter((x) => x.name === 'list_outlook_round_conversations')
+  // The first page starts from nothing; each later one starts after the previous page's
+  // last conversation, which is also where the write cursor is recorded.
+  assert.strictEqual(lists[0].args.p_after, null)
+  const writes = h.writes().map((c) => c.args.p_episode_fingerprint)
+  assert.strictEqual(new Set(writes).size, writes.length, 'no conversation written twice')
+  for (let i = 1; i < lists.length; i += 1) {
+    assert.match(lists[i].args.p_after, /^[0-9a-f]{64}$/)
+    assert.ok(lists[i].args.p_after > (lists[i - 1].args.p_after ?? ''),
+      'the resume point must move strictly forward')
+  }
+})
+
+test('REGRESSION: a truncated episode blocks the commit, and NO cursor moves', async () => {
+  // The whole-round gate used to catch this; per-row finalisation then skipped the
+  // tainted conversation and said nothing, so the run committed BOTH cursors past an
+  // exchange it had discarded - permanently, because a delta cursor never offers those
+  // messages again.
+  const h = harness()
+  seedCompletedRound(h.store, { n: 3, taintAt: [1] })
+  const r = await h.invoke({ fetchImpl: noGraph })
+  const s = summarizeRun(r)
+  assert.strictEqual(r.outcome, 'incomplete', JSON.stringify(s))
+  assert.ok(s.incomplete_reasons.includes('episode_truncated'),
+    JSON.stringify(s.incomplete_reasons))
+  // NOTHING is written from a round that cannot commit.
+  assert.strictEqual(h.writes().length, 0, 'no suggestion from a round that forfeits its cursor')
+  assert.strictEqual(r.accepted, 0)
+  assert.strictEqual(r.cursorsAdvanced, 0)
+  // And the cursor state is untouched: both committed cursors absent, and finalisation
+  // did not record progress it did not make.
+  for (const f of GRAPH_FOLDERS) {
+    assert.strictEqual(h.store.folders[f].delta_link_ciphertext, null, f)
+    assert.strictEqual(h.store.folders[f].write_cursor, null, f)
+    assert.strictEqual(h.store.folders[f].pending_delta_ciphertext, `CT:delta-${f}`,
+      'the staged cursor stays staged, never promoted')
+  }
+})
+
+test('REGRESSION, THE HARD CASE: the tainted row is on an EARLIER page', async () => {
+  // This is the one a per-page check cannot catch. A previous invocation already dealt
+  // with the page holding the shortened exchange and recorded the write cursor past it,
+  // so the page THIS invocation lists does not contain it at all. The round must still
+  // refuse to commit, because the discarded work is a property of the ROUND.
+  const h = harness()
+  seedCompletedRound(h.store, { n: 3, taintAt: [0] })
+  // As if finalisation had already passed the first conversation - the tainted one.
+  for (const f of GRAPH_FOLDERS) h.store.folders[f].write_cursor = hexFp(1)
+
+  const r = await h.invoke({ fetchImpl: noGraph })
+  const s = summarizeRun(r)
+
+  // The page in hand is CLEAN - the tainted conversation is behind the cursor.
+  const listed = h.calls.find((x) => x.name === 'list_outlook_round_conversations')
+  assert.strictEqual(listed.args.p_after, hexFp(1), 'the listing resumed past the tainted row')
+
+  assert.strictEqual(r.outcome, 'incomplete', JSON.stringify(s))
+  assert.ok(s.incomplete_reasons.includes('episode_truncated'),
+    'a shortened exchange on an earlier page must still forfeit the cursor')
+  assert.strictEqual(r.cursorsAdvanced, 0)
+  assert.strictEqual(h.writes().length, 0)
+  for (const f of GRAPH_FOLDERS) {
+    assert.strictEqual(h.store.folders[f].delta_link_ciphertext, null,
+      'NO cursor may advance past work the round discarded')
+  }
+})
+
+test('a clean round of the same shape DOES commit, so the gate is not just always-on', async () => {
+  const h = harness()
+  seedCompletedRound(h.store, { n: 3 })
+  for (const f of GRAPH_FOLDERS) h.store.folders[f].write_cursor = hexFp(1)
+  const r = await h.invoke({ fetchImpl: noGraph })
+  assert.strictEqual(r.outcome, 'committed', JSON.stringify(summarizeRun(r)))
+  assert.strictEqual(r.intended, 2, 'the conversation behind the cursor is not redone')
+  assert.strictEqual(r.accepted, 2)
+  assert.strictEqual(r.cursorsAdvanced, 2)
+})
+
+test('more rows remaining with no budget left is CONTINUATION, not incompleteness', async () => {
+  let clock = 0
+  const h = harness({
+    now: () => clock, advance: (ms) => { clock += ms }, writeCostMs: 20_000,
+  })
+  seedCompletedRound(h.store, { n: 450 })
+  const r = await h.invoke({ fetchImpl: noGraph, requestEntryMs: 0 })
+  const s = summarizeRun(r)
+  assert.strictEqual(r.outcome, 'continued', JSON.stringify(s))
+  // Not reported as a dropped-work reason: there is simply more to do.
+  assert.deepStrictEqual(s.incomplete_reasons, [])
+  assert.strictEqual(s.finalize.complete, false)
+  assert.strictEqual(r.cursorsAdvanced, 0)
+  assert.ok(r.accepted > 0 && r.accepted < 450, `part of it landed (${r.accepted})`)
+  assert.match(h.store.folders.inbox.write_cursor ?? '', /^[0-9a-f]{64}$/)
+  // Then it finishes across invocations without redoing anything.
+  let outcome = r.outcome
+  for (let i = 0; i < 400 && outcome === 'continued'; i += 1) {
+    clock = 0
+    outcome = (await h.invoke({ fetchImpl: noGraph, requestEntryMs: 0 })).outcome
+  }
+  assert.strictEqual(outcome, 'committed')
+  assert.strictEqual(h.distinctWritten(), 450)
+  assert.strictEqual((h.results().refreshed ?? 0), 0, 'nothing was written twice')
+})
+
+// ══════════════════════════════════════════════════════════════════════════════
 console.log('\nthe fingerprint is stable however the round was split')
 // ══════════════════════════════════════════════════════════════════════════════
 
@@ -1071,14 +1267,22 @@ test('the controlled vocabularies are complete and free of stray codes', () => {
 
 test('every incomplete reason is controlled, and an unknown one never reaches a log', () => {
   for (const r of ['folder_incomplete', 'messages_dropped', 'conversations_dropped',
-    'episode_truncated', 'plan_truncated', 'accumulator_unreadable', 'pending_key_mismatch']) {
+    'episode_truncated', 'accumulator_unreadable', 'pending_key_mismatch']) {
     assert.ok(ROUND_INCOMPLETE_REASONS.includes(r), r)
   }
+  // `plan_truncated` is gone: the read-back is PAGED now, so `more rows remain` means
+  // continue rather than `this round is incomplete`. The run only commits once a page
+  // comes back with none left, which is stronger than the old check.
+  assert.ok(!ROUND_INCOMPLETE_REASONS.includes('plan_truncated'))
   const s = summarizeRun({
     outcome: 'incomplete',
-    incompleteReasons: ['messages_dropped', 'something_invented', 'plan_truncated'],
+    // 'plan_truncated' is no longer a reason, so it must be filtered out alongside an
+    // invented one - a stale code must never reach a log either.
+    incompleteReasons: ['messages_dropped', 'something_invented', 'plan_truncated',
+      'episode_truncated'],
   })
-  assert.deepStrictEqual(s.incomplete_reasons, ['messages_dropped', 'plan_truncated'])
+  assert.deepStrictEqual(s.incomplete_reasons,
+    ['messages_dropped', 'episode_truncated'])
 })
 
 test('the round summary is counts and codes, never a fingerprint or a cursor', () => {
@@ -1155,6 +1359,21 @@ test('the design records that the WHOLE invocation is budgeted, and what still i
   // And the trade-off in persisting the write cursor once per invocation is stated.
   assert.ok(DESIGN.includes('once per invocation'))
   assert.ok(DESIGN.includes('bounded rework, never a lost'))
+})
+
+test('the design records the measured read-back size and the whole-round gate', () => {
+  assert.ok(DESIGN.includes('5b. The accumulator read-back is paged'))
+  // The numbers that forced paging, not an estimate.
+  assert.ok(DESIGN.includes('1,204,055 bytes'))
+  assert.ok(DESIGN.includes('262,144 bytes'))
+  assert.ok(DESIGN.includes('4.6'))
+  assert.ok(DESIGN.includes('clamps'), 'the SQL must be recorded as clamping, not defaulting')
+  assert.ok(DESIGN.includes('same ordered write cursor'))
+  // And the regression, named as one.
+  assert.ok(DESIGN.includes('5c. A shortened exchange forfeits'))
+  assert.ok(DESIGN.includes('committed both cursors past an exchange it had discarded'))
+  assert.ok(DESIGN.includes('cannot be a check on the page in hand'))
+  assert.ok(DESIGN.includes('round_truncated_episodes'))
 })
 
 test('the cross-round decision sheet names fields, retention, deletion and wording', () => {

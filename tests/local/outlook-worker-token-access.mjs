@@ -43,9 +43,17 @@ import assert from 'node:assert'
 import {
   handleOutlookImportWorker,
 } from '../../supabase/functions/outlook-import-worker/handler.js'
-import { PRODUCTION_TOKEN_URL } from '../../supabase/functions/outlook-import-worker/endpoints.js'
+import {
+  PRODUCTION_TOKEN_URL, makePostgrestPorts,
+} from '../../supabase/functions/outlook-import-worker/endpoints.js'
 import { MS_TOKEN_ENDPOINT } from '../../supabase/functions/shared/microsoftOauthHelpers.js'
 import { GRAPH_BASE } from '../../supabase/functions/shared/outlookGraphTransport.js'
+import {
+  CONVERSATION_PAGE_SIZE,
+} from '../../supabase/functions/shared/outlookImportRun.js'
+import {
+  MAX_CONVERSATIONS_PER_ROUND,
+} from '../../supabase/functions/shared/outlookRoundState.js'
 import {
   MAX_CONTACTS_LOADED, CONTACT_PAGE_SIZE,
 } from '../../supabase/functions/shared/outlookRunContext.js'
@@ -988,6 +996,147 @@ async function main () {
     assert.strictEqual(stale.data.result, 'stale_run', JSON.stringify(stale.data))
     assert.strictEqual(one(`SELECT count(*) FROM public.outlook_sync_state
       WHERE user_id='${U1}' AND round_write_cursor IS NOT NULL;`), '0')
+  })
+
+  // ══ the accumulator read-back must fit the port's body bound ══════════════
+  console.log('\nthe round read-back is paged, because the port bounds every response')
+
+  /**
+   * Fill a round with `n` accumulator rows at their WIDEST realistic shape: every
+   * fingerprint present and a lookup array carrying two keys, as a rotation in flight
+   * would. Measured at 602 bytes per row in the response, so the whole-round ceiling of
+   * 2000 serialises to about 1.18 MiB.
+   */
+  const fillRound = (n) => psql(`
+DO $fill$
+DECLARE
+  k uuid; r uuid; s uuid; cid uuid; i integer; fp text;
+BEGIN
+  SELECT id INTO k FROM public.microsoft_connections WHERE user_id = '${U1}';
+  SELECT id INTO cid FROM public.contacts WHERE user_id = '${U1}' LIMIT 1;
+  SELECT sync_run_id, round_id INTO s, r FROM public.outlook_sync_state
+   WHERE connection_id = k LIMIT 1;
+  IF r IS NULL THEN
+    r := '00000000-0000-0000-0000-0000000000a1'::uuid;
+    UPDATE public.outlook_sync_state SET round_id = r, round_started_at = now(),
+           round_expires_at = now() + interval '1 day' WHERE connection_id = k;
+  END IF;
+  FOR i IN 1..${n} LOOP
+    fp := lpad(to_hex(i), 64, '0');
+    INSERT INTO public.outlook_conversation_progress (
+      connection_id, user_id, round_id, conversation_fingerprint,
+      person_fingerprint, episode_fingerprint, episode_lookup_fingerprints,
+      first_message_fingerprint, key_version, contact_id,
+      first_seen_at, last_seen_at, inbound_count, outbound_count, message_count,
+      taint_code, expires_at)
+    VALUES (k, '${U1}', r, fp,
+            lpad(to_hex(i + 9000000), 64, '0'), lpad(to_hex(i + 8000000), 64, '0'),
+            ARRAY[lpad(to_hex(i + 8000000), 64, '0'), lpad(to_hex(i + 7000000), 64, '0')],
+            lpad(to_hex(i + 6000000), 64, '0'), 1, cid,
+            now() - interval '2 days', now() - interval '1 day', 2, 1, 3,
+            NULL, now() + interval '1 day')
+    ON CONFLICT DO NOTHING;
+  END LOOP;
+END $fill$;`, { tuplesOnly: false })
+
+  await test('THE OVERSIZED READ-BACK: the whole-round ceiling in one response is refused', async () => {
+    await seed({ accessExpired: false })
+    // A real reservation, so the round rows exist and the lease fence is satisfied.
+    psql(`SELECT public.reserve_due_outlook_connection(600, 0);`, { tuplesOnly: false })
+    fillRound(MAX_CONVERSATIONS_PER_ROUND)
+    assert.strictEqual(one('SELECT count(*) FROM public.outlook_conversation_progress;'),
+      String(MAX_CONVERSATIONS_PER_ROUND))
+
+    const conn = one(`SELECT id FROM public.microsoft_connections WHERE user_id='${U1}';`)
+    const st = psql(`SELECT sync_run_id, round_id FROM public.outlook_sync_state
+      WHERE connection_id='${conn}' LIMIT 1;`).trim().split('|').map((s) => s.trim())
+
+    // THE DEPLOYED PORT, not the harness mirror: this is the bounding that ships -
+    // readJsonBounded at MAX_PROVIDER_BODY_BYTES, redirect: 'error', DB_TIMEOUT_MS and the
+    // real headers. The ONE adaptation is the path: makePostgrestPorts targets Supabase's
+    // gateway at /rest/v1/, and a bare PostgREST container serves at /, so the fetch is
+    // wrapped to drop that prefix. Nothing about the bounding is changed.
+    const deployed = makePostgrestPorts({
+      url: PGRST,
+      serviceRoleKey: mintServiceJwt(),
+      fetchImpl: (u, init) => fetch(String(u).replace('/rest/v1/', '/'), init),
+    })
+
+    // THE HAZARD IS REAL, measured on these exact rows: the whole round in one response
+    // is about 1.18 MiB, four and a half times what the port will read. Shown through the
+    // SAME port on the SAME data, so this is the bound biting rather than an estimate.
+    const sizeBytes = Number(one(`SELECT octet_length(jsonb_agg(jsonb_build_object(
+        'cfp', conversation_fingerprint, 'pfp', person_fingerprint,
+        'efp', episode_fingerprint, 'elookup', episode_lookup_fingerprints,
+        'contact_id', contact_id, 'key_version', key_version,
+        'first_at', first_seen_at, 'last_at', last_seen_at,
+        'inbound', inbound_count, 'outbound', outbound_count,
+        'messages', message_count, 'taint', taint_code))::text)
+      FROM public.outlook_conversation_progress;`))
+    assert.ok(sizeBytes > MAX_PROVIDER_BODY_BYTES * 4,
+      `the whole round must be far over the bound: ${(sizeBytes / 1024).toFixed(1)} KiB`)
+    const wholeRead = await deployed.select(
+      'outlook_conversation_progress?select=conversation_fingerprint,person_fingerprint,' +
+      'episode_fingerprint,episode_lookup_fingerprints,first_message_fingerprint,' +
+      `contact_id,key_version,first_seen_at,last_seen_at,inbound_count,outbound_count,` +
+      `message_count,taint_code&limit=${MAX_CONVERSATIONS_PER_ROUND}`)
+    // 'malformed' is specifically what the port reports when readJsonBounded refuses a
+    // body for being over MAX_PROVIDER_BODY_BYTES. Asserting the CODE, not merely that
+    // something failed, is what makes this prove the bound rather than, say, a bad path.
+    assert.strictEqual(wholeRead.error?.code, 'malformed',
+      `the oversized body must be refused by the bound, got ${JSON.stringify(wholeRead.error)}` +
+      ` / ${wholeRead.data?.length} rows`)
+
+    // AND THE RPC CAN NO LONGER PRODUCE ONE. Asking for the whole round - which is what
+    // the first version of this slice did - now yields one page and says there is more.
+    const whole = await deployed.rpc('list_outlook_round_conversations', {
+      p_connection_id: conn, p_run_id: st[0], p_round_id: st[1],
+      p_limit: MAX_CONVERSATIONS_PER_ROUND, p_after: null,
+    })
+    assert.strictEqual(whole.error, null, JSON.stringify(whole.error))
+    assert.strictEqual(whole.data.conversations.length, CONVERSATION_PAGE_SIZE,
+      'the server caps the page, so a caller cannot ask for a body its own port refuses')
+    assert.strictEqual(whole.data.more_rows, true)
+
+    // And ONE PAGE of the same rows is accepted, with room to spare.
+    const page = await deployed.rpc('list_outlook_round_conversations', {
+      p_connection_id: conn, p_run_id: st[0], p_round_id: st[1],
+      p_limit: CONVERSATION_PAGE_SIZE, p_after: null,
+    })
+    assert.strictEqual(page.error, null, JSON.stringify(page.error))
+    assert.strictEqual(page.data.result, 'ok')
+    assert.strictEqual(page.data.conversations.length, CONVERSATION_PAGE_SIZE)
+    assert.strictEqual(page.data.more_rows, true, 'the page must say more rows remain')
+    const bytes = Buffer.byteLength(JSON.stringify(page.data))
+    assert.ok(bytes < MAX_PROVIDER_BODY_BYTES / 2,
+      `a page must sit well inside the bound: ${(bytes / 1024).toFixed(1)} KiB`)
+
+    // The ordered write cursor is what resumes it, and the pages do not overlap.
+    const last = page.data.conversations.at(-1).cfp
+    const next = await deployed.rpc('list_outlook_round_conversations', {
+      p_connection_id: conn, p_run_id: st[0], p_round_id: st[1],
+      p_limit: CONVERSATION_PAGE_SIZE, p_after: last,
+    })
+    assert.strictEqual(next.error, null, JSON.stringify(next.error))
+    assert.ok(next.data.conversations.every((c) => c.cfp > last), 'pages must not overlap')
+    assert.strictEqual(next.data.conversations.length, CONVERSATION_PAGE_SIZE)
+
+    // Walking the whole round a page at a time reaches every row exactly once.
+    let cursor = null
+    let seen = 0
+    const distinct = new Set()
+    for (let i = 0; i < 40; i += 1) {
+      const r = await deployed.rpc('list_outlook_round_conversations', {
+        p_connection_id: conn, p_run_id: st[0], p_round_id: st[1],
+        p_limit: CONVERSATION_PAGE_SIZE, p_after: cursor,
+      })
+      assert.strictEqual(r.error, null, JSON.stringify(r.error))
+      for (const c of r.data.conversations) { distinct.add(c.cfp); seen += 1 }
+      if (!r.data.more_rows) break
+      cursor = r.data.conversations.at(-1).cfp
+    }
+    assert.strictEqual(seen, MAX_CONVERSATIONS_PER_ROUND)
+    assert.strictEqual(distinct.size, MAX_CONVERSATIONS_PER_ROUND, 'no row twice, none missed')
   })
 
   // ══ refusals ══════════════════════════════════════════════════════════════

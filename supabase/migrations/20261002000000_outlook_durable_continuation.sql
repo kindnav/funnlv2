@@ -659,11 +659,30 @@ GRANT EXECUTE ON FUNCTION public.read_outlook_round_progress(uuid, uuid) TO serv
 
 
 -- ══════════════════════════════════════════════════════════════════════════════
---  E. list_outlook_round_conversations — the accumulator, for finalisation
+--  E. list_outlook_round_conversations — the accumulator, ONE PAGE at a time
 -- ══════════════════════════════════════════════════════════════════════════════
 -- Read back the round's conversation records so the worker can turn the complete ones
--- into suggestions. Bounded and lease fenced. Returns fingerprints and counts only -
--- there is nothing else in the table to return.
+-- into suggestions. Lease fenced. Returns fingerprints and counts only - there is
+-- nothing else in the table to return.
+--
+-- IT MUST BE PAGED, and the number is measured rather than guessed. A row serialises to
+-- about 602 bytes at its widest realistic shape (every fingerprint present and a lookup
+-- array carrying two keys, as a key rotation in flight would), so the whole-round ceiling
+-- of 2000 rows is about 1.18 MiB - four and a half times the 256 KiB the worker's
+-- database port allows any JSON response to be. Reproduced through the deployed port:
+-- asking for the whole round is refused outright, while a page of 200 is 118 KiB.
+--
+-- `more_rows` says whether anything is left AFTER this page. It means CONTINUE, not
+-- `this round is incomplete`: the caller walks the pages with p_after and only commits
+-- once a page comes back with more_rows false. The whole-round ceiling of 2000 is
+-- unchanged and still enforced in record_outlook_page_progress.
+--
+-- `round_truncated_episodes` is a WHOLE-ROUND aggregate, deliberately not a per-page one.
+-- A conversation whose exchange exceeded the episode bound was shortened, so no cursor
+-- from this round may be stored - and that stays true however many pages later the
+-- caller reaches the end. Counting it per page would let a round commit past work it
+-- discarded on an earlier page, which is exactly the regression this field exists to
+-- prevent.
 -- p_after is the FINALISATION RESUME POINT: only conversations ordered strictly after it
 -- are returned. The worker passes the round's stored write cursor, so a finalisation that
 -- spanned invocations continues instead of restarting.
@@ -680,9 +699,12 @@ SECURITY DEFINER
 SET search_path = ''
 AS $$
 DECLARE
-  v_n     integer;
-  v_limit integer := LEAST(GREATEST(COALESCE(p_limit, 500), 1), 2000);
-  v_rows  jsonb;
+  v_n         integer;
+  -- Capped at the measured safe page size, not at the round ceiling: a caller asking for
+  -- more than fits would get a response its own port refuses to read.
+  v_limit     integer := LEAST(GREATEST(COALESCE(p_limit, 200), 1), 200);
+  v_rows      jsonb;
+  v_truncated integer;
 BEGIN
   IF p_run_id IS NULL OR p_round_id IS NULL THEN
     RETURN jsonb_build_object('result', 'stale_run');
@@ -699,6 +721,14 @@ BEGIN
   IF v_n <> 2 THEN
     RETURN jsonb_build_object('result', 'stale_run');
   END IF;
+
+  -- The whole round, before any paging is applied.
+  SELECT count(*) INTO v_truncated
+  FROM public.outlook_conversation_progress p
+   WHERE p.connection_id = p_connection_id
+     AND p.round_id      = p_round_id
+     AND p.expires_at    > now()
+     AND p.taint_code    = 'episode_truncated';
 
   SELECT jsonb_agg(jsonb_build_object(
            'cfp', q.conversation_fingerprint,
@@ -726,9 +756,17 @@ BEGIN
 
   RETURN jsonb_build_object(
     'result', 'ok',
-    -- The caller must treat truncation as an incomplete round, not as a short list.
-    'truncated', COALESCE(jsonb_array_length(v_rows), 0) > v_limit,
-    'conversations', COALESCE(v_rows, '[]'::jsonb));
+    -- CONTINUE, not `incomplete`: one more row than the page size was fetched purely to
+    -- answer this, and it is not returned.
+    'more_rows', COALESCE(jsonb_array_length(v_rows), 0) > v_limit,
+    -- WHOLE-ROUND, independent of this page. A shortened exchange anywhere in the round
+    -- forfeits every cursor of it.
+    'round_truncated_episodes', v_truncated,
+    'conversations', COALESCE(
+      (SELECT jsonb_agg(e) FROM (
+         SELECT e FROM jsonb_array_elements(COALESCE(v_rows, '[]'::jsonb)) e
+          LIMIT v_limit) q),
+      '[]'::jsonb));
 END;
 $$;
 
