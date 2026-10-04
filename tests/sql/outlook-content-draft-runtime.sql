@@ -11,6 +11,20 @@
 --
 -- Fixture legend (all synthetic example.invalid data, all deleted at the end):
 --   U1 = the acting user      U2 = a bystander with IDENTICAL data (isolation)
+-- PERMISSION CONTRACT (migration 20260928000000, in this same PR). Graph GET /me is the
+-- only sound source for the connected mailbox address, and it requires DELEGATED
+-- User.Read - Mail.Read does not grant it. So:
+--   * the connection allowlist is Mail.Read + User.Read + offline_access/openid/email/profile;
+--   * an ACTIVE connection must hold BOTH Mail.Read AND User.Read;
+--   * finalize_microsoft_connection normalizes 'user.read' and its Graph-prefixed
+--     spelling, and refuses `missing_user_read` when it is absent;
+--   * every BROADER User.* permission - User.ReadWrite, User.ReadBasic.All,
+--     User.Read.All - and Directory.* remain `forbidden_scope`.
+-- This file originally asserted Mail.Read ALONE and listed User.Read among the forbidden
+-- scopes, so it failed at its own first fixture with `missing_user_read`. The fixtures and
+-- expectations below are corrected; the assertions against genuinely broader permissions
+-- are kept and extended.
+--
 --   per user: contact EXISTING (existing-<u>@example.invalid), Google connection with
 --   calendar + gmail capability/tokens/cursors/oauth state, pending Gmail + Calendar
 --   candidates (must stay untouched), Microsoft connection (via the RPC) + oauth state,
@@ -100,7 +114,7 @@ BEGIN
     -- the consent evidence lives on the single-use state minted after the disclosure.
     PERFORM pg_temp.mint_state(r.uid, 'fixture-' || r.u, 'disclosure-v1');
     v_res := public.finalize_microsoft_connection(pg_temp.fpx('state:fixture-' || r.u), r.uid, 'msacct-' || sfx, 'consumers', 'personal', 'ol-' || sfx || '@example.invalid',
-               ARRAY['Mail.Read','offline_access','openid','email'], now() + interval '1 hour', 'act', 'an', 'rct', 'rn', 1::smallint);
+               ARRAY['Mail.Read','User.Read','offline_access','openid','email'], now() + interval '1 hour', 'act', 'an', 'rct', 'rn', 1::smallint);
     ASSERT v_res ->> 'result' = 'stored', 'finalize_microsoft_connection failed: ' || v_res::text;
     v_mconn := (v_res ->> 'connection_id')::uuid;
     -- a second, still-pending state (disconnect/cleanup must delete it)
@@ -280,7 +294,7 @@ BEGIN
   ok := false;
   BEGIN
     INSERT INTO public.microsoft_connections (user_id, ms_account_id, account_type, ms_email, scopes, consented_at, consent_policy_version)
-      VALUES (u1, 'other', 'work', 'other@example.invalid', ARRAY['Mail.Read'], now(), 'v');
+      VALUES (u1, 'other', 'work', 'other@example.invalid', ARRAY['Mail.Read','User.Read'], now(), 'v');
   EXCEPTION WHEN unique_violation THEN ok := true; END;
   ASSERT ok, 'second connection per user accepted';
 END $$;
@@ -294,31 +308,31 @@ BEGIN
   ASSERT (SELECT consent_policy_version FROM public.microsoft_connections WHERE user_id = u1) = 'disclosure-v1', 'consent version not copied from state';
   ASSERT (SELECT consented_at FROM public.microsoft_connections WHERE user_id = u1) = (SELECT consented_at FROM public.microsoft_oauth_states WHERE state_hash = pg_temp.fpx('state:fixture-U1')), 'consented_at not copied from state';
   ASSERT (SELECT consumed_at IS NOT NULL FROM public.microsoft_oauth_states WHERE state_hash = pg_temp.fpx('state:fixture-U1')), 'fixture state not consumed';
-  ASSERT (SELECT scopes FROM public.microsoft_connections WHERE user_id = u1) = ARRAY['Mail.Read','offline_access','openid','email'], 'scopes not normalized: ' || (SELECT scopes::text FROM public.microsoft_connections WHERE user_id = u1);
+  ASSERT (SELECT scopes FROM public.microsoft_connections WHERE user_id = u1) = ARRAY['Mail.Read','User.Read','offline_access','openid','email'], 'scopes not normalized: ' || (SELECT scopes::text FROM public.microsoft_connections WHERE user_id = u1);
 
   -- REPLAY: the consumed state cannot finalize again (and changes nothing)
   SELECT * INTO before_conn FROM public.microsoft_connections WHERE user_id = u1;
-  v := public.finalize_microsoft_connection(pg_temp.fpx('state:fixture-U1'), NULL, 'msacct-u1', 'consumers', 'personal', 'ol-u1@example.invalid', ARRAY['Mail.Read','offline_access'], NULL, NULL, NULL, 'replay-r', 'replay-n', 1::smallint);
+  v := public.finalize_microsoft_connection(pg_temp.fpx('state:fixture-U1'), NULL, 'msacct-u1', 'consumers', 'personal', 'ol-u1@example.invalid', ARRAY['Mail.Read','User.Read','offline_access'], NULL, NULL, NULL, 'replay-r', 'replay-n', 1::smallint);
   ASSERT v ->> 'result' = 'state_consumed', 'replay accepted: ' || v::text;
   ASSERT (SELECT refresh_token_ciphertext FROM public.microsoft_tokens WHERE user_id = u1) <> 'replay-r', 'replay rotated the token';
   ASSERT (SELECT updated_at FROM public.microsoft_connections WHERE user_id = u1) = before_conn.updated_at, 'replay touched the connection';
 
   -- UNKNOWN / WRONG-INTEGRATION: a Google (gmail) state hash is not an Outlook state
-  v := public.finalize_microsoft_connection(repeat('1', 64), NULL, 'msacct-u1', 'consumers', 'personal', 'ol-u1@example.invalid', ARRAY['Mail.Read'], NULL, NULL, NULL, 'r', 'n', 1::smallint);
+  v := public.finalize_microsoft_connection(repeat('1', 64), NULL, 'msacct-u1', 'consumers', 'personal', 'ol-u1@example.invalid', ARRAY['Mail.Read','User.Read'], NULL, NULL, NULL, 'r', 'n', 1::smallint);
   ASSERT v ->> 'result' = 'unknown_state', 'google state accepted as outlook: ' || v::text;
-  v := public.finalize_microsoft_connection('not-a-hash', NULL, 'msacct-u1', 'consumers', 'personal', 'ol-u1@example.invalid', ARRAY['Mail.Read'], NULL, NULL, NULL, 'r', 'n', 1::smallint);
+  v := public.finalize_microsoft_connection('not-a-hash', NULL, 'msacct-u1', 'consumers', 'personal', 'ol-u1@example.invalid', ARRAY['Mail.Read','User.Read'], NULL, NULL, NULL, 'r', 'n', 1::smallint);
   ASSERT v ->> 'result' = 'invalid_state', 'malformed hash accepted';
 
   -- EXPIRED state
   h := pg_temp.mint_state(u1, 'expired-U1', 'disclosure-v2', interval '-1 minute');
-  v := public.finalize_microsoft_connection(h, NULL, 'msacct-u1', 'consumers', 'personal', 'ol-u1@example.invalid', ARRAY['Mail.Read','offline_access'], NULL, NULL, NULL, 'r', 'n', 1::smallint);
+  v := public.finalize_microsoft_connection(h, NULL, 'msacct-u1', 'consumers', 'personal', 'ol-u1@example.invalid', ARRAY['Mail.Read','User.Read','offline_access'], NULL, NULL, NULL, 'r', 'n', 1::smallint);
   ASSERT v ->> 'result' = 'state_expired', 'expired state accepted: ' || v::text;
   ASSERT (SELECT consumed_at IS NULL FROM public.microsoft_oauth_states WHERE state_hash = h), 'expired state consumed';
   ASSERT (SELECT consent_policy_version FROM public.microsoft_connections WHERE user_id = u1) = 'disclosure-v1', 'expired state changed consent';
 
   -- WRONG USER: the caller expected U2 but the state belongs to U1
   h := pg_temp.mint_state(u1, 'wronguser-U1', 'disclosure-v2');
-  v := public.finalize_microsoft_connection(h, u2, 'msacct-u1', 'consumers', 'personal', 'ol-u1@example.invalid', ARRAY['Mail.Read','offline_access'], NULL, NULL, NULL, 'r', 'n', 1::smallint);
+  v := public.finalize_microsoft_connection(h, u2, 'msacct-u1', 'consumers', 'personal', 'ol-u1@example.invalid', ARRAY['Mail.Read','User.Read','offline_access'], NULL, NULL, NULL, 'r', 'n', 1::smallint);
   ASSERT v ->> 'result' = 'state_user_mismatch', 'wrong-user state accepted: ' || v::text;
   ASSERT (SELECT consumed_at IS NULL FROM public.microsoft_oauth_states WHERE state_hash = h), 'mismatched state consumed';
   ASSERT (SELECT count(*) FROM public.microsoft_connections WHERE user_id = u2 AND ms_account_id = 'msacct-u1') = 0, 'connection created for the wrong user';
@@ -328,11 +342,25 @@ BEGIN
   ASSERT v ->> 'result' = 'missing_mail_read', 'no Mail.Read accepted: ' || v::text;
   v := public.finalize_microsoft_connection(h, NULL, 'msacct-u1', 'consumers', 'personal', 'ol-u1@example.invalid', ARRAY['Mail.ReadBasic','offline_access'], NULL, NULL, NULL, 'r', 'n', 1::smallint);
   ASSERT v ->> 'result' = 'forbidden_scope', 'ReadBasic-only accepted (must be forbidden, not silently narrowed): ' || v::text;
+  -- CANONICAL User.Read has moved OUT of this list - it is required now - and the
+  -- genuinely broader User.* permissions and Directory.* have moved IN. Anything that
+  -- reads more than the signed-in user's own profile must still refuse activation.
   FOREACH v_raw IN ARRAY ARRAY['Mail.ReadWrite', 'Mail.Send', 'MailboxSettings.ReadWrite', 'Files.Read', 'Files.Read.All', 'Contacts.ReadWrite',
-                               'Calendars.ReadWrite', 'https://graph.microsoft.com/.default', '.default', 'Mail.Read.All', 'Mail.ReadBasic.All', 'User.Read', 'Mail.Read.Shared'] LOOP
-    v := public.finalize_microsoft_connection(h, NULL, 'msacct-u1', 'consumers', 'personal', 'ol-u1@example.invalid', ARRAY['Mail.Read', 'offline_access', v_raw], NULL, NULL, NULL, 'r', 'n', 1::smallint);
+                               'Calendars.ReadWrite', 'https://graph.microsoft.com/.default', '.default', 'Mail.Read.All', 'Mail.ReadBasic.All', 'Mail.Read.Shared',
+                               'User.ReadWrite', 'User.ReadBasic.All', 'User.Read.All', 'User.ReadWrite.All',
+                               'Directory.Read.All', 'Directory.ReadWrite.All', 'People.Read.All',
+                               'https://graph.microsoft.com/User.Read.All'] LOOP
+    v := public.finalize_microsoft_connection(h, NULL, 'msacct-u1', 'consumers', 'personal', 'ol-u1@example.invalid', ARRAY['Mail.Read', 'User.Read', 'offline_access', v_raw], NULL, NULL, NULL, 'r', 'n', 1::smallint);
     ASSERT v ->> 'result' = 'forbidden_scope', v_raw || ' accepted: ' || v::text;
   END LOOP;
+  -- AND THE NEW REFUSAL: Mail.Read alone can read mail but cannot resolve the mailbox
+  -- address from GET /me, so a connection granted only Mail.Read is not a working one.
+  v := public.finalize_microsoft_connection(h, NULL, 'msacct-u1', 'consumers', 'personal', 'ol-u1@example.invalid', ARRAY['Mail.Read','offline_access'], NULL, NULL, NULL, 'r', 'n', 1::smallint);
+  ASSERT v ->> 'result' = 'missing_user_read', 'Mail.Read without User.Read accepted: ' || v::text;
+  -- Checked in the documented order: no Mail.Read is reported as missing_mail_read even
+  -- when User.Read is present, so the two refusals cannot be confused.
+  v := public.finalize_microsoft_connection(h, NULL, 'msacct-u1', 'consumers', 'personal', 'ol-u1@example.invalid', ARRAY['User.Read','offline_access'], NULL, NULL, NULL, 'r', 'n', 1::smallint);
+  ASSERT v ->> 'result' = 'missing_mail_read', 'User.Read alone accepted: ' || v::text;
   v := public.finalize_microsoft_connection(h, NULL, 'msacct-u1', 'consumers', 'personal', 'ol-u1@example.invalid', ARRAY[]::text[], NULL, NULL, NULL, 'r', 'n', 1::smallint);
   ASSERT v ->> 'result' = 'missing_mail_read', 'empty scopes accepted';
   v := public.finalize_microsoft_connection(h, NULL, 'msacct-u1', 'consumers', 'personal', 'ol-u1@example.invalid', ARRAY['Mail.Read', NULL], NULL, NULL, NULL, 'r', 'n', 1::smallint);
@@ -341,22 +369,22 @@ BEGIN
   ASSERT (SELECT consent_policy_version FROM public.microsoft_connections WHERE user_id = u1) = 'disclosure-v1', 'refused finalization changed consent';
 
   -- DIFFERENT ACCOUNT refused (state still valid)
-  v := public.finalize_microsoft_connection(h, NULL, 'someone-else', 'consumers', 'personal', 'other@example.invalid', ARRAY['Mail.Read','offline_access'], NULL, NULL, NULL, 'r', 'n', 1::smallint);
+  v := public.finalize_microsoft_connection(h, NULL, 'someone-else', 'consumers', 'personal', 'other@example.invalid', ARRAY['Mail.Read','User.Read','offline_access'], NULL, NULL, NULL, 'r', 'n', 1::smallint);
   ASSERT v ->> 'result' = 'different_account', 'account swap allowed: ' || v::text;
   ASSERT (SELECT consumed_at IS NULL FROM public.microsoft_oauth_states WHERE state_hash = h), 'different-account attempt consumed the state';
 
   -- REAUTHORIZATION with a NEW state carrying a NEW disclosure version + documented
   -- equivalent spellings (resource-prefixed, mixed case, duplicates) → normalized
   v := public.finalize_microsoft_connection(h, u1, 'msacct-u1', 'consumers', 'personal', 'ol-u1@example.invalid',
-         ARRAY['https://graph.microsoft.com/Mail.Read', 'MAIL.READ', ' offline_access ', 'OpenID', 'email', 'profile'], now() + interval '1 hour', 'a2', 'an2', 'r2', 'n2', 2::smallint);
+         ARRAY['https://graph.microsoft.com/Mail.Read', 'MAIL.READ', 'https://graph.microsoft.com/User.Read', 'user.read', ' offline_access ', 'OpenID', 'email', 'profile'], now() + interval '1 hour', 'a2', 'an2', 'r2', 'n2', 2::smallint);
   ASSERT v ->> 'result' = 'stored' AND (v ->> 'connection_id')::uuid = m1, 'reauth failed: ' || v::text;
   ASSERT (SELECT consent_policy_version FROM public.microsoft_connections WHERE user_id = u1) = 'disclosure-v2', 'reauth did not adopt the new state version';
   ASSERT (SELECT consented_at FROM public.microsoft_connections WHERE user_id = u1) = (SELECT consented_at FROM public.microsoft_oauth_states WHERE state_hash = h), 'reauth consented_at not from the new state';
-  ASSERT (SELECT scopes FROM public.microsoft_connections WHERE user_id = u1) = ARRAY['Mail.Read','offline_access','openid','email','profile'], 'reauth scopes not normalized: ' || (SELECT scopes::text FROM public.microsoft_connections WHERE user_id = u1);
+  ASSERT (SELECT scopes FROM public.microsoft_connections WHERE user_id = u1) = ARRAY['Mail.Read','User.Read','offline_access','openid','email','profile'], 'reauth scopes not normalized: ' || (SELECT scopes::text FROM public.microsoft_connections WHERE user_id = u1);
   ASSERT (SELECT refresh_token_ciphertext = 'r2' AND key_version = 2 FROM public.microsoft_tokens WHERE user_id = u1), 'refresh token not rotated';
   ASSERT (SELECT count(*) FROM public.microsoft_connections WHERE user_id = u1) = 1, 'connection duplicated';
   ASSERT (SELECT consumed_at IS NOT NULL FROM public.microsoft_oauth_states WHERE state_hash = h), 'successful finalization did not consume';
-  v := public.finalize_microsoft_connection(h, u1, 'msacct-u1', 'consumers', 'personal', 'ol-u1@example.invalid', ARRAY['Mail.Read'], NULL, NULL, NULL, 'r3', 'n3', 1::smallint);
+  v := public.finalize_microsoft_connection(h, u1, 'msacct-u1', 'consumers', 'personal', 'ol-u1@example.invalid', ARRAY['Mail.Read','User.Read'], NULL, NULL, NULL, 'r3', 'n3', 1::smallint);
   ASSERT v ->> 'result' = 'state_consumed', 'second finalization of the same state succeeded';
   ASSERT (SELECT refresh_token_ciphertext FROM public.microsoft_tokens WHERE user_id = u1) = 'r2', 'replay after reauth rotated the token';
 
@@ -371,6 +399,26 @@ BEGIN
     UPDATE public.microsoft_connections SET scopes = ARRAY['offline_access'] WHERE user_id = u1;
   EXCEPTION WHEN check_violation THEN ok := true; END;
   ASSERT ok, 'CHECK accepted an active connection without Mail.Read';
+  -- NEW with 20260928000000: an ACTIVE connection without User.Read could not have
+  -- resolved its own ms_email, so the CHECK must refuse it too.
+  ok := false;
+  BEGIN
+    UPDATE public.microsoft_connections SET scopes = ARRAY['Mail.Read','offline_access'] WHERE user_id = u1;
+  EXCEPTION WHEN check_violation THEN ok := true; END;
+  ASSERT ok, 'CHECK accepted an active connection without User.Read';
+  -- And broader User.* is refused by the allowlist, not merely absent from it.
+  ok := false;
+  BEGIN
+    UPDATE public.microsoft_connections SET scopes = ARRAY['Mail.Read','User.Read.All'] WHERE user_id = u1;
+  EXCEPTION WHEN check_violation THEN ok := true; END;
+  ASSERT ok, 'CHECK accepted User.Read.All';
+  -- NOT ALWAYS-DENY: the canonical pair is accepted, and then restored.
+  UPDATE public.microsoft_connections SET scopes = ARRAY['Mail.Read','User.Read'] WHERE user_id = u1;
+  ASSERT (SELECT scopes FROM public.microsoft_connections WHERE user_id = u1) = ARRAY['Mail.Read','User.Read'],
+         'CHECK refused the canonical Mail.Read + User.Read pair';
+  UPDATE public.microsoft_connections
+     SET scopes = ARRAY['Mail.Read','User.Read','offline_access','openid','email','profile']
+   WHERE user_id = u1;
   ok := false;
   BEGIN
     INSERT INTO public.microsoft_oauth_states (state_hash, user_id, pkce_verifier_ciphertext, pkce_verifier_nonce, return_origin, consented_at, consent_policy_version, expires_at)
@@ -400,7 +448,7 @@ BEGIN
   h := pg_temp.mint_state(u2, 'fail-U2', 'disclosure-v9');
   SELECT consent_policy_version INTO before_ver FROM public.microsoft_connections WHERE user_id = u2;
   BEGIN
-    PERFORM public.finalize_microsoft_connection(h, u2, 'msacct-u2', 'consumers', 'personal', 'ol-u2@example.invalid', ARRAY['Mail.Read','offline_access'], NULL, NULL, NULL, 'FORCE_FAIL', 'n', 1::smallint);
+    PERFORM public.finalize_microsoft_connection(h, u2, 'msacct-u2', 'consumers', 'personal', 'ol-u2@example.invalid', ARRAY['Mail.Read','User.Read','offline_access'], NULL, NULL, NULL, 'FORCE_FAIL', 'n', 1::smallint);
   EXCEPTION WHEN OTHERS THEN failed := true; END;
   ASSERT failed, 'forced token failure did not raise';
   ASSERT (SELECT consumed_at IS NULL FROM public.microsoft_oauth_states WHERE state_hash = h), 'FAILED FINALIZATION CONSUMED THE STATE';
@@ -513,9 +561,18 @@ BEGIN
   ok := false; BEGIN PERFORM public.reserve_due_outlook_connection(120, 3600); EXCEPTION WHEN insufficient_privilege THEN ok := true; END;
   ASSERT ok, 'anon executed reserve';
   PERFORM set_config('role', 'postgres', true);
+  PERFORM set_config('request.jwt.claims', '', true);
+  PERFORM set_config('request.jwt.claim.sub', '', true);
 
   -- authenticated U1: sensitive tables + columns denied; worker RPCs denied
-  PERFORM set_config('request.jwt.claims', json_build_object('sub', u1::text, 'role', 'authenticated')::text, true);
+  -- BOTH claim forms, deliberately. Production's auth.uid() reads the JSON
+  -- `request.jwt.claims`; this disposable image's reads the singular
+  -- `request.jwt.claim.sub`. Setting only one left auth.uid() NULL, which made every
+  -- row-isolation assertion below pass for the wrong reason - nothing was visible to
+  -- anyone. The positive assertions are what expose that, so they are load-bearing.
+  PERFORM set_config('request.jwt.claims',
+    json_build_object('sub', u1::text, 'role', 'authenticated')::text, true);
+  PERFORM set_config('request.jwt.claim.sub', u1::text, true);
   PERFORM set_config('role', 'authenticated', true);
   ok := false; BEGIN PERFORM 1 FROM public.microsoft_tokens; EXCEPTION WHEN insufficient_privilege THEN ok := true; END;
   ASSERT ok, 'authenticated read microsoft_tokens';
@@ -554,6 +611,8 @@ BEGIN
   v := public.defer_candidate('new_contact', (SELECT nc_pend FROM fx WHERE u = 'U2'), now() + interval '2 days');
   ASSERT v ->> 'result' = 'not_found', 'cross-user defer: ' || v::text;
   PERFORM set_config('role', 'postgres', true);
+  PERFORM set_config('request.jwt.claims', '', true);
+  PERFORM set_config('request.jwt.claim.sub', '', true);
 END $$;
 
 -- ── 3. New-contact acceptance (U1) ────────────────────────────────────────────
@@ -561,7 +620,14 @@ DO $$
 DECLARE u1 uuid := (SELECT uid FROM fx WHERE u = 'U1'); r fx%ROWTYPE; v jsonb; cnt integer; c public.contacts%ROWTYPE; i public.interactions%ROWTYPE; nc public.new_contact_candidates%ROWTYPE;
 BEGIN
   SELECT * INTO r FROM fx WHERE u = 'U1';
-  PERFORM set_config('request.jwt.claims', json_build_object('sub', u1::text, 'role', 'authenticated')::text, true);
+  -- BOTH claim forms, deliberately. Production's auth.uid() reads the JSON
+  -- `request.jwt.claims`; this disposable image's reads the singular
+  -- `request.jwt.claim.sub`. Setting only one left auth.uid() NULL, which made every
+  -- row-isolation assertion below pass for the wrong reason - nothing was visible to
+  -- anyone. The positive assertions are what expose that, so they are load-bearing.
+  PERFORM set_config('request.jwt.claims',
+    json_build_object('sub', u1::text, 'role', 'authenticated')::text, true);
+  PERFORM set_config('request.jwt.claim.sub', u1::text, true);
   PERFORM set_config('role', 'authenticated', true);
 
   -- validation before any write
@@ -594,13 +660,22 @@ BEGIN
   SELECT * INTO i FROM public.interactions WHERE id = (v ->> 'interaction_id')::uuid;
   ASSERT i.user_id = u1 AND i.contact_id = c.id AND i.source = 'outlook' AND i.type = 'Email' AND i.interaction_date = current_date
          AND i.notes = 'Ada described the summer analyst role and offered to intro the hiring lead.' AND i.follow_up_date = current_date + 7, 'interaction fields wrong';
-  PERFORM set_config('role', 'postgres', true);   -- full-row inspection needs the owner (authenticated lacks internal columns)
+  PERFORM set_config('role', 'postgres', true);
+  PERFORM set_config('request.jwt.claims', '', true);
+  PERFORM set_config('request.jwt.claim.sub', '', true);   -- full-row inspection needs the owner (authenticated lacks internal columns)
   SELECT * INTO nc FROM public.new_contact_candidates WHERE id = r.nc_pend;
   ASSERT nc.status = 'accepted' AND nc.accepted_contact_id = c.id AND nc.accepted_interaction_id = i.id, 'candidate linkage wrong';
   ASSERT nc.proposed_email IS NULL AND nc.proposed_name IS NULL AND nc.proposed_company IS NULL AND nc.proposed_role IS NULL AND nc.proposed_linkedin_url IS NULL
          AND nc.proposed_name_evidence IS NULL AND nc.proposed_company_confidence IS NULL AND nc.draft_summary IS NULL AND nc.draft_follow_up IS NULL
          AND nc.retained_subject IS NULL AND nc.context_expires_at IS NULL AND nc.deferred_until IS NULL, 'accept did not erase context';
   ASSERT nc.person_fingerprint = pg_temp.fpx('person-newU1') AND nc.episode_fingerprint = pg_temp.fpx('ep-newU1'), 'fingerprints lost';
+  -- Back to acting AS U1. The identity has to be restored explicitly, not inherited: the
+  -- owner-role inspection above clears the claims so a later section cannot silently act
+  -- as whoever came before it. Without this the call below runs with auth.uid() NULL and
+  -- answers `not_found`, which would look like a broken idempotency contract.
+  PERFORM set_config('request.jwt.claims',
+    json_build_object('sub', u1::text, 'role', 'authenticated')::text, true);
+  PERFORM set_config('request.jwt.claim.sub', u1::text, true);
   PERFORM set_config('role', 'authenticated', true);
   v := public.accept_new_contact_candidate(r.nc_pend, 'Ada Example');
   ASSERT v ->> 'result' = 'already_accepted' AND (v ->> 'contact_id')::uuid = c.id, 're-accept not idempotent';
@@ -611,6 +686,8 @@ BEGIN
   ASSERT (SELECT count(*) FROM public.interactions WHERE contact_id = (v ->> 'contact_id')::uuid) = 0, 'contact-only created an interaction';
   ASSERT (SELECT accepted_interaction_id FROM public.new_contact_candidates WHERE id = r.nc_only) IS NULL, 'contact-only linked an interaction';
   PERFORM set_config('role', 'postgres', true);
+  PERFORM set_config('request.jwt.claims', '', true);
+  PERFORM set_config('request.jwt.claim.sub', '', true);
 END $$;
 
 -- forced interaction failure → NO orphan contact, controlled code, candidate still open
@@ -621,13 +698,22 @@ DO $$
 DECLARE u2 uuid := (SELECT uid FROM fx WHERE u = 'U2'); r fx%ROWTYPE; v jsonb;
 BEGIN
   SELECT * INTO r FROM fx WHERE u = 'U2';
-  PERFORM set_config('request.jwt.claims', json_build_object('sub', u2::text, 'role', 'authenticated')::text, true);
+  -- BOTH claim forms, deliberately. Production's auth.uid() reads the JSON
+  -- `request.jwt.claims`; this disposable image's reads the singular
+  -- `request.jwt.claim.sub`. Setting only one left auth.uid() NULL, which made every
+  -- row-isolation assertion below pass for the wrong reason - nothing was visible to
+  -- anyone. The positive assertions are what expose that, so they are load-bearing.
+  PERFORM set_config('request.jwt.claims',
+    json_build_object('sub', u2::text, 'role', 'authenticated')::text, true);
+  PERFORM set_config('request.jwt.claim.sub', u2::text, true);
   PERFORM set_config('role', 'authenticated', true);
   v := public.accept_new_contact_candidate(r.nc_pend, 'Ada Example', p_interaction_notes => 'FORCE_FAIL');
   ASSERT v ->> 'result' = 'write_failed', 'forced failure not controlled: ' || v::text;
   ASSERT (SELECT count(*) FROM public.contacts WHERE user_id = u2 AND email = 'newperson-u2@example.invalid') = 0, 'ORPHAN CONTACT CREATED';
   ASSERT (SELECT status FROM public.new_contact_candidates WHERE id = r.nc_pend) = 'pending', 'candidate not left open';
   PERFORM set_config('role', 'postgres', true);
+  PERFORM set_config('request.jwt.claims', '', true);
+  PERFORM set_config('request.jwt.claim.sub', '', true);
 END $$;
 DROP TRIGGER rt_force_fail ON public.interactions;
 
@@ -636,7 +722,14 @@ DO $$
 DECLARE u2 uuid := (SELECT uid FROM fx WHERE u = 'U2'); r fx%ROWTYPE; v jsonb; exp timestamptz;
 BEGIN
   SELECT * INTO r FROM fx WHERE u = 'U2';
-  PERFORM set_config('request.jwt.claims', json_build_object('sub', u2::text, 'role', 'authenticated')::text, true);
+  -- BOTH claim forms, deliberately. Production's auth.uid() reads the JSON
+  -- `request.jwt.claims`; this disposable image's reads the singular
+  -- `request.jwt.claim.sub`. Setting only one left auth.uid() NULL, which made every
+  -- row-isolation assertion below pass for the wrong reason - nothing was visible to
+  -- anyone. The positive assertions are what expose that, so they are load-bearing.
+  PERFORM set_config('request.jwt.claims',
+    json_build_object('sub', u2::text, 'role', 'authenticated')::text, true);
+  PERFORM set_config('request.jwt.claim.sub', u2::text, true);
   PERFORM set_config('role', 'authenticated', true);
 
   -- defer new-contact
@@ -691,6 +784,8 @@ BEGIN
   ASSERT (SELECT draft_summary IS NULL AND draft_follow_up IS NULL AND summary_evidence IS NULL AND deferred_until IS NULL AND retained_subject IS NULL
           FROM public.interaction_candidates WHERE id = r.o_pend), 'outlook accept did not erase drafts';
   PERFORM set_config('role', 'postgres', true);
+  PERFORM set_config('request.jwt.claims', '', true);
+  PERFORM set_config('request.jwt.claim.sub', '', true);
   ASSERT (SELECT source_fingerprint FROM public.interaction_candidates WHERE id = r.o_pend) = pg_temp.fpx('o_pendU2'), 'fingerprint lost';
   ASSERT (SELECT context_expires_at IS NULL FROM public.interaction_candidates WHERE id = r.o_pend), 'outlook accept left deadline';
   ASSERT (SELECT context_expires_at IS NULL FROM public.interaction_candidates WHERE id = r.g_pend), 'gmail accept left deadline';
@@ -803,13 +898,22 @@ BEGIN
   -- give U1 one more open draft so disconnect has something to erase
   INSERT INTO public.new_contact_candidates (user_id, person_fingerprint, episode_fingerprint, proposed_email, proposed_name, proposed_name_evidence, proposed_name_confidence, draft_summary, proposed_interaction_date, context_expires_at)
     VALUES (u1, pg_temp.fpx('person-late'), pg_temp.fpx('ep-late'), 'late@example.invalid', 'Late Person', 'provider_metadata', 'high', 'Late draft.', current_date, now() + interval '5 days');
-  PERFORM set_config('request.jwt.claims', json_build_object('sub', u1::text, 'role', 'authenticated')::text, true);
+  -- BOTH claim forms, deliberately. Production's auth.uid() reads the JSON
+  -- `request.jwt.claims`; this disposable image's reads the singular
+  -- `request.jwt.claim.sub`. Setting only one left auth.uid() NULL, which made every
+  -- row-isolation assertion below pass for the wrong reason - nothing was visible to
+  -- anyone. The positive assertions are what expose that, so they are load-bearing.
+  PERFORM set_config('request.jwt.claims',
+    json_build_object('sub', u1::text, 'role', 'authenticated')::text, true);
+  PERFORM set_config('request.jwt.claim.sub', u1::text, true);
   PERFORM set_config('role', 'authenticated', true);
   v := public.disconnect_my_outlook();
   ASSERT v ->> 'result' = 'disconnected', 'disconnect: ' || v::text;
   v := public.disconnect_my_outlook();
   ASSERT v ->> 'result' = 'not_connected', 'disconnect not idempotent: ' || v::text;
   PERFORM set_config('role', 'postgres', true);
+  PERFORM set_config('request.jwt.claims', '', true);
+  PERFORM set_config('request.jwt.claim.sub', '', true);
 
   ASSERT (SELECT count(*) FROM public.microsoft_connections WHERE user_id = u1) = 0, 'connection remains';
   ASSERT (SELECT count(*) FROM public.microsoft_tokens WHERE user_id = u1) = 0, 'tokens remain';
