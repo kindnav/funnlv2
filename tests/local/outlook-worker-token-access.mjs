@@ -834,9 +834,15 @@ async function main () {
       assert.ok(!cols.includes(forbidden), `no ${forbidden} column may exist`)
     }
     for (const required of ['conversation_fingerprint', 'person_fingerprint',
-      'episode_fingerprint', 'first_message_fingerprint', 'key_version', 'expires_at']) {
+      'episode_fingerprint', 'first_message_fingerprint', 'key_version']) {
       assert.ok(cols.includes(required), `${required} must exist`)
     }
+    // AND NO expires_at. These records live and die with their round, whose single
+    // deadline is outlook_sync_state.round_expires_at. An independent one here let an
+    // early two-sided exchange age out and be deleted while the round that needed it
+    // stayed valid, after which finalisation would have committed a cursor past it.
+    assert.ok(!cols.split(',').includes('expires_at'),
+      'a record must carry no deadline of its own')
   })
 
   await test('a REJECTED saved nextLink restarts the round and keeps the committed cursor', async () => {
@@ -1028,13 +1034,13 @@ BEGIN
       person_fingerprint, episode_fingerprint, episode_lookup_fingerprints,
       first_message_fingerprint, key_version, contact_id,
       first_seen_at, last_seen_at, inbound_count, outbound_count, message_count,
-      taint_code, expires_at)
+      taint_code)
     VALUES (k, '${U1}', r, fp,
             lpad(to_hex(i + 9000000), 64, '0'), lpad(to_hex(i + 8000000), 64, '0'),
             ARRAY[lpad(to_hex(i + 8000000), 64, '0'), lpad(to_hex(i + 7000000), 64, '0')],
             lpad(to_hex(i + 6000000), 64, '0'), 1, cid,
             now() - interval '2 days', now() - interval '1 day', 2, 1, 3,
-            NULL, now() + interval '1 day')
+            NULL)
     ON CONFLICT DO NOTHING;
   END LOOP;
 END $fill$;`, { tuplesOnly: false })
@@ -1137,6 +1143,168 @@ END $fill$;`, { tuplesOnly: false })
     }
     assert.strictEqual(seen, MAX_CONVERSATIONS_PER_ROUND)
     assert.strictEqual(distinct.size, MAX_CONVERSATIONS_PER_ROUND, 'no row twice, none missed')
+  })
+
+  // ══ round expiry, through the real worker and the real SQL ════════════════
+  console.log('\nexpiry: a round is discarded as one unit, and a new one can start')
+
+  /** Age the round past its deadline, which is what a long import does to it. */
+  const expireRound = () => psql(
+    `UPDATE public.outlook_sync_state SET round_expires_at = now() - interval '1 second'
+      WHERE user_id = '${U1}';`, { tuplesOnly: false })
+
+  const roundState = () => psql(`SELECT folder,
+      coalesce(round_id::text,'NULL'), round_pages,
+      coalesce(round_expires_at::text,'NULL'),
+      coalesce(delta_link_ciphertext,'NULL')
+    FROM public.outlook_sync_state WHERE user_id='${U1}' ORDER BY folder;`)
+    .trim().split(String.fromCharCode(10)).filter((l) => l.length > 0)
+    .map((l) => l.split('|').map((s) => s.trim()))
+
+  await test('AN EXPIRED ROUND does not get stuck: a new one starts and makes progress', async () => {
+    // REPRODUCED BEFORE THE FIX against this same SQL: read_outlook_round_progress
+    // reported an expired round as ABSENT, the worker chose a new round id, and because
+    // the old id was still on the folder rows every checkpoint answered round_mismatch -
+    // forever. The committed cursor was never touched, so nothing was lost; nothing
+    // progressed either.
+    await seed({ accessExpired: false })
+    const graphC = pagedGraphFixture({ pages: 25, inboundAt: 22, outboundAt: 18 })
+    const ports = makePorts()
+    currentEnv = baseEnv()
+    currentDeps = {
+      tokenUrl: FIXTURE_TOKEN_URL, fetchImpl: tokenFixture().fetchImpl,
+      graphFetchImpl: graphC.fetchImpl, select: ports.select, rpc: ports.rpc,
+    }
+
+    // One invocation reads part of the round and saves where it got to.
+    const first = await callWorker({ secret: WORKER_SECRET })
+    assert.strictEqual(first.body.run.outcome, 'continued', JSON.stringify(first.body.run))
+    const before = roundState()
+    const oldRound = before[0][1]
+    assert.notStrictEqual(oldRound, 'NULL', 'a round must be saved')
+    assert.strictEqual(before[0][1], before[1][1], 'both folders share the round id')
+    assert.strictEqual(before[0][3], before[1][3],
+      'and ONE deadline, identical on both rows')
+    assert.ok(Number(before[0][2]) > 0, 'with pages recorded')
+    assert.strictEqual(before[0][4], 'NULL', 'and no committed cursor yet')
+
+    // The deadline passes.
+    expireRound()
+    makeDueNow()
+
+    const second = await callWorker({ secret: WORKER_SECRET })
+    // IT MAKES PROGRESS, where before every page was refused.
+    assert.ok(['continued', 'committed'].includes(second.body.run.outcome),
+      `an expired round must not get stuck: ${JSON.stringify(second.body.run)}`)
+    assert.strictEqual(second.body.run.round_expired, true,
+      'and the run must say it threw one away')
+    assert.strictEqual(second.body.run.round_reset, 'reset')
+
+    const after = roundState()
+    assert.notStrictEqual(after[0][1], oldRound, 'a NEW round id')
+    assert.strictEqual(after[0][1], after[1][1], 'on both folders')
+    assert.strictEqual(after[0][3], after[1][3], 'with one shared deadline')
+    // The discarded round left no records behind.
+    assert.strictEqual(one(`SELECT count(*) FROM public.outlook_conversation_progress p
+      JOIN public.microsoft_connections c ON c.id = p.connection_id
+      WHERE c.user_id='${U1}' AND p.round_id::text='${oldRound}';`), '0')
+    // AND THE COMMITTED CURSOR NEVER MOVED, so the new round re-reads from a position
+    // that genuinely was ingested: it costs pages, and skips nothing.
+    assert.strictEqual(one(`SELECT coalesce(string_agg(coalesce(delta_link_ciphertext,'NULL'),','),'none')
+      FROM public.outlook_sync_state WHERE user_id='${U1}';`), 'NULL,NULL')
+    assert.strictEqual(one('SELECT count(*) FROM public.interaction_candidates;'), '0',
+      'and nothing was suggested from a round that was thrown away')
+  })
+
+  await test('a long import still reaches ONE suggestion with a round expiring part-way', async () => {
+    await seed({ accessExpired: false })
+    const graphC = pagedGraphFixture({ pages: 25, inboundAt: 22, outboundAt: 18 })
+    const ports = makePorts()
+    currentEnv = baseEnv()
+    currentDeps = {
+      tokenUrl: FIXTURE_TOKEN_URL, fetchImpl: tokenFixture().fetchImpl,
+      graphFetchImpl: graphC.fetchImpl, select: ports.select, rpc: ports.rpc,
+    }
+    let outcome = null
+    let expiries = 0
+    for (let i = 0; i < 20; i += 1) {
+      const r = await callWorker({ secret: WORKER_SECRET })
+      if (r.body?.run?.round_expired === true) expiries += 1
+      outcome = r.body?.run?.outcome
+      if (outcome !== 'continued') break
+      // The deadline passes once, in the middle of the import.
+      if (i === 1) expireRound()
+      makeDueNow()
+    }
+    assert.strictEqual(expiries, 1, 'exactly one round was discarded')
+    assert.strictEqual(outcome, 'committed', `and the import still finished: ${outcome}`)
+    assert.strictEqual(one(`SELECT count(*) FROM public.interaction_candidates
+      WHERE user_id='${U1}' AND source='outlook' AND status='pending';`), '1',
+    'exactly one pending suggestion, after the rework')
+    assert.strictEqual(one(`SELECT count(*) FROM public.interactions WHERE user_id='${U1}';`), '0')
+  })
+
+  await test('a round that expires MID-RUN commits no cursor and leaves no records', async () => {
+    await seed({ accessExpired: false })
+    const graphC = pagedGraphFixture({ pages: 1, inboundAt: 1, outboundAt: 1 })
+    const ports = makePorts()
+    // Expire the round between the last checkpoint and finalisation, by ageing it the
+    // moment the final page is recorded.
+    let expired = false
+    const racingRpc = async (name, args) => {
+      const res = await ports.rpc(name, args)
+      if (!expired && name === 'record_outlook_page_progress'
+          && args?.p_folder === 'sentitems' && args?.p_folder_complete === true) {
+        expired = true
+        expireRound()
+      }
+      return res
+    }
+    currentEnv = baseEnv()
+    currentDeps = {
+      tokenUrl: FIXTURE_TOKEN_URL, fetchImpl: tokenFixture().fetchImpl,
+      graphFetchImpl: graphC.fetchImpl, select: ports.select, rpc: racingRpc,
+    }
+    const r = await callWorker({ secret: WORKER_SECRET })
+    assert.ok(expired, 'the round must actually have been aged mid-run')
+    assert.strictEqual(r.body.run.outcome, 'incomplete', JSON.stringify(r.body.run))
+    assert.deepStrictEqual(r.body.run.incomplete_reasons, ['round_expired'])
+    assert.strictEqual(r.body.run.cursors_advanced, 0,
+      'NOTHING may be committed from a dead round')
+    assert.strictEqual(one(`SELECT coalesce(string_agg(coalesce(delta_link_ciphertext,'NULL'),','),'none')
+      FROM public.outlook_sync_state WHERE user_id='${U1}';`), 'NULL,NULL')
+    assert.strictEqual(one('SELECT count(*) FROM public.interaction_candidates;'), '0')
+  })
+
+  await test('one folder expiring expires the ROUND, not half of it', async () => {
+    await seed({ accessExpired: false })
+    const graphC = pagedGraphFixture({ pages: 25, inboundAt: 22, outboundAt: 18 })
+    const ports = makePorts()
+    currentEnv = baseEnv()
+    currentDeps = {
+      tokenUrl: FIXTURE_TOKEN_URL, fetchImpl: tokenFixture().fetchImpl,
+      graphFetchImpl: graphC.fetchImpl, select: ports.select, rpc: ports.rpc,
+    }
+    const first = await callWorker({ secret: WORKER_SECRET })
+    assert.strictEqual(first.body.run.outcome, 'continued', JSON.stringify(first.body.run))
+    const oldRound = roundState()[0][1]
+
+    // Only Sent Items is aged. The deadline is written to both rows at once so they
+    // cannot normally differ; if they ever did, the EARLIER one must govern, or one folder
+    // reports a round the other does not and a run resumes half of one.
+    psql(`UPDATE public.outlook_sync_state
+      SET round_expires_at = now() - interval '1 second'
+      WHERE user_id = '${U1}' AND folder = 'sentitems';`, { tuplesOnly: false })
+    makeDueNow()
+
+    const second = await callWorker({ secret: WORKER_SECRET })
+    assert.strictEqual(second.body.run.round_expired, true,
+      `the earlier deadline must govern: ${JSON.stringify(second.body.run)}`)
+    const after = roundState()
+    assert.notStrictEqual(after[0][1], oldRound)
+    assert.strictEqual(after[0][1], after[1][1],
+      'both folders must end up on the SAME new round')
+    assert.strictEqual(after[0][3], after[1][3], 'sharing one deadline again')
   })
 
   // ══ refusals ══════════════════════════════════════════════════════════════

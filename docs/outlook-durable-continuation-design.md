@@ -288,6 +288,61 @@ Both cases are tested: the tainted row on the page in hand, and the tainted row 
 write cursor and therefore absent from the page — with a clean round of the same shape
 committing normally, so the gate is not simply always on.
 
+### 5d. A round expires as ONE unit
+
+Expiry was spread across three places that could disagree, and all three failures were
+reproduced against the real SQL before being changed.
+
+**It could get stuck.** `read_outlook_round_progress` reported an expired round as
+*absent*, so the worker chose a new round id — while the old id was still on the folder
+rows, so `record_outlook_page_progress` answered `round_mismatch` to every page. Forever.
+The committed cursor was never touched, so nothing was lost; nothing progressed either.
+
+**It could skip mail.** Conversation records carried their own `expires_at` while every
+page checkpoint pushed `round_expires_at` forward. An early two-sided exchange therefore
+aged out and was deleted by a later page's own cleanup *while the round and its saved
+`nextLink` stayed valid* — so finalisation listed only the survivors and would have
+committed both cursors past an exchange it had lost. Reproduced with a page on each folder
+and the exchange assembled from both.
+
+**The two folders could disagree.** `round_expires_at` was written per folder on each page,
+so Inbox and Sent Items could hold different deadlines and the read reported a round for one
+and none for the other.
+
+**The rule now:**
+
+1. **One deadline per round**, fixed when the round is adopted and written identically to
+   both folder rows. **Later pages do not extend it.**
+2. **Records have no deadline of their own.** `outlook_conversation_progress.expires_at` is
+   gone; the round's deadline governs, so nothing can age out from under a live round.
+3. **Every expiry decision takes `min()` across the two folder rows**, so a disagreement
+   fails towards *expired* rather than towards half a round.
+4. **An expired round is discarded as a unit** — both folder rows' round state and every one
+   of its records — and the **committed cursor is untouched**. Adoption of a new round id
+   performs that discard, which is what unsticks case 1; the worker also resets explicitly
+   so the reason is recorded on the row.
+5. **An expired round cannot be extended, listed, finalised, or have its finalisation
+   progress recorded.** `record_outlook_page_progress`, `list_outlook_round_conversations`
+   and `advance_outlook_round_write_cursor` all answer `round_expired`. That is what stops a
+   cursor advancing past records that are about to be discarded.
+
+**Can a long import still make progress?** Yes, and it is tested both in Node and through
+the real worker: a round expiring part-way through a 50-page import still reaches exactly
+one pending suggestion. The cost of expiry is **re-reading pages from the committed cursor**
+— which has not moved, so nothing is skipped, and the suggestion dedupe answers `refreshed`
+for anything already written. The window runs from the round's **start**, so a round cannot
+extend its own life by making slow progress; retention is exactly `ROUND_TTL_SECONDS` from
+adoption, which is stricter than the "TTL after whichever page happened to be last" it
+replaces.
+
+**The remaining limit, stated.** A mailbox so large that a round cannot complete within
+`ROUND_TTL_SECONDS` (currently 24 h) would expire and restart indefinitely, re-reading and
+never committing. The per-round ceilings (200 pages, 10 000 messages) make that reachable
+only if something invokes the worker very rarely — and **nothing invokes it at all today**,
+which is the separate scheduler gap. It is safe in the sense that no mail is skipped and no
+cursor is wrongly advanced; it is not useful in that state. Raising the TTL would trade
+retention for it, and is deliberately not done here.
+
 The budget is driven by an injected clock, so its behaviour is tested with a virtual clock
 rather than by hoping a local Deno reproduces a hosted timeout.
 
@@ -443,6 +498,12 @@ who sees some conversations suggested and not others will otherwise read it as a
 3. **Per-round ceilings are bounds, not progress guarantees.** A mailbox large enough to
    exceed `MAX_PAGES_PER_ROUND` still ends a round incomplete. The bound is far above the
    old 20-page per-invocation ceiling, but it is a bound.
+3a. **A round must complete within `ROUND_TTL_SECONDS` (24 h) or it restarts.** Expiry
+   discards the round as a unit and the next one re-reads from the committed cursor, which
+   has not moved — so nothing is skipped and no cursor is wrongly advanced, but a mailbox
+   that cannot finish a round inside the window would loop without committing. Reachable
+   only if the worker is invoked very rarely, which today it is not invoked at all (see 4).
+   Raising the TTL would trade retention for it and is deliberately not done.
 4. **No scheduler.** Nothing invokes the worker. Continuation only continues if something
    calls it again.
 5. **Entra is not set up**, no client secret, token-encryption key or fingerprint HMAC key

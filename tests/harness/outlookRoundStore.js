@@ -35,6 +35,9 @@ const blankFolder = () => ({
   conversations_dropped: 0,
   folder_complete: false,
   write_cursor: null,
+  // The round's ONE deadline, mirrored on both folder rows. Milliseconds, or null for no
+  // round. Expiry is decided from the EARLIER of the two, exactly as the SQL does.
+  round_expires_ms: null,
   next_link_ciphertext: null,
   next_link_nonce: null,
   next_link_key_version: null,
@@ -45,12 +48,33 @@ const blankFolder = () => ({
   delta_link_nonce: null,
 })
 
-export function makeRoundStore () {
+export function makeRoundStore ({ clock } = {}) {
   const folders = Object.fromEntries(GRAPH_FOLDERS.map((f) => [f, blankFolder()]))
   /** conversation fingerprint -> accumulated record */
   const conversations = new Map()
   const refusals = new Map()
   const calls = []
+
+  const nowMs = () => (typeof clock === 'function' ? clock() : Date.now())
+  const committedOf = (f) => ({
+    delta_link_ciphertext: folders[f].delta_link_ciphertext,
+    delta_link_nonce: folders[f].delta_link_nonce,
+  })
+  /** The EARLIER of the two folder deadlines governs, so a disagreement fails to expired. */
+  const roundExpired = () => {
+    const ends = GRAPH_FOLDERS
+      .filter((f) => folders[f].round_id !== null)
+      .map((f) => folders[f].round_expires_ms)
+    if (ends.length === 0) return false
+    const earliest = ends.reduce((a, b) => (a === null || (b !== null && b < a) ? b : a), null)
+    return earliest !== null && earliest <= nowMs()
+  }
+  const discardRound = () => {
+    conversations.clear()
+    for (const f of GRAPH_FOLDERS) {
+      folders[f] = { ...blankFolder(), ...committedOf(f) }
+    }
+  }
 
   const refuse = (name, result) => { refusals.set(name, result) }
   const allow = (name) => { refusals.delete(name) }
@@ -62,29 +86,30 @@ export function makeRoundStore () {
     }
 
     if (name === 'read_outlook_round_progress') {
+      const expired = roundExpired()
       return {
         data: {
           result: 'ok',
-          folders: Object.fromEntries(GRAPH_FOLDERS.map((f) => [f, { ...folders[f] }])),
+          // Reported HONESTLY, not as `no round`: pretending there is none is what made
+          // the worker invent an id that every checkpoint then refused.
+          round_expired: expired,
+          folders: Object.fromEntries(GRAPH_FOLDERS.map((f) => [f,
+            expired ? { ...blankFolder(), ...committedOf(f) } : { ...folders[f] }])),
         },
         error: null,
       }
     }
 
     if (name === 'reset_outlook_round') {
-      conversations.clear()
-      for (const f of GRAPH_FOLDERS) {
-        const committed = {
-          delta_link_ciphertext: folders[f].delta_link_ciphertext,
-          delta_link_nonce: folders[f].delta_link_nonce,
-        }
-        // Exactly like the SQL: the round is discarded, the COMMITTED cursor is not.
-        folders[f] = { ...blankFolder(), ...committed }
-      }
+      // Exactly like the SQL: the round goes AS A UNIT, the COMMITTED cursor does not.
+      discardRound()
       return { data: { result: 'reset' }, error: null }
     }
 
     if (name === 'list_outlook_round_conversations') {
+      // An expired round is not finalised: its records are about to be discarded, so
+      // listing it would let a cursor advance past whatever is missing.
+      if (roundExpired()) return { data: { result: 'round_expired' }, error: null }
       // p_after is the finalisation resume point: only conversations ordered strictly
       // after it, exactly as the SQL filters them.
       const after = typeof args?.p_after === 'string' && args.p_after.length > 0
@@ -114,6 +139,7 @@ export function makeRoundStore () {
     }
 
     if (name === 'advance_outlook_round_write_cursor') {
+      if (roundExpired()) return { data: { result: 'round_expired' }, error: null }
       const after = args?.p_after
       if (typeof after !== 'string' || !/^[0-9a-f]{64}$/.test(after)) {
         return { data: { result: 'invalid_cursor' }, error: null }
@@ -136,11 +162,18 @@ export function makeRoundStore () {
     }
 
     if (name === 'record_outlook_page_progress') {
-      const folder = folders[args.p_folder]
-      if (!folder) return { data: { result: 'invalid_folder' }, error: null }
-      if (folder.round_id !== null && folder.round_id !== args.p_round_id) {
-        return { data: { result: 'round_mismatch' }, error: null }
+      if (!folders[args.p_folder]) return { data: { result: 'invalid_folder' }, error: null }
+      // A DIFFERENT round is here: discard it if it has expired, refuse if it is live.
+      const other = GRAPH_FOLDERS.some(
+        (f) => folders[f].round_id !== null && folders[f].round_id !== args.p_round_id)
+      if (other) {
+        if (!roundExpired()) return { data: { result: 'round_mismatch' }, error: null }
+        discardRound()
+      } else if (roundExpired()) {
+        // The CURRENT round is dead; it must not be extended by another page.
+        return { data: { result: 'round_expired' }, error: null }
       }
+      const folder = folders[args.p_folder]
       if (args.p_page_seq <= folder.page_seq) {
         return {
           data: {
@@ -224,6 +257,15 @@ export function makeRoundStore () {
         existing.taint = taint
       }
 
+      // Fixed at ADOPTION, identical on both rows, and never extended by a later page.
+      const ttlMs = (Number.isInteger(args.p_round_ttl_seconds)
+        ? args.p_round_ttl_seconds : 86400) * 1000
+      for (const f of GRAPH_FOLDERS) {
+        if (folders[f].round_id === null) {
+          folders[f].round_id = args.p_round_id
+          folders[f].round_expires_ms = nowMs() + ttlMs
+        }
+      }
       folder.round_id = args.p_round_id
       folder.page_seq = args.p_page_seq
       folder.pages += 1

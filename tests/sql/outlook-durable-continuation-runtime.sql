@@ -39,6 +39,9 @@ DECLARE
   mfp_1st text := repeat('f', 64);
   committed_ct text;
   i       integer;
+  round3  uuid := '00000000-0000-0000-0000-0000000000a3';
+  early_cfp text := repeat('a', 62) || 'cd';
+  round_ends timestamptz;
   -- Deliberately ordered AFTER cfp: the resume filter is `> cursor`, so a fingerprint
   -- that sorted before it would be skipped and prove nothing. ('2' < 'a' - the first
   -- attempt at this fixture got that wrong and the filter correctly returned nothing.)
@@ -416,18 +419,130 @@ BEGIN
           FROM public.outlook_sync_state WHERE connection_id = conn AND folder = 'inbox'),
          'the reason must be recorded on the row';
 
-  -- ── 14. An EXPIRED round reads back as no round at all ────────────────────
+  -- ── 14. ROUND EXPIRY: one deadline, discarded or renewed AS ONE UNIT ──────
+  -- Three failures forced this rule, and all three are reproduced below against the
+  -- behaviour that preceded it.
+
+  -- A round with a page on EACH folder, and a two-sided conversation assembled from
+  -- both - the kind that must not be lost.
   v := public.record_outlook_page_progress(
          conn, run1, 'inbox', round2, 1,
-         'NEXT-EXPIRING', 'NE', NULL, NULL, 1::smallint, false, 3, 0, '[]'::jsonb, 86400);
+         'NEXT-IN-1', 'NI', NULL, NULL, 1::smallint, false, 3, 0,
+         jsonb_build_array(jsonb_build_object(
+           'cfp', early_cfp, 'pfp', pfp, 'efp', efp_1st,
+           'elookup', jsonb_build_array(efp_1st), 'first_fp', mfp_1st,
+           'first_at', '2026-09-20T14:00:00Z', 'last_at', '2026-09-20T14:00:00Z',
+           'contact_id', c1::text, 'key_version', 1,
+           'inbound', 1, 'outbound', 0, 'messages', 1, 'taint', NULL)), 86400);
   ASSERT v ->> 'result' = 'recorded', v::text;
+  v := public.record_outlook_page_progress(
+         conn, run1, 'sentitems', round2, 1,
+         'NEXT-SE-1', 'NS', NULL, NULL, 1::smallint, false, 3, 0,
+         jsonb_build_array(jsonb_build_object(
+           'cfp', early_cfp, 'pfp', pfp, 'efp', efp_1st,
+           'elookup', jsonb_build_array(efp_1st), 'first_fp', mfp_1st,
+           'first_at', '2026-09-21T09:00:00Z', 'last_at', '2026-09-21T09:00:00Z',
+           'contact_id', c1::text, 'key_version', 1,
+           'inbound', 0, 'outbound', 1, 'messages', 1, 'taint', NULL)), 86400);
+  ASSERT v ->> 'result' = 'recorded', v::text;
+  ASSERT (SELECT inbound_count = 1 AND outbound_count = 1
+          FROM public.outlook_conversation_progress
+          WHERE connection_id = conn AND conversation_fingerprint = early_cfp),
+         'the exchange must be two-sided across the folders';
+
+  -- ONE DEADLINE, identical on both rows, and later pages do NOT move it. Extending it
+  -- per page is what let a round outlive the records it depended on.
+  SELECT round_expires_at INTO round_ends FROM public.outlook_sync_state
+   WHERE connection_id = conn AND folder = 'inbox';
+  ASSERT (SELECT count(DISTINCT round_expires_at) = 1 FROM public.outlook_sync_state
+           WHERE connection_id = conn),
+         'both folders must carry the SAME round deadline';
+  v := public.record_outlook_page_progress(
+         conn, run1, 'inbox', round2, 2,
+         'NEXT-IN-2', 'NI', NULL, NULL, 1::smallint, false, 3, 0, '[]'::jsonb, 86400);
+  ASSERT v ->> 'result' = 'recorded', v::text;
+  ASSERT (SELECT round_expires_at = round_ends FROM public.outlook_sync_state
+           WHERE connection_id = conn AND folder = 'inbox'),
+         'A LATER PAGE MUST NOT EXTEND THE ROUND DEADLINE';
+
+  -- ── 14a. the round expires: EVERYTHING about it stops at once ─────────────
   UPDATE public.outlook_sync_state SET round_expires_at = now() - interval '1 second'
    WHERE connection_id = conn;
+
+  -- The read reports it HONESTLY. Reporting `no round` is what made the worker invent a
+  -- new id that every checkpoint then refused, forever.
   v := public.read_outlook_round_progress(conn, run1);
+  ASSERT (v ->> 'round_expired')::boolean = true, v::text;
   ASSERT v #>> '{folders,inbox,round_id}' IS NULL,
          'an expired round must not be resumed';
   ASSERT v #>> '{folders,inbox,next_link_ciphertext}' IS NULL,
          'an expired resume position must not be handed back';
+
+  -- A dead round cannot be extended by another page...
+  v := public.record_outlook_page_progress(
+         conn, run1, 'inbox', round2, 3,
+         'NEXT-IN-3', 'NI', NULL, NULL, 1::smallint, false, 3, 0, '[]'::jsonb, 86400);
+  ASSERT v ->> 'result' = 'round_expired', v::text;
+  -- ...nor FINALISED, which is what stops a cursor advancing past records that are about
+  -- to be discarded. Before this rule the round stayed live while an early conversation
+  -- aged out and was deleted by a later page, and finalisation then listed only the
+  -- survivors and committed both cursors past the exchange it had lost.
+  v := public.list_outlook_round_conversations(conn, run1, round2, 200, NULL);
+  ASSERT v ->> 'result' = 'round_expired',
+         'an expired round must not be listed for finalisation: ' || v::text;
+  -- ...nor may its finalisation progress be recorded.
+  v := public.advance_outlook_round_write_cursor(conn, run1, round2, early_cfp);
+  ASSERT v ->> 'result' = 'round_expired', v::text;
+
+  -- The two-sided conversation is STILL THERE, not silently deleted while its round
+  -- looked alive. It goes when the round goes, which is the whole rule.
+  ASSERT (SELECT count(*) > 0 FROM public.outlook_conversation_progress
+           WHERE connection_id = conn AND conversation_fingerprint = early_cfp),
+         'records must not vanish out from under a round';
+
+  -- ── 14b. a NEW round starts cleanly from the unchanged committed cursor ───
+  committed_ct := (SELECT delta_link_ciphertext FROM public.outlook_sync_state
+                    WHERE connection_id = conn AND folder = 'inbox');
+  v := public.record_outlook_page_progress(
+         conn, run1, 'inbox', round3, 1,
+         'FRESH-IN-1', 'FI', NULL, NULL, 1::smallint, false, 2, 0, '[]'::jsonb, 86400);
+  ASSERT v ->> 'result' = 'recorded',
+         'A NEW ROUND MUST BE ABLE TO START OVER AN EXPIRED ONE: ' || v::text;
+  ASSERT (v ->> 'round_pages')::int = 1, 'and it starts from one page, not from the old count';
+  -- The expired round is gone WHOLE: both folder rows and every one of its records.
+  ASSERT (SELECT count(*) = 0 FROM public.outlook_conversation_progress
+           WHERE connection_id = conn AND round_id = round2),
+         'the discarded round must leave no records behind';
+  ASSERT (SELECT count(*) = 2 FROM public.outlook_sync_state
+           WHERE connection_id = conn AND round_id = round3),
+         'the new round id must be adopted on both folder rows';
+  ASSERT (SELECT bool_and(round_expires_at > now()) FROM public.outlook_sync_state
+           WHERE connection_id = conn),
+         'the new round gets a live deadline';
+  -- AND THE COMMITTED CURSOR NEVER MOVED, so the new round re-reads from a position that
+  -- genuinely was ingested: it costs pages, and it skips nothing.
+  ASSERT (SELECT delta_link_ciphertext = committed_ct FROM public.outlook_sync_state
+           WHERE connection_id = conn AND folder = 'inbox'),
+         'expiry must never touch the committed cursor';
+
+  -- ── 14c. the two folders disagreeing fails towards EXPIRED ────────────────
+  -- The deadline is written to both rows at once, so they cannot normally differ. If they
+  -- ever did, the EARLIER one must govern - otherwise one folder reports a round the
+  -- other does not, and a worker resumes half of one.
+  UPDATE public.outlook_sync_state SET round_expires_at = now() - interval '1 second'
+   WHERE connection_id = conn AND folder = 'sentitems';
+  v := public.read_outlook_round_progress(conn, run1);
+  ASSERT (v ->> 'round_expired')::boolean = true,
+         'one expired folder expires the round: ' || v::text;
+  ASSERT v #>> '{folders,inbox,round_id}' IS NULL
+     AND v #>> '{folders,sentitems,round_id}' IS NULL,
+         'NEITHER folder may report a resumable round';
+  v := public.list_outlook_round_conversations(conn, run1, round3, 200, NULL);
+  ASSERT v ->> 'result' = 'round_expired', v::text;
+
+  -- Tidy up for the sections that follow.
+  v := public.reset_outlook_round(conn, run1, NULL);
+  ASSERT v ->> 'result' = 'reset', v::text;
 
   -- ── 14b. THE READ-BACK IS PAGED, AND TRUNCATION IS WHOLE-ROUND ────────────
   -- A record serialises to about 602 bytes at its widest, so the 2000-record round
@@ -449,15 +564,14 @@ BEGIN
       person_fingerprint, episode_fingerprint, episode_lookup_fingerprints,
       first_message_fingerprint, key_version, contact_id,
       first_seen_at, last_seen_at, inbound_count, outbound_count, message_count,
-      taint_code, expires_at)
+      taint_code)
     VALUES (conn, u1, round2, lpad(to_hex(i), 64, '0'),
             lpad(to_hex(i + 9000000), 64, '0'), lpad(to_hex(i + 8000000), 64, '0'),
             ARRAY[lpad(to_hex(i + 8000000), 64, '0'), lpad(to_hex(i + 7000000), 64, '0')],
             lpad(to_hex(i + 6000000), 64, '0'), 1, c1,
             now() - interval '2 days', now() - interval '1 day', 1, 1,
             CASE WHEN i = 1 THEN 60 ELSE 2 END,
-            CASE WHEN i = 1 THEN 'episode_truncated' ELSE NULL END,
-            now() + interval '1 day');
+            CASE WHEN i = 1 THEN 'episode_truncated' ELSE NULL END);
   END LOOP;
 
   -- THE CAP HOLDS whatever is asked for, so a caller cannot produce a body its own port

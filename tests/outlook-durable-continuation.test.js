@@ -1038,6 +1038,226 @@ test('more rows remaining with no budget left is CONTINUATION, not incompletenes
 })
 
 // ══════════════════════════════════════════════════════════════════════════════
+console.log('\n8. a round expires AS ONE UNIT, and a new one can always start')
+// ══════════════════════════════════════════════════════════════════════════════
+
+/** A harness whose store shares the test's virtual clock, so expiry is controllable. */
+function expiryHarness () {
+  let clock = 1_000_000
+  const store = makeRoundStore({ clock: () => clock })
+  const calls = []
+  const rpc = async (name, args) => {
+    calls.push({ name, args })
+    if (name === 'reserve_due_outlook_connection') {
+      return { data: { result: 'reserved', connection_id: CONN, run_id: RUN }, error: null }
+    }
+    if (name === 'renew_outlook_sync_lease') return { data: true, error: null }
+    if (name === 'upsert_outlook_interaction_candidate') {
+      return { data: { result: 'created' }, error: null }
+    }
+    if (name === 'release_outlook_sync_lease') {
+      if (args?.p_run_complete === true) store.commitRelease()
+      return { data: true, error: null }
+    }
+    const fromStore = await store.handle(name, args)
+    if (fromStore !== null) return fromStore
+    return { data: null, error: null }
+  }
+  return {
+    store,
+    calls,
+    advance: (ms) => { clock += ms },
+    now: () => clock,
+    invoke: ({ fetchImpl }) => runOutlookImport({
+      rpc,
+      encryptCursor: ENCRYPT,
+      decryptCursor: DECRYPT,
+      loadRunContext: context(),
+      deps: { fetchImpl },
+    }),
+    writes: () => calls.filter((c) => c.name === 'upsert_outlook_interaction_candidate'),
+    named: (n) => calls.filter((c) => c.name === n),
+  }
+}
+
+test('a later page does NOT extend the round deadline', async () => {
+  const h = expiryHarness()
+  // Big enough that the round is still OPEN afterwards - a committed round erases its
+  // deadline along with everything else, so there would be nothing to compare.
+  const mb = bigMailbox({ inboxPages: 25, sentPages: 25, inboundAt: 22, outboundAt: 18 })
+  const r = await h.invoke({ fetchImpl: mb.fetchImpl })
+  assert.strictEqual(r.outcome, 'continued', JSON.stringify(summarizeRun(r)))
+  const ends = GRAPH_FOLDERS.map((f) => h.store.folders[f].round_expires_ms)
+  // ONE deadline, the same on both rows. Extending it per page is what let a round
+  // outlive the records it depended on.
+  assert.strictEqual(ends[0], ends[1], 'both folders must carry the same deadline')
+  assert.ok(ends[0] > h.now(), 'and it must be in the future')
+  // Several pages were checkpointed, and the deadline is still the adoption one.
+  assert.ok(h.named('record_outlook_page_progress').length >= 3)
+  assert.strictEqual(ends[0], 1_000_000 + ROUND_TTL_SECONDS * 1000)
+})
+
+test('REPRODUCED: an expired round used to get STUCK; now a new one starts', async () => {
+  // BEFORE: read_outlook_round_progress reported an expired round as ABSENT, so the run
+  // chose a new round id - while the old id was still on the folder rows, so every
+  // checkpoint answered round_mismatch, forever. Nothing was lost (the committed cursor
+  // was never touched) and nothing progressed either.
+  const h = expiryHarness()
+  const mb = bigMailbox({ inboxPages: 25, sentPages: 25, inboundAt: 22, outboundAt: 18 })
+
+  // One invocation reads part of the round...
+  const first = await h.invoke({ fetchImpl: mb.fetchImpl })
+  assert.strictEqual(first.outcome, 'continued', JSON.stringify(summarizeRun(first)))
+  const savedPages = h.store.folders.inbox.pages
+  assert.ok(savedPages > 0, 'a position must have been saved')
+  const oldRound = h.store.folders.inbox.round_id
+
+  // ...then the round's deadline passes.
+  h.advance(ROUND_TTL_SECONDS * 1000 + 1)
+
+  const second = await h.invoke({ fetchImpl: mb.fetchImpl })
+  const s = summarizeRun(second)
+  // IT MAKES PROGRESS. Before the fix this was round_mismatch on every page.
+  assert.ok(['continued', 'committed'].includes(second.outcome),
+    `an expired round must not get stuck: ${JSON.stringify(s)}`)
+  assert.strictEqual(s.round_expired, true, 'and it must say it threw one away')
+  assert.strictEqual(s.round_reset, 'reset')
+  // A NEW round, from scratch.
+  assert.notStrictEqual(h.store.folders.inbox.round_id, oldRound)
+  assert.strictEqual(h.store.folders.inbox.round_id, h.store.folders.sentitems.round_id)
+  // No checkpoint was refused for a round mismatch.
+  assert.strictEqual(h.named('record_outlook_page_progress')
+    .filter((c) => c.args.p_round_id === oldRound && c.args.p_page_seq > savedPages).length, 0)
+  // AND THE COMMITTED CURSOR NEVER MOVED, so the fresh round re-reads from a position
+  // that genuinely was ingested: it costs pages, and skips nothing.
+  for (const f of GRAPH_FOLDERS) {
+    assert.strictEqual(h.store.folders[f].delta_link_ciphertext, null, f)
+  }
+})
+
+test('a long import still finishes across invocations while rounds expire', async () => {
+  // The point of the rule is that expiry costs re-reading, never progress. Here the
+  // deadline passes part-way through, the round restarts from the committed cursor, and
+  // the import still reaches exactly one suggestion.
+  const h = expiryHarness()
+  const mb = bigMailbox({ inboxPages: 25, sentPages: 25, inboundAt: 22, outboundAt: 18 })
+  let outcome = null
+  let expiries = 0
+  for (let i = 0; i < 20; i += 1) {
+    const r = await h.invoke({ fetchImpl: mb.fetchImpl })
+    if (r.roundExpired === true) expiries += 1
+    outcome = r.outcome
+    if (outcome !== 'continued') break
+    // The deadline passes once, in the middle of the import.
+    if (i === 1) h.advance(ROUND_TTL_SECONDS * 1000 + 1)
+  }
+  assert.strictEqual(expiries, 1, 'exactly one round was discarded')
+  assert.strictEqual(outcome, 'committed', 'and the import still finished')
+  assert.strictEqual(h.writes().length, 1, 'exactly one pending suggestion')
+})
+
+test('REPRODUCED: a record cannot vanish from under a live round', async () => {
+  // BEFORE: conversation records carried their OWN expires_at while every page pushed
+  // round_expires_at forward, so an early two-sided exchange aged out and was deleted by
+  // a later page's cleanup while the round and its saved nextLink stayed valid -
+  // finalisation then listed only the survivors and committed both cursors past it.
+  //
+  // Records have no independent deadline now, so the only way one goes is with its round.
+  const h = expiryHarness()
+  // The qualifying inbound is on the FIRST inbox page, so a record exists straight away,
+  // and the mailbox is big enough that the round stays open to hold it.
+  const mb = bigMailbox({ inboxPages: 25, sentPages: 25, inboundAt: 1, outboundAt: 18 })
+  const first = await h.invoke({ fetchImpl: mb.fetchImpl })
+  assert.strictEqual(first.outcome, 'continued', JSON.stringify(summarizeRun(first)))
+  const before = h.store.conversations.size
+  assert.ok(before > 0, 'the exchange must be in the accumulator')
+  const rows = [...h.store.conversations.values()]
+  for (const row of rows) {
+    assert.strictEqual('expires_at' in row, false,
+      'a record must carry no deadline of its own')
+  }
+  // Time passes well beyond what a record used to live for, but inside the round.
+  h.advance(ROUND_TTL_SECONDS * 1000 - 1000)
+  await h.invoke({ fetchImpl: mb.fetchImpl })
+  assert.ok(h.store.conversations.size >= before,
+    'no record may be dropped while its round is live')
+})
+
+test('a round that expires MID-RUN commits nothing at all', async () => {
+  const h = expiryHarness()
+  seedCompletedRound(h.store, { n: 3 })
+  // The seeded round is live...
+  for (const f of GRAPH_FOLDERS) {
+    h.store.folders[f].round_expires_ms = h.now() + 60_000
+  }
+  // ...but its deadline passes before finalisation can list it.
+  h.advance(60_001)
+  const r = await h.invoke({ fetchImpl: noGraph })
+  const s = summarizeRun(r)
+  // It is thrown away and a fresh round is started - which, with no Graph pages to read,
+  // means this invocation simply makes no suggestion.
+  assert.strictEqual(s.round_expired, true, JSON.stringify(s))
+  assert.strictEqual(r.cursorsAdvanced, 0, 'NOTHING may be committed from a dead round')
+  assert.strictEqual(h.writes().length, 0)
+  for (const f of GRAPH_FOLDERS) {
+    assert.strictEqual(h.store.folders[f].delta_link_ciphertext, null, f)
+  }
+  // The discarded round left no records behind.
+  assert.strictEqual(h.store.conversations.size, 0)
+})
+
+test('one folder expiring expires the ROUND, not half of it', async () => {
+  const h = expiryHarness()
+  const mb = bigMailbox({ inboxPages: 25, sentPages: 25, inboundAt: 22, outboundAt: 18 })
+  await h.invoke({ fetchImpl: mb.fetchImpl })
+  const oldRound = h.store.folders.inbox.round_id
+  assert.ok(oldRound)
+  // The deadline is written to both rows at once, so they cannot normally differ. If they
+  // ever did, the EARLIER one must govern - otherwise one folder reports a round the
+  // other does not, and a run resumes half of one.
+  h.store.folders.sentitems.round_expires_ms = h.now() - 1
+  const r = await h.invoke({ fetchImpl: mb.fetchImpl })
+  assert.strictEqual(summarizeRun(r).round_expired, true,
+    'the earlier of the two deadlines must govern')
+  assert.notStrictEqual(h.store.folders.inbox.round_id, oldRound)
+  assert.strictEqual(h.store.folders.inbox.round_id, h.store.folders.sentitems.round_id,
+    'and both folders must end up on the SAME new round')
+})
+
+test('the design records the expiry rule, its cost and its remaining limit', () => {
+  assert.ok(DESIGN.includes('5d. A round expires as ONE unit'))
+  // All three reproduced failures, named.
+  assert.ok(DESIGN.includes('It could get stuck'))
+  assert.ok(DESIGN.includes('It could skip mail'))
+  assert.ok(DESIGN.includes('The two folders could disagree'))
+  // The rule itself.
+  assert.ok(DESIGN.includes('One deadline per round'))
+  assert.ok(DESIGN.includes('Records have no deadline of their own'))
+  assert.ok(DESIGN.includes('discarded as a unit'))
+  // Honest about what it costs and what it does not fix.
+  assert.ok(DESIGN.includes('Can a long import still make progress'))
+  assert.ok(DESIGN.includes('re-reading pages from the committed cursor'))
+  assert.ok(DESIGN.includes('The remaining limit, stated'))
+  // And the two things that must stay open.
+  assert.ok(DESIGN.includes('NOT addressed for context preparation'),
+    'the context-load blocker must stay explicit')
+  assert.ok(DESIGN.includes('D2 as a decision sheet'),
+    'the cross-round privacy decision must stay open')
+})
+
+test('round_expired is a controlled reason, and the TTL is still bounded', () => {
+  assert.ok(ROUND_INCOMPLETE_REASONS.includes('round_expired'))
+  // Bounded retention, unchanged in intent: the window runs from the round's START, so a
+  // round cannot keep extending its own life by making slow progress.
+  assert.ok(ROUND_TTL_SECONDS >= 3600 && ROUND_TTL_SECONDS <= 604_800)
+  assert.ok(MIGRATION.includes('ONE DEADLINE, FOR THE WHOLE ROUND'))
+  assert.ok(MIGRATION.includes('Later pages do NOT'),
+    'the no-extension rule must be stated')
+  assert.ok(MIGRATION.includes('NO expires_at'),
+    'records must be documented as having no deadline of their own')
+})
+
+// ══════════════════════════════════════════════════════════════════════════════
 console.log('\nthe fingerprint is stable however the round was split')
 // ══════════════════════════════════════════════════════════════════════════════
 

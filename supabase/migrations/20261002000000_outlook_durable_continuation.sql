@@ -45,6 +45,39 @@
 -- for any superseded or expired round the moment a new round touches the connection. No
 -- scheduler is introduced and no retention window is promised beyond that.
 --
+-- ── ONE DEADLINE, FOR THE WHOLE ROUND ───────────────────────────────────────
+-- A round and its conversation records expire TOGETHER, at a single deadline fixed when
+-- the round is adopted and written identically to both folder rows. Later pages do NOT
+-- extend it, and the records carry no deadline of their own.
+--
+-- THREE FAILURES THAT FORCED THIS, each reproduced against this SQL:
+--
+--   1. STUCK. read_outlook_round_progress reported an expired round as ABSENT, so the
+--      worker chose a new round id - while the old id was still on the folder rows, so
+--      record_outlook_page_progress answered `round_mismatch` to every page, forever. The
+--      committed cursor was never touched, so nothing was lost; nothing progressed
+--      either. Adoption now DISCARDS an expired round as a unit and takes the new id.
+--
+--   2. SKIPPED MAIL. Conversation records had their own expires_at while every page
+--      checkpoint pushed round_expires_at forward. An early two-sided exchange therefore
+--      aged out and was deleted by a later page's own cleanup, while the round and its
+--      saved nextLink stayed valid - so finalisation listed only the survivors and would
+--      have committed both cursors past an exchange it had lost. Records now have no
+--      independent expiry, and an expired round cannot be listed, finalised, or
+--      checkpointed at all.
+--
+--   3. DISAGREEING FOLDERS. round_expires_at was written per folder on each page, so
+--      Inbox and Sent Items could hold different deadlines and the read reported a round
+--      for one folder and none for the other. The deadline is now set once for both, and
+--      every expiry decision takes min() across the two rows, so a disagreement fails
+--      towards expired rather than towards half a round.
+--
+-- WHAT THIS COSTS. A round that cannot finish inside the window is discarded and starts
+-- again from the COMMITTED cursor, which has not moved - so it re-reads pages it had
+-- already read. That is bounded rework, and the suggestion dedupe makes it harmless. What
+-- it buys is that retention is exactly the window from the round's start, rather than
+-- `the window after whichever page happened to be last`.
+--
 -- GRANTS. service_role only throughout. Per the FUTURE RULE recorded in
 -- 20260922175616 every REVOKE names PUBLIC, anon AND authenticated explicitly, because
 -- this project's default privileges would otherwise grant all three at CREATE time.
@@ -203,10 +236,12 @@ CREATE TABLE IF NOT EXISTS public.outlook_conversation_progress (
 
   created_at                 timestamptz NOT NULL DEFAULT now(),
   updated_at                 timestamptz NOT NULL DEFAULT now(),
-  -- A bound on how long an abandoned round's state may sit. Superseded and expired
-  -- rounds are also deleted eagerly whenever a new round touches the connection, so no
-  -- scheduled sweep is required.
-  expires_at                 timestamptz NOT NULL,
+  -- NO expires_at. These records live and die with their ROUND, whose single deadline is
+  -- outlook_sync_state.round_expires_at. An independent one here is what let an early
+  -- two-sided exchange age out and be deleted while the round that needed it stayed
+  -- valid - after which finalisation would have committed a cursor past the lost
+  -- exchange. Superseded and expired rounds are still deleted eagerly whenever a new
+  -- round touches the connection, so no scheduled sweep is required.
 
   CONSTRAINT ocp_conv_fp_shape   CHECK (conversation_fingerprint ~ '^[0-9a-f]{64}$'),
   CONSTRAINT ocp_person_fp_shape CHECK (person_fingerprint IS NULL OR person_fingerprint ~ '^[0-9a-f]{64}$'),
@@ -241,8 +276,6 @@ CREATE INDEX IF NOT EXISTS outlook_conversation_progress_round_idx
   ON public.outlook_conversation_progress (connection_id, round_id);
 CREATE INDEX IF NOT EXISTS outlook_conversation_progress_user_idx
   ON public.outlook_conversation_progress (user_id);
-CREATE INDEX IF NOT EXISTS outlook_conversation_progress_expiry_idx
-  ON public.outlook_conversation_progress (expires_at);
 
 ALTER TABLE public.outlook_conversation_progress ENABLE ROW LEVEL SECURITY;
 REVOKE ALL ON TABLE public.outlook_conversation_progress FROM PUBLIC;
@@ -315,8 +348,10 @@ DECLARE
   v_uid        uuid;
   v_n          integer;
   v_row        public.outlook_sync_state;
+  -- Read at ADOPTION only. Later pages never extend a round's deadline.
   v_ttl        integer := COALESCE(p_round_ttl_seconds, 86400);
   v_expires    timestamptz;
+  v_round_ends timestamptz;
   v_conv       jsonb;
   v_convs      integer := 0;
   v_dropped    integer := 0;
@@ -375,25 +410,60 @@ BEGIN
     RETURN jsonb_build_object('result', 'stale_run');
   END IF;
 
-  -- ── round identity ────────────────────────────────────────────────────────
-  -- A round spans BOTH folders, so the id is adopted on both rows at once. A row that
-  -- already carries a different round id means this run is resuming state that is not
-  -- its own; refuse rather than mix two rounds' accumulators.
+  -- ── round identity and the round's ONE deadline ───────────────────────────
+  -- A round spans BOTH folders, so the id and the deadline are adopted on both rows at
+  -- once. min() decides expiry, so if the two rows ever disagreed the earlier deadline
+  -- governs - failing towards `expired` rather than towards half a round.
+  SELECT min(s.round_expires_at) INTO v_round_ends
+  FROM public.outlook_sync_state s
+   WHERE s.connection_id = p_connection_id AND s.round_id IS NOT NULL;
+
+  -- A DIFFERENT round is already here. If it has expired, discard it AS A UNIT and take
+  -- over; if it is still live, refuse rather than mix two rounds' accumulators.
   SELECT count(*) INTO v_n FROM public.outlook_sync_state s
    WHERE s.connection_id = p_connection_id
      AND s.round_id IS NOT NULL
      AND s.round_id <> p_round_id;
   IF v_n > 0 THEN
-    RETURN jsonb_build_object('result', 'round_mismatch');
+    IF v_round_ends IS NULL OR v_round_ends > now() THEN
+      RETURN jsonb_build_object('result', 'round_mismatch');
+    END IF;
+    -- EXPIRED, so it is discarded whole: both folder rows' round state and every one of
+    -- its conversation records. This is what unsticks the case where the read reported no
+    -- round, the worker chose a new id, and every page was then refused forever. The
+    -- COMMITTED cursor is deliberately untouched, so the new round re-reads from a
+    -- position that was genuinely ingested and skips nothing.
+    DELETE FROM public.outlook_conversation_progress p
+     WHERE p.connection_id = p_connection_id;
+    UPDATE public.outlook_sync_state s
+       SET round_id = NULL, round_started_at = NULL, round_expires_at = NULL,
+           round_pages = 0, round_messages = 0, round_page_seq = 0,
+           round_messages_dropped = 0, round_conversations_dropped = 0,
+           round_folder_complete = false, round_write_cursor = NULL,
+           next_link_ciphertext = NULL, next_link_nonce = NULL,
+           next_link_key_version = NULL, pending_delta_ciphertext = NULL,
+           pending_delta_nonce = NULL, pending_delta_key_version = NULL,
+           updated_at = now()
+     WHERE s.connection_id = p_connection_id;
+    v_round_ends := NULL;
   END IF;
 
-  v_expires := now() + make_interval(secs => v_ttl);
+  -- THE CURRENT round has expired: refuse. A dead round must not be extended by a new
+  -- page, and nothing from it may be committed - the caller resets it and starts again.
+  IF v_round_ends IS NOT NULL AND v_round_ends <= now() THEN
+    RETURN jsonb_build_object('result', 'round_expired');
+  END IF;
 
-  -- Eagerly erase any superseded or expired round's state for this connection. This is
-  -- what keeps the accumulator round-scoped without introducing a scheduler.
+  -- Fixed at adoption, and NEVER extended afterwards. Extending it per page is what let
+  -- a round outlive the records it depended on.
+  v_expires := COALESCE(v_round_ends, now() + make_interval(secs => v_ttl));
+
+  -- Eagerly erase any superseded round's state for this connection. This is what keeps
+  -- the accumulator round-scoped without introducing a scheduler. Records of the CURRENT
+  -- round are never touched here: they expire with their round, as a unit.
   DELETE FROM public.outlook_conversation_progress p
    WHERE p.connection_id = p_connection_id
-     AND (p.round_id <> p_round_id OR p.expires_at <= now());
+     AND p.round_id <> p_round_id;
 
   UPDATE public.outlook_sync_state s
      SET round_id         = p_round_id,
@@ -462,7 +532,7 @@ BEGIN
         person_fingerprint, episode_fingerprint, episode_lookup_fingerprints,
         first_message_fingerprint, key_version, contact_id,
         first_seen_at, last_seen_at, inbound_count, outbound_count, message_count,
-        taint_code, expires_at)
+        taint_code)
       VALUES (
         p_connection_id, v_uid, p_round_id, v_conv->>'cfp',
         NULLIF(v_conv->>'pfp', ''), NULLIF(v_conv->>'efp', ''),
@@ -474,7 +544,7 @@ BEGIN
         COALESCE((v_conv->>'inbound')::integer, 0),
         COALESCE((v_conv->>'outbound')::integer, 0),
         COALESCE((v_conv->>'messages')::integer, 0),
-        NULLIF(v_conv->>'taint', ''), v_expires);
+        NULLIF(v_conv->>'taint', ''));
       v_convs := v_convs + 1;
       CONTINUE;
     END IF;
@@ -536,7 +606,6 @@ BEGIN
            outbound_count = p.outbound_count + COALESCE((v_conv->>'outbound')::integer, 0),
            message_count  = LEAST(p.message_count + COALESCE((v_conv->>'messages')::integer, 0), 10000),
            taint_code     = v_taint,
-           expires_at     = v_expires,
            updated_at     = now()
      WHERE p.id = v_existing.id;
     v_convs := v_convs + 1;
@@ -550,7 +619,7 @@ BEGIN
          round_messages_dropped      = s.round_messages_dropped + COALESCE(p_messages_dropped, 0),
          round_conversations_dropped = s.round_conversations_dropped + v_dropped,
          round_folder_complete       = v_complete,
-         round_expires_at            = v_expires,
+         -- NOT round_expires_at: the round's deadline is fixed at adoption.
          -- Exactly one of these is non-null, enforced above and by
          -- oss_round_position_exclusive.
          next_link_ciphertext        = p_next_link_ct,
@@ -609,8 +678,10 @@ SECURITY DEFINER
 SET search_path = ''
 AS $$
 DECLARE
-  v_n     integer;
-  v_out   jsonb;
+  v_n          integer;
+  v_out        jsonb;
+  v_round_ends timestamptz;
+  v_expired    boolean;
 BEGIN
   IF p_run_id IS NULL THEN
     RETURN jsonb_build_object('result', 'stale_run');
@@ -628,28 +699,42 @@ BEGIN
     RETURN jsonb_build_object('result', 'stale_run');
   END IF;
 
-  -- An expired round is reported as no round at all, so a resuming worker starts a
-  -- fresh one from the committed cursor instead of resuming state it should not trust.
+  -- ONE decision for the whole round, taken from the EARLIER of the two folder
+  -- deadlines. Deciding per folder is what let one folder report a round while the other
+  -- reported none, leaving a worker resuming half a round.
+  SELECT min(s.round_expires_at) INTO v_round_ends
+  FROM public.outlook_sync_state s
+   WHERE s.connection_id = p_connection_id AND s.round_id IS NOT NULL;
+  v_expired := v_round_ends IS NOT NULL AND v_round_ends <= now();
+
+  -- The resume values of an expired round are masked, because a worker must not carry on
+  -- from state it should not trust. But `round_expired` is reported HONESTLY rather than
+  -- the round being reported as absent: pretending there was no round is what made the
+  -- worker invent a new id that every checkpoint then refused, forever.
   SELECT jsonb_object_agg(s.folder, jsonb_build_object(
-           'round_id', CASE WHEN s.round_expires_at > now() THEN s.round_id ELSE NULL END,
-           'page_seq', CASE WHEN s.round_expires_at > now() THEN s.round_page_seq ELSE 0 END,
-           'pages', CASE WHEN s.round_expires_at > now() THEN s.round_pages ELSE 0 END,
-           'messages', CASE WHEN s.round_expires_at > now() THEN s.round_messages ELSE 0 END,
-           'messages_dropped', CASE WHEN s.round_expires_at > now() THEN s.round_messages_dropped ELSE 0 END,
-           'conversations_dropped', CASE WHEN s.round_expires_at > now() THEN s.round_conversations_dropped ELSE 0 END,
-           'folder_complete', CASE WHEN s.round_expires_at > now() THEN s.round_folder_complete ELSE false END,
-           'write_cursor', CASE WHEN s.round_expires_at > now() THEN s.round_write_cursor ELSE NULL END,
-           'next_link_ciphertext', CASE WHEN s.round_expires_at > now() THEN s.next_link_ciphertext ELSE NULL END,
-           'next_link_nonce', CASE WHEN s.round_expires_at > now() THEN s.next_link_nonce ELSE NULL END,
-           'next_link_key_version', CASE WHEN s.round_expires_at > now() THEN s.next_link_key_version ELSE NULL END,
-           'pending_delta_ciphertext', CASE WHEN s.round_expires_at > now() THEN s.pending_delta_ciphertext ELSE NULL END,
-           'pending_delta_nonce', CASE WHEN s.round_expires_at > now() THEN s.pending_delta_nonce ELSE NULL END,
-           'pending_delta_key_version', CASE WHEN s.round_expires_at > now() THEN s.pending_delta_key_version ELSE NULL END))
+           'round_id', CASE WHEN NOT v_expired THEN s.round_id ELSE NULL END,
+           'page_seq', CASE WHEN NOT v_expired THEN s.round_page_seq ELSE 0 END,
+           'pages', CASE WHEN NOT v_expired THEN s.round_pages ELSE 0 END,
+           'messages', CASE WHEN NOT v_expired THEN s.round_messages ELSE 0 END,
+           'messages_dropped', CASE WHEN NOT v_expired THEN s.round_messages_dropped ELSE 0 END,
+           'conversations_dropped', CASE WHEN NOT v_expired THEN s.round_conversations_dropped ELSE 0 END,
+           'folder_complete', CASE WHEN NOT v_expired THEN s.round_folder_complete ELSE false END,
+           'write_cursor', CASE WHEN NOT v_expired THEN s.round_write_cursor ELSE NULL END,
+           'next_link_ciphertext', CASE WHEN NOT v_expired THEN s.next_link_ciphertext ELSE NULL END,
+           'next_link_nonce', CASE WHEN NOT v_expired THEN s.next_link_nonce ELSE NULL END,
+           'next_link_key_version', CASE WHEN NOT v_expired THEN s.next_link_key_version ELSE NULL END,
+           'pending_delta_ciphertext', CASE WHEN NOT v_expired THEN s.pending_delta_ciphertext ELSE NULL END,
+           'pending_delta_nonce', CASE WHEN NOT v_expired THEN s.pending_delta_nonce ELSE NULL END,
+           'pending_delta_key_version', CASE WHEN NOT v_expired THEN s.pending_delta_key_version ELSE NULL END))
     INTO v_out
   FROM public.outlook_sync_state s
   WHERE s.connection_id = p_connection_id;
 
-  RETURN jsonb_build_object('result', 'ok', 'folders', COALESCE(v_out, '{}'::jsonb));
+  RETURN jsonb_build_object(
+    'result', 'ok',
+    -- Whether a round is there to be thrown away, not whether one may be resumed.
+    'round_expired', COALESCE(v_expired, false),
+    'folders', COALESCE(v_out, '{}'::jsonb));
 END;
 $$;
 
@@ -699,12 +784,13 @@ SECURITY DEFINER
 SET search_path = ''
 AS $$
 DECLARE
-  v_n         integer;
+  v_n          integer;
   -- Capped at the measured safe page size, not at the round ceiling: a caller asking for
   -- more than fits would get a response its own port refuses to read.
-  v_limit     integer := LEAST(GREATEST(COALESCE(p_limit, 200), 1), 200);
-  v_rows      jsonb;
-  v_truncated integer;
+  v_limit      integer := LEAST(GREATEST(COALESCE(p_limit, 200), 1), 200);
+  v_rows       jsonb;
+  v_truncated  integer;
+  v_round_ends timestamptz;
 BEGIN
   IF p_run_id IS NULL OR p_round_id IS NULL THEN
     RETURN jsonb_build_object('result', 'stale_run');
@@ -722,12 +808,22 @@ BEGIN
     RETURN jsonb_build_object('result', 'stale_run');
   END IF;
 
-  -- The whole round, before any paging is applied.
+  -- AN EXPIRED ROUND IS NOT FINALISED. Its records are about to be discarded, and some
+  -- may already be unreachable, so listing it would hand the caller a partial view and
+  -- let it commit a cursor past whatever is missing. Refusing is what stops that.
+  SELECT min(s.round_expires_at) INTO v_round_ends
+  FROM public.outlook_sync_state s
+   WHERE s.connection_id = p_connection_id AND s.round_id = p_round_id;
+  IF v_round_ends IS NULL OR v_round_ends <= now() THEN
+    RETURN jsonb_build_object('result', 'round_expired');
+  END IF;
+
+  -- The whole round, before any paging is applied. No per-record expiry test: these
+  -- records have no deadline of their own, which is the point.
   SELECT count(*) INTO v_truncated
   FROM public.outlook_conversation_progress p
    WHERE p.connection_id = p_connection_id
      AND p.round_id      = p_round_id
-     AND p.expires_at    > now()
      AND p.taint_code    = 'episode_truncated';
 
   SELECT jsonb_agg(jsonb_build_object(
@@ -748,7 +844,6 @@ BEGIN
     SELECT * FROM public.outlook_conversation_progress p
      WHERE p.connection_id = p_connection_id
        AND p.round_id      = p_round_id
-       AND p.expires_at    > now()
        AND (p_after IS NULL OR p.conversation_fingerprint > p_after)
      ORDER BY p.conversation_fingerprint
      LIMIT v_limit + 1
@@ -832,6 +927,15 @@ BEGIN
    WHERE s.connection_id = p_connection_id AND s.round_id = p_round_id;
   IF v_n <> 2 THEN
     RETURN jsonb_build_object('result', 'round_mismatch');
+  END IF;
+
+  -- An expired round is about to be discarded, so how far its finalisation got is not
+  -- worth recording - and recording it would imply the round may still be committed.
+  IF EXISTS (SELECT 1 FROM public.outlook_sync_state s
+              WHERE s.connection_id = p_connection_id
+                AND s.round_id = p_round_id
+                AND s.round_expires_at <= now()) THEN
+    RETURN jsonb_build_object('result', 'round_expired');
   END IF;
 
   UPDATE public.outlook_sync_state s

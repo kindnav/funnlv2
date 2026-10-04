@@ -311,6 +311,10 @@ export const ROUND_INCOMPLETE_REASONS = Object.freeze([
   // saying more rows remain means continue - the run only commits once a page comes back
   // with none left, which is a stronger guarantee than the old one.
   'accumulator_unreadable',   // the round's own conversation records could not be read
+  // The round's single deadline passed. It and its conversation records are discarded as
+  // one unit and a new round starts from the COMMITTED cursor, which has not moved - so
+  // this costs re-reading pages, and skips nothing.
+  'round_expired',
   // The two folders staged their cursors under DIFFERENT key versions, which release
   // cannot record - it takes one version for both. Re-reading the round is cheaper than
   // storing a cursor that will not decrypt later.
@@ -518,6 +522,10 @@ export async function runOutlookImport (p) {
   let context
   let roundId = null
   let progress = null
+  // Whether THIS invocation found an expired round and threw it away. Reported, because
+  // a round being discarded costs re-reading and a reader should be able to see it.
+  let roundExpired = false
+  let roundReset = null
   try {
     // Loading the context can take most of a lease on its own: a paged contact read
     // plus a token refresh. Renew first if what remains would not cover it.
@@ -560,12 +568,36 @@ export async function runOutlookImport (p) {
     }
     progress = progressRes.data.folders ?? {}
 
-    // One round id for the whole round, adopted from whatever is already saved. A round
-    // that has expired reads back as no round at all, so this starts a fresh one - from
-    // the COMMITTED cursor, which is still true.
-    const savedRoundId = GRAPH_FOLDERS
-      .map((f) => progress?.[f]?.round_id)
-      .find((v) => typeof v === 'string' && v.length > 0) ?? null
+    // ── an EXPIRED round is discarded, not resumed ──────────────────────────
+    // The read reports expiry honestly rather than as `no round`, because pretending
+    // there was none is what made this invent a new id that every checkpoint then
+    // refused with round_mismatch - forever, while the committed cursor sat untouched and
+    // nothing progressed. The checkpoint now discards an expired round as a unit and
+    // adopts the new id; resetting first makes that explicit rather than incidental, and
+    // means the reason is recorded on the row.
+    roundExpired = progressRes.data.round_expired === true
+    if (roundExpired) {
+      try {
+        await ensureLease(PROGRESS_STEP_MS)
+        const r = await rpc('reset_outlook_round', {
+          p_connection_id: connectionId,
+          p_run_id: runId,
+          p_reason: 'round_expired',
+        })
+        roundReset = r?.error ? 'rpc_error' : (r?.data?.result ?? 'unknown')
+      } catch {
+        roundReset = 'reset_threw'
+      }
+    }
+
+    // One round id for the whole round, adopted from whatever is already saved. An
+    // expired round contributes nothing, so this starts a fresh one - from the COMMITTED
+    // cursor, which is still true.
+    const savedRoundId = roundExpired
+      ? null
+      : GRAPH_FOLDERS
+        .map((f) => progress?.[f]?.round_id)
+        .find((v) => typeof v === 'string' && v.length > 0) ?? null
     roundId = savedRoundId ?? (typeof deps?.newRoundId === 'function'
       ? deps.newRoundId()
       : crypto.randomUUID())
@@ -701,6 +733,8 @@ export async function runOutlookImport (p) {
   const stops = Object.fromEntries(GRAPH_FOLDERS.map((f) => [f, slice.folders[f].stop]))
   const nothingWritten = {
     connectionId,
+    roundExpired,
+    roundReset,
     intended: 0,
     accepted: 0,
     created: 0,
@@ -726,6 +760,7 @@ export async function runOutlookImport (p) {
     } catch {
       reset = 'reset_threw'
     }
+    roundReset = reset
     await release('idle', false, null, null)
     return {
       ...nothingWritten,
@@ -796,6 +831,10 @@ export async function runOutlookImport (p) {
   let pagesRead = 0
   let moreRows = false
   let roundTruncatedEpisodes = 0
+  // The round's deadline passed while this run was working on it. Nothing of it may be
+  // committed: its records are about to be discarded as a unit, so a cursor would be
+  // claiming mail that no longer has a suggestion behind it.
+  let roundDiedMidRun = false
 
   // ── the commit gate, for the whole ROUND ──────────────────────────────────
   // A delta cursor claims everything before it was INGESTED, so any dropped or shortened
@@ -824,6 +863,7 @@ export async function runOutlookImport (p) {
         // fingerprint order the write cursor is kept in.
         p_after: cursor,
       })
+      if (listed?.data?.result === 'round_expired') { roundDiedMidRun = true; break }
       if (listed?.error || listed?.data?.result !== 'ok') { listFailed = true; break }
       pagesRead += 1
       moreRows = listed.data.more_rows === true
@@ -923,6 +963,19 @@ export async function runOutlookImport (p) {
     threw = true
   }
 
+  if (roundDiedMidRun) {
+    // The next invocation discards it and starts again from the committed cursor, which
+    // has not moved. Whatever suggestions landed stay - they are valid pending rows, and
+    // the dedupe makes the re-read harmless.
+    await release('idle', false, null, 'round_expired', CONTINUE_BACKOFF_SECONDS)
+    return {
+      ...nothingWritten,
+      outcome: 'incomplete',
+      incompleteReasons: ['round_expired'],
+      roundReset,
+    }
+  }
+
   if (listFailed) {
     await release('idle', false, null, 'progress_unreadable')
     return {
@@ -973,6 +1026,8 @@ export async function runOutlookImport (p) {
     cursorsAdvanced: 0,
     round: roundSummary,
     stops,
+    roundExpired,
+    roundReset,
     // How much of the round's finalisation is done, as counts only.
     finalize: {
       pages: pagesRead,
@@ -1150,6 +1205,9 @@ export function summarizeRun (result) {
     round: result.round ?? null,
     stops: result.stops ?? null,
     round_reset: typeof result.roundReset === 'string' ? result.roundReset : null,
+    // Whether this invocation threw away an expired round. A reader needs it: a discarded
+    // round means the next one re-reads pages from the committed cursor.
+    round_expired: result.roundExpired === true,
     // How much of a finished round's finalisation is done. Counts and flags only - never a
     // fingerprint, so the write cursor itself is not reported.
     finalize: result.finalize ?? null,
