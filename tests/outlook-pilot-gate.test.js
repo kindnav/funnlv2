@@ -310,6 +310,31 @@ test('the refusal is BEFORE the round progress is read, not after', async () => 
 
 console.log('\nthe worker refuses to run at all without a designation')
 
+test('the DENO ENTRY actually reads the designation from the environment', () => {
+  // The handler tests hand it a config object, so they cannot see whether anything
+  // populates that object. This is the gap that check: pilotUserId was required by the
+  // handler while index.ts never read OUTLOOK_PILOT_USER_ID, which would have refused a
+  // deployed worker `config_missing` for ever - fail-closed, but impossible to ENABLE.
+  const entry = read('supabase/functions/outlook-import-worker/index.ts')
+  assert.ok(entry.includes('Deno.env.get(PILOT_USER_ENV)'),
+    'index.ts must read the pilot designation from the environment')
+  // And every other required key is sourced too, so this stays true as the list grows.
+  const sources = {
+    clientId: 'MICROSOFT_CLIENT_ID',
+    clientSecret: 'MICROSOFT_CLIENT_SECRET',
+    tokenKeyB64: 'MICROSOFT_TOKEN_ENCRYPTION_KEY_V1',
+    fingerprintKey: 'OUTLOOK_FINGERPRINT_HMAC_KEY_V1',
+    pilotUserId: 'PILOT_USER_ENV',
+  }
+  for (const key of REQUIRED_CONFIG) {
+    const env = sources[key]
+    assert.ok(env, `REQUIRED_CONFIG gained ${key} with no known environment source`)
+    assert.ok(entry.includes("Deno.env.get('" + env + "')")
+      || entry.includes('Deno.env.get(' + env + ')'),
+    `index.ts must read ${env} for ${key}`)
+  }
+})
+
 test('pilotUserId is REQUIRED configuration, refused with the other secrets', async () => {
   assert.ok(REQUIRED_CONFIG.includes('pilotUserId'))
   assert.deepStrictEqual(missingConfig({
