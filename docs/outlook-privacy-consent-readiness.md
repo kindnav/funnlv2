@@ -137,7 +137,14 @@ run, no client secret or encryption key is configured for one to use, no consent
 been collected and no Microsoft round trip has ever completed, both
 build flags are unset, both forward migrations are unapplied, and every Outlook table in
 Production holds zero rows. The public Privacy Policy date is the owner-approved
-**September 27, 2026** and must not change until the publication commit.
+**September 27, 2026**, which is the date of the text **currently live**. That approval
+is historical: it attached to the previous wording, not to the revision in this packet.
+
+> **THIS REVISION IS NOT APPROVED AND NOT PUBLISHED.** The Outlook section and the
+> consent notice quoted below are Draft. They need the owner’s review, and publishing
+> them needs a separate commit carrying the **real publication date** — not
+> September 27, 2026, which has passed. Pilot consent must not be collected against
+> the live page while it still describes the superseded wording.
 
 Prepared against merged `main` `ef4aa21827fb3675620bb516e0432f39ddb79247`; updated for the
 four-PR Outlook stack #54 (`8f27553`) → #55 (`827414b`) → #56 (`549954c`) → #57 (`20f1b2d`),
@@ -177,27 +184,25 @@ you agree".
 >
 > Connecting Outlook is optional. Funnl works fully without it.
 >
-> You would grant two Microsoft permissions, both read-only. Mail.Read ("Read user mail") lets Funnl read messages in your Inbox and Sent Items. User.Read ("Sign in and read user profile") lets Funnl identify which mailbox you connected.
+> Access is restricted to one designated Funnl-controlled test account. Funnl’s servers refuse a connection request from any other account.
 >
-> Microsoft describes User.Read as allowing an app to read the signed-in user’s full profile and basic company information. Funnl asks it for three fields only — your account id, your mail address and your user principal name — and uses them only to record and display which mailbox is connected. The permission permits more than Funnl requests, which is why both are stated here.
+> You would grant six Microsoft scopes. Two of them read data, and both are read-only: Mail.Read ("Read user mail") and User.Read ("Sign in and read user profile"). Three are the standard sign-in scopes openid, profile and email. The sixth, offline_access, grants no new access of its own — it is what lets Funnl keep using those two read permissions while you are not using the app, so a read can run without asking you to sign in again.
 >
-> Mail.Read is mailbox-wide: it would technically allow reading message bodies and attachments anywhere in your mailbox. Funnl reads only Inbox and Sent Items, and never opens attachments.
+> Microsoft grants those two more broadly than Funnl uses them. Mail.Read is granted at the mailbox level: it would technically permit reading message bodies and attachments anywhere in your mailbox. User.Read permits your profile and basic company information; Funnl asks it for three fields and uses them only to record which mailbox is connected. Neither requires administrator consent by default, but a work or school tenant can be configured to require an administrator to approve the app, and then you may not be able to consent for yourself.
 >
-> Funnl can never send, reply, delete, move or change anything in your mailbox. It does not read your Microsoft contacts, calendars or files, and it does not read your organisation’s directory, your colleagues or your manager.
+> This first pilot reads message envelopes only — who sent each message, who it was addressed to, the subject, the times, which conversation it belongs to and whether it is a draft — from your Inbox and Sent Items. It does not fetch message bodies or attachments, and sends nothing to Anthropic or any other AI service. Funnl can never send, reply, delete, move or change anything in your mailbox, and does not read your Microsoft contacts, calendars, files or your organisation’s directory.
 >
-> Funnl would read those two folders in two steps. First the envelope of each message — who sent it, who it was addressed to, the subject, the times, which conversation it belongs to and whether it is a draft — to decide whether the message is worth reading at all. Then, only for the messages that pass that check, the message text itself: Microsoft’s plain-text version of the body and the version that leaves out the quoted reply history, plus five headers that identify newsletters, mailing lists and automatic replies. Those five are reduced to yes/no facts and then discarded.
+> Nothing is saved to your network until you approve it. Funnl proposes an interaction for someone already in your contacts, and you accept, edit, dismiss or defer it. Funnl never creates a contact or logs an interaction on its own, and this pilot proposes no new contacts.
 >
-> Funnl does not store your emails. Message text is held in server memory only while a message is being processed. Funnl’s database has no column that can hold a message body, HTML, raw MIME, an attachment, a preview snippet or a collection of headers.
+> A suggestion keeps the contact, the date, the type (Email) and one-way fingerprints of the exchange, so the same conversation is not suggested twice. Those fingerprints are pseudonymous but are stored against your account, so they are personal data about you; they cannot be turned back into a message, an address or a subject line. No subject line, summary or message text is kept.
 >
-> To turn an exchange into a draft you can edit, Funnl would send Anthropic (Claude) a minimized extract: the message text, an optional signature block, a shortened subject, the direction and the date. The two people are labelled only USER and CONTACT. Email addresses, the recipient’s email domain, Microsoft account, tenant, message and conversation identifiers, authorisation tokens, attachments and raw headers are not included.
+> While a read is in progress Funnl keeps working records of the same kind, one per conversation it is part-way through. They belong to that single read, which becomes unusable 24 hours after it starts. Becoming unusable is not the same as being erased: they are actually removed when a later read starts, when a read completes, when a read is reset, or when you disconnect. Waiting, or looking at the progress of a read, removes nothing — so if a read is abandoned and none of those happens, its working records stay stored.
 >
-> Anthropic deletes API inputs and outputs within 30 days. Funnl does not have a Zero Data Retention agreement. If Anthropic’s automated systems flag content as violating their Usage Policy, Anthropic may keep those inputs and outputs for up to 2 years, and the related trust-and-safety classification scores for up to 7 years. Anthropic does not train its models on commercial API data by default, and does not offer per-record deletion to paid API customers, so Funnl cannot promise to have an individual record deleted on request.
->
-> What Funnl would do with all of this: suggest networking contacts and draft interaction notes from relevant conversations. Nothing is saved as a contact or logged as an interaction until you review it and choose to accept it. You can edit or dismiss every suggestion.
->
-> You can disconnect at any time from this screen. Disconnecting deletes the connection, the stored Microsoft authorisation and the mailbox synchronisation state, and empties any suggestion you have not reviewed: each becomes inactive and its proposed details and drafts are removed. Contacts and interactions you already saved are kept.
+> You can disconnect at any time from this screen. That deletes the connection, the stored Microsoft authorisation, the mailbox synchronisation state, the working records and the provenance records, and invalidates any suggestion you have not reviewed. An invalidated suggestion is not deleted: it keeps the contact, the date and its fingerprint so the same exchange is not suggested again, and it goes when you delete that contact or your Funnl account.
 >
 > Disconnecting removes Funnl’s copy of the authorisation, so Funnl has nothing left to start a new read with. A read already under way may finish using access it had already obtained. Disconnecting does not withdraw the permission at Microsoft — to do that, remove Funnl from the permissions page of your Microsoft account.
+>
+> Funnl’s Privacy Policy sets all of this out in full, including what is kept and when it is deleted.
 >
 > [Read the Privacy Policy](/privacy)
 >
@@ -208,18 +213,30 @@ you agree".
 `tests/outlook-consent-ui.test.js` fails if this document and that array ever diverge, so a
 reviewer approving the text here is approving the text a user would see.
 
-**WHY IT IS THIS LONG.** An earlier draft of the card described the permissions and the
-folders and then jumped to "suggestions", omitting the material processing: that shortlisted
-message text is actually read, and that a minimized extract of it leaves Funnl for Anthropic.
-Artefact A already discloses both. A short notice at the decision point may summarise the
-published policy but must not say LESS than it about what happens to the user's mail, so the
-two-step read, the absence of body storage, Anthropic and Anthropic's real retention terms
-are all named here. Tests assert each of those facts appears in both.
+**WHY IT IS THIS SHORT, AND WHAT CAME OUT.** The previous revision had twelve
+paragraphs describing a two-step read of message text and a minimized extract sent to
+Anthropic. **No code on this branch does either**: the worker issues the envelope
+projection (`DISCOVERY_SELECT`) only, `CONTENT_SELECT` has no caller in the run path,
+and nothing in the Outlook path calls Anthropic. Those paragraphs were removed rather
+than kept as promises the implementation cannot keep - consenting to processing that
+does not happen is consent to the wrong thing. The published policy still carries the
+body reading and the Anthropic extract, marked as a **later release**.
+
+What stayed, because each is material at the moment of the decision: all **six**
+requested scopes with `offline_access` described as continuing access rather than as a
+third thing to read; the mailbox-wide reach of `Mail.Read`; what `User.Read` permits;
+that a work or school tenant may require an administrator even though none of these
+scopes requires admin consent by default; the envelope-only pilot read; the
+approval-before-save rule; that the fingerprints are pseudonymous **but stored against
+the account**; and the limits of disconnect. Everything else points at the policy.
+
+The derived version for this text is **`ol-disc-81fe8944fd2be59ac3c059c229b4d28e`**. It is not
+configured anywhere; `outlook-oauth-start` still refuses to mint a state.
 
 **Consent version:** derived, not declared. Draft PR #56 computes it from the
 disclosure text (`ol-disc-<32 hex of SHA-256>`), so any edit to the wording produces a
 different version and the server's exact-string gate refuses the stale one. The current
-draft value is `ol-disc-34f8d13dc657d2d6ca6377f0c93ca427`. **Not approved.** The server's
+draft value is `ol-disc-81fe8944fd2be59ac3c059c229b4d28e`. **Not approved.** The server's
 `OUTLOOK_DISCLOSURE_VERSION` is unset in every environment, so `outlook-oauth-start`
 refuses with `config_missing`. The wording and the server value must be approved together —
 approving one without the other is self-defeating, since the version moves with the text.
@@ -340,6 +357,44 @@ holding one user id, checked by one predicate
    `none_due` rather than a refusal, which is the stronger answer: an excluded
    connection is no longer refused, it is never offered.
 
+---
+
+## 4b. Retention, as measured rather than assumed
+
+Every claim the published section and the consent notice make about when Outlook-derived
+records go away is verified in `tests/sql/outlook-pilot-retention-runtime.sql` against a
+real Postgres with all 26 migrations. The wording was corrected where the measurement
+contradicted it.
+
+| Claim | Measured | Wording consequence |
+|---|---|---|
+| The 24-hour round deadline deletes the working records | **No.** Seeded a record whose `round_expires_at` passed 2 days earlier and made no call: still present. The deadline makes the round **unusable**, nothing more | The text says a read becomes *unusable* after 24 hours and is explicit that the deadline deletes nothing |
+| `read_outlook_round_progress` deletes them | **No.** It returns `result: ok` with `round_expired: true` and leaves the rows | Not described as a cleanup step anywhere |
+| A refused checkpoint or an **incomplete** release deletes them | **No.** Both leave the record in place | This is why the pilot must END BY DISCONNECTING (§7 item 5c) |
+| Something deletes them | **Yes, four things:** a checkpoint under a **new** round (the next read), `reset_outlook_round`, a **complete** release, and disconnect | The text names exactly these triggers |
+| An expired suggestion disappears without a scheduled sweep | **No.** 45 days past `context_expires_at` it was still present and still **`pending`** | The policy states that removal is event-driven and that no scheduled job acts on the deadline today |
+| The sweep, when called, deletes the suggestion | **No.** `expire_pending_outlook_context` reported `expired: 1` and the row remained, status `invalidated`, with `contact_id`, the date and a 64-character fingerprint intact | Described as invalidation, not deletion |
+| Disconnect removes all Outlook-derived records | **No.** It removes the connection, the credentials, the sync state, the working records and the provenance refs (1 → 0) — **the suggestion row survives**, still carrying `contact_id`, the proposed date and the fingerprint | The row is **never** called empty, and never called deleted |
+| Deleting the related contact removes it | **Yes** — `interaction_candidates.contact_id REFERENCES contacts(id) ON DELETE CASCADE` | Claim retained |
+| Deleting the account removes it | **Yes** — cascades from `auth.users`, verified on a throwaway user so the fixture users survive | Claim retained |
+
+**What a pilot row does and does not hold.** Measured: zero rows holding a retained
+subject, draft summary, next step or notes — the envelope-only write path never writes
+those columns. **That is not the same as holding nothing derived from the mail.** The row
+names a contact, carries a proposed date, and carries one-way fingerprints, and all three
+are computed **from message envelopes**. They are personal data about the account holder
+and the counterparty, the sweep does not touch them, and no schedule removes them.
+
+So the absent cleanup schedule is a **real retention limit**, not an irrelevance. What
+the absence of message text changes is its *severity*, not its existence: an expired
+suggestion left pending indefinitely retains envelope-derived personal data until the
+owner acts. That is tolerable for one owner-controlled account that can disconnect and
+delete at will; it is not tolerable for unattended operation, nor for a user who cannot.
+It gets worse, not newly real, once the body/AI path ships.
+
+**Not described anywhere, because it does not exist:** the D2 90-day cross-round
+recognition record. No migration or function contains it (§6.14).
+
    **It also fixes starvation.** The ordering is
    `min(last_success_at) ASC NULLS FIRST, c.id ASC`. A connection that has never
    succeeded sorts first, and being refused is not succeeding — so one excluded
@@ -425,11 +480,37 @@ ever been collected.
       to pursue publisher verification (unverified apps show "Unverified" at consent).
 - [ ] 10. The Funnl-side history window **and** the context-erasure schedule — currently undefined
       and unenforced; see §5.
-- [x] 11. The launch-time publication date. **Owner/product decision: September 27, 2026** (supersedes September 20, 2026). If the merge happens after that day, the date must be updated again in the merge commit.
-- [ ] 12. Authorization for a one-account real-mailbox pilot, **and which account**. The
-      restriction is now server-enforced and fails closed (§4a), so the pilot cannot begin
-      until the owner names one Funnl user id for `OUTLOOK_PILOT_USER_ID`. Until it is set,
-      nobody can connect or be imported — which is the intended resting state.
+- [x] 11. The launch-time publication date for the text **now live**.
+      **Owner/product decision: September 27, 2026** (superseded September 20, 2026).
+      **Historical.** That decision covered the wording published then.
+- [ ] 11a. **A publication date for the revised wording in this packet.** September 27,
+      2026 has passed, so it cannot be reused: publishing this revision requires a new
+      owner-approved date set in the publication commit itself. Until then the live page
+      keeps its current date and its current (superseded) text, and pilot consent must
+      not be collected.
+- [ ] 12. Authorization for a one-account pilot, **and which mailbox**. The restriction is
+      server-enforced and fails closed (§4a), so the pilot cannot begin until the owner
+      names one Funnl user id for `OUTLOOK_PILOT_USER_ID`. Until it is set, nobody can
+      connect or be imported — the intended resting state.
+
+      **The criterion is a usable mailbox, not which kind of account it is.** Choose a
+      Funnl-controlled Microsoft account with a **confirmed working Inbox and Sent Items**
+      — confirmed by opening the mailbox and seeing mail in both folders, because the
+      worker reads exactly those two (`GRAPH_FOLDERS`) and an exchange needs both sides to
+      become a suggestion. Populate them with synthetic mail created for the test.
+
+      **The account used to register the Entra application is not, by itself, evidence of
+      a usable mailbox.** Registration proves directory access, not mail provisioning: an
+      account can own an app registration and have no Exchange licence, no mailbox, or an
+      empty one. Verify the mailbox separately from the registration.
+
+      A **personal Outlook.com** account is acceptable for the first pilot if it meets
+      that criterion. It does **not** validate the work/school path: a tenant may require
+      administrator approval of the app regardless of the no-default-admin-consent
+      position, and Microsoft’s risk-based step-up consent can block consent to an
+      unverified multitenant app from a tenant other than the registration tenant. Those
+      remain untested until a work/school account is used, and no claim is made here that
+      consent will succeed on either kind of account.
 - [ ] 13. Whether disconnect must also revoke the grant at Microsoft before the pilot. A local
       disconnect is implemented and verified; upstream revocation is not implemented and is not claimed.
 - [ ] 14. **The per-conversation continuation record — one policy bullet, and one product choice.**
@@ -495,6 +576,27 @@ ever been collected.
 4. OAuth start and callback, including token encryption at rest and the refusal path.
 5. Worker, lease, bounded cursor reset, and candidate persistence — **including scheduling or
    otherwise invoking `expire_pending_outlook_context`**, without which §5's retention gap stands.
+5c. **Ending the pilot: disconnect, do not merely stop calling the worker.**
+   1. **Disconnect the designated account** from Settings. Stopping worker invocations
+      is NOT equivalent: a refused checkpoint and an incomplete release both leave the
+      working records in place (measured, §4b), and nothing else will remove them.
+   2. **Verify the result on the real database, after the migrations are eventually
+      applied, before claiming the cleanup happened.** §4b was measured on a disposable
+      database with all 26 migrations; Production has 19 applied and 7 pending, so the
+      cascade that removes the working records does not exist there yet. The claim is
+      verified for the code, not for Production.
+   3. Expect the **invalidated suggestion row to remain**, carrying its contact, date and
+      fingerprint. Remove it by deleting the contact or the account. Do not report it as
+      gone.
+   4. Revoke at Microsoft separately if required: remove Funnl from the permissions page
+      of the Microsoft account. Disconnect does not do this and does not claim to.
+   5. Unset `VITE_OUTLOOK_PILOT_USER_ID` so the designated id leaves the public bundle.
+
+   **Standing limit for anything broader.** `expire_pending_outlook_context` is still
+   unscheduled, so an expired suggestion stays pending indefinitely. Acceptable for one
+   owner-controlled account that can disconnect; **not** acceptable for unattended
+   operation or for users who cannot. No scheduler is added here.
+
 5b. **The browser flags are global, and turning them on is not a pilot.**
    `VITE_OUTLOOK_CONNECTION_ENABLED` applies to every signed-in user. The Settings card
    additionally requires the viewer to be the designated account, which is

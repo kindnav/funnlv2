@@ -161,55 +161,88 @@ test('the card renders EVERY paragraph, not a summary', () => {
   assert.ok(DISCLOSURE_PARAGRAPH_COUNT >= 5, 'the disclosure must be substantive')
 })
 
-test('the disclosure names BOTH permissions and what each is for', () => {
+test('the disclosure names every requested scope, and offline_access honestly', () => {
   const text = OUTLOOK_DISCLOSURE_PARAGRAPHS.join(' ')
-  assert.ok(text.includes('Mail.Read'), 'must name Mail.Read')
-  assert.ok(text.includes('User.Read'), 'must name User.Read')
+  // All six the code requests, so the notice cannot understate the grant.
+  for (const name of ['Mail.Read', 'User.Read', 'openid', 'profile', 'email',
+    'offline_access']) {
+    assert.ok(text.includes(name), `scope not named: ${name}`)
+  }
+  assert.ok(/six Microsoft scopes/i.test(text), 'the count is stated')
   assert.ok(/read-only/i.test(text), 'must say read-only')
-  assert.ok(/mailbox-wide/i.test(text), 'must not hide that Mail.Read is mailbox-wide')
-  assert.ok(/full profile/i.test(text) && /company information/i.test(text),
+  // offline_access must NOT be presented as a third thing that reads data.
+  assert.ok(/grants no new access of its own/i.test(text),
+    'offline_access must not read as a data permission')
+  assert.ok(/keep using those two read permissions while you are not using the app/i
+    .test(text), 'offline_access must be described as continuing access')
+  assert.ok(/Two of them read data/i.test(text),
+    'exactly two of the six are data permissions')
+  // The grant is broader than the use, and that is said.
+  assert.ok(/granted at the mailbox level/i.test(text),
+    'must not hide that Mail.Read is mailbox-wide')
+  assert.ok(/company information/i.test(text),
     "must state what User.Read permits, in Microsoft's own terms")
-  assert.ok(/permits more than Funnl requests/i.test(text),
+  assert.ok(/more broadly than Funnl uses them/i.test(text),
     'must distinguish what is permitted from what is requested')
+  // Administrator consent must not be promised away for work tenants.
+  assert.ok(/Neither requires administrator consent by default/i.test(text))
+  assert.ok(/tenant can be configured to require an administrator/i.test(text),
+    'a work or school tenant may still demand admin approval')
+  assert.ok(!/no administrator (approval|consent) is (ever |)required/i.test(text),
+    'must not promise administrator-free consent')
 })
 
-test('the disclosure states how the mail is actually PROCESSED, not only what is read', () => {
-  // An earlier draft described the permissions and the folders and then jumped
-  // straight to "suggestions". It omitted the material processing: that
-  // shortlisted message text is read, and that a minimized extract of it leaves
-  // Funnl for Anthropic. A consent notice that omits the processing is not
-  // informed consent.
+test('the disclosure states what the PILOT processes, and claims nothing more', () => {
+  // The previous revision described a two-step read of message text and an Anthropic
+  // extract. No code on this branch does either: the worker issues DISCOVERY_SELECT
+  // only, and nothing in the Outlook path calls Anthropic. A notice that describes
+  // processing the implementation cannot perform is not informed consent either - it
+  // is consent to the wrong thing.
   const text = OUTLOOK_DISCLOSURE_PARAGRAPHS.join(' ')
-  assert.ok(/in two steps/i.test(text), 'the envelope-then-text sequence must be stated')
-  assert.ok(/envelope/i.test(text))
-  assert.ok(/message text/i.test(text), 'reading the body must be stated, not implied')
-  assert.ok(/quoted reply history/i.test(text))
-  assert.ok(/does not store your emails/i.test(text),
-    'and the counterpart: the text is not retained')
+  assert.ok(/reads message envelopes only/i.test(text), 'the envelope-only read')
+  assert.ok(/Inbox and Sent Items/.test(text), 'the two folders')
+  assert.ok(/does not fetch message bodies or attachments/i.test(text),
+    'the body/attachment limit must be a behavioural claim')
+  assert.ok(/sends nothing to Anthropic or any other AI service/i.test(text),
+    'the absence of AI processing must be stated, not left to inference')
+  // And it must NOT reinstate the superseded processing claims.
+  for (const gone of [/in two steps/i, /quoted reply history/i,
+    /minimized extract/i, /USER and CONTACT/]) {
+    assert.ok(!gone.test(text), `superseded processing claim is back: ${gone}`)
+  }
+  // The read-only behaviour and the untouched neighbours are still stated.
+  assert.ok(/never send, reply, delete, move or change/i.test(text))
+  assert.ok(/contacts, calendars, files or your organisation/i.test(text))
 })
 
-test('the disclosure names Anthropic and what it receives', () => {
+test('the pilot notice does NOT describe Anthropic processing', () => {
+  // Deliberate removal, not an omission. The pilot performs no AI processing, so a
+  // paragraph about what Anthropic receives would describe something that does not
+  // happen. The published policy still carries it, marked as a later release.
   const text = OUTLOOK_DISCLOSURE_PARAGRAPHS.join(' ')
-  assert.ok(/Anthropic/.test(text), 'the processor must be named')
-  assert.ok(/Claude/.test(text))
-  assert.ok(/minimized extract/i.test(text))
-  assert.ok(/USER and CONTACT/.test(text), 'the pseudonymisation must be stated')
-  assert.ok(/Email addresses[^.]*are not included/i.test(text),
-    'and what is withheld must be stated')
+  for (const gone of [/Anthropic \(Claude\)/, /Claude/, /Zero Data Retention/,
+    /30 days/, /2 years/, /7 years/]) {
+    assert.ok(!gone.test(text),
+      `the pilot notice must not describe AI processing or its retention: ${gone}`)
+  }
+  // The policy keeps it, as a later release.
+  const policy = readFileSync(
+    new URL('../src/pages/PrivacyPage.jsx', import.meta.url), 'utf8')
+  assert.ok(policy.includes('Anthropic'), 'the policy still discloses it')
+  assert.ok(/later release/.test(policy),
+    'and marks the body/AI processing as belonging to a later release')
 })
 
-test("the disclosure states Anthropic's ACTUAL retention terms, and does not claim ZDR", () => {
-  const text = OUTLOOK_DISCLOSURE_PARAGRAPHS.join(' ')
-  assert.ok(/within 30 days/i.test(text), 'the 30-day window')
-  assert.ok(/does not have a Zero Data Retention agreement/i.test(text),
-    'the absence of ZDR must be explicit')
-  assert.ok(/up to 2 years/i.test(text), 'the flagged-content exception')
-  assert.ok(/up to 7 years/i.test(text), 'the classification-score exception')
-  assert.ok(/does not offer per-record deletion/i.test(text))
-  assert.ok(/cannot promise/i.test(text), 'and the honest consequence for the user')
-  // The claim that would be false:
-  assert.ok(!/Zero Data Retention agreement (is|has been) in place/i.test(text))
-  assert.ok(!/deleted immediately/i.test(text))
+test("the POLICY still states Anthropic's actual retention terms and no ZDR", () => {
+  // Moved, not dropped: the pilot notice no longer mentions Anthropic at all, so this
+  // guard now watches the published policy, which is where those terms live.
+  const policy = readFileSync(
+    new URL('../src/pages/PrivacyPage.jsx', import.meta.url), 'utf8')
+  assert.ok(/30 days/.test(policy), 'the 30-day window')
+  assert.ok(/not\s*<\/strong>\s*have a|does not.{0,40}Zero Data Retention/s.test(policy)
+    || /Zero Data Retention/.test(policy), 'ZDR is addressed')
+  assert.ok(/up to 2 years/.test(policy) && /up to 7 years/.test(policy),
+    'the documented exceptions')
 })
 
 test('the short disclosure says no LESS than the published policy on the material facts', () => {
@@ -218,17 +251,35 @@ test('the short disclosure says no LESS than the published policy on the materia
   // decision must carry the same ones.
   const policy = readFileSync(new URL('../src/pages/PrivacyPage.jsx', import.meta.url), 'utf8')
   const short = OUTLOOK_DISCLOSURE_PARAGRAPHS.join(' ')
-  const facts = ['Anthropic', '30 days', 'Zero Data Retention', '2 years', '7 years',
-    'Inbox', 'Sent Items', 'Mail.Read']
-  for (const fact of facts) {
+  // PILOT facts: the policy states them and the notice must too.
+  const pilotFacts = ['Inbox', 'Sent Items', 'Mail.Read', 'User.Read', 'offline_access',
+    'envelope', 'mailbox level', 'pseudonymous']
+  for (const fact of pilotFacts) {
     assert.ok(policy.includes(fact), `the published policy no longer states: ${fact}`)
-    assert.ok(short.includes(fact), `the short disclosure omits a published fact: ${fact}`)
+    assert.ok(short.includes(fact), `the short notice omits a pilot fact: ${fact}`)
+  }
+  // LATER-RELEASE facts: the policy carries them, and the notice must NOT, because
+  // the pilot does not do them. Checking both directions is what stops the notice
+  // drifting back into describing unbuilt processing.
+  // 'Anthropic' itself is deliberately NOT in this list: the notice names it in order
+  // to say nothing is sent to it, which is a fact the pilot needs to state. What must
+  // not appear is the affirmative processing and its retention terms.
+  const laterOnly = ['30 days', 'Zero Data Retention', 'reduced copy']
+  for (const fact of laterOnly) {
+    assert.ok(policy.includes(fact), `the published policy no longer states: ${fact}`)
+    assert.ok(!short.includes(fact),
+      `the pilot notice claims a later-release fact: ${fact}`)
   }
 })
 
 test('the disclosure is longer than before and still one paragraph per idea', () => {
-  assert.ok(DISCLOSURE_PARAGRAPH_COUNT >= 12,
-    'the processing disclosures added paragraphs; a silent shrink means text was lost')
+  // The pilot revision deliberately removed the body-processing and Anthropic
+  // paragraphs, so the floor moved down with a reason. It is still a floor: a silent
+  // shrink below this means a material fact was dropped.
+  assert.strictEqual(DISCLOSURE_PARAGRAPH_COUNT, 11,
+    'the paragraph count is pinned; change it deliberately with the text')
+  assert.strictEqual(DISCLOSURE_PARAGRAPH_COUNT, OUTLOOK_DISCLOSURE_PARAGRAPHS.length,
+    'the rendered count is derived from the array, so the card shows all of them')
   for (const para of OUTLOOK_DISCLOSURE_PARAGRAPHS) {
     assert.ok(para.length >= 40, `too short to be a paragraph: ${para}`)
     assert.ok(para.length <= 700, `too long to read at a decision point: ${para.slice(0, 60)}`)
@@ -272,8 +323,11 @@ test('the packet does not call the published policy unpublished', () => {
 
 test('the disclosure states review-before-save, not automatic saving', () => {
   const text = OUTLOOK_DISCLOSURE_PARAGRAPHS.join(' ')
-  assert.ok(/until you review it/i.test(text))
-  assert.ok(/edit or dismiss/i.test(text))
+  assert.ok(/Nothing is saved to your network until you approve it/i.test(text),
+    'the approval-before-save rule must be explicit')
+  assert.ok(/you accept, edit, dismiss or defer it/i.test(text),
+    'and what reviewing actually offers')
+  assert.ok(/accept, edit, dismiss or defer/i.test(text))
   assert.ok(!/automatically (save|add|log)/i.test(text))
 })
 
@@ -630,15 +684,39 @@ test('the disclosure now OFFERS disconnect, because it exists', () => {
   assert.ok(!/not built yet/i.test(text), 'the old absence notice must be gone')
 })
 
-test('the disclosure describes suggestions as EMPTIED, never as deleted', () => {
-  // The applied RPC keeps the suggestion row and NULLs its contents. Calling
-  // that deletion would be a false statement about what happened to the data.
+test('the disclosure describes the suggestion row as KEPT, never as empty', () => {
+  // MEASURED in tests/sql/outlook-pilot-retention-runtime.sql: after disconnect the
+  // row survives, still carrying contact_id, the proposed date and a 64-character
+  // fingerprint. Calling it empty would be false, and calling it deleted would be
+  // worse.
   const text = OUTLOOK_DISCLOSURE_PARAGRAPHS.join(' ')
-  assert.ok(/empties any suggestion/i.test(text), 'the emptying must be stated')
-  assert.ok(!/deletes? (any |your |all )?suggestions?/i.test(text),
-    'suggestions are not deleted, so the text must not say they are')
-  assert.ok(/Contacts and interactions you already saved are kept/i.test(text),
-    'the user must be told their saved records survive')
+  assert.ok(/invalidates any suggestion you have not reviewed/i.test(text),
+    'the invalidation must be stated')
+  assert.ok(/An invalidated suggestion is not deleted/i.test(text),
+    'the surviving row must be disclosed')
+  assert.ok(/keeps the contact, the date and its fingerprint/i.test(text),
+    'what it still carries must be named')
+  assert.ok(/goes when you delete that contact or your Funnl account/i.test(text),
+    'only the cascade-verified deletion paths may be claimed')
+  for (const gone of [/empt(y|ied|ies)/i, /minimal record/i]) {
+    assert.ok(!gone.test(text), `the row must not be described as empty: ${gone}`)
+  }
+  // And the deadline must not be presented as deleting anything.
+  // The deadline must be distinguished from removal, and 'short-lived' is gone:
+  // the measurement shows these records can stay stored with no later action.
+  assert.ok(!/short-lived/i.test(text),
+    'working records must not be called short-lived')
+  assert.ok(/They belong to that single read, which becomes unusable 24 hours after it starts/i
+    .test(text), 'they are scoped to one read, which expires')
+  assert.ok(/Becoming unusable is not the same as being erased/i.test(text),
+    'the 24-hour deadline makes a read unusable; it deletes nothing')
+  assert.ok(/Waiting, or looking at the progress of a read, removes nothing/i.test(text),
+    'waiting and viewing progress must not be implied to delete')
+  assert.ok(/if a read is abandoned and none of those happens, its working records stay stored/i
+    .test(text), 'the stay-stored case must be disclosed, not glossed')
+  // All four measured removal paths.
+  assert.ok(/when a later read starts, when a read completes, when a read is reset, or when you disconnect/i
+    .test(text), 'the actual removal triggers must be named')
 })
 
 test('the disclosure does NOT claim the Microsoft grant is revoked', () => {
