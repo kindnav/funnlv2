@@ -3,6 +3,28 @@
 **Status: DRAFT FOR OWNER/LEGAL REVIEW. Nothing in this packet is published, deployed or
 configured.**
 
+**THREE SEPARATE CONSENT ARTEFACTS. Only the first is published.**
+
+| # | Artefact | Where it lives | Status | Permissions it names |
+|---|---|---|---|---|
+| 1 | **Conditional Outlook section of the Privacy Policy** | `src/pages/PrivacyPage.jsx`, live at `/privacy` | **PUBLISHED** | **`Mail.Read` only** |
+| 2 | Updated permission wording | this document only | **NOT published** | `Mail.Read` **+ `User.Read`** |
+| 3 | Just-in-time consent disclosure shown before the redirect | nowhere — does not exist | **NOT written, NOT published** | n/a |
+
+**DISCREPANCY, unresolved.** Artefact 1 is live and tells readers Outlook would use
+*one* delegated permission. Draft PR #54 requests **two**, because Graph `GET /me` —
+the only way to satisfy `ms_email NOT NULL` — cannot be called without `User.Read`,
+which Microsoft describes as reading the signed-in user's full profile and basic
+company information. Until artefact 1 is revised to match, or the design changes to
+avoid `User.Read`, **no Outlook consent may be collected.** Nothing in the current
+branches publishes or alters artefact 1.
+
+Artefact 3 is what `OUTLOOK_DISCLOSURE_VERSION` identifies. That variable is unset in
+every environment, and `outlook-oauth-start` refuses to mint a state without it, so no
+consent can be recorded today even by accident. The version string and the text it
+names must be approved **together**: a version sent without its matching displayed
+text would be evidence of nothing.
+
 **What exists where — code in a Draft branch is not code in Production.**
 
 | | In the repository | Deployed to Production |
