@@ -301,7 +301,9 @@ test('nothing is tracked for a refusal, a failure, or an already-gone connection
 console.log('\nthe copy matches what the database actually does')
 
 test('every consequence is labelled with a verified effect', () => {
-  const allowed = ['deleted', 'emptied', 'kept', 'in_flight', 'upstream']
+  // `emptied` was replaced by `invalidated`: the retained row still carries its
+  // contact, proposed date and fingerprint, so it is not empty.
+  const allowed = ['deleted', 'invalidated', 'kept', 'in_flight', 'upstream']
   assert.ok(DISCONNECT_CONSEQUENCES.length >= 4, 'the confirmation must be specific')
   for (const c of DISCONNECT_CONSEQUENCES) {
     assert.ok(allowed.includes(c.effect), `unreviewed effect: ${c.effect}`)
@@ -313,16 +315,30 @@ test('every consequence is labelled with a verified effect', () => {
   }
 })
 
-test('suggestions are described as EMPTIED, never as deleted', () => {
-  // The applied RPC keeps the candidate row and NULLs its contents. The SQL
-  // runtime test asserts exactly that, so the copy must not say "deleted".
-  const emptied = DISCONNECT_CONSEQUENCES.filter((c) => c.effect === 'emptied')
-  assert.strictEqual(emptied.length, 1)
-  const t = emptied[0].text
+test('unreviewed suggestions are INVALIDATED, and the retained row is described', () => {
+  // The applied RPC keeps the candidate row and NULLs its proposed contents. What it
+  // does NOT null is contact_id, the proposed date and the episode fingerprint -
+  // measured in tests/sql/outlook-pilot-retention-runtime.sql case 3c. So the copy
+  // must say neither 'deleted' nor 'empty': what survives names a contact and a date.
+  const inval = DISCONNECT_CONSEQUENCES.filter((c) => c.effect === 'invalidated')
+  assert.strictEqual(inval.length, 1)
+  const t = inval[0].text
   assert.ok(/suggestion/i.test(t))
-  assert.ok(/emptied|removed/i.test(t))
-  assert.ok(!/deleted/i.test(t), 'the suggestion row is not deleted')
-  assert.ok(/kept|remains|retained/i.test(t), 'the surviving empty record must be disclosed')
+  assert.ok(/invalidated/i.test(t), 'the verb must be invalidated')
+  assert.ok(/cleared|removed/i.test(t), 'the proposed details are cleared')
+  assert.ok(/The record itself is kept/i.test(t),
+    'the surviving record must be disclosed')
+  assert.ok(/still holding the contact it was about, the proposed date and a one-way fingerprint/i
+    .test(t), 'what the surviving record still holds must be named')
+  assert.ok(/deleted when you delete that contact or your Funnl account/i.test(t),
+    'only the cascade-verified deletion paths may be claimed')
+  // The two words that were wrong before.
+  assert.ok(!/empt(y|ied|ies)/i.test(t), 'the retained row is not empty')
+  // Every mention of deletion must be the contact/account path, not the disconnect.
+  const deletions = t.match(/[^.]*\bdeleted\b[^.]*\./gi) || []
+  assert.strictEqual(deletions.length, 1, JSON.stringify(deletions))
+  assert.ok(/when you delete that contact or your Funnl account/i.test(deletions[0]),
+    'the only deletion claim must be the verified cascade path')
 })
 
 test('the confirmation says saved contacts and interactions are KEPT', () => {

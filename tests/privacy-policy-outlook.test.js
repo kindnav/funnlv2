@@ -23,6 +23,12 @@ const MIGRATION = read('supabase/migrations/20260921000000_add_outlook_content_d
 const TRANSPORT = read('supabase/functions/shared/outlookGraphTransport.js')
 const NORMALIZE = read('supabase/functions/shared/outlookMessageNormalize.js')
 const DRAFT = read('supabase/functions/shared/outlookDraftContract.js')
+// The scopes the code actually requests, so the policy's count cannot drift from it.
+const OUTLOOK_OAUTH_SCOPES = JSON.parse(
+  '[' + /OUTLOOK_OAUTH_SCOPES = Object\.freeze\(\[([\s\S]*?)\]\)/
+    .exec(read('supabase/functions/shared/microsoftOauthHelpers.js'))[1]
+    .split(',').map((s) => s.trim()).filter(Boolean)
+    .map((s) => '"' + s.replace(/^'|'$/g, '') + '"').join(',') + ']')
 
 // The Outlook section only (so assertions cannot accidentally pass on Gmail wording).
 const START = POLICY.indexOf('<Section title="Outlook connection (not yet available)">')
@@ -111,42 +117,107 @@ test('an Outlook section exists and is isolated from the Gmail section', () => {
   assert.ok(!OUTLOOK.includes('Gmail connection (optional)'), 'does not swallow the Gmail section')
 })
 
-test('the section title and body say the connection does not exist yet', () => {
-  assert.ok(OUTLOOK.includes('Outlook connection (not yet available)'), 'title marks it unavailable')
-  assert.ok(/This connection does not exist yet/.test(OUTLOOK))
-  // JSX wraps across lines, so normalize whitespace before matching the phrase.
+test('the section describes the RESTRICTION, not non-existence', () => {
+  // It must read correctly BEFORE and DURING the restricted pilot, without being
+  // republished in between. So it says who can connect (one designated account) rather
+  // than asserting whether the pilot is running - an assertion that would go stale.
+  assert.ok(OUTLOOK.includes('Outlook connection (not yet available)'),
+    'the title still marks it unavailable to the reader')
+  assert.ok(/Outlook is not generally available/.test(OUTLOOK_PROSE),
+    'it states availability rather than an absolute about the reader')
+  assert.ok(/only a single designated Funnl-controlled test account may start an Outlook connection/
+    .test(OUTLOOK_PROSE), 'it names who may start a connection')
+  assert.ok(/refuse a connection request from any other account/.test(OUTLOOK_PROSE),
+    'and where that is enforced')
+  // The start gate restricts NEW connections. It is not evidence that no retained row
+  // exists elsewhere, so the page must not claim that.
+  assert.ok(!/no Outlook-derived records exist for any other account/.test(OUTLOOK_PROSE),
+    'the gate must not be presented as proof of absent historical rows')
+  assert.ok(!/You cannot connect Outlook/.test(OUTLOOK_PROSE),
+    'the superseded absolute must not return')
+  // And it does NOT claim the restriction means nobody has Outlook records.
+  assert.ok(/designated account is itself a Funnl account/.test(OUTLOOK_PROSE),
+    'it admits the designated account is a Funnl account')
+  assert.ok(/Outlook-derived records will exist for it/.test(OUTLOOK_PROSE),
+    'it does not claim no Outlook-derived records exist for any account')
+  // The conditional framing for the UNBUILT parts is retained.
   const flat = OUTLOOK.replace(/\s+/g, ' ')
   assert.ok(/if, and only if,<\/em> you choose to connect Outlook/i.test(flat),
     'uses the conditional "if, and only if" framing')
-  assert.ok(/Nothing here is in\s+effect today/.test(OUTLOOK))
+  assert.ok(/belong to a later release and are not part of the first pilot/
+    .test(OUTLOOK_PROSE), 'body reading and AI stay conditional on a later release')
+  // The superseded absolutes must not come back.
+  for (const gone of [/This connection does not exist yet/,
+    /Nothing here is in\s+effect today/,
+    /holds no\s+Outlook data for anyone/]) {
+    assert.ok(!gone.test(OUTLOOK), `superseded claim is back: ${gone}`)
+  }
 })
 
-test('no statement claims Outlook is currently enabled, verified, certified or piloted', () => {
+test('the FIRST PILOT is described as envelope-only', () => {
+  assert.ok(/read message envelopes only/.test(OUTLOOK_PROSE),
+    'names the envelope-only behaviour')
+  assert.ok(/will not fetch message bodies or attachments/.test(OUTLOOK_PROSE))
+  assert.ok(/send nothing to Anthropic or any other AI service/.test(OUTLOOK_PROSE))
+  assert.ok(/produce no summaries or drafts/.test(OUTLOOK_PROSE))
+  assert.ok(/people already in that account.s contacts/.test(OUTLOOK_PROSE),
+    'no new-contact proposals are claimed for the pilot')
+  // Which is what the worker actually does: the envelope projection is the only one
+  // the delta request uses, and the content projection has no caller in the run path.
+  assert.ok(/\$select=\$\{DISCOVERY_SELECT\.join/.test(TRANSPORT),
+    'the folder delta request uses the envelope projection')
+})
+
+test('no statement claims the pilot is running, verified or certified', () => {
   for (const bad of [
     /Outlook is (now )?(available|enabled|live)/i,
     /\bOutlook is verified\b/i,
     /\bMicrosoft(-| )certified\b/i,
-    /\bin pilot\b(?!;)/i,
     /you are connected to Outlook/i,
+    // The page must not assert the pilot's RUN STATE in either direction: both
+    // readings go stale, one of them silently.
+    /the pilot is (now )?(running|live|under way|underway)/i,
+    /Funnl is (currently )?testing/i,
+    /not in pilot/i,
   ]) {
     assert.ok(!bad.test(OUTLOOK), `must not claim: ${bad}`)
   }
-  assert.ok(/not available,\s*not enabled, and not in pilot/.test(OUTLOOK),
-    'states the negative explicitly')
+  // Instead: the restriction, and what the first pilot will do WHEN enabled.
+  assert.ok(/When this integration is enabled/.test(OUTLOOK_PROSE),
+    'the pilot is described conditionally on being enabled')
+  assert.ok(/What the first pilot will do, when it is enabled/.test(OUTLOOK_PROSE))
 })
 
 // ── Permission scope ─────────────────────────────────────────────────────────
 console.log('\npermission scope')
 
-test('Mail.Read is disclosed as read-only AND as granting message-content access', () => {
-  assert.ok(/Mail\.Read/.test(OUTLOOK), 'names the permission')
-  assert.ok(/read-only/.test(OUTLOOK), 'says read-only')
-  assert.ok(/never allows sending, replying, deleting, moving, or changing/.test(OUTLOOK))
-  // The honest half: the permission itself is broader than what Funnl requests.
-  assert.ok(/permission to read your mail generally/.test(OUTLOOK),
+test('all six requested scopes are disclosed, and offline_access is not called a read', () => {
+  // The code requests six. Describing 'a single delegated permission' understated the
+  // grant; describing offline_access as a third READ permission would overstate it.
+  const requested = OUTLOOK_OAUTH_SCOPES
+  assert.strictEqual(requested.length, 6, `the code requests ${requested.length} scopes`)
+  assert.ok(/six delegated scopes/.test(OUTLOOK_PROSE), 'the count is stated')
+  for (const name of ['Mail.Read', 'User.Read', 'openid', 'profile', 'email',
+    'offline_access']) {
+    assert.ok(OUTLOOK.includes(name), `scope not disclosed: ${name}`)
+  }
+  // Two read data; three are sign-in; offline_access grants DURATION, not access.
+  assert.ok(/Two of them read data, and both are read-only/.test(OUTLOOK_PROSE))
+  assert.ok(/not a permission to read anything new/.test(OUTLOOK_PROSE),
+    'offline_access must not be presented as a read permission')
+  assert.ok(/lets Funnl keep using the two read permissions above while you are not using the app/
+    .test(OUTLOOK_PROSE), 'offline_access is described as continuing access')
+  // The honest half: the grant is broader than the use.
+  assert.ok(/granted at the mailbox level/.test(OUTLOOK_PROSE),
     'discloses that Mail.Read is mailbox-wide')
-  assert.ok(/would technically allow reading\s+message bodies and attachments/.test(OUTLOOK),
-    'does not hide the authority the permission grants')
+  assert.ok(/would technically allow reading message bodies and attachments anywhere in your mailbox/
+    .test(OUTLOOK_PROSE), 'does not hide the authority the permission grants')
+  assert.ok(/never send, reply to, delete, move or change anything in your mailbox/
+    .test(OUTLOOK_PROSE), 'read-only is stated as a behaviour')
+  // Admin consent: not required by default, but a tenant may demand it anyway.
+  assert.ok(/requires administrator consent by default/.test(OUTLOOK_PROSE))
+  assert.ok(/work or school tenant may be configured to require an administrator/
+    .test(OUTLOOK_PROSE), 'tenant policy caveat present')
   assert.ok(TRANSPORT.includes("GRAPH_MAIL_READ_SCOPE = 'Mail.Read'"), 'matches the code constant')
 })
 
@@ -318,9 +389,41 @@ test('envelope-only proposed email and read-only acceptance are disclosed and en
 })
 
 test('disconnect wording matches what the applied cleanup RPC actually does', () => {
-  assert.ok(/disconnecting Outlook would delete your Microsoft connection/.test(OUTLOOK))
+  assert.ok(/disconnecting Outlook deletes your Microsoft connection/.test(OUTLOOK_PROSE))
   assert.ok(/marked invalidated/.test(OUTLOOK))
   assert.ok(/Interactions and contacts you already accepted remain/.test(OUTLOOK))
+  // MEASURED in tests/sql/outlook-pilot-retention-runtime.sql: the suggestion row
+  // SURVIVES disconnect, still carrying contact_id, the proposed date and a 64-char
+  // fingerprint. Calling it empty, or saying it is deleted, would be false.
+  assert.ok(/The suggestion record itself is not deleted/.test(OUTLOOK_PROSE),
+    'the surviving row must be disclosed')
+  assert.ok(/still carrying the contact it referred to, the proposed date and its one-way fingerprint/
+    .test(OUTLOOK_PROSE), 'what it still carries must be named')
+  assert.ok(!/leaving only a minimal record/.test(OUTLOOK),
+    'the superseded minimal-record wording must not return')
+  // Removal is event-driven, and the two remaining deletion claims are the verified ones.
+  assert.ok(/events, not by a timer/.test(OUTLOOK_PROSE))
+  assert.ok(/deleted when you delete the contact it refers to, or when you delete your Funnl account/
+    .test(OUTLOOK_PROSE), 'only the cascade-verified deletion paths are claimed')
+  assert.ok(/no scheduled job that acts on it today/.test(OUTLOOK_PROSE),
+    'the absent sweep is disclosed as a limit')
+  // And the working records are disclosed with the right verb.
+  // 'short-lived' is gone: the measurement shows they can stay stored indefinitely.
+  assert.ok(!/short-lived/.test(OUTLOOK_PROSE),
+    'working records must not be called short-lived')
+  assert.ok(/working records belonging to one read/.test(OUTLOOK_PROSE),
+    'they are scoped to one read')
+  assert.ok(/becomes unusable 24 hours after it begins/.test(OUTLOOK_PROSE))
+  assert.ok(/becoming unusable is not the same as being erased/i.test(OUTLOOK_PROSE),
+    'the deadline must be distinguished from removal')
+  assert.ok(/neither does waiting or reading the progress of a read/.test(OUTLOOK_PROSE),
+    'waiting and viewing progress must not be implied to delete')
+  // The four measured removal paths, each named.
+  for (const path of [/later read starting/, /completing/, /reset/, /disconnecting/]) {
+    assert.ok(path.test(OUTLOOK_PROSE), `removal path not named: ${path}`)
+  }
+  assert.ok(/No scheduled job acts on the deadline/.test(OUTLOOK_PROSE),
+    'the absent schedule must stay visible')
   const i = MIGRATION.indexOf('CREATE FUNCTION public.run_microsoft_local_cleanup')
   const body = MIGRATION.slice(i, MIGRATION.indexOf('$$;', i))
   assert.ok(body.includes("status = 'invalidated'"), 'RPC invalidates')
@@ -399,9 +502,14 @@ test('the section still carries a mandatory date-recheck instruction and an appr
 
 test('the Outlook section is still not represented as operational', () => {
   // The publication decision changes the date, nothing else. Outlook stays dormant.
-  assert.ok(/not available,\s*not enabled, and not in pilot/.test(OUTLOOK))
-  assert.ok(/This connection does not exist yet/.test(OUTLOOK))
-  assert.ok(/STILL UNAVAILABLE/.test(POLICY), 'the source comment still says so')
+  assert.ok(/Outlook is not generally available/.test(OUTLOOK_PROSE))
+  assert.ok(/NOT GENERALLY AVAILABLE/.test(POLICY), 'the source comment still says so')
+  assert.ok(/WHY THE WORDING IS NOT "DOES NOT EXIST"/.test(POLICY),
+    'the source records why the absolutes were dropped')
+  assert.ok(/WHAT THE START GATE PROVES, AND WHAT IT DOES NOT/.test(POLICY),
+    'the source records that the gate is not proof of absent rows')
+  assert.ok(!/no reader of this page can connect/.test(POLICY),
+    'the superseded comment must not return')
   for (const bad of [/Outlook is (now )?(available|enabled|live)/i, /you are connected to Outlook/i]) {
     assert.ok(!bad.test(OUTLOOK), `must not claim: ${bad}`)
   }

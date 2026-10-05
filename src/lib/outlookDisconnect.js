@@ -24,9 +24,14 @@
 //   DELETED  the connection row, the encrypted access and refresh tokens, the
 //            mailbox sync cursors and leases, any unconsumed OAuth state, and
 //            the stored links from a suggestion back to a mail message.
-//   EMPTIED  suggestions not yet reviewed. The rows remain, marked invalidated,
-//            with every proposed field, draft and retained subject set to NULL.
-//            They are NOT deleted, so this must not be described as deletion.
+//   INVALIDATED
+//            suggestions not yet reviewed. The rows REMAIN, marked invalidated, with
+//            every proposed field, draft and retained subject set to NULL - but they
+//            still carry contact_id, the proposed date and the episode fingerprint
+//            (measured: tests/sql/outlook-pilot-retention-runtime.sql case 3c). So
+//            this must not be described as deletion, and not as emptying either:
+//            what is left identifies a contact and a date. It is deleted when the
+//            user deletes that contact or their account.
 //   KEPT     contacts and interactions already saved. Disconnecting a mailbox
 //            is not a request to delete the user's CRM.
 //
@@ -48,7 +53,10 @@ import { canStartOauthFrom } from './oauthStartEndpoint.js'
 /**
  * The exact consequences shown in the confirmation, as data rather than markup
  * so a test can assert each one against the database behaviour it describes.
- * `effect` is the verified verb: deleted, emptied, kept, in_flight or upstream.
+ * `effect` is the verified verb: deleted, invalidated, kept, in_flight or
+ * upstream. `emptied` was removed deliberately - tests/sql/outlook-pilot-retention-runtime.sql
+ * shows the retained suggestion row still carries its contact, proposed date and
+ * episode fingerprint after a disconnect, so calling it empty was false.
  */
 export const DISCONNECT_CONSEQUENCES = Object.freeze([
   Object.freeze({
@@ -67,8 +75,12 @@ export const DISCONNECT_CONSEQUENCES = Object.freeze([
     text: 'The mailbox synchronisation state is deleted, along with any unfinished sign-in request.',
   }),
   Object.freeze({
-    effect: 'emptied',
-    text: 'Suggestions you have not reviewed are emptied: each one is marked inactive and its proposed details, drafts and retained subject lines are removed. The empty record itself is kept.',
+    effect: 'invalidated',
+    // MEASURED, not described: run_microsoft_local_cleanup sets status 'invalidated'
+    // and nulls the proposed values, and the ROW REMAINS - with contact_id, the
+    // proposed date and the episode fingerprint intact. See
+    // tests/sql/outlook-pilot-retention-runtime.sql case 3c.
+    text: 'Suggestions you have not reviewed are invalidated: each is marked inactive and its proposed details, drafts and retained subject lines are cleared. The record itself is kept, still holding the contact it was about, the proposed date and a one-way fingerprint of the exchange, so the same conversation is not suggested again. It is deleted when you delete that contact or your Funnl account.',
   }),
   Object.freeze({
     effect: 'kept',
