@@ -120,6 +120,10 @@ export const REQUIRED_CONFIG = Object.freeze([
   'clientSecret',    // MICROSOFT_CLIENT_SECRET
   'tokenKeyB64',     // MICROSOFT_TOKEN_ENCRYPTION_KEY_V1
   'fingerprintKey',  // the HMAC key ring the episode fingerprints are keyed with
+  // OUTLOOK_PILOT_USER_ID. Required like the rest: the run's pilot gate fails closed
+  // without it, so refusing here is the same decision taken one step earlier and with a
+  // clearer code than a reserved-then-released lease.
+  'pilotUserId',
 ])
 
 /** Every response code this endpoint can produce. Controlled; safe to log. */
@@ -259,6 +263,9 @@ export async function handleOutlookImportWorker (req, env, deps) {
       }),
       loadRunContext,
       requestEntryMs,
+      // The designated pilot account. A reserved connection belonging to anyone else is
+      // released untouched; absent or malformed means nobody is importable (fails closed).
+      pilotUserId: e.pilotUserId,
       // The Graph fetch is separable from the token fetch so a test can fail one
       // without the other; in production both are the platform fetch.
       deps: { fetchImpl: d.graphFetchImpl ?? d.fetchImpl, now: d.now },

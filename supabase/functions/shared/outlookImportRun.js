@@ -60,6 +60,8 @@
 //   release_failed   every intended write landed but the release did not confirm, so
 //                    the cursor state is UNKNOWN and is not reported as advanced
 //   released_error   the pass itself threw; the lease is released as an error
+//   not_in_pilot     the reserved connection is not the designated pilot account; the
+//                    lease is released and nothing is read, written or advanced
 //
 // PARTIAL WRITES ARE REPORTED, NOT ERASED. A run reports three numbers - intended,
 // accepted and created - so "two of five landed, then one was refused" is legible.
@@ -95,6 +97,7 @@ import {
 import {
   ROUND_TTL_SECONDS, finalizeConversation, summarizeRoundProgress,
 } from './outlookRoundState.js'
+import { checkPilotUser } from './outlookPilotGate.js'
 
 /**
  * Lease length and due interval for one run. Bounded by the RPC's own checks, which
@@ -289,6 +292,10 @@ export const RUN_OUTCOMES = Object.freeze([
   // owns the connection now. Nothing is committed and no cursor is claimed.
   'lease_lost',
   'released_error',      // the pass threw; the lease was released as an error
+  // The reserved connection does not belong to the designated pilot account. Nothing
+  // is read, written or advanced. See outlookPilotGate.js for why the reservation
+  // cannot enforce this itself: it picks whichever connection is DUE, for any user.
+  'not_in_pilot',
 ])
 
 /**
@@ -398,10 +405,16 @@ export function partitionPlan (plan) {
  *        measured from here, not from the reservation, because the platform's 150s idle
  *        timeout and wall clock started before this module was reached. Omitted in tests
  *        that do not exercise the budget, in which case no invocation deadline applies.
+ * @param {string} p.pilotUserId  the designated pilot account, from the function
+ *        environment (OUTLOOK_PILOT_USER_ID). A reserved connection belonging to anyone
+ *        else is released untouched. Absent or malformed means NOBODY is importable:
+ *        the gate fails closed, by design.
  * @param {object} p.deps  passed through to the round slice (fetchImpl, etc.)
  */
 export async function runOutlookImport (p) {
-  const { rpc, encryptCursor, decryptCursor, loadRunContext, requestEntryMs, deps } = p || {}
+  const {
+    rpc, encryptCursor, decryptCursor, loadRunContext, requestEntryMs, pilotUserId, deps,
+  } = p || {}
   if (typeof rpc !== 'function') throw new Error('rpc_not_injected')
   if (typeof encryptCursor !== 'function') throw new Error('encrypt_cursor_not_injected')
   if (typeof decryptCursor !== 'function') throw new Error('decrypt_cursor_not_injected')
@@ -556,6 +569,29 @@ export async function runOutlookImport (p) {
       deadlineMs: invocationDeadlineMs,
       now: clock,
     })
+
+    // ── THE PILOT GATE ───────────────────────────────────────────────────────
+    // The reservation chose this connection, not the caller: it takes whichever active
+    // consented connection is DUE, for ANY user. So invoking the worker by hand
+    // restricts nothing, and this is the first point at which the owner of the reserved
+    // connection is known. Checked BEFORE the round progress is read and before any
+    // Graph request, so a non-pilot account is never read from and never written to.
+    //
+    // FAILS CLOSED, like the OAuth start gate: with no designated pilot user, no
+    // connection is importable.
+    const pilot = checkPilotUser(pilotUserId, context.userId)
+    if (!pilot.ok) {
+      await release('idle', false, null, pilot.reason, RETRY_BACKOFF_SECONDS)
+      return {
+        outcome: 'not_in_pilot',
+        reason: pilot.reason,
+        connectionId,
+        intended: 0,
+        accepted: 0,
+        created: 0,
+        cursorsAdvanced: 0,
+      }
+    }
 
     // ── where did the last invocation get to? ────────────────────────────────
     await ensureLease(PROGRESS_STEP_MS)
