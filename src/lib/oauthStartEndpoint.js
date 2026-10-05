@@ -23,6 +23,7 @@ export const CANONICAL_OAUTH_ORIGIN = 'https://www.getfunnl.com'
 export const OAUTH_START_PATHS = Object.freeze({
   calendar: '/api/google-oauth-start',
   gmail: '/api/gmail-oauth-start',
+  outlook: '/api/outlook-oauth-start',
 })
 
 /**
@@ -32,7 +33,7 @@ export const OAUTH_START_PATHS = Object.freeze({
  * request is same-origin: no CORS, and Set-Cookie is stored for exactly that host.
  *
  * @param {string} pageOrigin typically window.location.origin
- * @param {'calendar'|'gmail'} integration
+ * @param {'calendar'|'gmail'|'outlook'} integration
  * @returns {{ ok: true, url: string } | { ok: false, reason: string }}
  */
 export function resolveOauthStartUrl (pageOrigin, integration) {

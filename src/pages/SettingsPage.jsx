@@ -24,6 +24,8 @@ import {
 import ProComingSoon from '../components/ProComingSoon'
 import GoogleConnectionCard from '../components/GoogleConnectionCard'
 import { CALENDAR_CONNECTION_ENABLED } from '../lib/googleConnection'
+import OutlookConnectionCard from '../components/OutlookConnectionCard'
+import { OUTLOOK_CONNECTION_ENABLED } from '../lib/outlookConnection'
 
 // ── Shared style tokens ─────────────────────────────────────────────────────
 const SECTION_LABEL =
@@ -485,6 +487,14 @@ function SettingsPage() {
           <div className={`${CARD} mb-[14px]`}>
             <span className={SECTION_LABEL}>Connected accounts</span>
             <GoogleConnectionCard />
+          </div>
+        )}
+
+        {/* Outlook: its own flag, off everywhere. Inaccessible while off. */}
+        {OUTLOOK_CONNECTION_ENABLED && (
+          <div className={`${CARD} mb-[14px]`}>
+            <span className={SECTION_LABEL}>Connected accounts</span>
+            <OutlookConnectionCard />
           </div>
         )}
 
