@@ -41,7 +41,7 @@
 // configuration failure, not a runtime one: the loader refuses before reading anything.
 
 import { importKeyFromBase64, encryptToken, decryptToken } from './googleTokenCrypto.js'
-import { refreshAccessToken } from './microsoftTokenExchange.js'
+import { refreshAccessToken, TOKEN_TIMEOUT_MS } from './microsoftTokenExchange.js'
 import { GRAPH_FOLDERS } from './outlookGraphTransport.js'
 
 /** Refresh this far ahead of expiry, so a token cannot die mid-run. */
@@ -84,7 +84,23 @@ export const CONTEXT_FAILURES = Object.freeze([
   // option: matching against a subset would treat a tracked person as a stranger.
   'too_many_contacts',
   'sync_state_unreadable',
+  // The round's saved progress could not be read or written. Not strictly a CONTEXT
+  // failure, but it belongs in the same controlled vocabulary: it is a reason a run ends
+  // without touching a cursor, and it is reported through the same field.
+  'progress_unreadable',
+  // The INVOCATION budget ran out while preparing the run. The hosted request would
+  // otherwise have been killed mid-load, leaving the lease held until it expired; this
+  // way the run gives the lease back and says why.
+  'context_budget_exhausted',
 ])
+
+/**
+ * One bounded step of the context load, for budget purposes: a single PostgREST read at
+ * the worker port's own deadline (endpoints.js DB_TIMEOUT_MS). Declared here rather than
+ * imported because endpoints.js belongs to the worker function, not to shared/; a test
+ * pins this to RPC_ROUND_TRIP_MS so the two cannot drift apart.
+ */
+export const CONTEXT_STEP_MS = 15_000
 
 const isNonEmpty = (v) => typeof v === 'string' && v.length > 0
 
@@ -150,9 +166,42 @@ export function makeRunContextLoader ({ select, rpc, config, deps = {} }) {
     return res.data
   }
 
-  return async function loadRunContext (connectionId, runId) {
+  /**
+   * The INVOCATION budget, checked between the bounded steps below.
+   *
+   * WHY THIS EXISTS. Loading the context is the longest stage of a run - a paged contact
+   * read plus a token refresh and a rotation RPC, CONTEXT_WORST_MS = 285s - and it used
+   * to run with NO reference to the hosted limit at all, because the only budget check
+   * lived inside the page loop that comes after it. Reproduced: a 200s context load
+   * against a 120s budget returned a 200 'continued' having made zero durable progress,
+   * read no mail and saved no checkpoint - and on the real platform the instance was
+   * already killed at 150s mid-load, leaving the lease held until it expired.
+   *
+   * This does NOT make the load resumable. It makes it BOUNDED: the run gives up at a
+   * step boundary, releases the lease and reports a controlled reason, instead of being
+   * killed. A context load whose real cost exceeds the budget therefore still cannot
+   * complete - see the enablement blocker in
+   * docs/outlook-durable-continuation-design.md.
+   */
+  const makeBudget = (opts) => {
+    const deadlineMs = Number.isFinite(opts?.deadlineMs)
+      ? opts.deadlineMs
+      : Number.POSITIVE_INFINITY
+    const clock = typeof opts?.now === 'function' ? opts.now : now
+    // STRICTLY greater, for the same reason the lease guard is: with exactly the margin
+    // left, a step costing its whole worst case finishes at the instant the budget runs
+    // out and there is nothing left to release the lease with.
+    return (marginMs) => {
+      if (deadlineMs - clock() > marginMs) return
+      throw new RunContextError('context_budget_exhausted')
+    }
+  }
+
+  return async function loadRunContext (connectionId, runId, budgetOpts) {
     assertConfigured()
     if (!isNonEmpty(connectionId)) throw new RunContextError('connection_unreadable')
+    const budget = makeBudget(budgetOpts)
+    budget(CONTEXT_STEP_MS)
 
     // ── the reserved connection, by id. Only the columns the run uses. ────────
     const conns = await read(
@@ -176,6 +225,9 @@ export function makeRunContextLoader ({ select, rpc, config, deps = {} }) {
     // an unstable order could both skip and duplicate a contact.
     const contactRows = []
     while (contactRows.length < MAX_CONTACTS_LOADED) {
+      // The dominant term: ceil(5000/400) = 13 of the load's 18 bounded calls. Checked
+      // per page so a slow mailbox stops at a page boundary rather than being killed.
+      budget(CONTEXT_STEP_MS)
       const chunk = await read(
         `contacts?user_id=eq.${userId}&email=not.is.null` +
         `&select=id,user_id,email&order=id.asc` +
@@ -221,6 +273,11 @@ export function makeRunContextLoader ({ select, rpc, config, deps = {} }) {
     }
 
     // ── the tokens ───────────────────────────────────────────────────────────
+    // The remaining steps are the token read, at most one refresh at the exchange's own
+    // timeout, and the rotation RPC. Checked as one margin because a refresh that has
+    // started cannot be abandoned safely: Microsoft rotates the refresh token, so
+    // dropping the response would strand an unusable credential.
+    budget(2 * CONTEXT_STEP_MS + TOKEN_TIMEOUT_MS)
     const tokenRows = await read(
       `microsoft_tokens?connection_id=eq.${connectionId}` +
       '&select=access_token_ciphertext,access_token_nonce,refresh_token_ciphertext,' +
@@ -328,5 +385,34 @@ export function makeCursorEncryptor ({ tokenKeyB64, keyVersion = 1, subtle = glo
     const key = await keyPromise
     const { ciphertext, nonce } = await encryptToken(plaintext, key, { subtle })
     return { ciphertext, nonce, keyVersion }
+  }
+}
+
+/**
+ * The matching decryptor, for ONE thing only: a saved @odata.nextLink written by an
+ * earlier invocation of the same round.
+ *
+ * A committed or pending deltaLink never needs this - release takes ciphertext and the
+ * ciphertext is already in the row - so the plaintext of a delta cursor exists in exactly
+ * the two places it has to: the moment it arrives from Microsoft, and the moment a resumed
+ * request uses it.
+ *
+ * It THROWS on failure rather than returning null. A cursor that will not decrypt must not
+ * silently become "start this folder over", which would re-read mail and hide a key
+ * problem; the run reports `cursor_undecryptable` and advances nothing.
+ */
+export function makeCursorDecryptor ({ tokenKeyB64, subtle = globalThis.crypto?.subtle }) {
+  let keyPromise = null
+  return async function decryptCursor (ciphertext, nonce) {
+    if (keyPromise === null) {
+      keyPromise = importKeyFromBase64(tokenKeyB64, subtle)
+        .catch(() => { throw new RunContextError('key_unusable') })
+    }
+    const key = await keyPromise
+    try {
+      return await decryptToken(ciphertext, nonce, key, { subtle })
+    } catch {
+      throw new RunContextError('cursor_undecryptable')
+    }
   }
 }

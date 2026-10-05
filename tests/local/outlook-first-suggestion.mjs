@@ -137,6 +137,18 @@ function workerRpc (calls) {
 // ── a real cursor encryptor, so the DB stores ciphertext ──────────────────────
 const CURSOR_KEY = await webcrypto.subtle.importKey(
   'raw', randomBytes(32), { name: 'AES-GCM' }, false, ['encrypt', 'decrypt'])
+/**
+ * The matching decryptor. A run needs it for ONE thing: a saved @odata.nextLink written
+ * by an earlier invocation of the same round. A pending deltaLink is committed as
+ * ciphertext and never decrypted.
+ */
+async function decryptCursor (ciphertext, nonce) {
+  const plain = await webcrypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: Buffer.from(nonce, 'base64') },
+    CURSOR_KEY, Buffer.from(ciphertext, 'base64'))
+  return new TextDecoder().decode(plain)
+}
+
 async function encryptCursor (plaintext) {
   const iv = randomBytes(12)
   const ct = await webcrypto.subtle.encrypt({ name: 'AES-GCM', iv },
@@ -280,6 +292,7 @@ async function main () {
   let run = await runOutlookImport({
     rpc: workerRpc(calls),
     encryptCursor,
+    decryptCursor,
     loadRunContext: contextLoader(contacts),
     deps: { fetchImpl: completeProvider(requests) },
   })
@@ -340,9 +353,18 @@ async function main () {
     }
   })
 
-  await test('the worker called only the three RPCs it is allowed to call', () => {
+  await test('the worker called only the RPCs it is allowed to call', () => {
+    // The three original ones, plus the four durable continuation added. Each of those
+    // does one narrow job: read where the last invocation got to, checkpoint one page,
+    // read the accumulator back to finalize, and discard a round whose saved token was
+    // rejected, and record how far finalising its suggestions got. Nothing else may be called - no scheduler, no job table, no generic
+    // key-value store. (renew_outlook_sync_lease is reachable too, but this run is fast
+    // enough that the lease guard never needs it.)
     const allowed = new Set(['reserve_due_outlook_connection',
-      'upsert_outlook_interaction_candidate', 'release_outlook_sync_lease'])
+      'upsert_outlook_interaction_candidate', 'release_outlook_sync_lease',
+      'renew_outlook_sync_lease', 'read_outlook_round_progress',
+      'record_outlook_page_progress', 'list_outlook_round_conversations',
+      'reset_outlook_round', 'advance_outlook_round_write_cursor'])
     for (const c of calls) assert.ok(allowed.has(c), `unexpected RPC: ${c}`)
     assert.ok(calls.includes('reserve_due_outlook_connection'))
     assert.ok(calls.indexOf('upsert_outlook_interaction_candidate') <
@@ -380,7 +402,7 @@ async function main () {
     psql(`UPDATE public.outlook_sync_state SET last_success_at = now() - interval '2 hours'
           WHERE user_id='${U1}';`, { tuplesOnly: false })
     const again = await runOutlookImport({
-      rpc: workerRpc([]), encryptCursor,
+      rpc: workerRpc([]), encryptCursor, decryptCursor,
       loadRunContext: contextLoader(contacts),
       deps: { fetchImpl: completeProvider([]) },
     })
@@ -466,7 +488,7 @@ async function main () {
     psql(`UPDATE public.outlook_sync_state SET last_success_at = now() - interval '2 hours'
           WHERE user_id='${U1}';`, { tuplesOnly: false })
     const again = await runOutlookImport({
-      rpc: workerRpc([]), encryptCursor,
+      rpc: workerRpc([]), encryptCursor, decryptCursor,
       loadRunContext: contextLoader(contacts),
       deps: { fetchImpl: completeProvider([]) },
     })
@@ -483,7 +505,7 @@ async function main () {
     psql(SEED, { tuplesOnly: false })
     const fresh = ownContacts()
     const r1 = await runOutlookImport({
-      rpc: workerRpc([]), encryptCursor,
+      rpc: workerRpc([]), encryptCursor, decryptCursor,
       loadRunContext: contextLoader(fresh),
       deps: { fetchImpl: completeProvider([]) },
     })
@@ -497,7 +519,7 @@ async function main () {
     psql(`UPDATE public.outlook_sync_state SET last_success_at = now() - interval '2 hours'
           WHERE user_id='${U1}';`, { tuplesOnly: false })
     const r2 = await runOutlookImport({
-      rpc: workerRpc([]), encryptCursor,
+      rpc: workerRpc([]), encryptCursor, decryptCursor,
       loadRunContext: contextLoader(fresh),
       deps: { fetchImpl: completeProvider([]) },
     })
@@ -509,16 +531,28 @@ async function main () {
   // ══ 5. an incomplete pass ════════════════════════════════════════════════
   console.log('\nan incomplete pass writes nothing and advances nothing')
   await test('Inbox finishes, Sent Items does not: no candidate, no cursor', async () => {
+    // CHANGED BY DURABLE CONTINUATION, and this is the improvement. Sent Items keeps
+    // yielding pages, so it reads until the per-INVOCATION cap, saves where it got to, and
+    // the run answers 'continued' instead of the old 'incomplete' - which used to mean
+    // every later run re-read the same pages and committed nothing, forever.
+    //
+    // What this test is really for has NOT changed: no candidate is written from a
+    // half-read round, and NEITHER cursor advances - not even Inbox's, which did finish,
+    // because a conversation can span both folders.
     psql(SEED, { tuplesOnly: false })
     const fresh = ownContacts()
     const before = one(`SELECT count(*) FROM public.interaction_candidates;`)
     const r = await runOutlookImport({
-      rpc: workerRpc([]), encryptCursor,
+      rpc: workerRpc([]), encryptCursor, decryptCursor,
       loadRunContext: contextLoader(fresh),
       deps: { fetchImpl: incompleteProvider([]) },
     })
-    assert.strictEqual(r.outcome, 'incomplete', JSON.stringify(summarizeRun(r)))
-    assert.deepStrictEqual(r.incompleteReasons, ['folder_incomplete'])
+    assert.strictEqual(r.outcome, 'continued', JSON.stringify(summarizeRun(r)))
+    const sum = summarizeRun(r)
+    assert.strictEqual(sum.round.inbox.folder_complete, true, 'Inbox did finish')
+    assert.strictEqual(sum.round.sentitems.folder_complete, false, 'Sent Items did not')
+    assert.strictEqual(sum.stops.sentitems, 'invocation_cap', JSON.stringify(sum.stops))
+    assert.strictEqual(r.cursorsAdvanced, 0)
     assert.strictEqual(r.intended, 0)
     assert.strictEqual(r.accepted, 0)
     assert.strictEqual(r.created, 0)

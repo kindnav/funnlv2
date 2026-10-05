@@ -51,13 +51,44 @@
 // the Outlook equivalent, fenced on `outlook_sync_state` and recording provenance in
 // `outlook_candidate_refs`.
 //
+// WHAT CHANGED ABOUT THE RUNTIME LIMIT. This handler used to await an entire import
+// before answering, which hosted Edge Functions do not allow: the request idle timeout is
+// 150s, the maximum duration is 150s on the free plan (400s paid), and background tasks
+// are explicitly capped by the same wall clock. It now runs one INVOCATION'S share of a
+// delta round against a budget measured from handler entry, checkpoints after every Graph
+// page, and answers `continued` when the budget runs out. The 420s database lease is not
+// and never was an execution budget - it stops a second run touching the connection.
+//
 // STILL BLOCKING ENABLEMENT, and none of it is fixed here:
-//   * NO CONTINUATION DESIGN. DURABLE CONTINUATION is still unbuilt: a mailbox past the
-//     per-run ceilings never becomes commit-ready, so it restarts from the same cursor
-//     every run, commits nothing, and makes no progress forever. Safe, not working.
-//     Somewhere to persist partial progress inside a delta stream must be designed and
-//     reviewed first - an intermediate nextLink is opaque and time-limited, so storing
-//     one is not obviously safe.
+//   * A PRODUCT DECISION AND A POLICY EDIT. Continuation persists per-conversation
+//     recognition state (keyed fingerprints, counts, two timestamps, controlled codes -
+//     no body, address, subject or provider id). The published /privacy "What Funnl would
+//     keep" list does not name that record, so one bullet must be added before Outlook is
+//     enabled; and whether that state may survive a sync round - which is what would let
+//     a reply arriving next week be paired with its earlier half - is a product decision.
+//     Both are written up as D1 and D2 in docs/outlook-durable-continuation-design.md and
+//     neither is decided in code.
+// NOT A BLOCKER, AND IT WAS LISTED AS ONE: CONTEXT PREPARATION. CONTEXT_WORST_MS is 285s
+// against a 120s budget, but that is the SUM OF PER-CALL TIMEOUT CEILINGS - 18 bounded calls
+// at the port's 15s deadline plus a 30s token exchange - which is what the guards must
+// survive, not a path anyone walks. Measured through the real port against real PostgREST
+// (tests/local/outlook-context-load-budget.mjs), with an expired access token so the refresh
+// and the rotation RPC are on the path:
+//     25 contacts      5 calls,  1 contact read,   5.6 KiB,  ~73 ms
+//   1,200 contacts     8 calls,  4 contact reads, 236.3 KiB,  ~88 ms
+//   5,000 contacts    18 calls, 14 contact reads, 985.9 KiB, ~245-268 ms
+// A Graph page plus its checkpoint needs 45,000 ms; the worst case leaves ~119,750 ms. So
+// the supported capacity is MAX_CONTACTS_LOADED (5,000) contacts per account, above which
+// the run already fails closed with `too_many_contacts` before any Graph request.
+//
+// HOSTED LATENCY IS NOT MEASURED - those containers are local. The useful threshold is that
+// at 18 calls the loader would need to average ~6.7s PER CALL before it alone consumed the
+// budget; and if it ever does, it stops at a step boundary with `context_budget_exhausted`,
+// gives the lease back, and the invocation answers `budget_exhausted` (503, not 200) rather
+// than being killed mid-load holding the lease. The residual is liveness only: the load
+// keeps no partial state, so a PERSISTENTLY degraded database would cost every invocation
+// rather than one. That corrupts nothing and is visible as a 503.
+//   * An invalid COMMITTED deltaLink still has no restart; only a saved nextLink does.
 //   * No Entra application, client secret, token-encryption key or fingerprint HMAC key
 //     exists in any environment, and none is configured here.
 //   * The published /privacy Outlook section names Mail.Read only, while the branches
@@ -66,7 +97,9 @@
 
 import { authorizeWorkerRequest } from '../shared/workerAuth.js'
 import { runOutlookImport, summarizeRun } from '../shared/outlookImportRun.js'
-import { makeRunContextLoader, makeCursorEncryptor } from '../shared/outlookRunContext.js'
+import {
+  makeRunContextLoader, makeCursorEncryptor, makeCursorDecryptor,
+} from '../shared/outlookRunContext.js'
 
 /** Fail-safe: anything but the exact string is off. */
 export function flagEnabled (raw) {
@@ -95,8 +128,21 @@ export const WORKER_CODES = Object.freeze([
   'config_missing', 'run_failed',
 ])
 
-/** Which run outcomes mean the endpoint answers 200. */
-export const OK_OUTCOMES = Object.freeze(['committed', 'none_due', 'incomplete'])
+/**
+ * Which run outcomes mean the endpoint answers 200.
+ *
+ * `continued` joins them because it is the DESIGNED behaviour of a large mailbox, not a
+ * failure: the invocation spent its budget, saved exactly where it got to, committed no
+ * cursor and wrote no suggestion. The body still says `continued`, so this is not a
+ * success-shaped no-op - a caller that only reads the status code learns "the worker
+ * behaved", and one that reads the body learns "come back, there is more".
+ *
+ * `restart_required` is deliberately NOT here. It means Microsoft rejected a saved
+ * continuation token and a round's worth of reading was discarded. Nothing is corrupt and
+ * nothing is lost, but work was thrown away for an external reason, and that should be
+ * visible to whatever calls this rather than blending into the 200s.
+ */
+export const OK_OUTCOMES = Object.freeze(['committed', 'none_due', 'incomplete', 'continued'])
 
 function json (status, body) {
   return new Response(JSON.stringify(body), {
@@ -149,6 +195,12 @@ export async function handleOutlookImportWorker (req, env, deps) {
   const e = env || {}
   const d = deps || {}
 
+  // THE FIRST THING, before the flags, before authorisation. The platform's 150s request
+  // idle timeout and its wall clock start when the request arrives, not when the run
+  // begins, so the invocation budget has to be measured from here or it overstates what is
+  // left by however long the checks and the context load took.
+  const requestEntryMs = typeof d.now === 'function' ? d.now() : Date.now()
+
   // 1. DORMANCY, before anything else.
   if (!flagEnabled(e.integrationEnabled) || !flagEnabled(e.workerEnabled)) {
     return json(503, { error: 'not_enabled' })
@@ -199,10 +251,17 @@ export async function handleOutlookImportWorker (req, env, deps) {
         keyVersion: e.keyVersion ?? 1,
         subtle: d.subtle,
       }),
+      // Needed for ONE thing: a saved @odata.nextLink from an earlier invocation of the
+      // same round. A pending deltaLink is committed as ciphertext and never decrypted.
+      decryptCursor: makeCursorDecryptor({
+        tokenKeyB64: e.tokenKeyB64,
+        subtle: d.subtle,
+      }),
       loadRunContext,
+      requestEntryMs,
       // The Graph fetch is separable from the token fetch so a test can fail one
       // without the other; in production both are the platform fetch.
-      deps: { fetchImpl: d.graphFetchImpl ?? d.fetchImpl },
+      deps: { fetchImpl: d.graphFetchImpl ?? d.fetchImpl, now: d.now },
     })
   } catch {
     // Nothing from the thrown value is read: it can carry a URL, an address or a

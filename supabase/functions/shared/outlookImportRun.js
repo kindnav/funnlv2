@@ -1,6 +1,11 @@
-// One Outlook import run, end to end: reserve a lease, do the metadata pass, write
-// the pending suggestions, then release - advancing the encrypted folder cursors only
-// if all of that succeeded.
+// One Outlook import run, end to end: reserve a lease, read as much of the current delta
+// ROUND as this invocation can afford, checkpoint every page, and - only when the round is
+// finished and every qualifying suggestion is written - release with the folder cursors
+// advanced.
+//
+// A ROUND MAY SPAN SEVERAL INVOCATIONS. That is the point: hosted Edge Functions cannot
+// read a large mailbox in one request, so an invocation that runs out of budget saves
+// exactly where it got to and answers 'continued'.
 //
 // THE ORDER IS THE CONTRACT, and it is the reason this module exists rather than the
 // steps being inlined somewhere:
@@ -12,14 +17,28 @@
 //      RELEASE_WORST_MS. Every deadline is anchored to when its RPC STARTED, because the
 //      database begins the lease then rather than when the response arrives.
 //   1. reserve_due_outlook_connection          take the lease for both folders
-//   2. runOutlookMetadataPass                  envelope only; no body, no Anthropic
-//   3. if NOT commitReady -> release WITHOUT cursors, run_complete = false, and write
-//      NO candidate at all. A truncated pass has not seen the whole picture, and a
-//      suggestion written from a partial view could be wrong while the cursor it
-//      travelled with claimed the mail had been fully ingested.
-//   4. if commitReady -> upsert_outlook_interaction_candidate for every qualifying
-//      entry FIRST, and only if every one of them succeeded, release WITH the
-//      encrypted cursors and run_complete = true.
+//   2. read_outlook_round_progress             where did the last invocation get to?
+//   3. runOutlookRoundSlice                    envelope only; no body, no Anthropic. ONE
+//      PAGE AT A TIME, each page's fold and resume position committed together by
+//      record_outlook_page_progress, and the whole loop bounded by the INVOCATION budget.
+//   4. if the round is unfinished but healthy -> release WITHOUT cursors, outcome
+//      'continued'. Progress is saved; the next invocation carries on.
+//   5. if a SAVED nextLink was rejected -> reset_outlook_round, release WITHOUT cursors,
+//      outcome 'restart_required'. The COMMITTED cursor is untouched.
+//   6. if the round finished but dropped or shortened work -> release WITHOUT cursors and
+//      write NO candidate at all. A truncated round has not seen the whole picture, and a
+//      suggestion written from a partial view could be wrong while the cursor it travelled
+//      with claimed the mail had been fully ingested.
+//   7. otherwise -> upsert_outlook_interaction_candidate for every qualifying entry
+//      FIRST, and only if every one of them succeeded, release WITH the pending cursors
+//      promoted and run_complete = true.
+//
+// TWO DEADLINES, DELIBERATELY INDEPENDENT. The LEASE deadline (420s, renewed per stage)
+// stops a second run touching this connection. The INVOCATION deadline (120s from handler
+// entry) stops the platform killing this run mid-page: hosted Edge Functions have a 150s
+// request idle timeout and a 150s wall clock on the free plan, and background tasks do not
+// lift either. A lease that is still valid says nothing about whether the instance is
+// about to be shut down, which is why the lease length is NOT used as an execution budget.
 //
 // So a cursor is never advanced past a suggestion that failed to persist. If any write
 // fails the run releases as incomplete: the same mail is read again next time and the
@@ -32,7 +51,10 @@
 // version of this file read "no transport error" as success and reported committed
 // with cursors advanced anyway. Every other ending is named separately:
 //
-//   incomplete       the pass dropped or did not finish work; no write attempted
+//   continued        the invocation budget ran out mid-round; progress SAVED, no cursor
+//   restart_required a saved nextLink was rejected; the round was discarded, the
+//                    COMMITTED cursor kept
+//   incomplete       the round dropped or did not finish work; no write attempted
 //   write_failed     a write was REFUSED with a controlled code; released, no cursor
 //   write_error      a write or the cursor encryption THREW; best-effort error release
 //   release_failed   every intended write landed but the release did not confirm, so
@@ -63,8 +85,16 @@ import {
   GRAPH_FOLDERS, MAX_RETRIES, REQUEST_TIMEOUT_MS, MAX_TOTAL_RETRY_DELAY_MS,
 } from './outlookGraphTransport.js'
 import { TOKEN_TIMEOUT_MS } from './microsoftTokenExchange.js'
-import { MAX_CONTACTS_LOADED, CONTACT_PAGE_SIZE } from './outlookRunContext.js'
-import { runOutlookMetadataPass, summarizePass } from './outlookMetadataPass.js'
+import {
+  MAX_CONTACTS_LOADED, CONTACT_PAGE_SIZE, CONTEXT_STEP_MS,
+} from './outlookRunContext.js'
+import { localDateFor } from './outlookMetadataPass.js'
+import {
+  INVOCATION_BUDGET_MS, CHECKPOINT_RESERVE_MS, runOutlookRoundSlice,
+} from './outlookContinuedPass.js'
+import {
+  ROUND_TTL_SECONDS, finalizeConversation, summarizeRoundProgress,
+} from './outlookRoundState.js'
 
 /**
  * Lease length and due interval for one run. Bounded by the RPC's own checks, which
@@ -158,8 +188,71 @@ export const WRITE_STEP_MS = RPC_ROUND_TRIP_MS + 5_000
  */
 export const RELEASE_WORST_MS = RPC_ROUND_TRIP_MS + 5_000
 
+/**
+ * One checkpoint or progress RPC, worst case. Same shape as WRITE_STEP_MS: the port's
+ * own deadline plus slack for the local fold that precedes it.
+ */
+export const PROGRESS_STEP_MS = RPC_ROUND_TRIP_MS + 5_000
+
+/**
+ * What the FINALISATION stage must keep in hand before starting one more suggestion:
+ * the write itself, the call that records how far it got, and the release.
+ *
+ * WHY THIS EXISTS. The write loop used to run with no reference to the invocation budget
+ * at all. Reproduced: 40 qualifying conversations at one bounded RPC each spent 800s
+ * against a 120s budget; with the platform stopping the instance after six, six valid
+ * pending suggestions existed, the round was still saved, both cursors were correctly
+ * NULL - and because nothing recorded those six, the next invocation re-listed all 40 and
+ * began again at the first entry. A batch larger than one invocation could never finish.
+ */
+export const WRITE_STEP_RESERVE_MS = WRITE_STEP_MS + PROGRESS_STEP_MS + RELEASE_WORST_MS
+
+/**
+ * What reading the accumulator back and finalising at least one suggestion needs: the
+ * list call plus one write's reserve. Below this the invocation stops before listing,
+ * rather than listing and then being unable to act on it.
+ */
+export const FINALIZE_RESERVE_MS = PROGRESS_STEP_MS + WRITE_STEP_RESERVE_MS
+
+/**
+ * What the FINALISATION stage must keep in hand before starting one more suggestion:
+ * the write itself, the call that records how far it got, and the release.
+ *
+ * WHY THIS EXISTS. The write loop used to run with no reference to the invocation budget
+ * at all. Reproduced: 40 qualifying conversations at one bounded RPC each spent 800s
+ * against a 120s budget; with the platform stopping the instance after six, six valid
+ * pending suggestions existed, the round was still saved, both cursors were correctly
+ * NULL - and because nothing recorded those six, the next invocation re-listed all 40 and
+ * began again at the first entry. A batch larger than one invocation could never finish.
+ */
 /** Backoff requested when a run releases incomplete. */
 export const RETRY_BACKOFF_SECONDS = 300
+
+/**
+ * Backoff when a run stopped only because its INVOCATION budget ran out. Shorter than
+ * RETRY_BACKOFF_SECONDS on purpose: the round is healthy and half-read, and the sooner
+ * something calls the worker again the sooner it finishes. Nothing here calls it - there
+ * is still no scheduler - this only stops the connection being marked not-due for five
+ * minutes when it has work waiting.
+ */
+export const CONTINUE_BACKOFF_SECONDS = 15
+
+/**
+ * How many of a round's conversation records are read back AT A TIME.
+ *
+ * NOT the round ceiling, which is what this used to be. A record serialises to about 602
+ * bytes at its widest realistic shape - every fingerprint present and a lookup array
+ * carrying two keys, as a key rotation in flight would - so the 2000-record round ceiling
+ * is about 1.18 MiB in ONE response. The worker's own database port refuses any JSON
+ * response over MAX_PROVIDER_BODY_BYTES (256 KiB), so the read-back failed outright on a
+ * large round: measured and reproduced through the deployed port against 2000 real rows.
+ *
+ * 200 records measures 118 KiB - under half the bound, with room for a longer lookup
+ * array or a wider contact id. The round ceiling of MAX_CONVERSATIONS_PER_ROUND is
+ * unchanged and still enforced in record_outlook_page_progress; this is only how many
+ * are carried at once, and `more_rows` means CONTINUE rather than `incomplete`.
+ */
+export const CONVERSATION_PAGE_SIZE = 200
 
 /** Every outcome a run can report. Controlled; safe to log. */
 export const RUN_OUTCOMES = Object.freeze([
@@ -167,7 +260,23 @@ export const RUN_OUTCOMES = Object.freeze([
   // COMMITTED means the release RPC itself CONFIRMED success. It is the only outcome
   // that may claim a cursor advanced.
   'committed',
-  'incomplete',          // the pass dropped or did not finish work; nothing committed
+  // The invocation budget ran out (or a per-invocation cap was reached) part-way through
+  // a healthy round. Progress IS saved and fenced to the run that saved it; no cursor is
+  // advanced and no suggestion is written. The next invocation resumes from here. This is
+  // a SUCCESSFUL outcome, not a failure - it is the point of the whole slice.
+  'continued',
+  // The invocation budget ran out BEFORE any durable progress was possible - no page
+  // checkpointed, no suggestion written, no write cursor advanced. Distinct from
+  // 'continued' on purpose: 'continued' means the round moved forward and the next
+  // invocation will carry on, while this means the invocation could do nothing and the
+  // next one may well do nothing either. That is a no-progress loop an operator has to
+  // see, so it is NOT a 200.
+  'budget_exhausted',
+  // A SAVED @odata.nextLink was rejected by Microsoft. The round's saved position and
+  // accumulators are discarded; the COMMITTED cursor is untouched, so the next round
+  // restarts from the last position that genuinely was ingested.
+  'restart_required',
+  'incomplete',          // the round dropped or did not finish work; nothing committed
   'write_failed',        // a candidate write was REFUSED with a controlled code
   'write_error',         // a write or the cursor encryption THREW; error release
   // Every intended write succeeded, but the release did not confirm - it returned
@@ -180,6 +289,36 @@ export const RUN_OUTCOMES = Object.freeze([
   // owns the connection now. Nothing is committed and no cursor is claimed.
   'lease_lost',
   'released_error',      // the pass threw; the lease was released as an error
+])
+
+/**
+ * Why a COMPLETE round still may not advance a cursor. Controlled; safe to log.
+ *
+ * Every one of these means work was dropped, shortened or could not be read back, and in
+ * each case a cursor would be claiming "everything before this is ingested" when it is not.
+ */
+export const ROUND_INCOMPLETE_REASONS = Object.freeze([
+  'folder_incomplete',        // a folder never reached its deltaLink and cannot continue
+  'messages_dropped',         // a page was truncated
+  'conversations_dropped',    // the per-round conversation ceiling discarded threads
+  // A thread exceeded the bound a suggestion may rest on, so the round saw only part of
+  // an exchange. Decided from a WHOLE-ROUND aggregate, not from the page in hand: a
+  // tainted conversation on an earlier finalisation page must still stop a commit the
+  // run reaches several pages later.
+  'episode_truncated',
+  // `plan_truncated` is gone on purpose. It used to mean `the read-back was cut short, so
+  // rows may exist that were never looked at`. The read-back is now PAGED, and a page
+  // saying more rows remain means continue - the run only commits once a page comes back
+  // with none left, which is a stronger guarantee than the old one.
+  'accumulator_unreadable',   // the round's own conversation records could not be read
+  // The round's single deadline passed. It and its conversation records are discarded as
+  // one unit and a new round starts from the COMMITTED cursor, which has not moved - so
+  // this costs re-reading pages, and skips nothing.
+  'round_expired',
+  // The two folders staged their cursors under DIFFERENT key versions, which release
+  // cannot record - it takes one version for both. Re-reading the round is cheaper than
+  // storing a cursor that will not decrypt later.
+  'pending_key_mismatch',
 ])
 
 /** Why a plan entry produced no suggestion. Controlled; safe to log. */
@@ -251,12 +390,21 @@ export function partitionPlan (plan) {
  *          accessToken: string, keyRing: object}>} p.loadRunContext
  *        everything the pass needs for ONE connection. Supplied by the caller so this
  *        module performs no query of its own and cannot widen its own scope.
- * @param {object} p.deps  passed through to the metadata pass (fetchImpl, etc.)
+ * @param {(ct: string, nonce: string) => Promise<string>} p.decryptCursor
+ *        already bound to a key. Needed only for a SAVED @odata.nextLink: a pending
+ *        deltaLink never has to be decrypted, because release takes ciphertext and the
+ *        ciphertext is already in the row.
+ * @param {number} [p.requestEntryMs] the clock at HANDLER ENTRY. The invocation budget is
+ *        measured from here, not from the reservation, because the platform's 150s idle
+ *        timeout and wall clock started before this module was reached. Omitted in tests
+ *        that do not exercise the budget, in which case no invocation deadline applies.
+ * @param {object} p.deps  passed through to the round slice (fetchImpl, etc.)
  */
 export async function runOutlookImport (p) {
-  const { rpc, encryptCursor, loadRunContext, deps } = p || {}
+  const { rpc, encryptCursor, decryptCursor, loadRunContext, requestEntryMs, deps } = p || {}
   if (typeof rpc !== 'function') throw new Error('rpc_not_injected')
   if (typeof encryptCursor !== 'function') throw new Error('encrypt_cursor_not_injected')
+  if (typeof decryptCursor !== 'function') throw new Error('decrypt_cursor_not_injected')
   if (typeof loadRunContext !== 'function') throw new Error('load_run_context_not_injected')
 
   // ── 1. reserve ─────────────────────────────────────────────────────────────
@@ -281,7 +429,7 @@ export async function runOutlookImport (p) {
 
   // A release that THROWS must not take the run's reporting with it: the outcome is
   // then simply unknown, which is what 'release_failed' says.
-  const release = async (status, complete, cursors, errorCode) => {
+  const release = async (status, complete, cursors, errorCode, backoffSeconds) => {
     try {
       return await rpc('release_outlook_sync_lease', {
         p_connection_id: connectionId,
@@ -295,7 +443,9 @@ export async function runOutlookImport (p) {
         p_sentitems_delta_nonce: cursors?.sentitems?.nonce ?? null,
         p_delta_key_version: cursors?.inbox?.keyVersion ?? cursors?.sentitems?.keyVersion ?? null,
         p_initial_done: complete,
-        p_retry_backoff_seconds: complete ? null : RETRY_BACKOFF_SECONDS,
+        p_retry_backoff_seconds: complete
+          ? null
+          : (Number.isInteger(backoffSeconds) ? backoffSeconds : RETRY_BACKOFF_SECONDS),
       })
     } catch {
       return { data: null, error: { code: 'release_threw' } }
@@ -345,29 +495,196 @@ export async function runOutlookImport (p) {
   // survive another worst-case page.
   const onPageComplete = () => ensureLease(PAGE_WORST_MS)
 
-  let pass
+  // ── the INVOCATION deadline ────────────────────────────────────────────────
+  // A SECOND, INDEPENDENT deadline, and the reason this slice exists. The lease deadline
+  // above protects the connection from a second run; this one protects the run from the
+  // platform, whose request idle timeout (150s) and wall clock started before this module
+  // was reached. Anchored to handler entry for exactly that reason. When no entry time is
+  // supplied there is no invocation deadline - the lease guard still applies.
+  const invocationDeadlineMs = Number.isFinite(requestEntryMs)
+    ? requestEntryMs + INVOCATION_BUDGET_MS
+    : Number.POSITIVE_INFINITY
+
+  /** Will `marginMs` of invocation budget still be there when this stage starts? */
+  const budgetAllows = (marginMs) => invocationDeadlineMs - clock() > marginMs
+
+  /**
+   * Did THIS invocation move the round forward in a way that survives it?
+   *
+   * The distinction matters for one reason: an invocation that saved progress can
+   * honestly say 'continued', while one that saved nothing may be in a loop that never
+   * finishes, and must say so instead. Set by a committed page checkpoint, by a confirmed
+   * suggestion write, and by advancing the finalisation write cursor.
+   */
+  let durableProgress = false
+
+  let slice
   let context
+  let roundId = null
+  let progress = null
+  // Whether THIS invocation found an expired round and threw it away. Reported, because
+  // a round being discarded costs re-reading and a reader should be able to see it.
+  let roundExpired = false
+  let roundReset = null
   try {
     // Loading the context can take most of a lease on its own: a paged contact read
     // plus a token refresh. Renew first if what remains would not cover it.
     await ensureLease(CONTEXT_WORST_MS)
-    context = await loadRunContext(connectionId, runId)
+    // THE INVOCATION BUDGET, not just the lease. Loading the context is the longest stage
+    // of a run (CONTEXT_WORST_MS = 285s) and it used to run with no reference to the
+    // hosted limit at all - reproduced: a 200s load against a 120s budget answered 200
+    // 'continued' having read no mail and saved no checkpoint, and on the real platform
+    // was killed at 150s mid-load with the lease still held. If there is not even enough
+    // budget to load and release, do not start.
+    if (!budgetAllows(CONTEXT_STEP_MS + RELEASE_WORST_MS)) {
+      await release('idle', false, null, 'context_budget_exhausted', CONTINUE_BACKOFF_SECONDS)
+      return {
+        outcome: 'budget_exhausted',
+        reason: 'context_budget_exhausted',
+        connectionId,
+        intended: 0,
+        accepted: 0,
+        created: 0,
+        cursorsAdvanced: 0,
+      }
+    }
+    // The loader checks the same deadline between its own bounded steps, so a load that
+    // cannot finish stops at a step boundary and gives the lease back instead of being
+    // killed. It does NOT make the load resumable - see the enablement blocker in
+    // docs/outlook-durable-continuation-design.md.
+    context = await loadRunContext(connectionId, runId, {
+      deadlineMs: invocationDeadlineMs,
+      now: clock,
+    })
+
+    // ── where did the last invocation get to? ────────────────────────────────
+    await ensureLease(PROGRESS_STEP_MS)
+    const progressRes = await rpc('read_outlook_round_progress', {
+      p_connection_id: connectionId,
+      p_run_id: runId,
+    })
+    if (progressRes?.error || progressRes?.data?.result !== 'ok') {
+      throw Object.assign(new Error('progress_unreadable'), { reason: 'progress_unreadable' })
+    }
+    progress = progressRes.data.folders ?? {}
+
+    // ── an EXPIRED round is discarded, not resumed ──────────────────────────
+    // The read reports expiry honestly rather than as `no round`, because pretending
+    // there was none is what made this invent a new id that every checkpoint then
+    // refused with round_mismatch - forever, while the committed cursor sat untouched and
+    // nothing progressed. The checkpoint now discards an expired round as a unit and
+    // adopts the new id; resetting first makes that explicit rather than incidental, and
+    // means the reason is recorded on the row.
+    roundExpired = progressRes.data.round_expired === true
+    if (roundExpired) {
+      try {
+        await ensureLease(PROGRESS_STEP_MS)
+        const r = await rpc('reset_outlook_round', {
+          p_connection_id: connectionId,
+          p_run_id: runId,
+          p_reason: 'round_expired',
+        })
+        roundReset = r?.error ? 'rpc_error' : (r?.data?.result ?? 'unknown')
+      } catch {
+        roundReset = 'reset_threw'
+      }
+    }
+
+    // One round id for the whole round, adopted from whatever is already saved. An
+    // expired round contributes nothing, so this starts a fresh one - from the COMMITTED
+    // cursor, which is still true.
+    const savedRoundId = roundExpired
+      ? null
+      : GRAPH_FOLDERS
+        .map((f) => progress?.[f]?.round_id)
+        .find((v) => typeof v === 'string' && v.length > 0) ?? null
+    roundId = savedRoundId ?? (typeof deps?.newRoundId === 'function'
+      ? deps.newRoundId()
+      : crypto.randomUUID())
+
+    // Decrypt ONLY the saved nextLinks. A cursor that will not decrypt must not silently
+    // become "start this folder over": that would re-read mail and, worse, hide a key
+    // problem. It is the same class of failure as an undecryptable committed cursor.
+    const resume = {}
+    for (const folder of GRAPH_FOLDERS) {
+      const f = progress?.[folder] ?? {}
+      let nextLink = null
+      if (savedRoundId !== null
+          && typeof f.next_link_ciphertext === 'string' && f.next_link_ciphertext.length > 0
+          && typeof f.next_link_nonce === 'string' && f.next_link_nonce.length > 0) {
+        try {
+          nextLink = await decryptCursor(f.next_link_ciphertext, f.next_link_nonce)
+        } catch {
+          throw Object.assign(new Error('cursor_undecryptable'), { reason: 'cursor_undecryptable' })
+        }
+      }
+      resume[folder] = {
+        nextLink,
+        pageSeq: Number.isInteger(f.page_seq) ? f.page_seq : 0,
+        pages: Number.isInteger(f.pages) ? f.pages : 0,
+        messages: Number.isInteger(f.messages) ? f.messages : 0,
+        messagesDropped: Number.isInteger(f.messages_dropped) ? f.messages_dropped : 0,
+        conversationsDropped: Number.isInteger(f.conversations_dropped) ? f.conversations_dropped : 0,
+        folderComplete: f.folder_complete === true,
+      }
+    }
+
+    // ── the per-page checkpoint ──────────────────────────────────────────────
+    // The fold and the resume position commit in ONE call, which is what makes a hard
+    // platform kill lose at most the page in flight. Microsoft's link is encrypted here
+    // and never stored, logged or compared in plaintext.
+    const checkpoint = async (c) => {
+      await ensureLease(PROGRESS_STEP_MS)
+      const link = c.folderComplete ? c.deltaLink : c.nextLink
+      const sealed = await encryptCursor(link)
+      const res = await rpc('record_outlook_page_progress', {
+        p_connection_id: connectionId,
+        p_run_id: runId,
+        p_folder: c.folder,
+        p_round_id: roundId,
+        p_page_seq: c.pageSeq,
+        p_next_link_ct: c.folderComplete ? null : sealed.ciphertext,
+        p_next_link_nonce: c.folderComplete ? null : sealed.nonce,
+        p_pending_delta_ct: c.folderComplete ? sealed.ciphertext : null,
+        p_pending_delta_nonce: c.folderComplete ? sealed.nonce : null,
+        p_key_version: sealed.keyVersion,
+        p_folder_complete: c.folderComplete === true,
+        p_messages_seen: c.messagesSeen,
+        p_messages_dropped: c.messagesDropped ?? 0,
+        p_conversations: c.conversations ?? [],
+        p_round_ttl_seconds: ROUND_TTL_SECONDS,
+      })
+      if (res?.error) return { result: 'rpc_error' }
+      const out = res?.data ?? { result: 'unknown' }
+      if (out.result === 'recorded') durableProgress = true
+      return out
+    }
+
     // And again before the first Graph page, because the context load may have consumed
     // most of what was left.
     await ensureLease(PAGE_WORST_MS)
-    pass = await runOutlookMetadataPass({
+    slice = await runOutlookRoundSlice({
       connection: {
         connectionId,
         primaryEmail: context.primaryEmail,
         aliases: context.aliases,
         timeZone: context.timeZone,
       },
-      cursors: context.cursors,
+      committedCursors: context.cursors,
+      resume,
       accessToken: context.accessToken,
       contacts: context.contacts,
       userId: context.userId,
       keyRing: context.keyRing,
-      deps: { ...deps, onPageComplete },
+      budget: {
+        now: clock,
+        deadlineMs: invocationDeadlineMs,
+        // Keep enough budget to release the lease and answer the request.
+        reserveMs: CHECKPOINT_RESERVE_MS,
+      },
+      checkpoint,
+      deps,
+      onPageComplete,
     })
   } catch (e) {
     // The lease must never be left held. A thrown message is deliberately NOT read or
@@ -398,72 +715,337 @@ export async function runOutlookImport (p) {
     }
   }
 
-  // 3. An incomplete pass writes NOTHING and advances NOTHING.
-  if (pass.commitReady !== true) {
+  // The only shape of round progress that may be reported or logged: counts, flags and
+  // controlled codes. No fingerprint, ciphertext, round id or connection id.
+  const roundSummary = summarizeRoundProgress(Object.fromEntries(
+    GRAPH_FOLDERS.map((f) => [f, {
+      resumed: slice.folders[f].resumed,
+      pages: slice.folders[f].roundPages,
+      messages: slice.folders[f].roundMessages,
+      pageSeq: slice.folders[f].pageSeq,
+      folderComplete: slice.folders[f].complete,
+      messagesDropped: slice.folders[f].messagesDropped,
+      conversationsDropped: slice.folders[f].conversationsDropped,
+      hasNextLink: slice.folders[f].complete !== true && slice.folders[f].pageSeq > 0,
+      hasPendingDelta: slice.folders[f].complete === true,
+    }]),
+  ))
+  const stops = Object.fromEntries(GRAPH_FOLDERS.map((f) => [f, slice.folders[f].stop]))
+  const nothingWritten = {
+    connectionId,
+    roundExpired,
+    roundReset,
+    intended: 0,
+    accepted: 0,
+    created: 0,
+    cursorsAdvanced: 0,
+    round: roundSummary,
+    stops,
+  }
+
+  // ── 3a. a SAVED nextLink was rejected: the controlled restart ──────────────
+  // The round's saved position is worthless now, but the COMMITTED cursor still marks a
+  // position that genuinely was ingested, so it is left exactly as it is. The next round
+  // starts from there: nothing is skipped, and the pages this round had read are simply
+  // read again - which the suggestion dedupe makes harmless.
+  if (slice.cursorRejected?.kind === 'saved_next_link') {
+    let reset = 'not_attempted'
+    try {
+      const r = await rpc('reset_outlook_round', {
+        p_connection_id: connectionId,
+        p_run_id: runId,
+        p_reason: 'next_link_rejected',
+      })
+      reset = r?.error ? 'rpc_error' : (r?.data?.result ?? 'unknown')
+    } catch {
+      reset = 'reset_threw'
+    }
+    roundReset = reset
     await release('idle', false, null, null)
     return {
-      outcome: 'incomplete',
-      connectionId,
-      incompleteReasons: pass.incompleteReasons,
-      intended: 0,
-      accepted: 0,
-      created: 0,
-      cursorsAdvanced: 0,
-      summary: summarizePass(pass),
+      ...nothingWritten,
+      outcome: 'restart_required',
+      reason: 'next_link_rejected',
+      roundReset: reset,
     }
   }
 
-  // 4. Write the suggestions FIRST.
-  const { writable, skipped } = partitionPlan(pass.plan)
+  // ── 3b. out of invocation budget, round healthy: stop and say so ───────────
+  // Progress is already saved, page by page, fenced to this run. NOTHING is committed and
+  // no suggestion is written from a partial view.
+  if (slice.roundComplete !== true && slice.continuable === true) {
+    await release('idle', false, null, null, CONTINUE_BACKOFF_SECONDS)
+    return { ...nothingWritten, outcome: 'continued' }
+  }
+
+  // ── 3c. the round did not finish for a reason that is not "later" ──────────
+  if (slice.roundComplete !== true) {
+    await release('idle', false, null, null)
+    return {
+      ...nothingWritten,
+      outcome: 'incomplete',
+      incompleteReasons: ['folder_incomplete'],
+    }
+  }
+
+  // ── 3d. the round IS complete: finalise it, resumably ─────────────────────
+  // The suggestions of a finished round are written one bounded RPC at a time, in
+  // conversation-fingerprint order, and the round remembers how far that got. Without
+  // that memory a batch bigger than one invocation restarts from its first entry every
+  // time and never finishes - reproduced: a hard stop after 6 of 40 writes left 6 valid
+  // pending suggestions, the round saved, both cursors correctly NULL, and the next
+  // invocation beginning the same 40 again.
+  if (!budgetAllows(FINALIZE_RESERVE_MS)) {
+    // Not enough budget to list the accumulator AND act on even one row. The round is
+    // untouched and still complete, so a later invocation finalises it.
+    await release('idle', false, null, null, CONTINUE_BACKOFF_SECONDS)
+    return {
+      ...nothingWritten,
+      outcome: durableProgress ? 'continued' : 'budget_exhausted',
+      reason: durableProgress ? null : 'finalize_budget_exhausted',
+    }
+  }
+
+  // Where finalisation left off WITHIN THE ROUND. NULL means none of it is done yet.
+  const writeCursorBefore = GRAPH_FOLDERS
+    .map((f) => progress?.[f]?.write_cursor)
+    .find((v) => typeof v === 'string' && v.length > 0) ?? null
+
   const results = Object.create(null)
+  const skipped = Object.create(null)
+  const bumpSkip = (c) => { skipped[c] = (skipped[c] || 0) + 1 }
   // Counted honestly. A later failure does not erase the fact that earlier writes
   // landed, and reporting zero while rows exist would send a reader looking for a bug
   // in the wrong place.
   let accepted = 0
+  let intended = 0
   let firstRefusal = null
   let threw = false
+  let outOfBudget = false
+  let listFailed = false
+  // The last conversation DEALT WITH - written, or deliberately skipped. A skip is a
+  // decision, not unfinished work, so the cursor may pass it.
+  let processedThrough = null
+  let rowsListed = 0
+  let rowsProcessed = 0
+  let pagesRead = 0
+  let moreRows = false
+  let roundTruncatedEpisodes = 0
+  // The round's deadline passed while this run was working on it. Nothing of it may be
+  // committed: its records are about to be discarded as a unit, so a cursor would be
+  // claiming mail that no longer has a suggestion behind it.
+  let roundDiedMidRun = false
+
+  // ── the commit gate, for the whole ROUND ──────────────────────────────────
+  // A delta cursor claims everything before it was INGESTED, so any dropped or shortened
+  // work forfeits every cursor of the round - including the case where Inbox finished
+  // cleanly and Sent Items did not, because a conversation can span both folders. These
+  // two are known from the folder counters before anything is listed.
+  const incompleteReasons = []
+  if (slice.totals.messagesDropped > 0) incompleteReasons.push('messages_dropped')
+  if (slice.totals.conversationsDropped > 0) incompleteReasons.push('conversations_dropped')
 
   try {
-    for (const entry of writable) {
-      // Before each write, not once before the loop: MAX_PLAN_ENTRIES round trips can
-      // outlast any lease, and a write refused `stale_run` halfway through would throw
-      // away a run that had otherwise succeeded.
-      await ensureLease(WRITE_STEP_MS)
-      const res = await rpc('upsert_outlook_interaction_candidate', {
+    let cursor = writeCursorBefore
+    for (;;) {
+      // Enough budget to list a page AND act on at least one row of it, or stop.
+      if (!budgetAllows(FINALIZE_RESERVE_MS)) { outOfBudget = true; break }
+
+      await ensureLease(PROGRESS_STEP_MS)
+      const listed = await rpc('list_outlook_round_conversations', {
         p_connection_id: connectionId,
         p_run_id: runId,
-        p_contact_id: entry.contactId,
-        p_episode_fingerprint: entry.episodeFingerprint,
-        p_person_fingerprint: entry.personFingerprint,
-        p_key_version: entry.keyVersion,
-        p_proposed_type: entry.proposedType,
-        p_proposed_date: entry.proposedDate,
-        p_lookup_fingerprints: entry.episodeLookupFingerprints?.length
-          ? entry.episodeLookupFingerprints
-          : null,
+        p_round_id: roundId,
+        // ONE PAGE. The whole round in one response is about 1.18 MiB against a 256 KiB
+        // port bound, which is the whole reason this is paged.
+        p_limit: CONVERSATION_PAGE_SIZE,
+        // RESUME POINT: only conversations after the ones already dealt with, in the same
+        // fingerprint order the write cursor is kept in.
+        p_after: cursor,
       })
-      const code = res?.error ? 'rpc_error' : (res?.data?.result ?? 'unknown')
-      results[code] = (results[code] || 0) + 1
-      if (writeAccepted(code)) { accepted += 1; continue }
-      if (firstRefusal === null) firstRefusal = code
-      // Stop at the first refusal. Continuing would pile up work that cannot be
-      // committed anyway, because the cursor is already forfeit.
-      break
+      if (listed?.data?.result === 'round_expired') { roundDiedMidRun = true; break }
+      if (listed?.error || listed?.data?.result !== 'ok') { listFailed = true; break }
+      pagesRead += 1
+      moreRows = listed.data.more_rows === true
+      const rows = Array.isArray(listed.data.conversations) ? listed.data.conversations : []
+      rowsListed += rows.length
+
+      // THE WHOLE-ROUND TRUNCATION CHECK, and it must be whole-round. A conversation
+      // whose exchange exceeded MAX_EPISODE_MESSAGES was shortened, so a suggestion from
+      // it would rest on a partial view and no cursor from this round may be stored. The
+      // database answers for the ENTIRE round on every page, so a tainted row on page one
+      // still blocks a commit the run reaches on page five - which is precisely the
+      // regression this replaced: per-row finalisation skipped the tainted conversation
+      // and then committed both cursors past the work it had discarded.
+      const t = listed.data.round_truncated_episodes
+      if (Number.isInteger(t) && t > roundTruncatedEpisodes) roundTruncatedEpisodes = t
+      if (roundTruncatedEpisodes > 0 && !incompleteReasons.includes('episode_truncated')) {
+        incompleteReasons.push('episode_truncated')
+      }
+      // A round that cannot commit writes NOTHING, so this is checked before any write.
+      if (incompleteReasons.length > 0) break
+
+      // ── decide every row of the page FIRST, then write ────────────────────
+      // Deciding is pure and cheap; writing is a bounded round trip each. Separating them
+      // keeps `intended` meaning what it has always meant - how many writes are needed -
+      // even when the budget stops the writing part-way. Without the pre-pass it would
+      // silently become `how many we got round to`, which `accepted` already reports.
+      const decisions = []
+      for (const row of rows) {
+        const one = finalizeConversation(row, (iso) => localDateFor(iso, context.timeZone))
+        const cfp = typeof row?.cfp === 'string' ? row.cfp : null
+        if (one.entry === null) {
+          bumpSkip(one.skip)
+          decisions.push({ cfp, entry: null })
+          continue
+        }
+        const { writable, skipped: entrySkipped } = partitionPlan([one.entry])
+        for (const [code, n] of Object.entries(entrySkipped)) {
+          skipped[code] = (skipped[code] || 0) + n
+        }
+        decisions.push({ cfp, entry: writable[0] ?? null })
+      }
+      intended += decisions.filter((x) => x.entry !== null).length
+
+      for (const { cfp, entry } of decisions) {
+        if (entry === null) {
+          // Skipped on purpose - a one-sided or unsupported conversation. A skip is a
+          // decision, not unfinished work, so finalisation may pass it.
+          rowsProcessed += 1
+          if (cfp !== null) processedThrough = cfp
+          continue
+        }
+
+        // THE INVOCATION BUDGET, before each write rather than once before the loop.
+        // Enough must remain for the write, for recording that it happened, and for the
+        // release - otherwise stop here and let a later invocation carry on.
+        if (!budgetAllows(WRITE_STEP_RESERVE_MS)) { outOfBudget = true; break }
+        // And the LEASE, which is a different deadline: a round's worth of round trips can
+        // outlast any lease, and a write refused `stale_run` halfway through would throw
+        // away a run that had otherwise succeeded.
+        await ensureLease(WRITE_STEP_MS)
+
+        const res = await rpc('upsert_outlook_interaction_candidate', {
+          p_connection_id: connectionId,
+          p_run_id: runId,
+          p_contact_id: entry.contactId,
+          p_episode_fingerprint: entry.episodeFingerprint,
+          p_person_fingerprint: entry.personFingerprint,
+          p_key_version: entry.keyVersion,
+          p_proposed_type: entry.proposedType,
+          p_proposed_date: entry.proposedDate,
+          p_lookup_fingerprints: entry.episodeLookupFingerprints?.length
+            ? entry.episodeLookupFingerprints
+            : null,
+        })
+        const code = res?.error ? 'rpc_error' : (res?.data?.result ?? 'unknown')
+        results[code] = (results[code] || 0) + 1
+        if (writeAccepted(code)) {
+          accepted += 1
+          rowsProcessed += 1
+          if (cfp !== null) processedThrough = cfp
+          continue
+        }
+        if (firstRefusal === null) firstRefusal = code
+        // Stop at the first refusal, and do NOT pass it: the cursor is already forfeit,
+        // and the next attempt must retry this conversation rather than skip it.
+        break
+      }
+
+      if (outOfBudget || firstRefusal !== null) break
+      if (!moreRows || rows.length === 0) break
+      // Carry on from the last conversation dealt with, which is where the write cursor
+      // will be recorded too.
+      cursor = processedThrough ?? cursor
     }
   } catch {
     // A renewal refusal inside the loop sets leaseLost; anything else is a thrown write.
     threw = true
   }
 
+  if (roundDiedMidRun) {
+    // The next invocation discards it and starts again from the committed cursor, which
+    // has not moved. Whatever suggestions landed stay - they are valid pending rows, and
+    // the dedupe makes the re-read harmless.
+    await release('idle', false, null, 'round_expired', CONTINUE_BACKOFF_SECONDS)
+    return {
+      ...nothingWritten,
+      outcome: 'incomplete',
+      incompleteReasons: ['round_expired'],
+      roundReset,
+    }
+  }
+
+  if (listFailed) {
+    await release('idle', false, null, 'progress_unreadable')
+    return {
+      ...nothingWritten,
+      outcome: 'incomplete',
+      incompleteReasons: ['accumulator_unreadable'],
+    }
+  }
+  // Record how far finalisation got, while the lease is still held. Doing this once per
+  // invocation rather than once per write keeps the round trips down; the cost of a hard
+  // stop before it lands is re-writing rows that are already there, which the candidate
+  // upsert answers 'refreshed' - bounded rework, never a lost or duplicated suggestion.
+  let writeCursorAdvanced = false
+  if (processedThrough !== null && processedThrough !== writeCursorBefore) {
+    try {
+      await ensureLease(PROGRESS_STEP_MS)
+      const adv = await rpc('advance_outlook_round_write_cursor', {
+        p_connection_id: connectionId,
+        p_run_id: runId,
+        p_round_id: roundId,
+        p_after: processedThrough,
+      })
+      writeCursorAdvanced = !adv?.error && adv?.data?.result === 'advanced'
+      if (writeCursorAdvanced) durableProgress = true
+    } catch {
+      // The lease went, or the call failed. Nothing is lost: the suggestions that landed
+      // are valid, and the next invocation re-walks from the last recorded point.
+      writeCursorAdvanced = false
+    }
+  }
+  if (accepted > 0) durableProgress = true
+
+  // EVERY intended write must be confirmed before a cursor may move, AND the round must be
+  // exhausted. Three separate ways it might not be: a page said more rows remain, a row of
+  // the page in hand was never processed, or the listing itself failed. Any of them means
+  // there is more of this round to finalise, so no cursor moves.
+  const batchComplete = !moreRows
+    && !listFailed
+    && !outOfBudget
+    && rowsProcessed === rowsListed
   const partial = {
     connectionId,
-    intended: writable.length,
+    intended,
     accepted,
     created: results.created ?? 0,
     writeResults: results,
     skipped,
     cursorsAdvanced: 0,
-    summary: summarizePass(pass),
+    round: roundSummary,
+    stops,
+    roundExpired,
+    roundReset,
+    // How much of the round's finalisation is done, as counts only.
+    finalize: {
+      pages: pagesRead,
+      rows: rowsListed,
+      processed: rowsProcessed,
+      more_rows: moreRows,
+      resumed: writeCursorBefore !== null,
+      cursor_advanced: writeCursorAdvanced,
+      complete: batchComplete,
+    },
+  }
+
+  // ── the round did not finish for a reason that forfeits every cursor ──────
+  // Checked here rather than before the loop so the reasons are reported alongside
+  // whatever finalisation managed to do. No write was attempted when this is non-empty.
+  if (incompleteReasons.length > 0) {
+    await release('idle', false, null, null)
+    return { ...partial, outcome: 'incomplete', incompleteReasons, refusal: null }
   }
 
   if (leaseLost) {
@@ -487,6 +1069,21 @@ export async function runOutlookImport (p) {
     return { ...partial, outcome: 'write_failed', refusal: firstRefusal }
   }
 
+  // ── finalisation ran out of invocation budget part-way ────────────────────
+  // The suggestions written so far are valid pending rows, the write cursor records
+  // exactly how far the batch got, and NEITHER cursor moves - every intended write must
+  // be confirmed before a cursor may claim the mail was ingested. The next invocation
+  // continues the batch instead of restarting it.
+  if (outOfBudget || !batchComplete) {
+    await release('idle', false, null, null, CONTINUE_BACKOFF_SECONDS)
+    return {
+      ...partial,
+      outcome: durableProgress ? 'continued' : 'budget_exhausted',
+      reason: durableProgress ? null : 'finalize_budget_exhausted',
+      refusal: null,
+    }
+  }
+
   // Only now: encrypt and advance the cursors. Encryption can throw (a missing or
   // unusable key). That is the same class of failure as a thrown write: nothing may be
   // committed, and the lease must not be left held.
@@ -503,15 +1100,59 @@ export async function runOutlookImport (p) {
     return { ...partial, outcome: 'lease_lost', refusal: null }
   }
 
-  const cursors = {}
+  // THE CURSORS ARE ALREADY CIPHERTEXT. Each folder's @odata.deltaLink was encrypted and
+  // staged as a PENDING cursor by the checkpoint that read its final page - possibly in an
+  // earlier invocation of this round. So the commit does not decrypt anything and does not
+  // re-encrypt anything: it hands release the ciphertext that is already in the row, and
+  // release promotes it. One fewer place a plaintext cursor can exist.
+  let cursors = {}
   try {
+    await ensureLease(PROGRESS_STEP_MS)
+    const after = await rpc('read_outlook_round_progress', {
+      p_connection_id: connectionId,
+      p_run_id: runId,
+    })
+    if (after?.error || after?.data?.result !== 'ok') {
+      await release('idle', false, null, 'progress_unreadable')
+      return { ...partial, outcome: 'release_failed', refusal: null }
+    }
+    const folders = after.data.folders ?? {}
+    const versions = new Set()
     for (const folder of GRAPH_FOLDERS) {
-      const link = pass.cursors?.[folder]
-      if (typeof link !== 'string' || link.length === 0) continue
-      cursors[folder] = await encryptCursor(link)
+      const f = folders[folder] ?? {}
+      if (typeof f.pending_delta_ciphertext !== 'string' || f.pending_delta_ciphertext.length === 0
+          || typeof f.pending_delta_nonce !== 'string' || f.pending_delta_nonce.length === 0) {
+        // A complete round without a staged cursor for one of its folders is a
+        // contradiction. Commit nothing rather than commit half a round.
+        await release('idle', false, null, 'pending_cursor_missing')
+        return { ...partial, outcome: 'release_failed', refusal: null }
+      }
+      if (Number.isInteger(f.pending_delta_key_version)) versions.add(f.pending_delta_key_version)
+      cursors[folder] = {
+        ciphertext: f.pending_delta_ciphertext,
+        nonce: f.pending_delta_nonce,
+        keyVersion: f.pending_delta_key_version,
+      }
+    }
+    // release takes ONE key version for both cursors. If the key rotated mid-round the two
+    // ciphertexts disagree, and recording one version for both would make a cursor
+    // undecryptable later. Refuse: the round is re-read, which is cheap and correct.
+    if (versions.size > 1) {
+      cursors = {}
+      await release('idle', false, null, 'pending_key_mismatch')
+      return {
+        ...partial,
+        outcome: 'incomplete',
+        incompleteReasons: ['pending_key_mismatch'],
+        refusal: null,
+      }
     }
   } catch {
-    await release('error', false, null, 'cursor_encrypt_failed')
+    if (leaseLost) {
+      await release('error', false, null, 'lease_lost')
+      return { ...partial, outcome: 'lease_lost', refusal: null }
+    }
+    await release('error', false, null, 'progress_unreadable')
     return { ...partial, outcome: 'write_error', refusal: null }
   }
 
@@ -549,12 +1190,26 @@ export function summarizeRun (result) {
     created: Number.isInteger(result.created) ? result.created : 0,
     write_results: result.writeResults ?? {},
     entry_skipped: result.skipped ?? {},
-    incomplete_reasons: Array.isArray(result.incompleteReasons) ? result.incompleteReasons : [],
+    // Filtered to the controlled set, so an unexpected string can never reach a log.
+    incomplete_reasons: Array.isArray(result.incompleteReasons)
+      ? result.incompleteReasons.filter((r) => ROUND_INCOMPLETE_REASONS.includes(r))
+      : [],
     refusal: typeof result.refusal === 'string' ? result.refusal : null,
     // A controlled context-failure reason (config_missing, refresh_failed, ...). Never
     // a provider message.
     reason: typeof result.reason === 'string' ? result.reason : null,
     cursors_advanced: Number.isInteger(result.cursorsAdvanced) ? result.cursorsAdvanced : 0,
-    pass: result.summary ?? null,
+    // Per-folder round progress: counts, flags and controlled stop codes only. Never a
+    // fingerprint, a ciphertext or a round id. `round` is how a reader distinguishes
+    // "nothing to do" from "half-way through a large mailbox, come back".
+    round: result.round ?? null,
+    stops: result.stops ?? null,
+    round_reset: typeof result.roundReset === 'string' ? result.roundReset : null,
+    // Whether this invocation threw away an expired round. A reader needs it: a discarded
+    // round means the next one re-reads pages from the committed cursor.
+    round_expired: result.roundExpired === true,
+    // How much of a finished round's finalisation is done. Counts and flags only - never a
+    // fingerprint, so the write cursor itself is not reported.
+    finalize: result.finalize ?? null,
   }
 }

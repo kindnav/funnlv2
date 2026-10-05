@@ -45,6 +45,7 @@ import {
   MAX_PAGES_PER_RUN, MAX_RETRIES, REQUEST_TIMEOUT_MS, MAX_TOTAL_RETRY_DELAY_MS, GRAPH_BASE,
 } from '../supabase/functions/shared/outlookGraphTransport.js'
 import { readFolderMetadata } from '../supabase/functions/shared/outlookMetadataPass.js'
+import { makeRoundStore } from './harness/outlookRoundStore.js'
 import { MAX_PROVIDER_BODY_BYTES } from '../supabase/functions/shared/boundedJson.js'
 import { TOKEN_TIMEOUT_MS } from '../supabase/functions/shared/microsoftTokenExchange.js'
 
@@ -73,6 +74,31 @@ const codeOnly = (src) => src.split(String.fromCharCode(10))
 
 const CONN = 'cccccccc-cccc-cccc-cccc-cccccccccccc'
 const RUN = 'rrrrrrrr-rrrr-rrrr-rrrr-rrrrrrrrrrrr'
+
+/**
+ * Every run now reads and writes round progress, so a suite's own rpc is wrapped: the
+ * four round-progress RPCs answer from an in-memory mirror of migration 20261002000000
+ * and everything else falls through unchanged. That keeps these suites tests of lease
+ * LIFETIME and of the commit gate, rather than tests of the database - which
+ * tests/sql/outlook-durable-continuation-runtime.sql and the Docker harness cover.
+ */
+function withRounds (innerRpc, store) {
+  return async (name, args) => {
+    const fromStore = await store.handle(name, args)
+    if (fromStore !== null) return fromStore
+    const res = await innerRpc(name, args)
+    // A CONFIRMED complete release promotes the pending cursors and erases the round,
+    // exactly as release_outlook_sync_lease does.
+    if (name === 'release_outlook_sync_lease' && args?.p_run_complete === true
+        && res?.data === true) store.commitRelease()
+    return res
+  }
+}
+
+// The cursor plaintext is recoverable from the ciphertext ON PURPOSE, so a test can
+// assert WHICH link a resumed request used.
+const ENCRYPT_CURSOR = async (link) => ({ ciphertext: `CT:${link}`, nonce: 'N', keyVersion: 1 })
+const DECRYPT_CURSOR = async (ct) => String(ct).replace(/^CT:/, '')
 const U1 = '11111111-1111-1111-1111-111111111111'
 const CONTACT = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
 const KEY_B64 = Buffer.from(new Uint8Array(32).fill(5)).toString('base64')
@@ -489,7 +515,12 @@ test('the 501 is gone, and no response is a success-shaped no-op', async () => {
     'the placeholder refusal must be gone now that the path runs')
   assert.ok(!WORKER_CODES.includes('not_implemented'))
   // Only these outcomes answer 200, and each of them reports what it did.
-  assert.deepStrictEqual([...OK_OUTCOMES], ['committed', 'none_due', 'incomplete'])
+  // `continued` answers 200 because it is the designed behaviour of a large mailbox:
+  // progress saved, no cursor advanced, nothing written. `restart_required` does NOT,
+  // because a round's reading was discarded for an external reason.
+  assert.deepStrictEqual([...OK_OUTCOMES],
+    ['committed', 'none_due', 'incomplete', 'continued'])
+  assert.strictEqual(statusForOutcome('restart_required'), 503)
   for (const o of RUN_OUTCOMES) {
     const expected = OK_OUTCOMES.includes(o) ? 200 : 503
     assert.strictEqual(statusForOutcome(o), expected, o)
@@ -622,7 +653,13 @@ test('no message body, no Anthropic, no scheduler, no new-contact path', () => {
 })
 
 test('the handler records what still blocks enablement', () => {
-  for (const blocker of ['DURABLE CONTINUATION', 'Entra application', 'Mail.Read', 'No scheduler']) {
+  // DURABLE CONTINUATION has left this list because it is built. What replaced it is the
+  // part code cannot settle: the policy bullet and the retention decision.
+  assert.ok(!HANDLER_SRC.includes('DURABLE CONTINUATION is still unbuilt'),
+    'the old blocker must not be claimed once continuation exists')
+  for (const blocker of ['A PRODUCT DECISION AND A POLICY EDIT', 'D1 and D2',
+    'Entra application', 'Mail.Read', 'No scheduler',
+    'CONTEXT_WORST_MS', 'COMMITTED deltaLink']) {
     assert.ok(HANDLER_SRC.includes(blocker), `the handler must still record: ${blocker}`)
   }
 })
@@ -703,8 +740,9 @@ function slowRun ({ pagesPerFolder, contextMs = 200_000, writeMs = 5_000, pageMs
   }
 
   const run = () => runOutlookImport({
-    rpc,
-    encryptCursor: async () => ({ ciphertext: 'CT', nonce: 'N', keyVersion: 1 }),
+    rpc: withRounds(rpc, makeRoundStore()),
+    encryptCursor: ENCRYPT_CURSOR,
+    decryptCursor: DECRYPT_CURSOR,
     loadRunContext,
     deps: { fetchImpl, now },
   })
@@ -796,8 +834,9 @@ test('a run slow enough to need renewal DURING the writes still commits', async 
     }
   }
   const r = await runOutlookImport({
-    rpc,
-    encryptCursor: async () => ({ ciphertext: 'CT', nonce: 'N', keyVersion: 1 }),
+    rpc: withRounds(rpc, makeRoundStore()),
+    encryptCursor: ENCRYPT_CURSOR,
+    decryptCursor: DECRYPT_CURSOR,
     loadRunContext: async () => ({
       primaryEmail: ME, userId: U1, timeZone: 'UTC',
       contacts: [{ id: CONTACT, user_id: U1, email: OTHER }],
@@ -829,8 +868,9 @@ test('the lease is renewed BEFORE context loading, not after', async () => {
     return { data: { result: 'created' }, error: null }
   }
   await runOutlookImport({
-    rpc,
-    encryptCursor: async () => ({ ciphertext: 'C', nonce: 'N', keyVersion: 1 }),
+    rpc: withRounds(rpc, makeRoundStore()),
+    encryptCursor: ENCRYPT_CURSOR,
+    decryptCursor: DECRYPT_CURSOR,
     loadRunContext: async () => {
       order.push('loadRunContext')
       return { primaryEmail: 'me@x.test', userId: U1, timeZone: 'UTC', contacts: [],
@@ -870,8 +910,9 @@ test('a FAILED renewal stops the run and advances NEITHER cursor', async () => {
       return { data: { result: 'created' }, error: null }
     }
     const r = await runOutlookImport({
-      rpc,
-      encryptCursor: async () => ({ ciphertext: 'C', nonce: 'N', keyVersion: 1 }),
+      rpc: withRounds(rpc, makeRoundStore()),
+      encryptCursor: ENCRYPT_CURSOR,
+      decryptCursor: DECRYPT_CURSOR,
       loadRunContext: async () => ({
         primaryEmail: 'me@x.test', userId: U1, timeZone: 'UTC',
         contacts: [{ id: CONTACT, user_id: U1, email: 'ava@bank.test' }],
@@ -1114,8 +1155,9 @@ test('an overflowing set NEVER silently treats a tracked contact as unknown', as
     return { data: { result: 'created' }, error: null }
   }
   const r = await runOutlookImport({
-    rpc,
-    encryptCursor: async () => ({ ciphertext: 'C', nonce: 'N', keyVersion: 1 }),
+    rpc: withRounds(rpc, makeRoundStore()),
+    encryptCursor: ENCRYPT_CURSOR,
+    decryptCursor: DECRYPT_CURSOR,
     loadRunContext: loaderFor(contactPort(MAX_CONTACTS_LOADED + 1)),
     deps: { fetchImpl: async () => { graphCalled += 1; throw new Error('must not be called') } },
   })
@@ -1232,8 +1274,9 @@ function leaseScenario ({
   }
 
   const run = () => runOutlookImport({
-    rpc,
-    encryptCursor: async () => ({ ciphertext: 'CT', nonce: 'N', keyVersion: 1 }),
+    rpc: withRounds(rpc, makeRoundStore()),
+    encryptCursor: ENCRYPT_CURSOR,
+    decryptCursor: DECRYPT_CURSOR,
     loadRunContext: async () => {
       clock += contextMs
       events.push(`context@${clock / 1000}:${leaseUntil > clock ? 'live' : 'EXPIRED'}`)

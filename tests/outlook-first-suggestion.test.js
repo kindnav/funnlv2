@@ -31,6 +31,7 @@
 // Run with: node tests/outlook-first-suggestion.test.js
 
 import assert from 'node:assert'
+import { makeRoundStore } from './harness/outlookRoundStore.js'
 import { readFileSync, existsSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 import { dirname, resolve } from 'node:path'
@@ -38,7 +39,8 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { transformWithOxc } from 'vite'
 import {
-  LEASE_SECONDS, DUE_AFTER_SECONDS, RETRY_BACKOFF_SECONDS, RUN_OUTCOMES,
+  LEASE_SECONDS, DUE_AFTER_SECONDS, RETRY_BACKOFF_SECONDS, CONTINUE_BACKOFF_SECONDS,
+  RUN_OUTCOMES,
   ENTRY_SKIP_CODES, WRITE_OK, writeAccepted, releaseConfirmed, partitionPlan,
   runOutlookImport, summarizeRun,
 } from '../supabase/functions/shared/outlookImportRun.js'
@@ -53,6 +55,28 @@ import { CANDIDATE_SELECT, validateOverrides } from '../src/lib/calendarReview.j
 import {
   SUGGESTION_EVENTS, SUGGESTION_SOURCES, suggestionSourceLabel, suggestionEventProps,
 } from '../src/lib/suggestionAnalytics.js'
+
+/**
+ * Every run now reads and writes ROUND PROGRESS, so this suite's port is wrapped: the
+ * round-progress RPCs answer from an in-memory mirror of migration 20261002000000 and
+ * everything else falls through and is still recorded in `p.calls`. The mirror is a
+ * convenience - the real SQL is exercised by tests/sql/outlook-durable-continuation-
+ * runtime.sql and by the Docker harness.
+ */
+function withRounds (innerRpc, store) {
+  return async (name, args) => {
+    const fromStore = await store.handle(name, args)
+    if (fromStore !== null) return fromStore
+    const res = await innerRpc(name, args)
+    if (name === 'release_outlook_sync_lease' && args?.p_run_complete === true
+        && res?.data === true) store.commitRelease()
+    return res
+  }
+}
+
+// `encryptCursor` in this suite wraps the link as CT(<link>); the decryptor undoes that,
+// so a test can assert WHICH link a resumed request used.
+const DECRYPT_CURSOR = async (ct) => String(ct).replace(/^CT\(/, '').replace(/\)$/, '')
 
 let passed = 0, failed = 0
 const pending = []
@@ -226,7 +250,10 @@ console.log('\nthe run writes the suggestion BEFORE it advances the cursor')
 test('a commit-ready pass writes one suggestion, then releases with both cursors', async () => {
   const p = port()
   const r = await runOutlookImport({
-    rpc: p.rpc, encryptCursor, loadRunContext: context(OWN_CONTACT),
+    rpc: withRounds(p.rpc, makeRoundStore()),
+    encryptCursor,
+    decryptCursor: DECRYPT_CURSOR,
+    loadRunContext: context(OWN_CONTACT),
     deps: { fetchImpl: graphFixture() },
   })
   assert.strictEqual(r.outcome, 'committed', JSON.stringify(summarizeRun(r)))
@@ -234,11 +261,16 @@ test('a commit-ready pass writes one suggestion, then releases with both cursors
   assert.strictEqual(r.accepted, 1)
   assert.strictEqual(r.created, 1)
   const names = p.calls.map((c) => c.name)
+  // Every round-progress RPC - including the call that records how far finalisation got -
+  // answers from the in-memory mirror, so only these three reach this port. What must be
+  // visible here is their ORDER: the suggestion is written before the release that
+  // advances the cursors. (That the finalisation cursor also lands before the release is
+  // asserted in tests/outlook-durable-continuation.test.js, where the mirror is inspected.)
   assert.deepStrictEqual(names, [
     'reserve_due_outlook_connection',
     'upsert_outlook_interaction_candidate',
     'release_outlook_sync_lease',
-  ], 'the write must precede the release')
+  ], 'the write must precede the cursor-advancing release')
   const rel = p.calls.at(-1).args
   assert.strictEqual(rel.p_run_complete, true)
   assert.ok(rel.p_inbox_delta_ct && rel.p_sentitems_delta_ct, 'both cursors supplied')
@@ -248,7 +280,10 @@ test('a commit-ready pass writes one suggestion, then releases with both cursors
 test('the cursor reaching the database is the ENCRYPTED value, never the link', async () => {
   const p = port()
   await runOutlookImport({
-    rpc: p.rpc, encryptCursor, loadRunContext: context(OWN_CONTACT),
+    rpc: withRounds(p.rpc, makeRoundStore()),
+    encryptCursor,
+    decryptCursor: DECRYPT_CURSOR,
+    loadRunContext: context(OWN_CONTACT),
     deps: { fetchImpl: graphFixture() },
   })
   const rel = p.calls.at(-1).args
@@ -262,7 +297,10 @@ test('the cursor reaching the database is the ENCRYPTED value, never the link', 
 test('the write carries the fingerprints and NO content field', async () => {
   const p = port()
   await runOutlookImport({
-    rpc: p.rpc, encryptCursor, loadRunContext: context(OWN_CONTACT),
+    rpc: withRounds(p.rpc, makeRoundStore()),
+    encryptCursor,
+    decryptCursor: DECRYPT_CURSOR,
+    loadRunContext: context(OWN_CONTACT),
     deps: { fetchImpl: graphFixture() },
   })
   const w = p.calls.find((c) => c.name === 'upsert_outlook_interaction_candidate').args
@@ -284,29 +322,49 @@ console.log('\nan incomplete pass writes nothing and advances nothing')
 test('no candidate write is attempted at all, and the release carries no cursor', async () => {
   const p = port()
   const r = await runOutlookImport({
-    rpc: p.rpc, encryptCursor, loadRunContext: context(OWN_CONTACT),
+    rpc: withRounds(p.rpc, makeRoundStore()),
+    encryptCursor,
+    decryptCursor: DECRYPT_CURSOR,
+    loadRunContext: context(OWN_CONTACT),
     deps: { fetchImpl: graphFixture({ complete: false }) },
   })
-  assert.strictEqual(r.outcome, 'incomplete')
-  assert.deepStrictEqual(r.incompleteReasons, ['folder_incomplete'])
+  // CHANGED BY DURABLE CONTINUATION, and this is the improvement. Inbox finished and Sent
+  // Items did not: before, that was 'incomplete' forever, because every run restarted from
+  // the same cursor, read the same pages and committed nothing - safe, but making no
+  // progress. Now the folder reads until the per-INVOCATION cap, saves where it got to, and
+  // reports 'continued' so a later invocation carries on.
+  //
+  // What has NOT changed is the point of the test: no candidate is written from a half-read
+  // round, and NEITHER cursor advances - not even Inbox's, which did finish, because a
+  // conversation can span both folders.
+  assert.strictEqual(r.outcome, 'continued', JSON.stringify(summarizeRun(r)))
   assert.strictEqual(r.intended, 0)
   assert.strictEqual(r.accepted, 0)
   assert.strictEqual(r.created, 0)
+  assert.strictEqual(r.cursorsAdvanced, 0)
   assert.ok(!p.calls.some((c) => c.name === 'upsert_outlook_interaction_candidate'),
-    'an incomplete pass must not attempt a write')
+    'a half-read round must not attempt a write')
   const rel = p.calls.at(-1).args
   assert.strictEqual(rel.p_run_complete, false)
   for (const k of ['p_inbox_delta_ct', 'p_inbox_delta_nonce',
     'p_sentitems_delta_ct', 'p_sentitems_delta_nonce', 'p_delta_key_version']) {
     assert.strictEqual(rel[k], null, k)
   }
-  assert.strictEqual(rel.p_retry_backoff_seconds, RETRY_BACKOFF_SECONDS)
+  // A SHORTER backoff than a failure gets, on purpose: the round is healthy and half-read,
+  // so the sooner something calls the worker again the sooner it finishes. Nothing here
+  // calls it - there is still no scheduler - this only stops a connection with work waiting
+  // being marked not-due for five minutes.
+  assert.strictEqual(rel.p_retry_backoff_seconds, CONTINUE_BACKOFF_SECONDS)
+  assert.ok(CONTINUE_BACKOFF_SECONDS < RETRY_BACKOFF_SECONDS)
 })
 
 test('a REFUSED write downgrades the whole run: no cursor, retry later', async () => {
   const p = port({ writes: ['stale_run'] })
   const r = await runOutlookImport({
-    rpc: p.rpc, encryptCursor, loadRunContext: context(OWN_CONTACT),
+    rpc: withRounds(p.rpc, makeRoundStore()),
+    encryptCursor,
+    decryptCursor: DECRYPT_CURSOR,
+    loadRunContext: context(OWN_CONTACT),
     deps: { fetchImpl: graphFixture() },
   })
   assert.strictEqual(r.outcome, 'write_failed')
@@ -333,7 +391,10 @@ test('a tombstoned exchange still lets the run commit', async () => {
   // The user dismissed it. Nothing is unpersisted, so the cursor may advance.
   const p = port({ writes: ['exists_terminal'] })
   const r = await runOutlookImport({
-    rpc: p.rpc, encryptCursor, loadRunContext: context(OWN_CONTACT),
+    rpc: withRounds(p.rpc, makeRoundStore()),
+    encryptCursor,
+    decryptCursor: DECRYPT_CURSOR,
+    loadRunContext: context(OWN_CONTACT),
     deps: { fetchImpl: graphFixture() },
   })
   assert.strictEqual(r.outcome, 'committed')
@@ -343,7 +404,10 @@ test('a tombstoned exchange still lets the run commit', async () => {
 test('nothing due takes no lease and performs no other call', async () => {
   const p = port({ reserve: { data: { result: 'none_due' }, error: null } })
   const r = await runOutlookImport({
-    rpc: p.rpc, encryptCursor, loadRunContext: context(OWN_CONTACT),
+    rpc: withRounds(p.rpc, makeRoundStore()),
+    encryptCursor,
+    decryptCursor: DECRYPT_CURSOR,
+    loadRunContext: context(OWN_CONTACT),
     deps: { fetchImpl: graphFixture() },
   })
   assert.strictEqual(r.outcome, 'none_due')
@@ -353,7 +417,9 @@ test('nothing due takes no lease and performs no other call', async () => {
 test('a thrown pass releases the lease as an error rather than holding it', async () => {
   const p = port()
   const r = await runOutlookImport({
-    rpc: p.rpc, encryptCursor,
+    rpc: withRounds(p.rpc, makeRoundStore()),
+    encryptCursor,
+    decryptCursor: DECRYPT_CURSOR,
     loadRunContext: async () => { throw new Error('token fetch failed at https://secret') },
     deps: { fetchImpl: graphFixture() },
   })
@@ -427,12 +493,25 @@ test('the migration fences on outlook_sync_state, never on the Gmail tables', ()
 
 test('the run module calls only the three permitted RPCs', () => {
   const names = [...new Set([...codeOnly(RUN_SRC).matchAll(/rpc\('([a-z_]+)'/g)].map((m) => m[1]))]
-  // FOUR now, not three: a long run must renew its lease or lose it, because the
-  // bounded worst case for a run is far longer than any lease the reservation RPC
-  // will grant. See the timing assertion in outlook-worker-token-access.test.js.
+  // EIGHT now. Four were there before: reserve, renew (a long run must renew or lose
+  // its claim), the candidate write, and release. Durable continuation added four, and
+  // each is one narrow job:
+  //   read_outlook_round_progress      where did the last invocation get to?
+  //   record_outlook_page_progress     ONE atomic checkpoint per Graph page
+  //   list_outlook_round_conversations read the accumulator back to finalize
+  //   reset_outlook_round              the controlled restart after a rejected nextLink
+  //   advance_outlook_round_write_cursor  how far finalising the round's suggestions got,
+  //                                     so a batch bigger than one invocation resumes
+  // Nothing else may be called from here: no scheduler, no job table, no generic
+  // key-value store.
   assert.deepStrictEqual(names.sort(), [
+    'advance_outlook_round_write_cursor',
+    'list_outlook_round_conversations',
+    'read_outlook_round_progress',
+    'record_outlook_page_progress',
     'release_outlook_sync_lease', 'renew_outlook_sync_lease',
-    'reserve_due_outlook_connection', 'upsert_outlook_interaction_candidate',
+    'reserve_due_outlook_connection', 'reset_outlook_round',
+    'upsert_outlook_interaction_candidate',
   ])
   assert.ok(!codeOnly(RUN_SRC).includes('upsert_email_candidate'))
 })
@@ -472,7 +551,10 @@ console.log('\nthe log summary carries no identifier or fingerprint')
 test('summarizeRun reports counts and controlled codes only', async () => {
   const p = port()
   const r = await runOutlookImport({
-    rpc: p.rpc, encryptCursor, loadRunContext: context(OWN_CONTACT),
+    rpc: withRounds(p.rpc, makeRoundStore()),
+    encryptCursor,
+    decryptCursor: DECRYPT_CURSOR,
+    loadRunContext: context(OWN_CONTACT),
     deps: { fetchImpl: graphFixture() },
   })
   const s = JSON.stringify(summarizeRun(r))
@@ -635,7 +717,10 @@ test('a release returning FALSE is release_failed, not committed', async () => {
   // with two cursors advanced here.
   const p = port({ release: false })
   const r = await runOutlookImport({
-    rpc: p.rpc, encryptCursor, loadRunContext: context(OWN_CONTACT),
+    rpc: withRounds(p.rpc, makeRoundStore()),
+    encryptCursor,
+    decryptCursor: DECRYPT_CURSOR,
+    loadRunContext: context(OWN_CONTACT),
     deps: { fetchImpl: graphFixture() },
   })
   assert.strictEqual(r.outcome, 'release_failed')
@@ -653,7 +738,10 @@ test('a release returning FALSE is release_failed, not committed', async () => {
 test('a release that ERRORS is release_failed, not committed', async () => {
   const p = port({ release: { data: null, error: { status: 500 } } })
   const r = await runOutlookImport({
-    rpc: p.rpc, encryptCursor, loadRunContext: context(OWN_CONTACT),
+    rpc: withRounds(p.rpc, makeRoundStore()),
+    encryptCursor,
+    decryptCursor: DECRYPT_CURSOR,
+    loadRunContext: context(OWN_CONTACT),
     deps: { fetchImpl: graphFixture() },
   })
   assert.strictEqual(r.outcome, 'release_failed')
@@ -672,7 +760,10 @@ test('a release that THROWS is release_failed, and does not escape the run', asy
     throw new Error('network down at https://secret.example')
   }
   const r = await runOutlookImport({
-    rpc, encryptCursor, loadRunContext: context(OWN_CONTACT),
+    rpc: withRounds(rpc, makeRoundStore()),
+    encryptCursor,
+    decryptCursor: DECRYPT_CURSOR,
+    loadRunContext: context(OWN_CONTACT),
     deps: { fetchImpl: graphFixture() },
   })
   assert.strictEqual(r.outcome, 'release_failed')
@@ -697,7 +788,10 @@ test('a THROWN candidate write releases as an error and commits nothing', async 
     return { data: true, error: null }
   }
   const r = await runOutlookImport({
-    rpc, encryptCursor, loadRunContext: context(OWN_CONTACT),
+    rpc: withRounds(rpc, makeRoundStore()),
+    encryptCursor,
+    decryptCursor: DECRYPT_CURSOR,
+    loadRunContext: context(OWN_CONTACT),
     deps: { fetchImpl: graphFixture() },
   })
   assert.strictEqual(r.outcome, 'write_error')
@@ -712,22 +806,28 @@ test('a THROWN candidate write releases as an error and commits nothing', async 
   assert.strictEqual(released.p_run_complete, false)
 })
 
-test('a THROWN cursor encryption releases as an error, after the writes landed', async () => {
+test('a THROWN cursor encryption now fails BEFORE any suggestion is written', async () => {
   const p = port()
   const r = await runOutlookImport({
-    rpc: p.rpc,
+    rpc: withRounds(p.rpc, makeRoundStore()),
     encryptCursor: async () => { throw new Error('key unavailable') },
+    decryptCursor: DECRYPT_CURSOR,
     loadRunContext: context(OWN_CONTACT),
     deps: { fetchImpl: graphFixture() },
   })
-  assert.strictEqual(r.outcome, 'write_error')
+  // MOVED EARLIER BY DURABLE CONTINUATION, deliberately. The cursor is now encrypted when
+  // the page that produced it is CHECKPOINTED, not at commit time, so an unusable key is
+  // discovered before a single page reaches the database - rather than after every
+  // suggestion has been written and with a cursor that can never be stored. The outcome is
+  // released_error with nothing accepted, which is a strictly better failure than the old
+  // write_error with work already done.
+  assert.strictEqual(r.outcome, 'released_error', JSON.stringify(summarizeRun(r)))
   assert.strictEqual(r.cursorsAdvanced, 0)
-  // The suggestion IS in the database. Saying zero would be false.
-  assert.strictEqual(r.accepted, 1)
-  assert.strictEqual(r.created, 1)
+  assert.strictEqual(r.accepted, 0, 'no write may even be attempted')
+  assert.strictEqual(r.created, 0)
+  assert.ok(!p.calls.some((c) => c.name === 'upsert_outlook_interaction_candidate'))
   const rel = p.calls.at(-1).args
   assert.strictEqual(rel.p_status, 'error')
-  assert.strictEqual(rel.p_error_code, 'cursor_encrypt_failed')
   assert.strictEqual(rel.p_inbox_delta_ct, null, 'no cursor may be supplied')
 })
 
@@ -739,7 +839,10 @@ test('a best-effort release that ALSO throws still returns a controlled outcome'
     throw new Error('everything is down')
   }
   const r = await runOutlookImport({
-    rpc, encryptCursor, loadRunContext: context(OWN_CONTACT),
+    rpc: withRounds(rpc, makeRoundStore()),
+    encryptCursor,
+    decryptCursor: DECRYPT_CURSOR,
+    loadRunContext: context(OWN_CONTACT),
     deps: { fetchImpl: graphFixture() },
   })
   assert.strictEqual(r.outcome, 'write_error')
@@ -753,7 +856,9 @@ console.log('partial writes are reported, not erased')
 test('two of three accepted then a refusal: the two are still counted', async () => {
   const p = port({ writes: ['created', 'refreshed', 'stale_run'] })
   const r = await runOutlookImport({
-    rpc: p.rpc, encryptCursor,
+    rpc: withRounds(p.rpc, makeRoundStore()),
+    encryptCursor,
+    decryptCursor: DECRYPT_CURSOR,
     loadRunContext: context(OWN_CONTACT),
     deps: { fetchImpl: threeEpisodeFixture() },
   })
@@ -774,7 +879,9 @@ test('two of three accepted then a refusal: the two are still counted', async ()
 test('the run STOPS at the first refusal rather than piling up uncommittable work', async () => {
   const p = port({ writes: ['created', 'stale_run', 'created'] })
   const r = await runOutlookImport({
-    rpc: p.rpc, encryptCursor,
+    rpc: withRounds(p.rpc, makeRoundStore()),
+    encryptCursor,
+    decryptCursor: DECRYPT_CURSOR,
     loadRunContext: context(OWN_CONTACT),
     deps: { fetchImpl: threeEpisodeFixture() },
   })
@@ -788,7 +895,10 @@ test('a partial run keeps the RETRY idempotent - no rollback, no new machinery',
   // First run: one lands, the next is refused.
   const first = port({ writes: ['created', 'stale_run'] })
   const a = await runOutlookImport({
-    rpc: first.rpc, encryptCursor, loadRunContext: context(OWN_CONTACT),
+    rpc: withRounds(first.rpc, makeRoundStore()),
+    encryptCursor,
+    decryptCursor: DECRYPT_CURSOR,
+    loadRunContext: context(OWN_CONTACT),
     deps: { fetchImpl: threeEpisodeFixture() },
   })
   assert.strictEqual(a.accepted, 1)
@@ -797,7 +907,10 @@ test('a partial run keeps the RETRY idempotent - no rollback, no new machinery',
   // happened in between.
   const second = port({ writes: ['refreshed', 'created', 'created'] })
   const b = await runOutlookImport({
-    rpc: second.rpc, encryptCursor, loadRunContext: context(OWN_CONTACT),
+    rpc: withRounds(second.rpc, makeRoundStore()),
+    encryptCursor,
+    decryptCursor: DECRYPT_CURSOR,
+    loadRunContext: context(OWN_CONTACT),
     deps: { fetchImpl: threeEpisodeFixture() },
   })
   assert.strictEqual(b.outcome, 'committed')
@@ -813,7 +926,10 @@ test('a partial run keeps the RETRY idempotent - no rollback, no new machinery',
 test('summarizeRun exposes intended, accepted and created separately', async () => {
   const p = port({ writes: ['created', 'refreshed', 'rpc_error'] })
   const r = await runOutlookImport({
-    rpc: p.rpc, encryptCursor, loadRunContext: context(OWN_CONTACT),
+    rpc: withRounds(p.rpc, makeRoundStore()),
+    encryptCursor,
+    decryptCursor: DECRYPT_CURSOR,
+    loadRunContext: context(OWN_CONTACT),
     deps: { fetchImpl: threeEpisodeFixture() },
   })
   const s = summarizeRun(r)

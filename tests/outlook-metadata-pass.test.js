@@ -1072,17 +1072,42 @@ test('the module documents that oversized mailboxes need a continuation design',
     'and tied to the reason the endpoint is off')
 })
 
-test('the worker records continuation as an independent, still-open blocker', () => {
-  // The write path, the token path and the continuation design are three different
-  // problems. The write path is now built (migration 20260930000000), so the endpoint's
-  // stated reason moved to the token path - and continuation must stay named, because
-  // clearing the other two would leave an endpoint that can be enabled but cannot make
-  // progress on a large mailbox.
-  assert.ok(/NO CONTINUATION DESIGN/.test(HANDLER_SRC))
-  assert.ok(/makes no progress\s*(\/\/)?\s*forever/.test(HANDLER_SRC))
-  assert.ok(/DURABLE\s*(\/\/)?\s*CONTINUATION|Durable continuation/.test(HANDLER_SRC))
-  assert.ok(/intermediate nextLink is opaque and time-limited/.test(HANDLER_SRC),
-    'why storing partial progress is not trivially safe must be stated')
+test('the worker no longer claims continuation is missing, and names what replaced it', () => {
+  // The write path, the token path and the continuation design were three different
+  // problems. All three are now built - continuation by migration 20261002000000 plus
+  // outlookContinuedPass.js - so the handler must NOT still say continuation is unbuilt,
+  // and it must name what actually blocks enablement now.
+  assert.ok(!/NO CONTINUATION DESIGN/.test(HANDLER_SRC),
+    'the handler must not still claim continuation is undesigned')
+  assert.ok(!/makes no progress\s*(\/\/)?\s*forever/.test(HANDLER_SRC),
+    'a mailbox past the per-invocation ceilings now makes progress')
+  // What replaced it: the two things code cannot settle, and the ceilings that remain.
+  assert.ok(/A PRODUCT DECISION AND A POLICY EDIT/.test(HANDLER_SRC))
+  assert.ok(/D1 and D2/.test(HANDLER_SRC), 'the decisions must be pointed at by name')
+  // CONTEXT_WORST_MS must still be NAMED, but no longer as a blocker: it is measured now,
+  // and the handler must carry the numbers so nobody re-asserts the ceiling as a verdict.
+  assert.ok(/CONTEXT_WORST_MS/.test(HANDLER_SRC), 'the ceiling must still be named')
+  assert.ok(/SUM OF PER-CALL TIMEOUT CEILINGS/.test(HANDLER_SRC),
+    'and explained as a ceiling rather than a path')
+  assert.ok(/5,000 contacts/.test(HANDLER_SRC), 'with the measured supported maximum')
+  assert.ok(/HOSTED LATENCY IS NOT MEASURED/.test(HANDLER_SRC),
+    'and what the measurement does not cover')
+  assert.ok(!/NOT for context preparation/.test(HANDLER_SRC),
+    'the superseded blocker claim must be gone')
+  assert.ok(/COMMITTED deltaLink still has no restart/.test(HANDLER_SRC))
+  // And the hosted limits that forced the design must be stated, not implied.
+  assert.ok(/150s/.test(HANDLER_SRC), 'the idle timeout and wall clock must be named')
+  assert.ok(/background tasks\s*(\/\/)?\s*are explicitly capped/.test(HANDLER_SRC),
+    'the docs are explicit that background tasks do not lift the wall clock')
+})
+
+test('THIS pass still documents that IT does not continue, and points at what does', () => {
+  // outlookMetadataPass reads both folders to completion in one go and is kept as the
+  // in-memory reference. It must keep saying so rather than quietly implying it is the
+  // production path, which it no longer is.
+  assert.ok(/CONTINUATION IS NOT IMPLEMENTED/.test(PASS_SRC))
+  assert.ok(/intermediate nextLink is opaque and time-limited/.test(PASS_SRC),
+    'why storing partial progress is not trivially safe must stay stated')
 })
 
 test('every INCOMPLETE_REASONS value is one this pass can actually produce', () => {
