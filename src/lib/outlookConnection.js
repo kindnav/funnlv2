@@ -145,18 +145,16 @@ export function classifyStartResponse (status, body) {
 
 // ── The post-OAuth return to Settings ───────────────────────────────────────
 //
-// outlook-oauth-callback finishes with a 303 to /settings?outlook=connected or
-// /settings?outlook=error (buildOutlookSettingsRedirect). Nothing read that
-// parameter, so a refused connection returned to a Settings page that looked
-// exactly like one that had never been attempted: the card simply showed the
-// not-connected state again, with no indication that anything had failed. The
-// first live pilot consent landed in precisely that silence.
+// outlook-oauth-callback redirects to /settings?outlook=connected or
+// ?outlook=error. Nothing read that parameter, so a refused connection returned
+// to a Settings page indistinguishable from one where nothing was attempted -
+// the silence the first live pilot consent landed in.
 //
-// The parameter is the ONLY thing the callback tells the browser, and
-// deliberately so: every failing path redirects to the same generic error so
-// that an unbound request and a bound-but-refused one are byte-identical.
-// There is therefore no provider detail here TO surface, and none must be
-// invented - the reason lives in the Edge log alone.
+// The parameter is deliberately the ONLY thing the callback tells the browser:
+// every failing path returns the same redirect, so an unbound request and a
+// bound-but-refused one stay byte-identical. There is therefore no provider
+// detail to surface, and none must be invented - the reason lives in the Edge
+// log alone.
 
 /** The only two values the callback can produce. Anything else is ignored. */
 export const OUTLOOK_CALLBACK_RESULTS = Object.freeze(['connected', 'error'])
@@ -190,12 +188,9 @@ export function readOutlookCallbackResult (search) {
 export function messageForOutcome (kind) {
   switch (kind) {
     case 'callback_failed':
-      // Short, visible, and generic ON PURPOSE. Every failing callback path
-      // produces the same redirect, so there is no provider detail available
-      // and none may be implied. "Nothing was connected" is accurate: the
-      // error redirect is returned on every path that stops before
-      // finalize_microsoft_connection stores a row, and on a non-'stored'
-      // result.
+      // "Nothing was connected" is accurate: the error redirect is returned on
+      // every path that stops before finalize_microsoft_connection stores a
+      // row, and on a non-'stored' result.
       return 'Could not connect your Outlook account. Nothing was connected - please try again.'
     case 'stale_version':
       return 'The Outlook disclosure has been updated. Reload this page to read the current version before connecting.'

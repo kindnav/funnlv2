@@ -295,12 +295,17 @@ export async function handleOutlookCallback (req, endpoints = PRODUCTION_ENDPOIN
       meUrl: endpoints.graphMeUrl,
     })
     if (!mailbox.ok) {
-      // The controlled reason, plus - on an identity mismatch - a diagnostic
-      // made only of shapes, lengths and booleans. It cannot contain an oid, a
-      // Graph id, an address, a state, a code, a cookie or a token, nor any
-      // substring of one. See describeIdentityMismatch.
-      console.error('outlook-oauth-callback mailbox_unresolved', mailbox.reason,
-        JSON.stringify(mailbox.diagnostic ?? {}))
+      // The structured diagnostic is logged for graph_identity_mismatch ONLY.
+      // Every other mailbox failure keeps its bare controlled reason code, as
+      // before. The diagnostic is shapes, lengths and booleans - it cannot
+      // contain an oid, a Graph id, an address, a state, a code, a cookie or a
+      // token, nor any substring of one. See describeIdentityMismatch.
+      if (mailbox.reason === 'graph_identity_mismatch' && mailbox.diagnostic) {
+        console.error('outlook-oauth-callback mailbox_unresolved', mailbox.reason,
+          JSON.stringify(mailbox.diagnostic))
+      } else {
+        console.error('outlook-oauth-callback mailbox_unresolved', mailbox.reason)
+      }
       return redirect(failRedirect)
     }
 

@@ -14,8 +14,7 @@
 //   * The Graph `id` is cross-checked against the VALIDATED id_token `oid`.
 //     A mismatch fails closed rather than trusting the Graph body. The
 //     comparison is EXACT (case-insensitive) for BOTH account types. See the
-//     EVIDENCE block above resolveMailboxFromGraphBody for why no
-//     personal-account equivalence is granted.
+//     note above resolveMailboxFromGraphBody.
 //   * The access token is passed as a bearer credential and never decoded.
 //     Redirects are refused: Fetch already strips Authorization cross-origin,
 //     but refusing outright also rules out an unexpected destination whose
@@ -50,10 +49,8 @@ export function pickMailboxAddress (body) {
 }
 
 // ── Identifier SHAPE vocabulary, for the mismatch diagnostic only ───────────
-//
-// None of this participates in the identity decision. It exists so that a
-// refusal can be investigated from the Edge log WITHOUT the log ever carrying
-// an identifier. Every value below is a category, a length or a boolean.
+// None of this participates in the identity decision. It exists so a refusal
+// can be investigated from the Edge log without the log carrying an identifier.
 
 const GUID_SHAPE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
@@ -65,10 +62,7 @@ const ZERO16 = '0000000000000000'
 export const IDENTIFIER_SHAPES = Object.freeze(
   ['absent', 'guid', 'hex16', 'hex32', 'other'])
 
-/**
- * Classify an identifier's FORM. Returns one of IDENTIFIER_SHAPES and never any
- * part of the value itself.
- */
+/** Classify an identifier's FORM. Never returns any part of the value. */
 export function identifierShape (raw) {
   if (typeof raw !== 'string') return 'absent'
   const s = raw.trim().toLowerCase()
@@ -81,12 +75,11 @@ export function identifierShape (raw) {
 
 /**
  * Is `guidForm` a GUID whose leading 16 hex digits are all zero and whose
- * trailing 16 hex digits are exactly `shortForm` (a 16-hex value)?
+ * trailing 16 are exactly `shortForm` (a 16-hex value)?
  *
- * This is the ONE relationship under investigation, and it is a REPORTING
- * predicate only - nothing calls it to accept an identity. A match on the
- * trailing digits WITHOUT the all-zero leading half is deliberately false, so
- * an arbitrary suffix coincidence is never reported as this relationship.
+ * A REPORTING predicate only - nothing calls it to accept an identity. A
+ * trailing-digit match WITHOUT the all-zero leading half is deliberately false,
+ * so an arbitrary suffix coincidence is never reported as this relationship.
  */
 export function isZeroPaddedGuidOf (guidForm, shortForm) {
   const g = typeof guidForm === 'string' ? guidForm.trim().toLowerCase() : ''
@@ -97,14 +90,11 @@ export function isZeroPaddedGuidOf (guidForm, shortForm) {
 }
 
 /**
- * A privacy-safe description of WHY two identifiers did not match.
+ * A privacy-safe description of WHY two identifiers did not match: shapes,
+ * lengths and booleans, with no identifier, substring, address or token in it.
  *
- * Returns shapes, lengths and booleans. It contains no identifier, no substring
- * of one, no address and no token, so it is safe to log verbatim.
- *
- * `accountType` is the classification already derived from the VALIDATED
- * id_token `tid` ('personal' for the well-known consumers tenant, 'work'
- * otherwise). Anything else is reported as 'unknown'.
+ * `accountType` comes from the VALIDATED id_token `tid` ('personal' for the
+ * well-known consumers tenant, 'work' otherwise); anything else is 'unknown'.
  */
 export function describeIdentityMismatch (graphId, oid, accountType) {
   const g = typeof graphId === 'string' ? graphId.trim().toLowerCase() : ''
@@ -132,38 +122,35 @@ export function describeIdentityMismatch (graphId, oid, accountType) {
  * `accountType` is optional and is used ONLY to label the diagnostic.
  * Returns { ok, email } or { ok: false, reason, diagnostic? }.
  *
- * EVIDENCE FOR THE COMPARISON BEING EXACT FOR BOTH ACCOUNT TYPES
- * --------------------------------------------------------------
+ * WHY THE COMPARISON IS STILL EXACT FOR BOTH ACCOUNT TYPES
+ * --------------------------------------------------------
  * A live personal-account consent refused here with graph_identity_mismatch,
- * which raised the question of whether a personal account's Graph `id` and its
- * id_token `oid` are two representations of one value (a 16-hex Microsoft
- * Account CID, and that CID zero-padded into GUID form). Primary documentation
- * does NOT support treating them as equivalent:
+ * raising the question of whether a personal account's Graph `id` and its
+ * id_token `oid` are two representations of one value - a 16-hex Microsoft
+ * Account CID, and that CID zero-padded into GUID form.
  *
- *   * ID token claims reference - `oid` is "String, a GUID", "The immutable
- *     identifier for an object"; and "Microsoft Graph returns this ID as the
- *     `id` property for a user account". That documents EQUALITY, and states no
- *     personal-account divergence anywhere.
- *   * `user` resource reference - `id` is "The unique identifier for the user.
- *     Should be treated as an opaque identifier." No format is given, and no
- *     personal-account carve-out exists.
- *   * "Working with users in Microsoft Graph" - nothing on personal-account id
- *     format at all.
- *   * The only primary-doc mention of a "Microsoft Account CID" is on the BETA
- *     `userAccountInformation` resource - a profile facet, a DIFFERENT entity
- *     from `user` - and even there no format is stated: no hex length, no
- *     padding, no stated relationship to a GUID.
+ * WHAT IS KNOWN. Zero-padding of a personal-account `oid` has been described
+ * publicly, and the beta `userAccountInformation` resource does say its entity
+ * identifier "is set to the corresponding Microsoft Entra guid or Microsoft
+ * Account CID respectively". But that is a different entity from `user`, and no
+ * format is stated there. The `user` reference documents `id` only as "The
+ * unique identifier for the user. Should be treated as an opaque identifier",
+ * and the ID token reference says `oid` is a GUID that "Microsoft Graph returns
+ * ... as the `id` property for a user account" - i.e. it documents EQUALITY.
  *
- * So the equivalence is UNDOCUMENTED. Accepting it would mean accepting a
- * 16-hex value as proof of ownership of a GUID-identified account on the
- * strength of an assumption, which is exactly the substitution this check
- * exists to prevent. The rule therefore stays EXACT equality for both account
- * types, UNKNOWN SHAPES STAY REJECTED, and the relationship is merely RECORDED
- * in the diagnostic above so the live representation can be established from a
- * refusal rather than guessed at. If a logged refusal shows
- * graph_id_is_short_form_of_oid true on the consumers tenant, that is the
- * evidence that would justify revisiting this - as a separate, deliberate
- * change, gated on account === 'personal'.
+ * WHAT IS NOT KNOWN. The exact relationship between the two values that Graph
+ * /me and the id_token actually returned FOR OUR LIVE ACCOUNT remains
+ * UNVERIFIED. Nothing recorded it. Accepting the equivalence now would mean
+ * treating a 16-hex value as proof of ownership of a GUID-identified account on
+ * the strength of an assumption - the exact substitution this check exists to
+ * prevent.
+ *
+ * SO: exact equality stands for both account types and unknown shapes stay
+ * REJECTED. The relationship is only RECORDED in the diagnostic above, so the
+ * next controlled pilot attempt establishes the shape WITHOUT logging either
+ * identifier. A refusal showing graph_id_is_short_form_of_oid true on
+ * account 'personal' is the evidence that would justify revisiting this, as a
+ * separate deliberate change gated on the consumers tenant.
  *
  * Email is NEVER identity here. `mail`/`userPrincipalName` are read only AFTER
  * the identifier check passes, and only to fill ms_email.

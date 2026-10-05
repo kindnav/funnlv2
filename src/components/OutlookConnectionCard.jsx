@@ -102,9 +102,8 @@ export default function OutlookConnectionCard() {
 
   useEffect(() => { refreshStatus() }, [refreshStatus])
 
-  // The callback's own verdict, which until now nothing read. Shown only while
-  // the DATABASE says this account is not connected, so a stale ?outlook=error
-  // left in the address bar cannot contradict a connection that exists.
+  // Shown only while the DATABASE says this account is not connected, so a
+  // stale ?outlook=error cannot contradict a connection that exists.
   const callbackFailed =
     readOutlookCallbackResult(searchParams) === 'error' && status !== 'connected'
 
@@ -163,11 +162,8 @@ export default function OutlookConnectionCard() {
     <div className="rounded-2xl border border-line-2 bg-card p-6">
       <h3 className="font-display text-lg text-hi">Outlook</h3>
 
-      {/*
-        Outside every status branch on purpose: the failure must be visible
-        while the card is still loading its status, and in the signed_out and
-        error branches too - not only in the not-connected one.
-      */}
+      {/* Outside every status branch on purpose: visible while the status is
+          still loading, and in the signed_out branch too. */}
       {callbackFailed && (
         <p
           className="mt-3 rounded-xl border border-danger/40 bg-danger/10 p-3 text-sm text-danger"
