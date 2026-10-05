@@ -15,19 +15,33 @@
 // listed, so they render no provider badge. 'manual' and any unknown source resolve to
 // null (no badge).
 
-export const INTERACTION_SOURCES = ['manual', 'google_calendar']
+// VALIDITY mirrors the DB CHECK interactions_source_check, which admits all four.
+// An earlier revision listed only the first two, so isValidInteractionSource said
+// 'outlook' was invalid while the database accepted it - and accept_interaction_candidate
+// does set interactions.source = 'outlook' for an accepted Outlook suggestion.
+export const INTERACTION_SOURCES = ['manual', 'google_calendar', 'gmail', 'outlook']
 export const DEFAULT_INTERACTION_SOURCE = 'manual'
 export const GOOGLE_CALENDAR_SOURCE = 'google_calendar'
 
-// Presentation registry for sources that have a live integration today. Only
-// google_calendar is functional; gmail/outlook are deliberately absent (no
-// nonfunctional tabs or "coming soon" UI is exposed anywhere).
+// Presentation registry for sources whose suggestions can actually reach a user's
+// review queue. google_calendar and outlook qualify; gmail is deliberately absent,
+// because nothing produces a reviewable Gmail suggestion and a label on a surface
+// that never renders is worse than no label.
 export const SOURCE_PROVIDERS = {
   google_calendar: {
     key: 'google_calendar',
     label: 'Google Calendar',
     ariaLabel: 'Source: Google Calendar',
     title: 'Added from Google Calendar',
+  },
+  // PRESENTED, because an Outlook suggestion can now actually appear in the review
+  // queue. gmail stays absent: nothing produces a reviewable Gmail suggestion, so
+  // listing it would put a label on a surface that never renders.
+  outlook: {
+    key: 'outlook',
+    label: 'Outlook',
+    ariaLabel: 'Source: Outlook',
+    title: 'Suggested from your Outlook mailbox',
   },
 }
 

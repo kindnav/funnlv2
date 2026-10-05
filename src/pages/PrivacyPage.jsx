@@ -36,7 +36,7 @@ function PrivacyPage() {
             <span className="font-display font-bold text-[20px] text-hi">Funnl</span>
           </div>
           <h1 className="font-display text-[32px] font-bold text-hi tracking-[-0.5px] mb-3">Privacy Policy</h1>
-          <p className="text-[14px] text-low">Last updated: September 27, 2026</p>
+          <p className="text-[14px] text-low">Last updated: October 5, 2026</p>
           <div className="mt-4 px-4 py-3 bg-elevated border border-line-1 rounded-xl">
             <p className="text-[13.5px] text-muted leading-relaxed">
               This policy explains, in plain language, what Funnl collects, how it is used, who processes it, and how to remove it.
@@ -137,37 +137,92 @@ function PrivacyPage() {
         </Section>
 
         {/* ── Outlook (NOT YET AVAILABLE) ─────────────────────────────────────────────────────
-            STILL UNAVAILABLE: this section describes a connection that does not
-            exist yet. There is no Outlook Edge Function, OAuth flow, worker, UI,
-            secret or scheduler, and every Outlook table is empty. Every sentence
-            here stays conditional until the integration actually ships.
+            NOT GENERALLY AVAILABLE: no Outlook Edge Function is deployed, there is no
+            OAuth flow, worker, UI, secret or scheduler, and every Outlook table in
+            Production is empty today.
 
-            PUBLICATION DECISION: the owner approved publishing this conditional
-            disclosure ahead of the integration, dated September 27, 2026. That is a
-            product decision, not legal advice, and is not evidence that outside
+            WHAT THE START GATE PROVES, AND WHAT IT DOES NOT. It refuses a NEW
+            connection from any account but the designated one. That is a claim about
+            who can connect, NOT a claim that no retained row exists anywhere: rows
+            created before a gate existed, or under a different designation, would be
+            unaffected by it. So the page must not say "no Outlook-derived records
+            exist for any other account" - the gate is not evidence of that. It says
+            who may START a connection, and leaves retention to the retention wording.
+
+            WHY THE WORDING IS NOT "DOES NOT EXIST". Access is restricted on the
+            server to ONE designated Funnl-controlled test account, which is itself a
+            Funnl account. So the page must not claim that Outlook is not in pilot,
+            that it is unavailable to everyone, or that no Outlook-derived records
+            exist for any account - all three would become false the moment the
+            restricted pilot is enabled, while this page stayed published. It is
+            written to be accurate BEFORE and DURING that pilot without being
+            republished in between, which is why it describes the RESTRICTION rather
+            than asserting whether the pilot is currently running.
+
+            THE FIRST PILOT READS ENVELOPES ONLY. The body reading and the Anthropic
+            processing described below belong to a LATER release and stay conditional.
+
+            RETENTION WORDING IS MEASURED, NOT ASSUMED. The claims about when records
+            go away are verified in tests/sql/outlook-pilot-retention-runtime.sql:
+            a round deadline makes working records unusable but does NOT delete them;
+            without a scheduled sweep an expired suggestion stays pending; and
+            disconnect leaves the invalidated suggestion row in place, still carrying
+            its contact, date and fingerprint. Do not describe that row as empty or
+            as deleted.
+
+            PUBLICATION DECISION: the owner approved this revised wording for
+            publication, dated October 5, 2026 - the actual New York date of the
+            commit that publishes it. The earlier September 27, 2026 approval covered
+            the superseded wording and is historical. Each is a product decision and
+            not legal advice, and is not evidence that outside
             counsel reviewed or approved this policy.
 
-            MANDATORY AT PUBLICATION: the date above is September 27, 2026. If the
-            merge that publishes this section happens on any later day, the "Last
-            updated" date MUST be changed again in that same commit.
+            MANDATORY AT PUBLICATION: the date above is October 5, 2026. If the merge
+            that publishes this section happens on any later day, the "Last updated"
+            date MUST be changed again in that same commit.
             tests/privacy-policy-outlook.test.js pins the conditional framing and the
             date. ------------- */}
         <Section title="Outlook connection (not yet available)">
           <p>
-            <strong className="text-hi font-semibold">This connection does not exist yet.</strong> Outlook is not available,
-            not enabled, and not in pilot; Funnl has no Microsoft connection, requests no Microsoft permission, and holds no
-            Outlook data for anyone. The section below describes what would happen <em>if, and only if,</em> you choose to
-            connect Outlook when this integration becomes available, so you can read it before deciding. Nothing here is in
-            effect today.
+            <strong className="text-hi font-semibold">Outlook is not generally available.</strong> When this integration is
+            enabled, only a single designated Funnl-controlled test account may start an Outlook connection; Funnl’s servers
+            refuse a connection request from any other account. That designated account is itself a Funnl account, so
+            Outlook-derived records will exist for it.
+          </p>
+          <p className="mt-3">
+            <strong className="text-hi font-semibold">What the first pilot will do, when it is enabled</strong> — read message
+            <strong className="text-hi font-semibold">envelopes only</strong> from Inbox and Sent Items, and propose interactions for
+            people already in that account’s contacts. It will not fetch message bodies or attachments, will send nothing to
+            Anthropic or any other AI service, and will produce no summaries or drafts.
+          </p>
+          <p className="mt-3">
+            Everything else in this section describes what would happen <em>if, and only if,</em> you choose to connect Outlook
+            when this integration becomes available to you, so you can read it before deciding. The body reading and the AI
+            processing described below belong to a <strong className="text-hi font-semibold">later release</strong> and are not part
+            of the first pilot.
           </p>
           <ul className="list-disc pl-5 space-y-2 mt-3">
-            <li><strong className="text-hi font-semibold">What Funnl would ask Microsoft for</strong> — a single delegated permission,
-              <strong className="text-hi font-semibold"> Mail.Read</strong> ("Read user mail"), which you authorize yourself and which is
-              read-only: it never allows sending, replying, deleting, moving, or changing anything in your mailbox. Be aware that Mail.Read
-              is a permission to read your mail generally — Microsoft grants it at the mailbox level, and it would technically allow reading
-              message bodies and attachments. Funnl's requests are deliberately narrower than the permission allows, as described next.
-              Funnl would not request Microsoft contacts, calendars, files, shared or delegated mailboxes, or any application-level
-              (organization-wide) mail permission.</li>
+            <li><strong className="text-hi font-semibold">What Funnl would ask Microsoft for</strong> — six delegated scopes, which
+              you authorize yourself. Two of them read data, and both are read-only:
+              <strong className="text-hi font-semibold">Mail.Read</strong> ("Read user mail") and
+              <strong className="text-hi font-semibold">User.Read</strong> ("Sign in and read user profile"). Three are the standard
+              sign-in scopes <code>openid</code>, <code>profile</code> and <code>email</code>. The sixth,
+              <strong className="text-hi font-semibold">offline_access</strong> ("Maintain access to data you have given it access to"),
+              is <strong className="text-hi font-semibold">not a permission to read anything new</strong> — it is what lets Funnl keep
+              using the two read permissions above while you are not using the app, so a scheduled read can run without asking you to
+              sign in again.</li>
+
+            <li><strong className="text-hi font-semibold">Those permissions are granted more broadly than Funnl uses them</strong> — stated
+              because the grant, not Funnl’s restraint, is what you are authorizing. <strong className="text-hi font-semibold">Mail.Read</strong>
+              is granted at the <strong className="text-hi font-semibold">mailbox level</strong>: it would technically allow reading message
+              bodies and attachments anywhere in your mailbox. Microsoft describes <strong className="text-hi font-semibold">User.Read</strong>
+              as allowing an app to read the signed-in user’s profile and basic company information; Funnl asks it for three fields
+              only — your account id, your mail address and your user principal name — and uses them only to record and display which
+              mailbox is connected. None of these scopes requires administrator consent by default,
+              <strong className="text-hi font-semibold">but a work or school tenant may be configured to require an administrator to approve the app anyway</strong>,
+              in which case you may not be able to consent for yourself. Funnl would never request Microsoft contacts, calendars, files,
+              shared or delegated mailboxes, your organization’s directory, or any application-level (organization-wide) mail
+              permission, and would never send, reply to, delete, move or change anything in your mailbox.</li>
 
             <li><strong className="text-hi font-semibold">What Funnl would read</strong> — selected messages from your
               <strong className="text-hi font-semibold"> Inbox</strong> and <strong className="text-hi font-semibold">Sent Items</strong> only.
@@ -189,9 +244,11 @@ function PrivacyPage() {
               inline images, raw MIME (the complete original message file), Microsoft contacts, calendars, files, or shared mailboxes. Funnl
               would never send, reply to, forward, delete, move, or mark mail.</li>
 
-            <li><strong className="text-hi font-semibold">Raw email bodies would not be stored by Funnl</strong> — message text would be held
-              only in server memory while a message is being processed. Funnl's database has no column that can hold a message body, HTML,
-              raw MIME, an attachment, a preview snippet, or a header collection.</li>
+            <li><strong className="text-hi font-semibold">Raw email bodies would not be stored by Funnl</strong> — message text would be
+              held only in server memory while a message is being processed, and never written to Funnl’s database. No message body,
+              HTML, raw MIME, attachment, preview snippet or header collection is persisted.
+              <strong className="text-hi font-semibold">In the first pilot Funnl does not fetch message bodies or attachments at all</strong>,
+              so there is nothing of that kind to hold.</li>
 
             <li><strong className="text-hi font-semibold">Anthropic would see a minimized, pseudonymized extract</strong> — to turn an exchange
               into a draft you can edit, Funnl would send <strong className="text-hi font-semibold">Anthropic</strong> (Claude) a reduced copy of
@@ -232,7 +289,22 @@ function PrivacyPage() {
                   interaction type (always Email), and a subject line shortened to at most 160 characters so you can recognize the conversation;</li>
                 <li>one-way keyed fingerprints (with the key version) of the conversation and of the person, so the same exchange is not suggested
                   twice. Funnl does not store Microsoft message or conversation identifiers, mailbox addresses, or subject lines in these
-                  provenance records.</li>
+                  provenance records. These fingerprints are <strong className="text-hi font-semibold">pseudonymous, not anonymous</strong>:
+                  they are stored against your account and your contact, so they are personal data about you and they do link a suggestion to
+                  the connected mailbox. What they cannot do is be reversed into an address, a subject line or a Microsoft identifier;</li>
+                <li><strong className="text-hi font-semibold">working records belonging to one read</strong> — one per
+                  conversation Funnl is part-way through, so an exchange whose halves arrive in different pages or folders is still recognized.
+                  They hold only pseudonymous keyed fingerprints and counts, stored against the connected account. The read they belong to
+                  becomes <strong className="text-hi font-semibold">unusable</strong> 24 hours after it begins, and Funnl will not
+                  resume it after that.</li>
+                <li><strong className="text-hi font-semibold">becoming unusable is not the same as being erased</strong> — the
+                  24-hour deadline changes what Funnl will do with those records; it does not remove them, and neither does waiting or
+                  reading the progress of a read. They are <strong className="text-hi font-semibold">physically removed</strong> by one
+                  of four things, each measured: a <strong className="text-hi font-semibold">later read starting</strong> for that
+                  connection, a read <strong className="text-hi font-semibold">completing</strong>, a read being
+                  <strong className="text-hi font-semibold">reset</strong>, or you <strong className="text-hi font-semibold">disconnecting</strong>.
+                  <strong className="text-hi font-semibold">No scheduled job</strong> acts on the deadline, so a read abandoned
+                  without any of those four leaves its working records stored;</li>
               </ul>
             </li>
 
@@ -246,12 +318,20 @@ function PrivacyPage() {
               When you accept a suggested contact, the address is fixed and cannot be changed in that step; afterwards it is an ordinary contact and
               you can edit its email like any other contact.</li>
 
-            <li><strong className="text-hi font-semibold">Disconnecting</strong> — disconnecting Outlook would delete your Microsoft connection and,
-              with it, your stored authorization, the synchronization state and the provenance records. Any pending or deferred Outlook suggestion
-              would be marked invalidated and every proposed value it held — email, name, company, role, how you met, LinkedIn URL, summary, next
-              step and subject line — would be erased in the same step, leaving only a minimal record and its fingerprints so the same exchange is
-              not suggested again. Any unused sign-in attempt would be discarded. Interactions and contacts you already accepted remain, because
-              they are yours. Deleting your account removes all of your data.</li>
+            <li><strong className="text-hi font-semibold">Disconnecting</strong> — disconnecting Outlook deletes your Microsoft connection
+              and, with it, your stored authorization, the mailbox synchronization state, the working records above and the provenance records.
+              Any unused sign-in attempt is discarded. Any pending or deferred Outlook suggestion is marked invalidated and every proposed value
+              it held — email, name, company, role, how you met, LinkedIn URL, summary, next step and subject line — is erased in the same step.
+              <strong className="text-hi font-semibold">The suggestion record itself is not deleted</strong>: it remains, marked
+              invalidated, still carrying the contact it referred to, the proposed date and its one-way fingerprint, so the same exchange is not
+              suggested to you again. Interactions and contacts you already accepted remain, because they are yours.</li>
+
+            <li><strong className="text-hi font-semibold">When Outlook-derived records are deleted</strong> — removal is driven by
+              <strong className="text-hi font-semibold">events, not by a timer</strong>. The invalidated record described above is deleted
+              when you delete the contact it refers to, or when you delete your Funnl account. A pending suggestion carries an internal context
+              deadline, but Funnl runs <strong className="text-hi font-semibold">no scheduled job</strong> that acts on it today, so a
+              suggestion past that deadline stays in your review queue until you act on it or disconnect. Deleting your account removes all of
+              your data.</li>
           </ul>
           <p className="mt-3">
             Outlook data would be used only to produce the suggestions you can see in Funnl. It would not be sold, not shared with advertisers or

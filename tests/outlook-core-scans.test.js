@@ -431,10 +431,20 @@ test('applied migrations are unmodified; the only addition is the forward scope 
   const files = readdirSync(join(ROOT, 'supabase/migrations')).sort()
   assert.ok(files.includes('20260921000000_add_outlook_content_draft_primitives.sql'))
   assert.ok(files.includes('20260922175616_revoke_service_role_from_outlook_user_rpcs.sql'))
-  // The OAuth binding phase adds exactly one migration, and it sorts last so it
-  // applies after both already-applied Outlook migrations.
-  assert.strictEqual(files[files.length - 1], '20260928000000_outlook_add_user_read_scope.sql',
-    'the forward scope migration must be the newest')
+  // FIVE UNAPPLIED forward migrations now exist. Every one must sort after every
+  // applied one, and in this order, so `db push` applies them as reviewed: the scope
+  // widening, the connection-status read path, the candidate write path, the token
+  // rotation, then durable continuation.
+  const UNAPPLIED = [
+    '20260928000000_outlook_add_user_read_scope.sql',
+    '20260929000000_outlook_connection_status_rpc.sql',
+    '20260930000000_outlook_interaction_candidate_write.sql',
+    '20261001000000_outlook_rotate_access_token.sql',
+    '20261002000000_outlook_durable_continuation.sql',
+    '20261003000000_outlook_pilot_reservation.sql',
+  ]
+  assert.deepStrictEqual(files.slice(-UNAPPLIED.length), UNAPPLIED,
+    'the unapplied forward migrations must be the newest, in this order')
   // The applied migrations must not be edited: 20260921000000 still carries its
   // original allowlist, which the forward migration supersedes at runtime.
   assert.ok(MIGRATION.includes("scopes <@ ARRAY['Mail.Read', 'offline_access', 'openid', 'email', 'profile']"),
@@ -498,12 +508,16 @@ test('the 30-day context ceiling exists in the schema and is not re-implemented 
 // ── Scope creep ──────────────────────────────────────────────────────────────
 console.log('\nscope containment')
 
-test('the only Outlook Edge Functions are the two OAuth entrypoints', () => {
-  // The content/draft phase added no entrypoint. The OAuth binding phase adds
-  // exactly two, both dormant behind OUTLOOK_INTEGRATION_ENABLED. Any further
-  // Outlook entrypoint (a worker, a sync job) is a later, separately reviewed
-  // slice and must not appear silently.
-  const ALLOWED = new Set(['outlook-oauth-start', 'outlook-oauth-callback'])
+test('the only Outlook Edge Functions are the two OAuth entrypoints and the dormant worker', () => {
+  // The content/draft phase added no entrypoint. The OAuth binding phase added
+  // exactly two. The metadata-pass slice adds ONE more, outlook-import-worker, which
+  // is private and dormant behind TWO flags. Widening this allowlist is deliberate:
+  // each name below has its dormancy asserted, here or in
+  // tests/outlook-metadata-pass.test.js. Any further Outlook entrypoint is a later,
+  // separately reviewed slice and must not appear silently.
+  const ALLOWED = new Set([
+    'outlook-oauth-start', 'outlook-oauth-callback', 'outlook-import-worker',
+  ])
   const dirs = readdirSync(join(ROOT, 'supabase/functions'), { withFileTypes: true })
     .filter((d) => d.isDirectory()).map((d) => d.name)
   for (const d of dirs) {
@@ -518,8 +532,14 @@ test('the only Outlook Edge Functions are the two OAuth entrypoints', () => {
 })
 
 test('both Outlook OAuth entrypoints are dormant unless explicitly enabled', () => {
-  for (const fn of ['outlook-oauth-start', 'outlook-oauth-callback']) {
-    const src = read(`supabase/functions/${fn}/index.ts`)
+  // The callback delegates to handler.js, so the gate may live in either file
+  // of that function's directory.
+  const sources = {
+    'outlook-oauth-start': read('supabase/functions/outlook-oauth-start/index.ts'),
+    'outlook-oauth-callback': read('supabase/functions/outlook-oauth-callback/index.ts') +
+      read('supabase/functions/outlook-oauth-callback/handler.js'),
+  }
+  for (const [fn, src] of Object.entries(sources)) {
     assert.ok(src.includes("Deno.env.get('OUTLOOK_INTEGRATION_ENABLED')"),
       `${fn} must read the dormancy flag`)
     assert.ok(/!==\s*'true'/.test(src),
@@ -527,12 +547,49 @@ test('both Outlook OAuth entrypoints are dormant unless explicitly enabled', () 
   }
 })
 
-test('config.toml pins verify_jwt for exactly the two Outlook OAuth functions', () => {
+test('the deployed callback cannot have its provider endpoints redirected', () => {
+  // An earlier revision resolved the Microsoft token, JWKS and Graph URLs from
+  // environment variables behind a guard that was claimed to be unreachable in
+  // Production. It was not: the variables could simply be set, and
+  // host.docker.internal is a route to the Docker host, not a loopback address.
+  // A reachable override would receive the authorization code and the client
+  // secret at /token and the Graph access token at /me.
+  const entry = read('supabase/functions/outlook-oauth-callback/index.ts')
+  const endpoints = read('supabase/functions/outlook-oauth-callback/endpoints.js')
+  const handler = read('supabase/functions/outlook-oauth-callback/handler.js')
+
+  // The deployable entrypoint reads NO environment variable at all.
+  assert.ok(!entry.includes('Deno.env'), 'index.ts must not read any env var')
+  assert.ok(entry.includes('PRODUCTION_ENDPOINTS'), 'index.ts must pass fixed endpoints')
+
+  // Endpoints are constants, not configuration.
+  assert.ok(!endpoints.includes('Deno.env'), 'endpoints.js must not read any env var')
+  assert.ok(endpoints.includes('MS_TOKEN_ENDPOINT') && endpoints.includes('GRAPH_ME_URL'))
+
+  // No fixture seam survives anywhere in deployable code.
+  for (const [name, src] of Object.entries({ entry, endpoints, handler })) {
+    for (const banned of ['OUTLOOK_LOCAL_FIXTURES', 'OUTLOOK_FIXTURE_BASE', 'FIXTURE_BASE']) {
+      assert.ok(!src.includes(banned), `${name} must not contain the ${banned} seam`)
+    }
+  }
+  // The removed module must stay removed.
+  assert.ok(!existsSync(join(ROOT, 'supabase/functions/shared/microsoftEndpoints.js')),
+    'the endpoint-override module must not come back')
+
+  // The fixture harness lives OUTSIDE supabase/functions, so `supabase functions
+  // deploy` cannot pick it up.
+  assert.ok(existsSync(join(ROOT, 'tests/harness/outlook-callback-fixture-entry.ts')),
+    'the fixture harness must exist outside the deployed directory')
+  assert.ok(!existsSync(join(ROOT, 'supabase/functions/outlook-oauth-callback/fixture-entry.ts')))
+})
+
+test('config.toml pins verify_jwt for every Outlook function, and only those', () => {
   const cfg = read('supabase/config.toml')
   // `graphql_public` in the exposed-schema list is unrelated to Microsoft Graph.
   const sections = [...cfg.matchAll(/^\[functions\.([^\]]+)\]/gm)].map((m) => m[1])
   const outlook = sections.filter((n) => /outlook|microsoft|graph/i.test(n))
-  assert.deepStrictEqual(outlook.sort(), ['outlook-oauth-callback', 'outlook-oauth-start'])
+  assert.deepStrictEqual(outlook.sort(),
+    ['outlook-import-worker', 'outlook-oauth-callback', 'outlook-oauth-start'])
   // The start is user-initiated and must verify the caller's JWT. The callback
   // receives Microsoft's form_post, which carries no Supabase JWT, so platform
   // verification must be off there or every completion would be rejected before

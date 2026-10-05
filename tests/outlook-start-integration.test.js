@@ -44,6 +44,10 @@ const ORIGIN = 'https://www.getfunnl.com'
 const CURRENT_VERSION = 'outlook-disclosure-2026-09-28'
 const TEST_KEY_B64 = randomBytes(32).toString('base64')
 const USER_ID = '11111111-2222-3333-4444-555555555555'
+// A SECOND authenticated Funnl user. Not the pilot, and not a stranger: a real
+// signed-in account whose JWT the handler accepts. That is the boundary being
+// tested - authenticated is not the same as authorized.
+const OTHER_USER_ID = '99999999-8888-7777-6666-555555555555'
 
 let passed = 0, failed = 0
 function check (name, cond, detail = '') {
@@ -71,7 +75,7 @@ function stopHandler () {
   try { execFileSync('docker', ['rm', '-f', CONTAINER], { stdio: 'ignore' }) } catch { /* not running */ }
 }
 
-async function startHandler (disclosureVersion) {
+async function startHandler (disclosureVersion, pilotUserId = USER_ID) {
   stopHandler()
   const env = [
     '-e', `SUPABASE_URL=http://host.docker.internal:${SINK_PORT}`,
@@ -85,6 +89,11 @@ async function startHandler (disclosureVersion) {
   // Absent on purpose in the first scenario.
   if (disclosureVersion !== null) {
     env.push('-e', `OUTLOOK_DISCLOSURE_VERSION=${disclosureVersion}`)
+  }
+  // The designated pilot account. Passed as null to leave it UNSET, which must fail
+  // closed rather than admitting everyone.
+  if (pilotUserId !== null) {
+    env.push('-e', `OUTLOOK_PILOT_USER_ID=${pilotUserId}`)
   }
   execFileSync('docker', [
     'run', '--rm', '-d', '--name', CONTAINER,
@@ -110,6 +119,9 @@ async function run () {
   console.log('\nreal outlook-oauth-start handler (Deno, containerised)')
 
   let stateInserts = []
+  // Which user GoTrue reports for the bearer. The handler trusts getUser(), so this
+  // is how a DIFFERENT authenticated caller is simulated - not by altering the token.
+  let sinkUserId = USER_ID
   const sink = http.createServer((req, res) => {
     let body = ''
     req.on('data', (c) => { body += c })
@@ -118,7 +130,7 @@ async function run () {
       if (path === '/auth/v1/user') {
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({
-          id: USER_ID, aud: 'authenticated', role: 'authenticated',
+          id: sinkUserId, aud: 'authenticated', role: 'authenticated',
           email: 'student@example.test', app_metadata: {}, user_metadata: {},
           created_at: new Date().toISOString(),
         }))
@@ -152,8 +164,9 @@ async function run () {
   sink.listen(SINK_PORT, '0.0.0.0')
   await once(sink, 'listening')
 
-  const start = async (bodyObj) => {
+  const start = async (bodyObj, asUser = USER_ID) => {
     stateInserts = []
+    sinkUserId = asUser
     const res = await fetch(`http://127.0.0.1:${HANDLER_PORT}/`, {
       method: 'POST',
       headers: {
@@ -169,6 +182,8 @@ async function run () {
     return {
       status: res.status,
       error: json?.error ?? null,
+      // The raw body, so a refusal can be checked for leaked identifiers.
+      raw0: text,
       hasUrl: typeof json?.url === 'string',
       url: typeof json?.url === 'string' ? json.url : null,
       setCookie: res.headers.getSetCookie?.().join(' | ') ?? res.headers.get('set-cookie') ?? '',
@@ -246,6 +261,66 @@ async function run () {
     check('invalid return origin: refuses and inserts no state',
       r.status === 400 && r.error === 'invalid_return_origin' && r.inserts.length === 0,
       `${r.status} ${r.error} ${JSON.stringify(r.inserts)}`)
+
+    // ── 3. THE SINGLE-ACCOUNT PILOT GATE, executed ──────────────────────────
+    // A source assertion cannot show that a refusal refuses, nor that nothing was
+    // written on the way out. This container has OUTLOOK_PILOT_USER_ID=USER_ID.
+    console.log('')
+
+    // 3a. the designated account: the only accepting path, unchanged
+    r = await start({ returnOrigin: ORIGIN, consentPolicyVersion: CURRENT_VERSION },
+      USER_ID)
+    check('pilot account: 200 with an authorization url',
+      r.status === 200 && r.hasUrl, `${r.status} ${r.error}`)
+    check('pilot account: inserts EXACTLY ONE state row, bound to that user',
+      r.inserts.length === 1 && r.inserts[0]?.userId === USER_ID,
+      JSON.stringify(r.inserts))
+    check('pilot account: issues the binding cookie',
+      r.setCookie.includes(COOKIE), 'cookie present')
+
+    // 3b. ANOTHER AUTHENTICATED USER - the boundary this gate exists for
+    r = await start({ returnOrigin: ORIGIN, consentPolicyVersion: CURRENT_VERSION },
+      OTHER_USER_ID)
+    check('another authenticated user: 403 not_in_pilot',
+      r.status === 403 && r.error === 'not_in_pilot', `${r.status} ${r.error}`)
+    check('another authenticated user: INSERTS NO STATE',
+      r.inserts.length === 0, JSON.stringify(r.inserts))
+    check('another authenticated user: issues NO binding cookie',
+      !r.setCookie.includes(COOKIE), r.setCookie)
+    check('another authenticated user: no authorization url is returned',
+      !r.hasUrl, String(r.hasUrl))
+    check('the refusal names no account',
+      !r.raw0.includes(OTHER_USER_ID) && !r.raw0.includes(USER_ID), 'body carries no id')
+
+    // 3c. valid consent does NOT buy a way past it
+    r = await start({ returnOrigin: ORIGIN, consentPolicyVersion: CURRENT_VERSION },
+      OTHER_USER_ID)
+    check('a correct disclosure version does not bypass the pilot gate',
+      r.status === 403 && r.inserts.length === 0, `${r.status} ${r.error}`)
+    stopHandler()
+
+    // ── 4. FAIL CLOSED: no pilot configured, everything else correct ────────
+    await startHandler(CURRENT_VERSION, null)
+    r = await start({ returnOrigin: ORIGIN, consentPolicyVersion: CURRENT_VERSION },
+      USER_ID)
+    check('UNSET pilot: even the would-be pilot is refused 403 not_in_pilot',
+      r.status === 403 && r.error === 'not_in_pilot', `${r.status} ${r.error}`)
+    check('UNSET pilot: INSERTS NO STATE',
+      r.inserts.length === 0, JSON.stringify(r.inserts))
+    check('UNSET pilot: the main flag being true does not admit anyone',
+      r.status === 403, 'OUTLOOK_INTEGRATION_ENABLED=true was set for this container')
+    stopHandler()
+
+    // ── 5. FAIL CLOSED: a MALFORMED designation is not a wildcard ───────────
+    for (const malformed of ['*', 'true', 'all', USER_ID.slice(0, 20)]) {
+      await startHandler(CURRENT_VERSION, malformed)
+      r = await start({ returnOrigin: ORIGIN, consentPolicyVersion: CURRENT_VERSION },
+        USER_ID)
+      check(`malformed designation ${JSON.stringify(malformed)}: 403, no state`,
+        r.status === 403 && r.error === 'not_in_pilot' && r.inserts.length === 0,
+        `${r.status} ${r.error} ${JSON.stringify(r.inserts)}`)
+      stopHandler()
+    }
   } finally {
     stopHandler()
     sink.close()

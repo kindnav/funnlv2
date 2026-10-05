@@ -19,7 +19,7 @@ import CommandPalette from './components/CommandPalette'
 import GlobalAddContactController from './components/GlobalAddContactController'
 import SettingsPage from './pages/SettingsPage'
 import SuggestionsPage from './pages/SuggestionsPage'
-import { CALENDAR_INGESTION_ENABLED } from './lib/calendarIngestion'
+import { SUGGESTION_REVIEW_ENABLED } from './lib/suggestionReview'
 import { ProStatusProvider } from './lib/useProStatus'
 
 function App() {
@@ -91,10 +91,10 @@ function App() {
             {/* Source-neutral Suggestions queue — only mounted when the ingestion flag is
                 enabled. /calendar-suggestions is preserved as a redirect so existing
                 bookmarks keep working (client-side navigation keeps the session). */}
-            {CALENDAR_INGESTION_ENABLED && (
+            {SUGGESTION_REVIEW_ENABLED && (
               <Route path="/suggestions" element={<SuggestionsPage />} />
             )}
-            {CALENDAR_INGESTION_ENABLED && (
+            {SUGGESTION_REVIEW_ENABLED && (
               <Route path="/calendar-suggestions" element={<Navigate to="/suggestions" replace />} />
             )}
             <Route path="/ai" element={<FunnlAIPage />} />
