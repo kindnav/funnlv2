@@ -751,6 +751,23 @@ ON CONFLICT DO NOTHING;`, { tuplesOnly: false })
   const missingCons = discMod.DISCONNECT_CONSEQUENCES.filter((c) => !panel.includes(c.text))
   check('every shipped consequence is rendered verbatim', missingCons.length === 0,
     missingCons.length ? `missing: ${missingCons[0].text.slice(0, 80)}...` : '')
+  // Each consequence carries a short effect label. EFFECT_LABEL in the card is keyed by
+  // the effect name, so renaming an effect without updating the map renders a BLANK
+  // label - which is exactly what `invalidated` did until this was asserted.
+  const labels = await page.eval(`
+    const li = [...document.querySelectorAll('li')]
+      .filter((e) => /invalidated|is deleted|are kept|already under way|at Microsoft/i.test(e.innerText))
+    return li.map((e) => (e.querySelector('span') ? e.querySelector('span').innerText.trim() : ''))`)
+  // Compared case-insensitively: the card styles these labels `uppercase`, and innerText
+  // returns the CSS-transformed text, so the DOM says INVALIDATED for 'Invalidated'.
+  check('the retained-suggestion consequence is labelled "Invalidated"',
+    labels.some((l) => l.toLowerCase() === 'invalidated'),
+    `rendered labels: ${JSON.stringify(labels)}`)
+  check('and no label is the superseded "Emptied"',
+    !labels.some((l) => /^empt/i.test(l)), `rendered labels: ${JSON.stringify(labels)}`)
+  check('no consequence renders a BLANK effect label',
+    labels.length > 0 && labels.every((l) => l.length > 0),
+    `rendered labels: ${JSON.stringify(labels)}`)
   check('the rendered panel does NOT call the retained row empty',
     !/empt(y|ied|ies)/i.test(panel), 'no "empty" in the rendered confirmation')
   check('it states the record is kept with its contact, date and fingerprint',

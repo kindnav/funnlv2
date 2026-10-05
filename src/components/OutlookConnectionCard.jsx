@@ -48,9 +48,14 @@ import {
 // One label per verified effect. 'In flight' and 'At Microsoft' are the two
 // limits: the RPC cannot stop a request already holding a token, and it does not
 // withdraw the grant at Microsoft.
+// 'Invalidated', not 'Emptied': the retained suggestion row still carries its contact,
+// proposed date and episode fingerprint after a disconnect, so it is not empty. The
+// effect was renamed in src/lib/outlookDisconnect.js and this map was left behind -
+// which rendered a BLANK label for that consequence, since EFFECT_LABEL['invalidated']
+// was undefined.
 const EFFECT_LABEL = {
   deleted: 'Deleted',
-  emptied: 'Emptied',
+  invalidated: 'Invalidated',
   kept: 'Kept',
   in_flight: 'In flight',
   upstream: 'At Microsoft',

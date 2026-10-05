@@ -315,6 +315,26 @@ test('every consequence is labelled with a verified effect', () => {
   }
 })
 
+test('every effect has a rendered label, so a rename cannot blank one out', () => {
+  // EFFECT_LABEL in OutlookConnectionCard.jsx is keyed by effect name. Renaming
+  // `emptied` to `invalidated` in outlookDisconnect.js left that map behind, and
+  // EFFECT_LABEL['invalidated'] was undefined - so the confirmation rendered a BLANK
+  // label beside the one consequence users most need to understand.
+  const card = readFileSync(
+    new URL('../src/components/OutlookConnectionCard.jsx', import.meta.url), 'utf8')
+  const map = /const EFFECT_LABEL = \{([\s\S]*?)\}/.exec(card)
+  assert.ok(map, 'EFFECT_LABEL not found')
+  const labelled = [...map[1].matchAll(/^\s*([a-z_]+):\s*'([^']+)'/gm)]
+    .map((m) => m[1])
+  for (const c of DISCONNECT_CONSEQUENCES) {
+    assert.ok(labelled.includes(c.effect),
+      `effect '${c.effect}' has no EFFECT_LABEL entry, so it renders blank`)
+  }
+  assert.ok(labelled.includes('invalidated'), 'the renamed effect must be labelled')
+  assert.ok(!labelled.includes('emptied'),
+    'the superseded label must not linger')
+})
+
 test('unreviewed suggestions are INVALIDATED, and the retained row is described', () => {
   // The applied RPC keeps the candidate row and NULLs its proposed contents. What it
   // does NOT null is contact_id, the proposed date and the episode fingerprint -
