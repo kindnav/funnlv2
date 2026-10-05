@@ -503,12 +503,16 @@ test('the 30-day context ceiling exists in the schema and is not re-implemented 
 // ── Scope creep ──────────────────────────────────────────────────────────────
 console.log('\nscope containment')
 
-test('the only Outlook Edge Functions are the two OAuth entrypoints', () => {
-  // The content/draft phase added no entrypoint. The OAuth binding phase adds
-  // exactly two, both dormant behind OUTLOOK_INTEGRATION_ENABLED. Any further
-  // Outlook entrypoint (a worker, a sync job) is a later, separately reviewed
-  // slice and must not appear silently.
-  const ALLOWED = new Set(['outlook-oauth-start', 'outlook-oauth-callback'])
+test('the only Outlook Edge Functions are the two OAuth entrypoints and the dormant worker', () => {
+  // The content/draft phase added no entrypoint. The OAuth binding phase added
+  // exactly two. The metadata-pass slice adds ONE more, outlook-import-worker, which
+  // is private and dormant behind TWO flags. Widening this allowlist is deliberate:
+  // each name below has its dormancy asserted, here or in
+  // tests/outlook-metadata-pass.test.js. Any further Outlook entrypoint is a later,
+  // separately reviewed slice and must not appear silently.
+  const ALLOWED = new Set([
+    'outlook-oauth-start', 'outlook-oauth-callback', 'outlook-import-worker',
+  ])
   const dirs = readdirSync(join(ROOT, 'supabase/functions'), { withFileTypes: true })
     .filter((d) => d.isDirectory()).map((d) => d.name)
   for (const d of dirs) {
@@ -574,12 +578,13 @@ test('the deployed callback cannot have its provider endpoints redirected', () =
   assert.ok(!existsSync(join(ROOT, 'supabase/functions/outlook-oauth-callback/fixture-entry.ts')))
 })
 
-test('config.toml pins verify_jwt for exactly the two Outlook OAuth functions', () => {
+test('config.toml pins verify_jwt for every Outlook function, and only those', () => {
   const cfg = read('supabase/config.toml')
   // `graphql_public` in the exposed-schema list is unrelated to Microsoft Graph.
   const sections = [...cfg.matchAll(/^\[functions\.([^\]]+)\]/gm)].map((m) => m[1])
   const outlook = sections.filter((n) => /outlook|microsoft|graph/i.test(n))
-  assert.deepStrictEqual(outlook.sort(), ['outlook-oauth-callback', 'outlook-oauth-start'])
+  assert.deepStrictEqual(outlook.sort(),
+    ['outlook-import-worker', 'outlook-oauth-callback', 'outlook-oauth-start'])
   // The start is user-initiated and must verify the caller's JWT. The callback
   // receives Microsoft's form_post, which carries no Supabase JWT, so platform
   // verification must be off there or every completion would be rejected before
