@@ -50,7 +50,12 @@ console.log('\nrevoke migration')
 test('migration file exists with a CLI-generated timestamp after 20260921000000', () => {
   const files = readdirSync(join(root, 'supabase/migrations')).sort()
   assert.ok(files.includes('20260922175616_revoke_service_role_from_outlook_user_rpcs.sql'))
-  assert.strictEqual(files[files.length - 1], '20260922175616_revoke_service_role_from_outlook_user_rpcs.sql', 'must be the newest migration')
+  // This migration must still sort AFTER the PR-A schema it revokes against.
+  // It is no longer the newest overall: the OAuth binding phase adds
+  // 20260928000000_outlook_add_user_read_scope.sql, which applies later still.
+  const iA = files.indexOf('20260921000000_add_outlook_content_draft_primitives.sql')
+  const iThis = files.indexOf('20260922175616_revoke_service_role_from_outlook_user_rpcs.sql')
+  assert.ok(iThis > iA, 'must apply after the PR-A migration')
   assert.ok(files.includes('20260921000000_add_outlook_content_draft_primitives.sql'), 'PR-A migration still present')
   assert.ok(!files.some(f => f.startsWith('20260918000100')), 'the held-back Cron migration must stay absent')
 })

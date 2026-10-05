@@ -109,6 +109,13 @@ const FUNCTION_JWT_SETTINGS = {
   'delete-account': 'true',
   'gmail-oauth-start': 'true',
   'gmail-sync-worker': 'false',
+  // Outlook OAuth binding phase. The start is user-initiated, so the platform
+  // verifies the caller's JWT. The callback receives Microsoft's form_post,
+  // which carries no Supabase JWT, so platform verification must be off there
+  // or every completion would be rejected before the handler's binding gate
+  // could run — the same shape as google-oauth-callback.
+  'outlook-oauth-start': 'true',
+  'outlook-oauth-callback': 'false',
 }
 // Non-comment, non-blank settings lines of one [functions.<name>] section.
 function functionSectionSettings(name) {

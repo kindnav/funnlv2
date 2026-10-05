@@ -454,12 +454,28 @@ test('runtime SQL companion covers the required scenarios and uses only example.
     'PERMISSION CONTRACT', 'REAUTHORIZATION with a NEW state', 'FAILED FINALIZATION', 'Explicit grant matrix', 'has_column_privilege', 'has_function_privilege',
     'duplicate email refused', 'forced interaction failure', 'NO orphan contact', 'Dismiss / defer / idempotency', 'Lease lifecycle', 'stale run cannot renew',
     'INCOMPLETE release: cursor held', 'COMPLETE release: cursors advance', 'Bounded expiry', 'Outlook disconnect', 'run_microsoft_local_cleanup', 'account deletion',
+    // Added with the User.Read contract (20260928000000): the runtime companion must cover
+    // the new refusal, must not have User.Read among the forbidden scopes, and must prove
+    // its isolation claims under a REAL authenticated identity rather than vacuously.
+    'missing_user_read', 'User.ReadBasic.All', 'User.Read.All', 'Directory.Read.All',
+    'request.jwt.claim.sub',
     'Teardown']) {
     assert.ok(RUNTIME.includes(s), `runtime SQL missing scenario: ${s}`)
   }
   const addrs = [...RUNTIME.matchAll(/[\w.+-]+@[\w.-]+\.[a-z]+/gi)].map(m => m[0])
   assert.ok(addrs.length > 0 && addrs.every(a => a.endsWith('@example.invalid')), `non-example.invalid address: ${addrs.filter(a => !a.endsWith('@example.invalid')).join(', ')}`)
   assert.ok(/RUN ONLY AGAINST A DISPOSABLE LOCAL SUPABASE STACK/.test(RUNTIME))
+  // Canonical User.Read is REQUIRED now, so it must not appear in the forbidden-scope
+  // loop. Checked as a word boundary so the broader User.Read.All / User.ReadBasic.All
+  // entries - which must stay forbidden - do not satisfy it.
+  const forbiddenLoop = /FOREACH v_raw IN ARRAY ARRAY\[([\s\S]*?)\] LOOP/.exec(RUNTIME)
+  assert.ok(forbiddenLoop, 'the forbidden-scope loop must exist')
+  const forbidden = [...forbiddenLoop[1].matchAll(/'([^']+)'/g)].map((m) => m[1])
+  assert.ok(!forbidden.includes('User.Read'),
+    'canonical User.Read must not be listed as forbidden - it is required')
+  for (const broader of ['User.ReadWrite', 'User.ReadBasic.All', 'User.Read.All']) {
+    assert.ok(forbidden.includes(broader), `${broader} must stay forbidden`)
+  }
 })
 test('PR-A file scope: this migration, this suite, and the runtime SQL only (no function, src, config or policy change)', () => {
   // The suite cannot see git; it pins that the migration does not reference Edge Function or frontend artifacts.

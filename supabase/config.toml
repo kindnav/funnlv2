@@ -452,3 +452,16 @@ enabled = true
 # declarative_schema_path = "./database"
 # JSON string passed through to pg-delta SQL formatting.
 # format_options = "{\"keywordCase\":\"upper\",\"indent\":2,\"maxWidth\":80,\"commaStyle\":\"trailing\"}"
+
+# outlook-oauth-start mints a bound OAuth state and is user-initiated: the platform
+# verifies the Supabase JWT and the handler ALSO calls auth.getUser().
+[functions.outlook-oauth-start]
+verify_jwt = true
+
+# outlook-oauth-callback receives Microsoft response_mode=form_post. Microsoft does
+# NOT present a Supabase JWT, so platform verification must be off or every
+# completion would be rejected before reaching the handler. Authorisation comes from
+# the browser-binding cookie plus the single-use hashed state, checked in the handler
+# before any database or token work.
+[functions.outlook-oauth-callback]
+verify_jwt = false
