@@ -536,8 +536,11 @@ who sees some conversations suggested and not others will otherwise read it as a
    Raising the TTL would trade retention for it and is deliberately not done.
 4. **No scheduler.** Nothing invokes the worker. Continuation only continues if something
    calls it again.
-5. **Entra is not set up**, no client secret, token-encryption key or fingerprint HMAC key
-   exists anywhere, and the published `Mail.Read`-only text still diverges from the draft
-   disclosure's `Mail.Read + User.Read`.
+5. **Entra is registered; nothing else about it is.** An application exists (client ID
+   `af27b250-da0b-443e-bcac-38a67737d640`) with the matching Web redirect URI and delegated
+   `Mail.Read` + `User.Read`. No client secret, token-encryption key, fingerprint HMAC key
+   or `OUTLOOK_PILOT_USER_ID` exists anywhere; nothing is deployed; no consent has been
+   collected and no Microsoft round trip has completed. The published `Mail.Read`-only
+   text still diverges from the draft disclosure's `Mail.Read + User.Read`.
 6. **#54's `outlook-content-draft-runtime.sql` is still outdated** and remains a pre-merge
    blocker on its own branch.
