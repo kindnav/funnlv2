@@ -441,6 +441,7 @@ test('applied migrations are unmodified; the only addition is the forward scope 
     '20260930000000_outlook_interaction_candidate_write.sql',
     '20261001000000_outlook_rotate_access_token.sql',
     '20261002000000_outlook_durable_continuation.sql',
+    '20261003000000_outlook_pilot_reservation.sql',
   ]
   assert.deepStrictEqual(files.slice(-UNAPPLIED.length), UNAPPLIED,
     'the unapplied forward migrations must be the newest, in this order')

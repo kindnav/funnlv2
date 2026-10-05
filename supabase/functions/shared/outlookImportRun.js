@@ -97,7 +97,7 @@ import {
 import {
   ROUND_TTL_SECONDS, finalizeConversation, summarizeRoundProgress,
 } from './outlookRoundState.js'
-import { checkPilotUser } from './outlookPilotGate.js'
+import { checkPilotUser, designatedPilotUser } from './outlookPilotGate.js'
 
 /**
  * Lease length and due interval for one run. Bounded by the RPC's own checks, which
@@ -426,10 +426,36 @@ export async function runOutlookImport (p) {
   // response would overstate what is left by a whole round trip, which is exactly how a
   // run with a 285s context path lost a 300s lease it believed ran to 315s.
   const clock = typeof deps?.now === 'function' ? deps.now : Date.now
+
+  // ── THE PILOT GATE, PART 1: before a single RPC ──────────────────────────
+  // A missing or malformed designation refuses here, with NOTHING reserved and no
+  // database call made at all. It also has to happen before the reservation because
+  // the designation is about to be passed to it as a uuid: 'true' or '*' would not
+  // narrow the selection, it would make the call fail on a cast.
+  const designated = designatedPilotUser(pilotUserId)
+  if (designated === null) {
+    return {
+      outcome: 'not_in_pilot',
+      reason: 'pilot_not_configured',
+      intended: 0,
+      accepted: 0,
+      created: 0,
+      cursorsAdvanced: 0,
+    }
+  }
+
   const reserveStartedMs = clock()
+  // ── THE PILOT GATE, PART 2: the reservation itself is narrowed ───────────
+  // Without p_pilot_user_id the reservation takes whichever connection is DUE, for
+  // ANY user - and then the run could only discover whose it was after loading the
+  // context, which refreshes an expired token at Microsoft and persists the rotation.
+  // Narrowing it here is what makes a non-pilot account cost zero provider calls and
+  // zero writes, and what stops an excluded connection taking the pilot's turn every
+  // time its backoff elapses. See migration 20261003000000.
   const reserved = await rpc('reserve_due_outlook_connection', {
     p_lease_seconds: LEASE_SECONDS,
     p_due_after_seconds: DUE_AFTER_SECONDS,
+    p_pilot_user_id: designated,
   })
   if (reserved?.error || !isPlainObject(reserved?.data)) {
     return { outcome: 'reserve_failed' }
@@ -462,6 +488,26 @@ export async function runOutlookImport (p) {
       })
     } catch {
       return { data: null, error: { code: 'release_threw' } }
+    }
+  }
+
+  // ── THE PILOT GATE, PART 3: verify what was handed back ──────────────────
+  // Part 2 narrowed the reservation, so this should be unreachable. It is kept
+  // because it is cheap and because it does not take the reservation's word for the
+  // narrowing: a function that accepted p_pilot_user_id and ignored it, or an older
+  // one that does not report user_id at all, would otherwise go unnoticed. Still
+  // BEFORE loadRunContext, so a wrong answer costs no token refresh and no rotation.
+  const reservedOwner = checkPilotUser(designated, reserved.data.user_id)
+  if (!reservedOwner.ok) {
+    await release('idle', false, null, reservedOwner.reason, RETRY_BACKOFF_SECONDS)
+    return {
+      outcome: 'not_in_pilot',
+      reason: reservedOwner.reason,
+      connectionId,
+      intended: 0,
+      accepted: 0,
+      created: 0,
+      cursorsAdvanced: 0,
     }
   }
 
@@ -570,16 +616,16 @@ export async function runOutlookImport (p) {
       now: clock,
     })
 
-    // ── THE PILOT GATE ───────────────────────────────────────────────────────
-    // The reservation chose this connection, not the caller: it takes whichever active
-    // consented connection is DUE, for ANY user. So invoking the worker by hand
-    // restricts nothing, and this is the first point at which the owner of the reserved
-    // connection is known. Checked BEFORE the round progress is read and before any
-    // Graph request, so a non-pilot account is never read from and never written to.
+    // ── THE PILOT GATE, PART 4: the last backstop ────────────────────────────
+    // Parts 1-3 already decided this, and they ran before any token refresh or write.
+    // This one differs in WHERE it gets the owner: from microsoft_connections itself,
+    // via the context load, rather than from the reservation's own answer. It is the
+    // only check that does not depend on that RPC being truthful.
     //
-    // FAILS CLOSED, like the OAuth start gate: with no designated pilot user, no
-    // connection is importable.
-    const pilot = checkPilotUser(pilotUserId, context.userId)
+    // It is NOT the enforcement point. Reaching it with a non-pilot connection would
+    // mean parts 2 and 3 both failed, and by then the load has already refreshed an
+    // expired token at Microsoft - which is exactly the defect this ordering fixed.
+    const pilot = checkPilotUser(designated, context.userId)
     if (!pilot.ok) {
       await release('idle', false, null, pilot.reason, RETRY_BACKOFF_SECONDS)
       return {

@@ -166,7 +166,7 @@ function harness ({ now, advance, writeCostMs = 0 } = {}) {
   const rpc = async (name, args) => {
     calls.push({ name, args })
     if (name === 'reserve_due_outlook_connection') {
-      return { data: { result: 'reserved', connection_id: CONN, run_id: RUN }, error: null }
+      return { data: { result: 'reserved', connection_id: CONN, user_id: U1, run_id: RUN }, error: null }
     }
     if (name === 'renew_outlook_sync_lease') return { data: leaseLive, error: null }
     if (name === 'upsert_outlook_interaction_candidate') {
@@ -1053,7 +1053,7 @@ function expiryHarness () {
   const rpc = async (name, args) => {
     calls.push({ name, args })
     if (name === 'reserve_due_outlook_connection') {
-      return { data: { result: 'reserved', connection_id: CONN, run_id: RUN }, error: null }
+      return { data: { result: 'reserved', connection_id: CONN, user_id: U1, run_id: RUN }, error: null }
     }
     if (name === 'renew_outlook_sync_lease') return { data: true, error: null }
     if (name === 'upsert_outlook_interaction_candidate') {

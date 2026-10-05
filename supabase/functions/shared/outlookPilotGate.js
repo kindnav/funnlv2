@@ -50,9 +50,26 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
  * @param {unknown} userId      the authenticated caller, or a connection's owner
  * @returns {{ok: true}|{ok: false, reason: string}}
  */
-export function checkPilotUser (configured, userId) {
+/**
+ * The designated pilot account as a normalized uuid, or null if none is configured.
+ *
+ * Separate from checkPilotUser because two callers need the VALUE, not a decision:
+ * the reservation, which must be told whose connection it may hand out, and the run,
+ * which must refuse a malformed designation BEFORE it reserves anything. Returning
+ * null for anything that is not a well-formed uuid is what stops an empty string, a
+ * 'true' or a '*' from being passed along as if it named somebody.
+ *
+ * @param {unknown} configured  the raw environment value
+ * @returns {string|null}
+ */
+export function designatedPilotUser (configured) {
   const designated = typeof configured === 'string' ? configured.trim().toLowerCase() : ''
-  if (!UUID_RE.test(designated)) return { ok: false, reason: 'pilot_not_configured' }
+  return UUID_RE.test(designated) ? designated : null
+}
+
+export function checkPilotUser (configured, userId) {
+  const designated = designatedPilotUser(configured)
+  if (designated === null) return { ok: false, reason: 'pilot_not_configured' }
   // The CANDIDATE is only required to be a non-empty string that matches. Demanding a
   // uuid of it too would add nothing: it can only equal a uuid-shaped designation by
   // being uuid-shaped itself. The shape check that matters is the one above, on the

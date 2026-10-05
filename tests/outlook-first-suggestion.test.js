@@ -156,7 +156,7 @@ function port ({ reserve, writes = ['created'], release = true } = {}) {
   const rpc = async (name, args) => {
     calls.push({ name, args })
     if (name === 'reserve_due_outlook_connection') {
-      return reserve ?? { data: { result: 'reserved', connection_id: CONN, run_id: RUN }, error: null }
+      return reserve ?? { data: { result: 'reserved', connection_id: CONN, user_id: OWNER, run_id: RUN }, error: null }
     }
     if (name === 'upsert_outlook_interaction_candidate') {
       const r = writes[Math.min(writeAt, writes.length - 1)]
@@ -769,7 +769,7 @@ test('a release that THROWS is release_failed, and does not escape the run', asy
   const rpc = async (name, args) => {
     calls.push({ name, args })
     if (name === 'reserve_due_outlook_connection') {
-      return { data: { result: 'reserved', connection_id: CONN, run_id: RUN }, error: null }
+      return { data: { result: 'reserved', connection_id: CONN, user_id: OWNER, run_id: RUN }, error: null }
     }
     if (name === 'upsert_outlook_interaction_candidate') return { data: { result: 'created' }, error: null }
     throw new Error('network down at https://secret.example')
@@ -797,7 +797,7 @@ test('a THROWN candidate write releases as an error and commits nothing', async 
   const rpc = async (name, args) => {
     calls.push({ name, args })
     if (name === 'reserve_due_outlook_connection') {
-      return { data: { result: 'reserved', connection_id: CONN, run_id: RUN }, error: null }
+      return { data: { result: 'reserved', connection_id: CONN, user_id: OWNER, run_id: RUN }, error: null }
     }
     if (name === 'upsert_outlook_interaction_candidate') throw new Error('connection reset')
     released = args
@@ -852,7 +852,7 @@ test('a THROWN cursor encryption now fails BEFORE any suggestion is written', as
 test('a best-effort release that ALSO throws still returns a controlled outcome', async () => {
   const rpc = async (name) => {
     if (name === 'reserve_due_outlook_connection') {
-      return { data: { result: 'reserved', connection_id: CONN, run_id: RUN }, error: null }
+      return { data: { result: 'reserved', connection_id: CONN, user_id: OWNER, run_id: RUN }, error: null }
     }
     throw new Error('everything is down')
   }

@@ -686,7 +686,7 @@ function slowRun ({ pagesPerFolder, contextMs = 200_000, writeMs = 5_000, pageMs
 
   const rpc = async (name) => {
     if (name === 'reserve_due_outlook_connection') {
-      return { data: { result: 'reserved', connection_id: CONN, run_id: RUN }, error: null }
+      return { data: { result: 'reserved', connection_id: CONN, user_id: U1, run_id: RUN }, error: null }
     }
     if (name === 'renew_outlook_sync_lease') {
       renewals += 1
@@ -799,7 +799,7 @@ test('a run slow enough to need renewal DURING the writes still commits', async 
   let renewals = 0
   const rpc = async (name) => {
     if (name === 'reserve_due_outlook_connection') {
-      return { data: { result: 'reserved', connection_id: CONN, run_id: RUN }, error: null }
+      return { data: { result: 'reserved', connection_id: CONN, user_id: U1, run_id: RUN }, error: null }
     }
     if (name === 'renew_outlook_sync_lease') {
       renewals += 1
@@ -867,7 +867,7 @@ test('the lease is renewed BEFORE context loading, not after', async () => {
   const rpc = async (name) => {
     order.push(name)
     if (name === 'reserve_due_outlook_connection') {
-      return { data: { result: 'reserved', connection_id: CONN, run_id: RUN }, error: null }
+      return { data: { result: 'reserved', connection_id: CONN, user_id: U1, run_id: RUN }, error: null }
     }
     if (name === 'renew_outlook_sync_lease') return { data: true, error: null }
     if (name === 'release_outlook_sync_lease') return { data: true, error: null }
@@ -903,7 +903,7 @@ test('a FAILED renewal stops the run and advances NEITHER cursor', async () => {
     let renewCalls = 0
     const rpc = async (name, args) => {
       if (name === 'reserve_due_outlook_connection') {
-        return { data: { result: 'reserved', connection_id: CONN, run_id: RUN }, error: null }
+        return { data: { result: 'reserved', connection_id: CONN, user_id: U1, run_id: RUN }, error: null }
       }
       if (name === 'renew_outlook_sync_lease') {
         renewCalls += 1
@@ -1156,7 +1156,7 @@ test('an overflowing set NEVER silently treats a tracked contact as unknown', as
   let released = null
   const rpc = async (name, args) => {
     if (name === 'reserve_due_outlook_connection') {
-      return { data: { result: 'reserved', connection_id: CONN, run_id: RUN }, error: null }
+      return { data: { result: 'reserved', connection_id: CONN, user_id: U1, run_id: RUN }, error: null }
     }
     if (name === 'renew_outlook_sync_lease') return { data: true, error: null }
     if (name === 'release_outlook_sync_lease') { released = args; return { data: true, error: null } }
@@ -1226,7 +1226,7 @@ function leaseScenario ({
     clock += RPC_ROUND_TRIP_MS
     if (name === 'reserve_due_outlook_connection') {
       leaseUntil = started + LEASE_SECONDS * 1000
-      return { data: { result: 'reserved', connection_id: CONN, run_id: RUN }, error: null }
+      return { data: { result: 'reserved', connection_id: CONN, user_id: U1, run_id: RUN }, error: null }
     }
     if (name === 'renew_outlook_sync_lease') {
       renewals += 1
