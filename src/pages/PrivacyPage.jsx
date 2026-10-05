@@ -36,7 +36,7 @@ function PrivacyPage() {
             <span className="font-display font-bold text-[20px] text-hi">Funnl</span>
           </div>
           <h1 className="font-display text-[32px] font-bold text-hi tracking-[-0.5px] mb-3">Privacy Policy</h1>
-          <p className="text-[14px] text-low">Last updated: September 27, 2026</p>
+          <p className="text-[14px] text-low">Last updated: October 5, 2026</p>
           <div className="mt-4 px-4 py-3 bg-elevated border border-line-1 rounded-xl">
             <p className="text-[13.5px] text-muted leading-relaxed">
               This policy explains, in plain language, what Funnl collects, how it is used, who processes it, and how to remove it.
@@ -170,14 +170,16 @@ function PrivacyPage() {
             its contact, date and fingerprint. Do not describe that row as empty or
             as deleted.
 
-            PUBLICATION DECISION: the owner approved publishing this conditional
-            disclosure ahead of the integration, dated September 27, 2026. That is a
-            product decision, not legal advice, and is not evidence that outside
+            PUBLICATION DECISION: the owner approved this revised wording for
+            publication, dated October 5, 2026 - the actual New York date of the
+            commit that publishes it. The earlier September 27, 2026 approval covered
+            the superseded wording and is historical. Each is a product decision and
+            not legal advice, and is not evidence that outside
             counsel reviewed or approved this policy.
 
-            MANDATORY AT PUBLICATION: the date above is September 27, 2026. If the
-            merge that publishes this section happens on any later day, the "Last
-            updated" date MUST be changed again in that same commit.
+            MANDATORY AT PUBLICATION: the date above is October 5, 2026. If the merge
+            that publishes this section happens on any later day, the "Last updated"
+            date MUST be changed again in that same commit.
             tests/privacy-policy-outlook.test.js pins the conditional framing and the
             date. ------------- */}
         <Section title="Outlook connection (not yet available)">

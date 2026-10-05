@@ -460,24 +460,31 @@ test('human-access wording is precise and includes the Anthropic safety exceptio
 // ── Date guard and non-regression ────────────────────────────────────────────
 console.log('\npublication date guard')
 
-test('the public date is the approved September 27, 2026 publication date', () => {
-  // Owner/product decision: publish the conditional Outlook disclosure dated
-  // 2026-09-27. If the merge slips to a later day this must be updated again in that
-  // commit, which is why the date is pinned here rather than left free.
-  assert.ok(POLICY.includes('Last updated: September 27, 2026'),
+test('the public date is the approved October 5, 2026 publication date', () => {
+  // Owner/product decision: publish THIS revised wording dated 2026-10-05, the actual
+  // New York date of the publishing commit. September 27 covered the superseded text
+  // and is historical. If a later merge moves the day, this pin must move with it in
+  // that same commit - which is the point of pinning it rather than leaving it free.
+  assert.ok(POLICY.includes('Last updated: October 5, 2026'),
     'the approved publication date must be present')
-  assert.ok(!/Last updated: September 20, 2026/.test(POLICY),
-    'the superseded September 20 date must be gone')
+  assert.ok(!/Last updated: September 2[07], 2026/.test(POLICY),
+    'a superseded Last-updated date must be gone')
   assert.ok(!/September 26, 2026/.test(POLICY),
     'the briefly-proposed September 26 date must not linger anywhere in the source')
   assert.strictEqual((POLICY.match(/Last updated:/g) || []).length, 1,
     'exactly one public date line')
-  // Once in the public line, twice in the source decision comment (the approval and the
-  // recheck instruction). Pinned so a stray extra date cannot creep in unnoticed.
-  assert.strictEqual((POLICY.match(/September 27, 2026/g) || []).length, 3,
+  // Once in the public line, twice in the source decision comment (the approval and
+  // the recheck instruction). Pinned so a stray extra date cannot creep in unnoticed.
+  assert.strictEqual((POLICY.match(/October 5, 2026/g) || []).length, 3,
     'one public date line plus the two source-comment mentions')
-  assert.strictEqual((POLICY.match(/Last updated: September 27, 2026/g) || []).length, 1,
+  assert.strictEqual((POLICY.match(/Last updated: October 5, 2026/g) || []).length, 1,
     'exactly one public Last-updated line carries the date')
+  // September 27 survives ONCE, in the comment, recorded as historical - so the
+  // superseded approval stays auditable rather than being quietly erased.
+  assert.strictEqual((POLICY.match(/September 27, 2026/g) || []).length, 1,
+    'the superseded approval is recorded once, as history')
+  assert.ok(/September 27, 2026 approval covered/.test(POLICY),
+    'and is labelled as covering the superseded wording')
 })
 
 test('the section still carries a mandatory date-recheck instruction and an approval that is not legal advice', () => {
