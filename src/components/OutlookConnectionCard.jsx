@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { SUPABASE_ANON_KEY, getSessionBearerToken, supabase } from '../lib/supabase'
 import { track } from '../lib/analytics'
 import { canStartOauthFrom } from '../lib/oauthStartEndpoint'
@@ -10,6 +11,7 @@ import {
 import {
   buildConsentRequest,
   messageForOutcome,
+  readOutlookCallbackResult,
   startOutlookConsent,
 } from '../lib/outlookConnection'
 import {
@@ -68,6 +70,7 @@ function formatConnectedAt (iso) {
 }
 
 export default function OutlookConnectionCard() {
+  const [searchParams] = useSearchParams()
   const [acknowledged, setAcknowledged] = useState(false)   // never defaults true
   const [connecting, setConnecting] = useState(false)
   const [error, setError] = useState('')
@@ -98,6 +101,12 @@ export default function OutlookConnectionCard() {
   }, [])
 
   useEffect(() => { refreshStatus() }, [refreshStatus])
+
+  // The callback's own verdict, which until now nothing read. Shown only while
+  // the DATABASE says this account is not connected, so a stale ?outlook=error
+  // left in the address bar cannot contradict a connection that exists.
+  const callbackFailed =
+    readOutlookCallbackResult(searchParams) === 'error' && status !== 'connected'
 
   const request = buildConsentRequest({
     acknowledged,
@@ -153,6 +162,21 @@ export default function OutlookConnectionCard() {
   return (
     <div className="rounded-2xl border border-line-2 bg-card p-6">
       <h3 className="font-display text-lg text-hi">Outlook</h3>
+
+      {/*
+        Outside every status branch on purpose: the failure must be visible
+        while the card is still loading its status, and in the signed_out and
+        error branches too - not only in the not-connected one.
+      */}
+      {callbackFailed && (
+        <p
+          className="mt-3 rounded-xl border border-danger/40 bg-danger/10 p-3 text-sm text-danger"
+          role="status"
+          aria-live="polite"
+        >
+          {messageForOutcome('callback_failed')}
+        </p>
+      )}
 
       {status === 'loading' && (
         <p className="mt-2 text-sm text-muted">Checking your Outlook connection…</p>
