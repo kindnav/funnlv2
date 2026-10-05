@@ -25,7 +25,9 @@ import ProComingSoon from '../components/ProComingSoon'
 import GoogleConnectionCard from '../components/GoogleConnectionCard'
 import { CALENDAR_CONNECTION_ENABLED } from '../lib/googleConnection'
 import OutlookConnectionCard from '../components/OutlookConnectionCard'
-import { OUTLOOK_CONNECTION_ENABLED } from '../lib/outlookConnection'
+import {
+  OUTLOOK_CONNECTION_ENABLED, OUTLOOK_PILOT_VIEWER_ID, outlookPilotViewer,
+} from '../lib/outlookConnection'
 
 // ── Shared style tokens ─────────────────────────────────────────────────────
 const SECTION_LABEL =
@@ -490,8 +492,14 @@ function SettingsPage() {
           </div>
         )}
 
-        {/* Outlook: its own flag, off everywhere. Inaccessible while off. */}
-        {OUTLOOK_CONNECTION_ENABLED && (
+        {/*
+          Outlook: its own flag, off everywhere, AND only for the designated pilot
+          account. The flag alone is global, so switching it on would offer this card
+          to every user and refuse all but one of them server-side. Hiding it is
+          presentation only - outlook-oauth-start is what actually refuses.
+        */}
+        {OUTLOOK_CONNECTION_ENABLED &&
+          outlookPilotViewer(OUTLOOK_PILOT_VIEWER_ID, user?.id) && (
           <div className={`${CARD} mb-[14px]`}>
             <span className={SECTION_LABEL}>Connected accounts</span>
             <OutlookConnectionCard />

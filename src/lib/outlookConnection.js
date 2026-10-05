@@ -31,6 +31,52 @@ export const OUTLOOK_CONNECTION_ENABLED = outlookConnectionEnabled(
   import.meta.env?.VITE_OUTLOOK_CONNECTION_ENABLED,
 )
 
+// ── the single-account pilot, for PRESENTATION ONLY ────────────────────────
+//
+// VITE_OUTLOOK_CONNECTION_ENABLED is global: switching it on would show the Connect
+// card to EVERY signed-in user, and every one of them except the designated account
+// would be refused 403 `not_in_pilot` by outlook-oauth-start. That is safe but it is
+// a dead end, so this hides the control instead of offering it and failing.
+//
+// IT IS NOT ACCESS CONTROL, and must never be described as any. A build-time flag
+// lives in the browser, where a user can edit it; the authoritative gates are
+// server-side - OUTLOOK_PILOT_USER_ID checked in outlook-oauth-start before a state
+// is minted, and the same designation narrowing reserve_due_outlook_connection so a
+// non-pilot connection is never even selected for import.
+//
+// IT IS A SEPARATE VARIABLE from the server's on purpose. The server's value must
+// not be sourced from a VITE_ name, because everything VITE_ is compiled into a
+// public bundle. The cost of two variables is that they can DIVERGE: a stale value
+// here shows the card to somebody the server will refuse, or hides it from the real
+// pilot. Neither is a security failure, both are confusing, so set them together.
+//
+// WHAT IT DISCLOSES: the bundle then contains one user id. That is not a credential
+// - a signed-in user can already read their own id - but it does reveal WHICH
+// account is piloting, to anyone who reads the bundle. Accepted deliberately for a
+// one-account pilot; it is a reason to unset it when the pilot ends.
+
+/**
+ * Pure predicate: may THIS viewer see the Outlook controls?
+ *
+ * Fails closed in both directions. An absent or malformed designation shows the
+ * control to nobody, so forgetting it cannot quietly expose Outlook to every user;
+ * an absent viewer id (still loading, or signed out) also shows nothing.
+ *
+ * @param {unknown} rawPilotId  the build-time designation
+ * @param {unknown} viewerId    the signed-in user's id
+ */
+export function outlookPilotViewer (rawPilotId, viewerId) {
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+  const designated = typeof rawPilotId === 'string' ? rawPilotId.trim().toLowerCase() : ''
+  if (!uuid.test(designated)) return false
+  const viewer = typeof viewerId === 'string' ? viewerId.trim().toLowerCase() : ''
+  return viewer.length > 0 && viewer === designated
+}
+
+/** The build-time designation. Undefined outside Vite, so false everywhere in Node. */
+export const OUTLOOK_PILOT_VIEWER_ID =
+  import.meta.env?.VITE_OUTLOOK_PILOT_USER_ID ?? null
+
 /**
  * May the Connect button be enabled?
  *
