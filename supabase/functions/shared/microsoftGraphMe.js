@@ -12,9 +12,10 @@
 //     full profile and basic company information - it only reduces what is
 //     returned. The disclosure describes both.
 //   * The Graph `id` is cross-checked against the VALIDATED id_token `oid`.
-//     A mismatch fails closed rather than trusting the Graph body. The
-//     comparison is EXACT (case-insensitive) for BOTH account types. See the
-//     note above resolveMailboxFromGraphBody.
+//     A mismatch fails closed rather than trusting the Graph body. Exact
+//     (case-insensitive) equality holds for every account type; personal
+//     accounts additionally accept the measured zero-padded-GUID short form,
+//     and nothing else. See classifyGraphIdentityMatch.
 //   * The access token is passed as a bearer credential and never decoded.
 //     Redirects are refused: Fetch already strips Authorization cross-origin,
 //     but refusing outright also rules out an unexpected destination whose
@@ -117,43 +118,80 @@ export function describeIdentityMismatch (graphId, oid, accountType) {
   }
 }
 
+// ── The identity rule ───────────────────────────────────────────────────────
+//
+// TWO rules, and no others. Both are reported so a connection's Edge log says
+// which one allowed it. Each is a controlled enum value, never an identifier.
+export const IDENTITY_MATCH_EXACT = 'exact'
+export const IDENTITY_MATCH_PERSONAL_SHORT_FORM = 'personal_zero_padded_short_form'
+export const IDENTITY_MATCHES = Object.freeze(
+  [IDENTITY_MATCH_EXACT, IDENTITY_MATCH_PERSONAL_SHORT_FORM])
+
 /**
- * Cross-check and resolve. `oid` is the VALIDATED id_token object id.
- * `accountType` is optional and is used ONLY to label the diagnostic.
- * Returns { ok, email } or { ok: false, reason, diagnostic? }.
+ * How - if at all - the Graph `id` identifies the same account as the VALIDATED
+ * id_token `oid`. Returns one of IDENTITY_MATCHES, or null for no match.
  *
- * WHY THE COMPARISON IS STILL EXACT FOR BOTH ACCOUNT TYPES
- * --------------------------------------------------------
- * A live personal-account consent refused here with graph_identity_mismatch,
- * raising the question of whether a personal account's Graph `id` and its
- * id_token `oid` are two representations of one value - a 16-hex Microsoft
- * Account CID, and that CID zero-padded into GUID form.
+ * RULE 1, every account type: case-insensitive exact equality.
  *
- * WHAT IS KNOWN. Zero-padding of a personal-account `oid` has been described
- * publicly, and the beta `userAccountInformation` resource does say its entity
- * identifier "is set to the corresponding Microsoft Entra guid or Microsoft
- * Account CID respectively". But that is a different entity from `user`, and no
- * format is stated there. The `user` reference documents `id` only as "The
- * unique identifier for the user. Should be treated as an opaque identifier",
- * and the ID token reference says `oid` is a GUID that "Microsoft Graph returns
- * ... as the `id` property for a user account" - i.e. it documents EQUALITY.
+ * RULE 2, PERSONAL ACCOUNTS ONLY: the `oid` is a GUID whose leading 16 hex
+ * digits are all zero and whose trailing 16 are exactly the Graph `id`. This is
+ * the representation a single controlled pilot attempt MEASURED in Production:
  *
- * WHAT IS NOT KNOWN. The exact relationship between the two values that Graph
- * /me and the id_token actually returned FOR OUR LIVE ACCOUNT remains
- * UNVERIFIED. Nothing recorded it. Accepting the equivalence now would mean
- * treating a 16-hex value as proof of ownership of a GUID-identified account on
- * the strength of an assumption - the exact substitution this check exists to
- * prevent.
+ *     account=personal  oid_shape=guid   oid_len=36
+ *                       graph_id_shape=hex16  graph_id_len=16
+ *                       graph_id_is_short_form_of_oid=true
  *
- * SO: exact equality stands for both account types and unknown shapes stay
- * REJECTED. The relationship is only RECORDED in the diagnostic above, so the
- * next controlled pilot attempt establishes the shape WITHOUT logging either
- * identifier. A refusal showing graph_id_is_short_form_of_oid true on
- * account 'personal' is the evidence that would justify revisiting this, as a
- * separate deliberate change gated on the consumers tenant.
+ * No identifier was logged to establish that - only the shape and relationship
+ * booleans this module already emitted. It is consistent with the publicly
+ * described zero-padding of a personal-account `oid` into GUID form, and with
+ * the beta `userAccountInformation` statement that the entity identifier "is
+ * set to the corresponding ... Microsoft Account CID".
  *
- * Email is NEVER identity here. `mail`/`userPrincipalName` are read only AFTER
- * the identifier check passes, and only to fill ms_email.
+ * WHAT RULE 2 DELIBERATELY DOES NOT ACCEPT:
+ *   * the REVERSE direction - a GUID from Graph against a 16-hex `oid`. Only
+ *     isZeroPaddedGuidOf(oid, graphId) is consulted, never the mirror.
+ *   * a flat 32-hex form, in either position: isZeroPaddedGuidOf requires the
+ *     8-4-4-4-12 GUID form on the left and exactly 16 hex on the right.
+ *   * a mere SUFFIX match. The leading 16 hex digits must ALL be zero, so a
+ *     GUID that merely ends in those digits is refused.
+ *   * an EMAIL match. Addresses are not consulted here at all.
+ *   * WORK/SCHOOL or UNKNOWN accounts. `accountType` must be the exact string
+ *     'personal', which only classifyAccountType produces, and only when the
+ *     VALIDATED id_token's `tid` is the well-known consumers tenant. Any other
+ *     value - 'work', 'unknown', absent, differently cased, padded - leaves
+ *     rule 1 as the only rule.
+ *
+ * Rule 2 is injective: for one `oid` with an all-zero leading half there is
+ * exactly one 16-hex value it accepts, so it cannot collapse two accounts
+ * together.
+ */
+export function classifyGraphIdentityMatch (graphId, oid, accountType) {
+  const g = typeof graphId === 'string' ? graphId.trim().toLowerCase() : ''
+  const o = typeof oid === 'string' ? oid.trim().toLowerCase() : ''
+  if (!g || !o) return null
+  if (g === o) return IDENTITY_MATCH_EXACT
+  // Strict equality on the literal, not a truthy or case-folded test.
+  if (accountType === 'personal' && isZeroPaddedGuidOf(o, g)) {
+    return IDENTITY_MATCH_PERSONAL_SHORT_FORM
+  }
+  return null
+}
+
+/**
+ * Cross-check and resolve. `oid` is the VALIDATED id_token object id;
+ * `accountType` is the classification derived from its `tid`.
+ *
+ * Returns { ok: true, email, identityMatch } or
+ *         { ok: false, reason, diagnostic? }.
+ *
+ * THE GRAPH ID IS NEVER RETURNED, so it cannot become the connection's account
+ * identity. The caller writes ms_account_id from the validated `oid` it already
+ * holds; all this function yields on success is the mailbox address and which
+ * rule matched. Under rule 2 the stored identity is therefore the GUID-form
+ * `oid`, not the 16-hex Graph short form.
+ *
+ * Email is NEVER identity. `mail`/`userPrincipalName` are read only AFTER the
+ * identifier check passes, and only to fill ms_email.
  */
 export function resolveMailboxFromGraphBody (body, oid, accountType) {
   if (!body || typeof body !== 'object') return { ok: false, reason: 'graph_me_malformed' }
@@ -163,8 +201,10 @@ export function resolveMailboxFromGraphBody (body, oid, accountType) {
     return { ok: false, reason: 'no_validated_oid' }
   }
   // Fail closed: the account Graph describes must be the account the validated
-  // id_token described. Otherwise we would record someone else's mailbox.
-  if (gid.toLowerCase() !== oid.trim().toLowerCase()) {
+  // id_token described, under one of the two rules above. Otherwise we would
+  // record someone else's mailbox.
+  const identityMatch = classifyGraphIdentityMatch(gid, oid, accountType)
+  if (!identityMatch) {
     return {
       ok: false,
       reason: 'graph_identity_mismatch',
@@ -173,7 +213,7 @@ export function resolveMailboxFromGraphBody (body, oid, accountType) {
   }
   const email = pickMailboxAddress(body)
   if (!email) return { ok: false, reason: 'no_usable_mailbox_address' }
-  return { ok: true, email }
+  return { ok: true, email, identityMatch }
 }
 
 /**

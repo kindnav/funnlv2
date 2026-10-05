@@ -308,6 +308,9 @@ export async function handleOutlookCallback (req, endpoints = PRODUCTION_ENDPOIN
       }
       return redirect(failRedirect)
     }
+    // WHICH identity rule allowed this. A controlled enum - 'exact', or the
+    // personal zero-padded short form - and never an identifier.
+    console.error('outlook-oauth-callback graph_identity_matched', mailbox.identityMatch)
 
     // ── 12. Encrypt and finalize ─────────────────────────────────────────
     let sealedAccess, sealedRefresh
@@ -327,6 +330,12 @@ export async function handleOutlookCallback (req, endpoints = PRODUCTION_ENDPOIN
       'finalize_microsoft_connection', {
         p_state_hash: stateHash,
         p_expected_user_id: row.user_id,
+        // The VALIDATED id_token `oid`, always - never the Graph `id`. Under
+        // the personal short-form rule the Graph body carries a 16-hex form of
+        // this same account; the stored identity stays the GUID-form oid, so
+        // ms_account_id does not change meaning between the two rules.
+        // resolveMailboxFromGraphBody never returns the Graph id, so there is
+        // nothing here that could be substituted for it.
         p_ms_account_id: identity.msAccountId,
         p_ms_tenant_id: identity.msTenantId,
         p_account_type: identity.accountType,
