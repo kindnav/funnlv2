@@ -1580,6 +1580,14 @@ test('the design records that the WHOLE invocation is budgeted, and what still i
     'the measurement must state what it cannot cover')
   assert.ok(DESIGN.includes('6.7 s per call'),
     'the hosted threshold that would exhaust the budget must be stated')
+  // The multiplier must be DERIVED, not asserted: 120,000 ms over 18 calls is ~6.7 s a
+  // call against a measured ~14 ms, which is ~450-500x - an earlier draft said 25x.
+  assert.ok(DESIGN.includes('450–500×') || DESIGN.includes('450-500x'),
+    'the per-call slowdown multiplier must be the derived one')
+  assert.ok(!DESIGN.includes('25× worse') && !DESIGN.includes('25x worse'),
+    'the superseded 25x figure must be gone')
+  assert.ok(DESIGN.includes('120,000 ms / 18 calls'),
+    'the derivation must be shown so the arithmetic is checkable')
   assert.ok(DESIGN.includes('The residual, stated honestly'),
     'the liveness residual must stay visible')
   assert.ok(DESIGN.includes('Supported capacity'),

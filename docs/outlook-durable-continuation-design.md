@@ -509,7 +509,9 @@ who sees some conversations suggested and not others will otherwise read it as a
    same machine here, so per-call round trips are faster than from a deployed Edge Function.
    What transfers is the *shape* — 18 bounded calls, under 1 MiB total, nothing quadratic or
    unbounded. The useful hosted figure is the threshold: at 18 calls, the loader would need
-   to average **~6.7 s per call** before it alone consumed the whole budget. And if it ever
+   to average **~6.7 s per call** (120,000 ms / 18 calls) before it alone consumed the whole
+   budget — against a measured **~14 ms per call** locally (245–268 ms / 18), so roughly
+   **450–500×** slower per call. And if it ever
    does, it stops at a **step boundary** with `context_budget_exhausted`, hands the lease
    back, and the invocation answers `budget_exhausted` (503, deliberately not a 200) rather
    than being killed mid-load holding the lease — verified in the same harness with a port
@@ -517,9 +519,9 @@ who sees some conversations suggested and not others will otherwise read it as a
 
    **The residual, stated honestly:** the load keeps no partial state, so a *persistently*
    degraded database would cost every invocation rather than one. That is a liveness
-   problem under conditions roughly 25× worse than anything measured, it corrupts nothing,
-   and it is visible as a 503. It is not a reason to persist a 5,000-contact snapshot or to
-   build a resumable-job framework.
+   problem under conditions roughly **450–500× slower per call** than anything measured
+   (~6.7 s against ~14 ms); it corrupts nothing, and it is visible as a 503. It is not a
+   reason to persist a 5,000-contact snapshot or to build a resumable-job framework.
 2. **An invalid committed `deltaLink`** (as opposed to a saved `nextLink`) still has no
    restart. The run reports incomplete and retries the same cursor. Clearing it means a full
    re-import, which is its own product question (what the user is shown during one).
