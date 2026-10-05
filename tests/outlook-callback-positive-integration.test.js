@@ -58,6 +58,12 @@ const CONSUMERS = '9188040d-6c67-4c5b-b112-36a304b66dad'
 // not any real account's identifier.
 const OID = '00000000-0000-0000-7a3b-9c15e204d6f8'
 const OID_SHORT_16 = '7a3b9c15e204d6f8'
+// A WORK/SCHOOL tenant, and an oid that is ALSO zero-padded. Together they
+// prove the short-form rule is gated on the TENANT and not merely on the shape:
+// identical shapes, different tenant, and the connection must be refused.
+const WORK_TENANT = '7c9e1b40-2a85-4d63-9f11-5ab8e0c47d22'
+const WORK_OID = '00000000-0000-0000-5d2e-81ba37f4c609'
+const WORK_OID_SHORT_16 = '5d2e81ba37f4c609'
 const MAILBOX = 'student@outlook.test'
 
 let passed = 0, failed = 0
@@ -170,6 +176,11 @@ async function run () {
     rpcResult: { result: 'stored', connection_id: 'conn-1' },
     stateRow: null,   // set below
     tokenStatus: 200,
+    // The id_token's tenant and object id. Scenario-driven so a work/school
+    // account can be described as well as a personal one; the issuer is derived
+    // from the tenant, exactly as the handler pins it.
+    tid: CONSUMERS,
+    oid: OID,
   }
   const freshRow = (over = {}) => ({
     state_hash: stateHash, user_id: USER_ID,
@@ -220,8 +231,8 @@ async function run () {
         }
         const now = Math.floor(Date.now() / 1000)
         const idToken = await signer.sign({
-          iss: `https://login.microsoftonline.com/${CONSUMERS}/v2.0`,
-          aud: CLIENT_ID, tid: CONSUMERS, oid: OID, nonce: expectedNonce,
+          iss: `https://login.microsoftonline.com/${scenario.tid}/v2.0`,
+          aud: CLIENT_ID, tid: scenario.tid, oid: scenario.oid, nonce: expectedNonce,
           exp: now + 3600, nbf: now - 60, iat: now, email: MAILBOX,
         })
         res.writeHead(200, { 'Content-Type': 'application/json' })
@@ -345,35 +356,97 @@ async function run () {
       seen.rpcArgs.length === 0 && String(r.location).includes('outlook=error'),
       `rpc=${seen.rpcArgs.length}`)
 
-    // THE REALISTIC PERSONAL-ACCOUNT CASE, which is the live pilot refusal
-    // reproduced against the real handler. Graph returns the 16-hex trailing
-    // half of the GUID the id_token asserted. The two LOOK like one account in
-    // two representations, but that equivalence is undocumented (see the
-    // EVIDENCE block in shared/microsoftGraphMe.js), so the handler must still
-    // refuse: no finalize, and the same generic error redirect as every other
-    // failing path.
+    // ── THE MAPPED PERSONAL PAIR: the measured live representation ─────────
+    // Graph returns the 16-hex trailing half of the zero-padded GUID the
+    // id_token asserted, on the consumers tenant. One controlled Production
+    // attempt measured exactly this. It must now REACH finalization - and the
+    // identity it stores must still be the VALIDATED oid, not the short form.
     scenario.meBody = { id: OID_SHORT_16, mail: MAILBOX }
     r = await post(`${COOKIE}=${state}`)
-    check('16-hex Graph id vs zero-padded GUID oid: NO finalize',
-      seen.rpcArgs.length === 0, `rpc=${seen.rpcArgs.length}`)
-    check('16-hex Graph id vs zero-padded GUID oid: generic error redirect',
-      r.status === 303 && String(r.location).endsWith('/settings?outlook=error'),
+    check('MAPPED personal pair (16-hex vs zero-padded GUID) REACHES finalize',
+      seen.rpcArgs.length === 1, `rpc=${seen.rpcArgs.length}`)
+    check('MAPPED personal pair redirects to the CONNECTED settings page',
+      r.status === 303 && String(r.location).endsWith('/settings?outlook=connected'),
       `${r.status} ${r.location}`)
-    check('that refusal happened AFTER Graph /me was called, not instead of it',
-      seen.meCalls === 1, `me=${seen.meCalls}`)
+    const mapped = seen.rpcArgs[0] ?? {}
+    check('the stored identity is the VALIDATED oid, NOT the Graph short form',
+      mapped.p_ms_account_id === OID && mapped.p_ms_account_id !== OID_SHORT_16,
+      'p_ms_account_id is not the validated oid')
+    check('and it is still classified personal on the consumers tenant',
+      mapped.p_ms_tenant_id === CONSUMERS && mapped.p_account_type === 'personal',
+      JSON.stringify({ tid: mapped.p_ms_tenant_id, t: mapped.p_account_type }))
+    check('the Graph-resolved mailbox address is still what is stored',
+      mapped.p_ms_email === MAILBOX, String(mapped.p_ms_email))
+    // Casing is not promised by Graph, so the rule must survive it.
+    scenario.meBody = { id: OID_SHORT_16.toUpperCase(), mail: MAILBOX }
+    r = await post(`${COOKIE}=${state}`)
+    check('an UPPERCASE short form also finalizes, with the same stored identity',
+      seen.rpcArgs.length === 1 && (seen.rpcArgs[0] ?? {}).p_ms_account_id === OID,
+      `rpc=${seen.rpcArgs.length}`)
 
-    // The reverse representation - a flat 32-hex GUID - is equally refused.
+    // ── refusals that must SURVIVE the new rule ────────────────────────────
+    // The REVERSE direction: a GUID from Graph against a 16-hex oid.
+    scenario.oid = OID_SHORT_16
+    scenario.meBody = { id: OID, mail: MAILBOX }
+    r = await post(`${COOKIE}=${state}`)
+    check('REVERSE direction (GUID from Graph, 16-hex oid): NO finalize',
+      seen.rpcArgs.length === 0 && String(r.location).includes('outlook=error'),
+      `rpc=${seen.rpcArgs.length}`)
+    scenario.oid = OID
+
+    // A FLAT 32-hex form is not the GUID form the rule requires.
     scenario.meBody = { id: OID.replace(/-/g, ''), mail: MAILBOX }
     r = await post(`${COOKIE}=${state}`)
     check('flat 32-hex Graph id vs GUID oid: NO finalize',
       seen.rpcArgs.length === 0 && String(r.location).includes('outlook=error'),
       `rpc=${seen.rpcArgs.length}`)
 
-    // POSITIVE CONTROL FOR THOSE REFUSALS: the same request with an exactly
-    // equal id DOES finalize, so the zero counts above are not vacuous.
+    // An UNRELATED personal account, zero-padded like the real one.
+    scenario.meBody = { id: '1111222233334444', mail: MAILBOX }
+    r = await post(`${COOKIE}=${state}`)
+    check('an UNRELATED personal 16-hex id: NO finalize',
+      seen.rpcArgs.length === 0 && String(r.location).includes('outlook=error'),
+      `rpc=${seen.rpcArgs.length}`)
+
+    // MALFORMED: an address-shaped id, and an absent id.
+    scenario.meBody = { id: MAILBOX, mail: MAILBOX }
+    r = await post(`${COOKIE}=${state}`)
+    check('an address-shaped Graph id: NO finalize (email is never identity)',
+      seen.rpcArgs.length === 0 && String(r.location).includes('outlook=error'),
+      `rpc=${seen.rpcArgs.length}`)
+    scenario.meBody = { mail: MAILBOX }
+    r = await post(`${COOKIE}=${state}`)
+    check('a Graph body with NO id at all: NO finalize',
+      seen.rpcArgs.length === 0 && String(r.location).includes('outlook=error'),
+      `rpc=${seen.rpcArgs.length}`)
+
+    // ── WORK/SCHOOL: identical shapes, different tenant, still refused ─────
+    scenario.tid = WORK_TENANT
+    scenario.oid = WORK_OID
+    scenario.meBody = { id: WORK_OID_SHORT_16, mail: MAILBOX }
+    r = await post(`${COOKIE}=${state}`)
+    check('a WORK/SCHOOL short form is REFUSED even though the shape matches',
+      seen.rpcArgs.length === 0 && String(r.location).includes('outlook=error'),
+      `rpc=${seen.rpcArgs.length}`)
+    check('that refusal came after Graph /me, so the rule was actually consulted',
+      seen.meCalls === 1, `me=${seen.meCalls}`)
+    // CONTROL for the work tenant: exact equality still works there.
+    scenario.meBody = { id: WORK_OID, mail: MAILBOX }
+    r = await post(`${COOKIE}=${state}`)
+    const workExact = seen.rpcArgs[0] ?? {}
+    check('a WORK/SCHOOL account with an EXACTLY equal id still finalizes',
+      seen.rpcArgs.length === 1 && String(r.location).endsWith('/settings?outlook=connected'),
+      `rpc=${seen.rpcArgs.length} ${r.location}`)
+    check('and it is classified work, with the validated oid stored',
+      workExact.p_account_type === 'work' && workExact.p_ms_account_id === WORK_OID,
+      JSON.stringify({ t: workExact.p_account_type }))
+    scenario.tid = CONSUMERS
+    scenario.oid = OID
+
+    // POSITIVE CONTROL: exact equality on the personal account, unchanged.
     scenario.meBody = { id: OID, mail: MAILBOX, userPrincipalName: 'upn@outlook.test' }
     r = await post(`${COOKIE}=${state}`)
-    check('the SAME request with an exactly equal Graph id DOES finalize',
+    check('an exactly equal personal Graph id still finalizes',
       seen.rpcArgs.length === 1 && String(r.location).endsWith('/settings?outlook=connected'),
       `rpc=${seen.rpcArgs.length} ${r.location}`)
 

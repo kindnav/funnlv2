@@ -163,7 +163,8 @@ test('Graph /me: a plain 200 still resolves the mailbox', async () => {
       accessToken: 'THE-ACCESS-TOKEN', oid: 'oid-1',
       meUrl: `${org.origin}/me`, timeoutMs: 5000,
     })
-    assert.deepStrictEqual(r, { ok: true, email: 'student@outlook.test' })
+    assert.deepStrictEqual(r,
+      { ok: true, email: 'student@outlook.test', identityMatch: 'exact' })
   } finally { org.close() }
 })
 

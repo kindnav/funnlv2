@@ -336,7 +336,7 @@ test('prefers mail, falls back to a mail-shaped UPN only', () => {
 test('Graph id must match the validated oid — fails closed on mismatch', () => {
   assert.deepStrictEqual(
     resolveMailboxFromGraphBody({ id: 'OID-1', mail: 'a@b.co' }, 'oid-1'),
-    { ok: true, email: 'a@b.co' })
+    { ok: true, email: 'a@b.co', identityMatch: 'exact' })
   assert.strictEqual(
     resolveMailboxFromGraphBody({ id: 'someone-else', mail: 'a@b.co' }, 'oid-1').reason,
     'graph_identity_mismatch')

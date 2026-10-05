@@ -1,26 +1,31 @@
-// The Graph-vs-id_token identity check, and the Settings surface for a refused
+// The Graph-vs-id_token identity rule, and the Settings surface for a refused
 // callback.
 //
-// WHY THIS EXISTS. The first live pilot consent refused with
-// graph_identity_mismatch and returned to a Settings page that showed nothing.
-// The only prior coverage of this path used SYNTHETIC identifiers ('oid-1'),
-// neither GUID nor hex, so no realistic representation was ever exercised.
+// WHAT THIS NOW ENFORCES. Two rules and no others:
+//   RULE 1, every account type: case-insensitive exact equality.
+//   RULE 2, PERSONAL ONLY: the validated `oid` is a GUID whose leading 16 hex
+//           digits are zero and whose trailing 16 are exactly the Graph `id`.
 //
-// WHAT IS DECIDED. Zero-padding of a personal-account `oid` has been described
-// publicly, but the exact relationship to what Graph /me returned FOR OUR LIVE
-// ACCOUNT is unverified - nothing recorded it. So exact (case-insensitive)
-// equality stands for both account types, unknown shapes stay REJECTED, and the
-// relationship is only RECORDED in a privacy-safe diagnostic, so the next
-// controlled pilot attempt establishes the shape without logging either
-// identifier.
+// Rule 2 exists because one controlled Production attempt MEASURED that shape
+// for the pilot's personal account - account=personal, oid_shape=guid/len 36,
+// graph_id_shape=hex16/len 16, graph_id_is_short_form_of_oid=true - using only
+// the shape and relationship booleans this module already emitted. No
+// identifier was logged to establish it, and none appears in this file: every
+// value below is invented.
+//
+// WHAT MUST STILL FAIL, and is asserted here: the reverse direction, a flat
+// 32-hex form, a bare suffix match, an email match, rule 2 on work/school or
+// unknown accounts, unrelated personal ids, and malformed ids.
 //
 // SCOPE. The functions below are EXECUTED. Two source scans cover the
 // handler's ordering and its log hygiene, which cannot be imported here
-// (handler.js imports from esm.sh). Real-handler behaviour is proven by
+// (handler.js imports from esm.sh). Real-handler behaviour - including that the
+// mapped personal pair now REACHES finalization and that ms_account_id stays
+// the validated oid - is proven by
 // tests/outlook-callback-positive-integration.test.js (opt-in: Docker +
 // FUNNL_EDGE_INTEGRATION=1); the rendered card by
 // tests/local/outlook-pilot-browser.mjs. No real Microsoft response is
-// exercised anywhere, and every identifier here is invented.
+// exercised anywhere.
 //
 // Run with: node tests/outlook-graph-identity.test.js
 
@@ -31,9 +36,13 @@ import { join, dirname } from 'path'
 import {
   resolveMailboxFromGraphBody,
   fetchMailboxAddress,
+  classifyGraphIdentityMatch,
   describeIdentityMismatch,
   identifierShape,
   isZeroPaddedGuidOf,
+  IDENTITY_MATCH_EXACT,
+  IDENTITY_MATCH_PERSONAL_SHORT_FORM,
+  IDENTITY_MATCHES,
 } from '../supabase/functions/shared/microsoftGraphMe.js'
 import {
   readOutlookCallbackResult,
@@ -68,143 +77,215 @@ function test (name, fn) {
 }
 
 // Invented fixtures. PERSONAL_OID_GUID has an all-zero leading half, so
-// PERSONAL_SHORT_16 is its zero-padded relationship. WORK_OID_GUID does not,
-// so WORK_SHORT_16 is a bare suffix coincidence.
+// PERSONAL_SHORT_16 is its zero-padded short form. WORK_OID_GUID does not, so
+// WORK_SHORT_16 is a bare suffix coincidence.
 const PERSONAL_OID_GUID = '00000000-0000-0000-7a3b-9c15e204d6f8'
 const PERSONAL_SHORT_16 = '7a3b9c15e204d6f8'
+const PERSONAL_FLAT_32 = PERSONAL_OID_GUID.replace(/-/g, '')
 const WORK_OID_GUID = 'c41d8f72-5b90-4e63-a1d2-77f0ba3c9e45'
 const WORK_SHORT_16 = 'a1d277f0ba3c9e45'
 const MAIL = 'student@outlook.test'
 
 console.log('')
-console.log('strict refusal: every non-identical pair fails closed')
+console.log('RULE 1: case-insensitive exact equality, every account type')
 
-test('an exactly equal pair resolves, for either account type', () => {
-  assert.deepStrictEqual(
-    resolveMailboxFromGraphBody({ id: PERSONAL_OID_GUID, mail: MAIL }, PERSONAL_OID_GUID, 'personal'),
-    { ok: true, email: MAIL })
+test('an exactly equal pair resolves and reports the exact rule', () => {
+  for (const t of ['personal', 'work', 'unknown', undefined]) {
+    assert.deepStrictEqual(
+      resolveMailboxFromGraphBody({ id: PERSONAL_OID_GUID, mail: MAIL }, PERSONAL_OID_GUID, t),
+      { ok: true, email: MAIL, identityMatch: IDENTITY_MATCH_EXACT }, String(t))
+  }
   assert.deepStrictEqual(
     resolveMailboxFromGraphBody({ id: WORK_OID_GUID, mail: MAIL }, WORK_OID_GUID, 'work'),
-    { ok: true, email: MAIL })
-  // Case and surrounding space are normalised, nothing else is.
+    { ok: true, email: MAIL, identityMatch: IDENTITY_MATCH_EXACT })
+  // Case and surrounding space are normalised; nothing else is.
   assert.deepStrictEqual(
-    resolveMailboxFromGraphBody({ id: ' ' + PERSONAL_OID_GUID.toUpperCase(), mail: MAIL },
+    resolveMailboxFromGraphBody({ id: ' ' + WORK_OID_GUID.toUpperCase(), mail: MAIL },
+      WORK_OID_GUID, 'work'),
+    { ok: true, email: MAIL, identityMatch: IDENTITY_MATCH_EXACT })
+})
+
+console.log('')
+console.log('RULE 2: the measured personal short form, and ONLY that')
+
+test('a personal 16-hex Graph id against its zero-padded GUID oid now RESOLVES', () => {
+  assert.deepStrictEqual(
+    resolveMailboxFromGraphBody({ id: PERSONAL_SHORT_16, mail: MAIL },
       PERSONAL_OID_GUID, 'personal'),
-    { ok: true, email: MAIL })
+    { ok: true, email: MAIL, identityMatch: IDENTITY_MATCH_PERSONAL_SHORT_FORM })
+  // Case-insensitive on the short form too, as Graph casing is not promised.
+  assert.strictEqual(
+    resolveMailboxFromGraphBody({ id: PERSONAL_SHORT_16.toUpperCase(), mail: MAIL },
+      PERSONAL_OID_GUID, 'personal').identityMatch,
+    IDENTITY_MATCH_PERSONAL_SHORT_FORM)
 })
 
-test('the PERSONAL equivalent-looking pair is still refused', () => {
-  const r = resolveMailboxFromGraphBody(
-    { id: PERSONAL_SHORT_16, mail: MAIL }, PERSONAL_OID_GUID, 'personal')
-  assert.strictEqual(r.ok, false, 'the unverified equivalence must not be granted')
+test('the REVERSE direction is NOT accepted', () => {
+  // A GUID from Graph against a 16-hex oid. Only isZeroPaddedGuidOf(oid, gid)
+  // is consulted, so this must stay a mismatch.
+  const r = resolveMailboxFromGraphBody({ id: PERSONAL_OID_GUID, mail: MAIL },
+    PERSONAL_SHORT_16, 'personal')
+  assert.strictEqual(r.ok, false)
   assert.strictEqual(r.reason, 'graph_identity_mismatch')
-  assert.strictEqual(r.email, undefined, 'no address may come back on a refusal')
+  assert.strictEqual(r.diagnostic.oid_is_short_form_of_graph_id, true,
+    'the diagnostic still records the mirror relationship')
+  assert.strictEqual(r.diagnostic.graph_id_is_short_form_of_oid, false)
+  assert.strictEqual(classifyGraphIdentityMatch(PERSONAL_OID_GUID, PERSONAL_SHORT_16,
+    'personal'), null)
 })
 
-test('WORK stays strict, including a GUID vs its own trailing 16 hex digits', () => {
-  const r = resolveMailboxFromGraphBody({ id: WORK_SHORT_16, mail: MAIL }, WORK_OID_GUID, 'work')
-  assert.strictEqual(r.reason, 'graph_identity_mismatch')
-  assert.strictEqual(r.diagnostic.account, 'work')
+test('a FLAT 32-hex form is NOT accepted, in either position', () => {
+  assert.strictEqual(
+    resolveMailboxFromGraphBody({ id: PERSONAL_FLAT_32, mail: MAIL },
+      PERSONAL_OID_GUID, 'personal').reason,
+    'graph_identity_mismatch')
+  assert.strictEqual(
+    resolveMailboxFromGraphBody({ id: PERSONAL_SHORT_16, mail: MAIL },
+      PERSONAL_FLAT_32, 'personal').reason,
+    'graph_identity_mismatch')
+  assert.strictEqual(classifyGraphIdentityMatch(PERSONAL_FLAT_32, PERSONAL_OID_GUID,
+    'personal'), null)
 })
 
-test('malformed, unrelated, suffix-matching and address-shaped ids are refused', () => {
-  const refused = [
-    PERSONAL_SHORT_16.toUpperCase(),            // right digits, wrong form
-    PERSONAL_OID_GUID.replace(/-/g, ''),        // flat 32-hex
-    '7a3b9c15e204d6f9',                         // one digit different
-    '9c15e204d6f8', 'e204d6f8', '00000000',     // partial suffix / prefix
-    '00000000-0000-0000-1111-222222222222',     // a different account
-    MAIL, 'oid-1', 'z'.repeat(16), '-'.repeat(36),
-  ]
-  for (const id of refused) {
+test('a bare SUFFIX match is NOT accepted - the leading half must be all zero', () => {
+  // WORK_SHORT_16 IS the trailing 16 hex digits of WORK_OID_GUID. Even labelled
+  // personal, the non-zero leading half must refuse it.
+  assert.strictEqual(classifyGraphIdentityMatch(WORK_SHORT_16, WORK_OID_GUID, 'personal'), null)
+  assert.strictEqual(
+    resolveMailboxFromGraphBody({ id: WORK_SHORT_16, mail: MAIL },
+      WORK_OID_GUID, 'personal').reason,
+    'graph_identity_mismatch')
+  // Partial suffixes of a zero-padded GUID are refused as well.
+  for (const id of ['9c15e204d6f8', 'e204d6f8', '00000000', '0000000000000000']) {
+    assert.strictEqual(classifyGraphIdentityMatch(id, PERSONAL_OID_GUID, 'personal'), null, id)
+  }
+})
+
+test('rule 2 is refused for WORK/SCHOOL and UNKNOWN accounts', () => {
+  for (const t of ['work', 'unknown', undefined, null, '', 42,
+    'PERSONAL', 'Personal', 'personal ', ' personal']) {
+    assert.strictEqual(
+      classifyGraphIdentityMatch(PERSONAL_SHORT_16, PERSONAL_OID_GUID, t), null,
+      `accountType ${JSON.stringify(t)} must not unlock rule 2`)
+    const r = resolveMailboxFromGraphBody({ id: PERSONAL_SHORT_16, mail: MAIL },
+      PERSONAL_OID_GUID, t)
+    assert.strictEqual(r.ok, false, `accountType ${JSON.stringify(t)}`)
+    assert.strictEqual(r.reason, 'graph_identity_mismatch')
+  }
+})
+
+test('an unrelated PERSONAL id is still refused', () => {
+  for (const id of [
+    '00000000-0000-0000-1111-222222222222',   // a different zero-padded account
+    '7a3b9c15e204d6f9',                        // one digit different
+    '0000000000000000',                        // the padding alone
+    'deadbeefdeadbeef',                        // unrelated 16-hex
+  ]) {
     const r = resolveMailboxFromGraphBody({ id, mail: MAIL }, PERSONAL_OID_GUID, 'personal')
     assert.strictEqual(r.reason, 'graph_identity_mismatch', `accepted ${id}`)
   }
-  // Absent or non-string ids and oids get their own controlled reasons, and no
-  // diagnostic - there was nothing to compare.
-  assert.strictEqual(resolveMailboxFromGraphBody({ mail: MAIL }, PERSONAL_OID_GUID).reason,
-    'graph_me_no_id')
-  assert.strictEqual(resolveMailboxFromGraphBody({ id: '  ', mail: MAIL }, PERSONAL_OID_GUID).reason,
-    'graph_me_no_id')
-  assert.strictEqual(resolveMailboxFromGraphBody(null, PERSONAL_OID_GUID).reason,
-    'graph_me_malformed')
-  const noOid = resolveMailboxFromGraphBody({ id: PERSONAL_OID_GUID, mail: MAIL }, '')
-  assert.strictEqual(noOid.reason, 'no_validated_oid')
-  assert.strictEqual(noOid.diagnostic, undefined)
 })
 
 test('EMAIL IS NEVER IDENTITY, and no address is ever invented', () => {
-  // Both addresses agree and are the only thing that agrees. Still refused.
+  // Both addresses agree and are the only thing that agrees. Still refused,
+  // even on a personal account.
   assert.strictEqual(
     resolveMailboxFromGraphBody({ id: MAIL, mail: MAIL, userPrincipalName: MAIL },
       PERSONAL_OID_GUID, 'personal').reason,
     'graph_identity_mismatch')
-  // A matching id with no usable address fails rather than filling the NOT NULL
-  // column with something made up.
+  // A pair that matches under rule 2 but has no usable address fails rather
+  // than filling the NOT NULL column with something made up.
   assert.strictEqual(
-    resolveMailboxFromGraphBody({ id: PERSONAL_OID_GUID, userPrincipalName: 'DOMAIN\\user' },
+    resolveMailboxFromGraphBody({ id: PERSONAL_SHORT_16, userPrincipalName: 'DOMAIN\\user' },
       PERSONAL_OID_GUID, 'personal').reason,
     'no_usable_mailbox_address')
 })
 
-console.log('')
-console.log('the diagnostic: relationship recorded, nothing identifying logged')
-
-test('the relationship boolean is true for the zero-padded pair, both ways', () => {
-  const fwd = describeIdentityMismatch(PERSONAL_SHORT_16, PERSONAL_OID_GUID, 'personal')
-  assert.strictEqual(fwd.graph_id_is_short_form_of_oid, true)
-  assert.strictEqual(fwd.oid_is_short_form_of_graph_id, false)
-  assert.strictEqual(fwd.account, 'personal')
-  assert.strictEqual(fwd.graph_id_shape, 'hex16')
-  assert.strictEqual(fwd.oid_shape, 'guid')
-  assert.strictEqual(fwd.graph_id_len, 16)
-  assert.strictEqual(fwd.oid_len, 36)
-  assert.strictEqual(fwd.equal_case_insensitive, false)
-
-  const rev = describeIdentityMismatch(PERSONAL_OID_GUID, PERSONAL_SHORT_16, 'personal')
-  assert.strictEqual(rev.graph_id_is_short_form_of_oid, false)
-  assert.strictEqual(rev.oid_is_short_form_of_graph_id, true)
+test('malformed ids and a missing validated oid keep their own reasons', () => {
+  assert.strictEqual(resolveMailboxFromGraphBody({ mail: MAIL }, PERSONAL_OID_GUID, 'personal')
+    .reason, 'graph_me_no_id')
+  assert.strictEqual(resolveMailboxFromGraphBody({ id: '  ', mail: MAIL }, PERSONAL_OID_GUID,
+    'personal').reason, 'graph_me_no_id')
+  assert.strictEqual(resolveMailboxFromGraphBody({ id: 42, mail: MAIL }, PERSONAL_OID_GUID,
+    'personal').reason, 'graph_me_no_id')
+  assert.strictEqual(resolveMailboxFromGraphBody(null, PERSONAL_OID_GUID, 'personal').reason,
+    'graph_me_malformed')
+  assert.strictEqual(resolveMailboxFromGraphBody('a string', PERSONAL_OID_GUID, 'personal')
+    .reason, 'graph_me_malformed')
+  for (const bad of ['', '   ', null, undefined, 42]) {
+    const r = resolveMailboxFromGraphBody({ id: PERSONAL_SHORT_16, mail: MAIL }, bad, 'personal')
+    assert.strictEqual(r.reason, 'no_validated_oid', JSON.stringify(bad))
+    assert.strictEqual(r.diagnostic, undefined)
+  }
+  // Nonsense GUID-ish shapes cannot satisfy rule 2.
+  assert.strictEqual(classifyGraphIdentityMatch(PERSONAL_SHORT_16, '-'.repeat(36), 'personal'),
+    null)
+  assert.strictEqual(classifyGraphIdentityMatch('z'.repeat(16), PERSONAL_OID_GUID, 'personal'),
+    null)
 })
 
-test('a suffix coincidence without an all-zero leading half is NOT the relationship', () => {
-  // The whole point: WORK_SHORT_16 IS the trailing 16 hex digits of
-  // WORK_OID_GUID, and must still report false.
-  assert.strictEqual(isZeroPaddedGuidOf(WORK_OID_GUID, WORK_SHORT_16), false)
-  assert.strictEqual(isZeroPaddedGuidOf(PERSONAL_OID_GUID, PERSONAL_SHORT_16), true)
-  for (const [g, s] of [
-    [PERSONAL_OID_GUID, 'deadbeefdeadbeef'],
-    [PERSONAL_OID_GUID, PERSONAL_SHORT_16 + '0'],
-    [PERSONAL_OID_GUID, MAIL],
-    ['not-a-guid', PERSONAL_SHORT_16],
-    [PERSONAL_SHORT_16, PERSONAL_SHORT_16],
-    [null, undefined],
-  ]) assert.strictEqual(isZeroPaddedGuidOf(g, s), false, `${g} / ${s}`)
+test('the match vocabulary is a frozen controlled enum', () => {
+  assert.deepStrictEqual(IDENTITY_MATCHES, ['exact', 'personal_zero_padded_short_form'])
+  assert.ok(Object.isFrozen(IDENTITY_MATCHES))
+  // Every successful resolve reports one of them, and nothing else.
+  for (const [body, oid, t] of [
+    [{ id: PERSONAL_OID_GUID, mail: MAIL }, PERSONAL_OID_GUID, 'personal'],
+    [{ id: PERSONAL_SHORT_16, mail: MAIL }, PERSONAL_OID_GUID, 'personal'],
+    [{ id: WORK_OID_GUID, mail: MAIL }, WORK_OID_GUID, 'work'],
+  ]) {
+    const r = resolveMailboxFromGraphBody(body, oid, t)
+    assert.strictEqual(r.ok, true)
+    assert.ok(IDENTITY_MATCHES.includes(r.identityMatch), String(r.identityMatch))
+  }
 })
 
-test('an unrelated pair reports both directions false', () => {
-  const d = describeIdentityMismatch('00000000-0000-0000-1111-222222222222',
+test('THE GRAPH ID IS NEVER RETURNED, so it cannot become the stored identity', () => {
+  // Under rule 2 the Graph body's 16-hex id must not leak into the result; the
+  // caller writes ms_account_id from the validated oid it already holds.
+  const r = resolveMailboxFromGraphBody({ id: PERSONAL_SHORT_16, mail: MAIL },
     PERSONAL_OID_GUID, 'personal')
+  assert.deepStrictEqual(Object.keys(r).sort(), ['email', 'identityMatch', 'ok'])
+  const serialized = JSON.stringify(r)
+  assert.ok(!serialized.includes(PERSONAL_SHORT_16))
+  assert.ok(!serialized.includes(PERSONAL_OID_GUID))
+})
+
+console.log('')
+console.log('the diagnostic still explains every remaining mismatch')
+
+test('a refused pair still carries shapes, lengths and both relationship booleans', () => {
+  // The reverse direction is the clearest remaining mismatch.
+  const d = resolveMailboxFromGraphBody({ id: PERSONAL_OID_GUID, mail: MAIL },
+    PERSONAL_SHORT_16, 'personal').diagnostic
+  assert.strictEqual(d.account, 'personal')
+  assert.strictEqual(d.graph_id_shape, 'guid')
+  assert.strictEqual(d.oid_shape, 'hex16')
+  assert.strictEqual(d.graph_id_len, 36)
+  assert.strictEqual(d.oid_len, 16)
+  assert.strictEqual(d.equal_case_insensitive, false)
+  assert.strictEqual(d.graph_id_is_short_form_of_oid, false)
+  assert.strictEqual(d.oid_is_short_form_of_graph_id, true)
+})
+
+test('a work short form is refused, labelled work, and reports no relationship', () => {
+  const d = resolveMailboxFromGraphBody({ id: WORK_SHORT_16, mail: MAIL },
+    WORK_OID_GUID, 'work').diagnostic
+  assert.strictEqual(d.account, 'work')
   assert.strictEqual(d.graph_id_is_short_form_of_oid, false)
   assert.strictEqual(d.oid_is_short_form_of_graph_id, false)
 })
 
-test('the account label comes from the validated tenant, and is never guessed', () => {
-  // A zero-padded pair on a WORK tenant: relationship reported, still refused,
-  // and labelled work - so a consumers-tenant finding cannot be confused with it.
-  const w = resolveMailboxFromGraphBody(
-    { id: PERSONAL_SHORT_16, mail: MAIL }, PERSONAL_OID_GUID, 'work')
-  assert.strictEqual(w.ok, false)
-  assert.strictEqual(w.diagnostic.account, 'work')
-  assert.strictEqual(w.diagnostic.graph_id_is_short_form_of_oid, true)
-  for (const t of [undefined, null, '', 'PERSONAL', 'consumer', 42]) {
-    assert.strictEqual(describeIdentityMismatch('a', 'b', t).account, 'unknown',
-      JSON.stringify(t))
-  }
+test('a zero-padded pair labelled work is refused but the relationship is recorded', () => {
+  const d = resolveMailboxFromGraphBody({ id: PERSONAL_SHORT_16, mail: MAIL },
+    PERSONAL_OID_GUID, 'work').diagnostic
+  assert.strictEqual(d.account, 'work')
+  assert.strictEqual(d.graph_id_is_short_form_of_oid, true,
+    'recorded, so a mislabelled tenant is diagnosable')
 })
 
 test('the serialized diagnostic leaks no part of either identifier', () => {
   const serialized = JSON.stringify(
-    describeIdentityMismatch(PERSONAL_SHORT_16, PERSONAL_OID_GUID, 'personal'))
+    describeIdentityMismatch(PERSONAL_FLAT_32, PERSONAL_OID_GUID, 'personal'))
   const runs = new Set()
   for (const v of [PERSONAL_SHORT_16, PERSONAL_OID_GUID, MAIL]) {
     const flat = v.replace(/-/g, '')
@@ -215,52 +296,48 @@ test('the serialized diagnostic leaks no part of either identifier', () => {
     assert.ok(!serialized.includes(run), `leaked the run ${JSON.stringify(run)}`)
   }
   assert.ok(!serialized.includes('@'), 'no address may appear')
-  // Only shapes, lengths and booleans - nothing of unbounded content.
   for (const v of Object.values(
-    describeIdentityMismatch(PERSONAL_SHORT_16, PERSONAL_OID_GUID, 'personal'))) {
+    describeIdentityMismatch(PERSONAL_FLAT_32, PERSONAL_OID_GUID, 'personal'))) {
     assert.ok(['number', 'boolean'].includes(typeof v)
       || ['personal', 'work', 'unknown', 'absent', 'guid', 'hex16', 'hex32', 'other'].includes(v),
       `unexpected diagnostic value: ${JSON.stringify(v)}`)
   }
 })
 
-test('identifierShape classifies the forms the diagnostic reports', () => {
+test('the shape and relationship primitives are unchanged', () => {
   assert.strictEqual(identifierShape(PERSONAL_OID_GUID), 'guid')
   assert.strictEqual(identifierShape(PERSONAL_SHORT_16), 'hex16')
-  assert.strictEqual(identifierShape('a'.repeat(32)), 'hex32')
+  assert.strictEqual(identifierShape(PERSONAL_FLAT_32), 'hex32')
   assert.strictEqual(identifierShape(MAIL), 'other')
   assert.strictEqual(identifierShape('   '), 'absent')
-  assert.strictEqual(identifierShape(null), 'absent')
+  assert.strictEqual(isZeroPaddedGuidOf(PERSONAL_OID_GUID, PERSONAL_SHORT_16), true)
+  assert.strictEqual(isZeroPaddedGuidOf(WORK_OID_GUID, WORK_SHORT_16), false)
+  assert.strictEqual(isZeroPaddedGuidOf(PERSONAL_FLAT_32, PERSONAL_SHORT_16), false)
 })
 
 console.log('')
 console.log('fetchMailboxAddress carries the validated account type through')
 
-test('a fetched mismatch reports the account type and the relationship', async () => {
+test('a fetched personal short-form pair resolves and reports rule 2', async () => {
   const r = await fetchMailboxAddress({
     accessToken: 'at', oid: PERSONAL_OID_GUID, accountType: 'personal',
     fetchImpl: async () => ({ status: 200, json: async () => ({ id: PERSONAL_SHORT_16, mail: MAIL }) }),
     meUrl: 'https://graph.invalid/me',
   })
-  assert.strictEqual(r.reason, 'graph_identity_mismatch')
-  assert.strictEqual(r.diagnostic.account, 'personal')
-  assert.strictEqual(r.diagnostic.graph_id_is_short_form_of_oid, true)
-  // Omitting the label still yields a usable record.
+  assert.deepStrictEqual(r,
+    { ok: true, email: MAIL, identityMatch: IDENTITY_MATCH_PERSONAL_SHORT_FORM })
+  // The SAME Graph body with the account type omitted must still be refused -
+  // the label is what unlocks rule 2, and it is not defaulted.
   const u = await fetchMailboxAddress({
     accessToken: 'at', oid: PERSONAL_OID_GUID,
     fetchImpl: async () => ({ status: 200, json: async () => ({ id: PERSONAL_SHORT_16, mail: MAIL }) }),
     meUrl: 'https://graph.invalid/me',
   })
+  assert.strictEqual(u.reason, 'graph_identity_mismatch')
   assert.strictEqual(u.diagnostic.account, 'unknown')
-  assert.strictEqual(u.diagnostic.graph_id_is_short_form_of_oid, true)
 })
 
-test('a matching fetch resolves; a transport failure carries no diagnostic', async () => {
-  assert.deepStrictEqual(await fetchMailboxAddress({
-    accessToken: 'at', oid: PERSONAL_OID_GUID, accountType: 'personal',
-    fetchImpl: async () => ({ status: 200, json: async () => ({ id: PERSONAL_OID_GUID, mail: MAIL }) }),
-    meUrl: 'https://graph.invalid/me',
-  }), { ok: true, email: MAIL })
+test('a transport failure still carries no diagnostic and no match', async () => {
   const f = await fetchMailboxAddress({
     accessToken: 'at', oid: PERSONAL_OID_GUID, accountType: 'personal',
     fetchImpl: async () => ({ status: 403, json: async () => ({}) }),
@@ -268,17 +345,15 @@ test('a matching fetch resolves; a transport failure carries no diagnostic', asy
   })
   assert.strictEqual(f.reason, 'graph_me_forbidden')
   assert.strictEqual(f.diagnostic, undefined)
+  assert.strictEqual(f.identityMatch, undefined)
 })
 
 console.log('')
-console.log('the callback: refuse before finalize, and log only safe values')
+console.log('the callback: finalize only after a match, and log only safe values')
 
 const HANDLER = exec(read('supabase/functions/outlook-oauth-callback/handler.js'))
 
 test('an unresolved mailbox returns BEFORE finalize_microsoft_connection', () => {
-  // Behaviourally proven against the real handler under Deno by
-  // tests/outlook-callback-positive-integration.test.js, which also proves an
-  // exactly equal id DOES finalize. This scan guards the ordering in source.
   const guard = HANDLER.indexOf('if (!mailbox.ok)')
   const finalize = HANDLER.indexOf('finalize_microsoft_connection')
   assert.ok(guard > 0 && finalize > 0, 'guard or finalize call missing')
@@ -286,7 +361,22 @@ test('an unresolved mailbox returns BEFORE finalize_microsoft_connection', () =>
   assert.ok(/return redirect\(failRedirect\)/.test(HANDLER.slice(guard, finalize)),
     'the guard must return, not fall through')
   assert.ok(/accountType:\s*identity\.accountType/.test(HANDLER),
-    'the diagnostic label must come from the validated id_token')
+    'rule 2 must be unlocked only by the validated id_token classification')
+})
+
+test('ms_account_id is written from the VALIDATED oid, never the Graph id', () => {
+  assert.ok(/p_ms_account_id:\s*identity\.msAccountId/.test(HANDLER))
+  // Nothing from the Graph body may reach the identity argument.
+  assert.ok(!/p_ms_account_id:\s*mailbox\./.test(HANDLER))
+  assert.ok(!/p_ms_account_id:\s*(gid|graphId|body)/.test(HANDLER))
+  // The mailbox result supplies the address and the match kind only.
+  const uses = HANDLER.match(/mailbox\.[a-zA-Z]+/g) || []
+  assert.deepStrictEqual([...new Set(uses)].sort(),
+    ['mailbox.diagnostic', 'mailbox.email', 'mailbox.identityMatch', 'mailbox.ok', 'mailbox.reason'])
+})
+
+test('the matched rule is logged as a controlled enum', () => {
+  assert.ok(/graph_identity_matched['"],\s*mailbox\.identityMatch/.test(HANDLER))
 })
 
 test('the diagnostic is logged for graph_identity_mismatch ONLY', () => {
@@ -294,7 +384,6 @@ test('the diagnostic is logged for graph_identity_mismatch ONLY', () => {
     /mailbox\.reason === 'graph_identity_mismatch'[\s\S]{0,200}JSON\.stringify\(mailbox\.diagnostic\)/
       .test(HANDLER),
     'the diagnostic must be gated on the identity-mismatch reason')
-  // Every other mailbox failure keeps its bare controlled reason code.
   assert.ok(/console\.error\('outlook-oauth-callback mailbox_unresolved', mailbox\.reason\)/
     .test(HANDLER), 'other reasons must still log the bare code')
 })
@@ -336,7 +425,6 @@ test('only the two values the callback produces are recognised', () => {
   assert.strictEqual(readOutlookCallbackResult('?outlook=connected'), 'connected')
   assert.strictEqual(readOutlookCallbackResult('outlook=error'), 'error')
   assert.strictEqual(readOutlookCallbackResult('?foo=1&outlook=error&bar=2'), 'error')
-  // A URLSearchParams, as the card passes it.
   assert.strictEqual(readOutlookCallbackResult(new URLSearchParams('outlook=error')), 'error')
 })
 
@@ -363,14 +451,10 @@ test('the notice is short, actionable and carries NO provider detail', () => {
     'identity', 'microsoft', 'entra', 'rpc', 'finalize', 'state', '401', '403', '500']) {
     assert.ok(!m.toLowerCase().includes(leak), `leaks ${leak}: ${m}`)
   }
-  // A failed RETURN must read differently from a failed START.
   assert.notStrictEqual(m, messageForOutcome('unknown_outcome'))
 })
 
 test('the card renders it through the shared helper and message map', () => {
-  // The rendered banner - its placement, aria-live, and suppression once
-  // connected - is driven in a real browser by
-  // tests/local/outlook-pilot-browser.mjs. This only guards the wiring.
   const CARD = exec(read('src/components/OutlookConnectionCard.jsx'))
   assert.ok(/readOutlookCallbackResult\(searchParams\)/.test(CARD))
   assert.ok(/messageForOutcome\('callback_failed'\)/.test(CARD))
