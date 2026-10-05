@@ -291,6 +291,7 @@ async function main () {
   const requests = []
   let run = await runOutlookImport({
     rpc: workerRpc(calls),
+    pilotUserId: U1,
     encryptCursor,
     decryptCursor,
     loadRunContext: contextLoader(contacts),
@@ -403,6 +404,7 @@ async function main () {
           WHERE user_id='${U1}';`, { tuplesOnly: false })
     const again = await runOutlookImport({
       rpc: workerRpc([]), encryptCursor, decryptCursor,
+      pilotUserId: U1,
       loadRunContext: contextLoader(contacts),
       deps: { fetchImpl: completeProvider([]) },
     })
@@ -489,6 +491,7 @@ async function main () {
           WHERE user_id='${U1}';`, { tuplesOnly: false })
     const again = await runOutlookImport({
       rpc: workerRpc([]), encryptCursor, decryptCursor,
+      pilotUserId: U1,
       loadRunContext: contextLoader(contacts),
       deps: { fetchImpl: completeProvider([]) },
     })
@@ -506,6 +509,7 @@ async function main () {
     const fresh = ownContacts()
     const r1 = await runOutlookImport({
       rpc: workerRpc([]), encryptCursor, decryptCursor,
+      pilotUserId: U1,
       loadRunContext: contextLoader(fresh),
       deps: { fetchImpl: completeProvider([]) },
     })
@@ -520,6 +524,7 @@ async function main () {
           WHERE user_id='${U1}';`, { tuplesOnly: false })
     const r2 = await runOutlookImport({
       rpc: workerRpc([]), encryptCursor, decryptCursor,
+      pilotUserId: U1,
       loadRunContext: contextLoader(fresh),
       deps: { fetchImpl: completeProvider([]) },
     })
@@ -544,6 +549,7 @@ async function main () {
     const before = one(`SELECT count(*) FROM public.interaction_candidates;`)
     const r = await runOutlookImport({
       rpc: workerRpc([]), encryptCursor, decryptCursor,
+      pilotUserId: U1,
       loadRunContext: contextLoader(fresh),
       deps: { fetchImpl: incompleteProvider([]) },
     })

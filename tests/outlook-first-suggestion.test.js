@@ -125,6 +125,10 @@ async function loadComponent (relPath) {
 const CONN = 'cccccccc-cccc-cccc-cccc-cccccccccccc'
 const RUN = 'rrrrrrrr-rrrr-rrrr-rrrr-rrrrrrrrrrrr'
 const CONTACT = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+// A real uuid, because microsoft_connections.user_id IS one and the pilot gate requires
+// the designated account to be uuid-shaped - that shape check is what stops an empty
+// string or a '*' reading as `everyone`.
+const OWNER = '11111111-1111-1111-1111-111111111111'
 
 function planEntry (over = {}) {
   return {
@@ -152,7 +156,7 @@ function port ({ reserve, writes = ['created'], release = true } = {}) {
   const rpc = async (name, args) => {
     calls.push({ name, args })
     if (name === 'reserve_due_outlook_connection') {
-      return reserve ?? { data: { result: 'reserved', connection_id: CONN, run_id: RUN }, error: null }
+      return reserve ?? { data: { result: 'reserved', connection_id: CONN, user_id: OWNER, run_id: RUN }, error: null }
     }
     if (name === 'upsert_outlook_interaction_candidate') {
       const r = writes[Math.min(writeAt, writes.length - 1)]
@@ -232,14 +236,14 @@ function context (contacts) {
     primaryEmail: 'student@getfunnl.test',
     aliases: [],
     timeZone: 'UTC',
-    userId: 'u1',
+    userId: OWNER,
     contacts,
     cursors: { inbox: null, sentitems: null },
     accessToken: 'fixture',
     keyRing: { current: { keyBytes: new Uint8Array(32).fill(3), keyVersion: 1 } },
   })
 }
-const OWN_CONTACT = [{ id: CONTACT, user_id: 'u1', email: 'ava@bank.test' }]
+const OWN_CONTACT = [{ id: CONTACT, user_id: OWNER, email: 'ava@bank.test' }]
 
 const encryptCursor = async (link) => ({
   ciphertext: `CT(${link.length})`, nonce: 'NONCE', keyVersion: 1,
@@ -251,6 +255,7 @@ test('a commit-ready pass writes one suggestion, then releases with both cursors
   const p = port()
   const r = await runOutlookImport({
     rpc: withRounds(p.rpc, makeRoundStore()),
+    pilotUserId: OWNER,
     encryptCursor,
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext: context(OWN_CONTACT),
@@ -281,6 +286,7 @@ test('the cursor reaching the database is the ENCRYPTED value, never the link', 
   const p = port()
   await runOutlookImport({
     rpc: withRounds(p.rpc, makeRoundStore()),
+    pilotUserId: OWNER,
     encryptCursor,
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext: context(OWN_CONTACT),
@@ -298,6 +304,7 @@ test('the write carries the fingerprints and NO content field', async () => {
   const p = port()
   await runOutlookImport({
     rpc: withRounds(p.rpc, makeRoundStore()),
+    pilotUserId: OWNER,
     encryptCursor,
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext: context(OWN_CONTACT),
@@ -323,6 +330,7 @@ test('no candidate write is attempted at all, and the release carries no cursor'
   const p = port()
   const r = await runOutlookImport({
     rpc: withRounds(p.rpc, makeRoundStore()),
+    pilotUserId: OWNER,
     encryptCursor,
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext: context(OWN_CONTACT),
@@ -362,6 +370,7 @@ test('a REFUSED write downgrades the whole run: no cursor, retry later', async (
   const p = port({ writes: ['stale_run'] })
   const r = await runOutlookImport({
     rpc: withRounds(p.rpc, makeRoundStore()),
+    pilotUserId: OWNER,
     encryptCursor,
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext: context(OWN_CONTACT),
@@ -392,6 +401,7 @@ test('a tombstoned exchange still lets the run commit', async () => {
   const p = port({ writes: ['exists_terminal'] })
   const r = await runOutlookImport({
     rpc: withRounds(p.rpc, makeRoundStore()),
+    pilotUserId: OWNER,
     encryptCursor,
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext: context(OWN_CONTACT),
@@ -405,6 +415,7 @@ test('nothing due takes no lease and performs no other call', async () => {
   const p = port({ reserve: { data: { result: 'none_due' }, error: null } })
   const r = await runOutlookImport({
     rpc: withRounds(p.rpc, makeRoundStore()),
+    pilotUserId: OWNER,
     encryptCursor,
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext: context(OWN_CONTACT),
@@ -418,6 +429,7 @@ test('a thrown pass releases the lease as an error rather than holding it', asyn
   const p = port()
   const r = await runOutlookImport({
     rpc: withRounds(p.rpc, makeRoundStore()),
+    pilotUserId: OWNER,
     encryptCursor,
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext: async () => { throw new Error('token fetch failed at https://secret') },
@@ -552,6 +564,7 @@ test('summarizeRun reports counts and controlled codes only', async () => {
   const p = port()
   const r = await runOutlookImport({
     rpc: withRounds(p.rpc, makeRoundStore()),
+    pilotUserId: OWNER,
     encryptCursor,
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext: context(OWN_CONTACT),
@@ -718,6 +731,7 @@ test('a release returning FALSE is release_failed, not committed', async () => {
   const p = port({ release: false })
   const r = await runOutlookImport({
     rpc: withRounds(p.rpc, makeRoundStore()),
+    pilotUserId: OWNER,
     encryptCursor,
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext: context(OWN_CONTACT),
@@ -739,6 +753,7 @@ test('a release that ERRORS is release_failed, not committed', async () => {
   const p = port({ release: { data: null, error: { status: 500 } } })
   const r = await runOutlookImport({
     rpc: withRounds(p.rpc, makeRoundStore()),
+    pilotUserId: OWNER,
     encryptCursor,
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext: context(OWN_CONTACT),
@@ -754,13 +769,14 @@ test('a release that THROWS is release_failed, and does not escape the run', asy
   const rpc = async (name, args) => {
     calls.push({ name, args })
     if (name === 'reserve_due_outlook_connection') {
-      return { data: { result: 'reserved', connection_id: CONN, run_id: RUN }, error: null }
+      return { data: { result: 'reserved', connection_id: CONN, user_id: OWNER, run_id: RUN }, error: null }
     }
     if (name === 'upsert_outlook_interaction_candidate') return { data: { result: 'created' }, error: null }
     throw new Error('network down at https://secret.example')
   }
   const r = await runOutlookImport({
     rpc: withRounds(rpc, makeRoundStore()),
+    pilotUserId: OWNER,
     encryptCursor,
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext: context(OWN_CONTACT),
@@ -781,7 +797,7 @@ test('a THROWN candidate write releases as an error and commits nothing', async 
   const rpc = async (name, args) => {
     calls.push({ name, args })
     if (name === 'reserve_due_outlook_connection') {
-      return { data: { result: 'reserved', connection_id: CONN, run_id: RUN }, error: null }
+      return { data: { result: 'reserved', connection_id: CONN, user_id: OWNER, run_id: RUN }, error: null }
     }
     if (name === 'upsert_outlook_interaction_candidate') throw new Error('connection reset')
     released = args
@@ -789,6 +805,7 @@ test('a THROWN candidate write releases as an error and commits nothing', async 
   }
   const r = await runOutlookImport({
     rpc: withRounds(rpc, makeRoundStore()),
+    pilotUserId: OWNER,
     encryptCursor,
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext: context(OWN_CONTACT),
@@ -810,6 +827,7 @@ test('a THROWN cursor encryption now fails BEFORE any suggestion is written', as
   const p = port()
   const r = await runOutlookImport({
     rpc: withRounds(p.rpc, makeRoundStore()),
+    pilotUserId: OWNER,
     encryptCursor: async () => { throw new Error('key unavailable') },
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext: context(OWN_CONTACT),
@@ -834,12 +852,13 @@ test('a THROWN cursor encryption now fails BEFORE any suggestion is written', as
 test('a best-effort release that ALSO throws still returns a controlled outcome', async () => {
   const rpc = async (name) => {
     if (name === 'reserve_due_outlook_connection') {
-      return { data: { result: 'reserved', connection_id: CONN, run_id: RUN }, error: null }
+      return { data: { result: 'reserved', connection_id: CONN, user_id: OWNER, run_id: RUN }, error: null }
     }
     throw new Error('everything is down')
   }
   const r = await runOutlookImport({
     rpc: withRounds(rpc, makeRoundStore()),
+    pilotUserId: OWNER,
     encryptCursor,
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext: context(OWN_CONTACT),
@@ -857,6 +876,7 @@ test('two of three accepted then a refusal: the two are still counted', async ()
   const p = port({ writes: ['created', 'refreshed', 'stale_run'] })
   const r = await runOutlookImport({
     rpc: withRounds(p.rpc, makeRoundStore()),
+    pilotUserId: OWNER,
     encryptCursor,
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext: context(OWN_CONTACT),
@@ -880,6 +900,7 @@ test('the run STOPS at the first refusal rather than piling up uncommittable wor
   const p = port({ writes: ['created', 'stale_run', 'created'] })
   const r = await runOutlookImport({
     rpc: withRounds(p.rpc, makeRoundStore()),
+    pilotUserId: OWNER,
     encryptCursor,
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext: context(OWN_CONTACT),
@@ -896,6 +917,7 @@ test('a partial run keeps the RETRY idempotent - no rollback, no new machinery',
   const first = port({ writes: ['created', 'stale_run'] })
   const a = await runOutlookImport({
     rpc: withRounds(first.rpc, makeRoundStore()),
+    pilotUserId: OWNER,
     encryptCursor,
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext: context(OWN_CONTACT),
@@ -908,6 +930,7 @@ test('a partial run keeps the RETRY idempotent - no rollback, no new machinery',
   const second = port({ writes: ['refreshed', 'created', 'created'] })
   const b = await runOutlookImport({
     rpc: withRounds(second.rpc, makeRoundStore()),
+    pilotUserId: OWNER,
     encryptCursor,
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext: context(OWN_CONTACT),
@@ -927,6 +950,7 @@ test('summarizeRun exposes intended, accepted and created separately', async () 
   const p = port({ writes: ['created', 'refreshed', 'rpc_error'] })
   const r = await runOutlookImport({
     rpc: withRounds(p.rpc, makeRoundStore()),
+    pilotUserId: OWNER,
     encryptCursor,
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext: context(OWN_CONTACT),

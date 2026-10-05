@@ -4,11 +4,13 @@
 //
 // The fingerprint key ring is assembled here from a base64 secret. It does not exist in
 // any environment, so `fingerprintKey` is null and the handler fails closed with
-// `config_missing` — which is the correct answer until the key is provisioned.
+// `config_missing` — which is the correct answer until the key is provisioned. The same
+// is true of OUTLOOK_PILOT_USER_ID: unset, no account is importable at all.
 import { handleOutlookImportWorker } from './handler.js'
 import { makePostgrestPorts, PRODUCTION_TOKEN_URL } from './endpoints.js'
 import { base64ToBytes } from '../shared/googleTokenCrypto.js'
 import { OUTLOOK_CANONICAL_SCOPES } from '../shared/microsoftOauthHelpers.js'
+import { PILOT_USER_ENV } from '../shared/outlookPilotGate.js'
 
 function fingerprintKeyRing(b64: string, version: number) {
   if (!b64) return null
@@ -36,6 +38,10 @@ Deno.serve((req: Request) => {
     tokenKeyB64: Deno.env.get('MICROSOFT_TOKEN_ENCRYPTION_KEY_V1') ?? null,
     fingerprintKey: fingerprintKeyRing(
       Deno.env.get('OUTLOOK_FINGERPRINT_HMAC_KEY_V1') ?? '', keyVersion),
+    // The one designated pilot account. Absent, the handler refuses `config_missing`
+    // before reading a row - the same fail-closed decision the run's own gate would take,
+    // one step earlier and without reserving a lease to release it again.
+    pilotUserId: Deno.env.get(PILOT_USER_ENV) ?? null,
     keyVersion,
     scope: OUTLOOK_CANONICAL_SCOPES.join(' '),
   }, {

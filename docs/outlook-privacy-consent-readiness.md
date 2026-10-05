@@ -19,8 +19,10 @@ unconfigured, and not published to anyone.
 
 A is a live public promise and nothing in these branches changes it. B and C are drafts in
 this repository. D is code that exists in Git and nowhere else: no Outlook Edge Function is
-deployed, no migration from the stack is applied, both flags are off, no Entra application
-exists, and every Outlook table in Production holds zero rows. "It exists in a Draft branch"
+deployed, no migration from the stack is applied, both flags are off, and every Outlook
+table in Production holds zero rows. An Entra application **is now registered** (client
+ID `af27b250-da0b-443e-bcac-38a67737d640`); registration is not the same as credentials,
+live consent, deployment, or a completed Microsoft round trip, and none of those exist. "It exists in a Draft branch"
 and "it exists in Production" are different claims throughout this document.
 
 **LAUNCH GATE: DISCONNECT NOW EXISTS, AND IS VERIFIED AT THE DATABASE LAYER.**
@@ -118,16 +120,21 @@ text would be evidence of nothing.
 | Connection-status migration `20260929000000` | yes, in **Draft PR #57 only** | **no — unapplied** |
 | Candidate-write migration `20260930000000` | yes, in **Draft PR #59 only** | **no — unapplied** |
 | `outlook-oauth-start` / `outlook-oauth-callback` Edge Functions | yes: start + binding gate in **Draft PR #54**, token exchange and finalization in **Draft PR #55** | **no — never deployed**, and dormant behind `OUTLOOK_INTEGRATION_ENABLED` (unset) |
-| Settings UI: consent card, connected status, disconnect | yes, in **Draft PRs #56 / #57** — `SettingsPage.jsx` does import the card on those branches | **no** — the import exists in the bundle but the card never mounts: `VITE_OUTLOOK_CONNECTION_ENABLED` is unset, and the predicate requires exactly `'true'` |
+| Settings UI: consent card, connected status, disconnect | yes, in **Draft PRs #56 / #57** — `SettingsPage.jsx` does import the card on those branches | **no** — the import exists in the bundle but the card never mounts. It now needs **both** `VITE_OUTLOOK_CONNECTION_ENABLED === 'true'` **and** the viewer to be the designated account (`VITE_OUTLOOK_PILOT_USER_ID`); both are unset. The first flag is **global**, so on its own it would show the card to every user — which is why the second condition exists. Neither authorizes anything: see §4a |
 | Mailbox import worker | yes, in **Draft PRs #58 / #59** — the metadata pass, the run orchestrator and a private endpoint | **no** — never deployed; the endpoint answers 501 `no_token_access_path` and is dormant behind two unset flags |
 | Suggestion review surface (show / edit / accept / dismiss) | yes, on `main` for Calendar; extended to Outlook in **Draft PR #59** | **no** — the whole surface is gated, and both `VITE_CALENDAR_INGESTION_ENABLED` and `VITE_OUTLOOK_REVIEW_ENABLED` are unset |
 | Scheduler for the worker or for context expiry | no | no |
-| Entra registration, client secret, token-encryption key, `OUTLOOK_DISCLOSURE_VERSION` | no | no |
+| Entra app **registration** | n/a (not a repository artefact) | **yes — registered**: client ID `af27b250-da0b-443e-bcac-38a67737d640`, work/school **and** personal accounts, one **Web** redirect URI `https://www.getfunnl.com/api/outlook-oauth-callback`, delegated `Mail.Read` + `User.Read`. The earlier personal-account registration is **superseded and must not be used.** |
+| Client secret, token-encryption key, fingerprint HMAC key, `OUTLOOK_DISCLOSURE_VERSION`, `OUTLOOK_WORKER_SECRET` | no | **no — none configured** |
+| `OUTLOOK_PILOT_USER_ID` (**function environment** — the authoritative gate) | n/a | **no — unset, so nobody can connect or be imported** |
+| `VITE_OUTLOOK_PILOT_USER_ID` (**build-time, presentation only** — hides the Settings card from other users) | n/a | **no — unset, so the card renders for nobody** |
+| Admin consent / a user ever completing the Microsoft prompt | n/a | **no — no round trip has ever happened**; nothing has been granted and no token has ever existed |
 
 So: the Outlook OAuth flow, the Settings consent card, connected status and disconnect all
 **exist in unmerged Drafts**, and the Settings card is even imported there. None of it is
 reachable: no Outlook Edge Function has ever been deployed, no Outlook OAuth flow has ever
-run, no Entra application exists to run it against, no consent has ever been collected, both
+run, no client secret or encryption key is configured for one to use, no consent has ever
+been collected and no Microsoft round trip has ever completed, both
 build flags are unset, both forward migrations are unapplied, and every Outlook table in
 Production holds zero rows. The public Privacy Policy date is the owner-approved
 **September 27, 2026** and must not change until the publication commit.
@@ -247,7 +254,7 @@ Draft branch and undeployed; it is not a Production fact.
 
 | # | Public claim | Evidence |
 |---|---|---|
-| 1 | Outlook is not available / not enabled / not in pilot | **No Outlook Edge Function is deployed** (12 deployed, none Outlook). The `outlook-oauth-start` / `outlook-oauth-callback` sources and their `config.toml` sections exist in **Draft PRs #54 / #55 only**, are unmerged and undeployed, and are inert unless `OUTLOOK_INTEGRATION_ENABLED` is exactly `true` (unset everywhere). The Settings card IS imported by `SettingsPage.jsx` on **Draft PRs #56 / #57**, and is gated by `OUTLOOK_CONNECTION_ENABLED`, which requires `VITE_OUTLOOK_CONNECTION_ENABLED === 'true'` and is unset in every environment — so the code ships in the bundle and the card never mounts. No Entra app, no secret, no flag, no worker, no scheduler; every Outlook table holds **zero rows** |
+| 1 | Outlook is not available / not enabled / not in pilot | **No Outlook Edge Function is deployed** (12 deployed, none Outlook). The `outlook-oauth-start` / `outlook-oauth-callback` sources and their `config.toml` sections exist in **Draft PRs #54 / #55 only**, are unmerged and undeployed, and are inert unless `OUTLOOK_INTEGRATION_ENABLED` is exactly `true` (unset everywhere). The Settings card IS imported by `SettingsPage.jsx` on **Draft PRs #56 / #57**, and is gated by `OUTLOOK_CONNECTION_ENABLED`, which requires `VITE_OUTLOOK_CONNECTION_ENABLED === 'true'` and is unset in every environment — so the code ships in the bundle and the card never mounts. An Entra app is now **registered** (client ID `af27b250-da0b-443e-bcac-38a67737d640`) but **no client secret, encryption key, fingerprint key, disclosure version or `OUTLOOK_PILOT_USER_ID` is configured**, nothing is deployed, no consent has ever been granted, there is no scheduler, and every Outlook table holds **zero rows**. Separately, the server-side **single-account pilot gate** refuses both connecting and importing for anyone but one designated account, and refuses **everyone** while that account is unset (§4a) |
 | 2 | Delegated `Mail.Read`, read-only, user-authorized | [Graph permissions reference](https://learn.microsoft.com/en-us/graph/permissions-reference) — "Read user mail", "Allows the app to read email in user mailboxes", admin consent **not** required; `GRAPH_MAIL_READ_SCOPE = 'Mail.Read'` in `outlookGraphTransport.js`; schema `microsoft_connections_active_requires_mail_read` |
 | 3 | Mail.Read is mailbox-wide and would technically permit bodies/attachments | Same reference — Mail.ReadBasic is the variant that *excludes* body and attachments; migration comment: "$select minimization in the worker never narrows the authority Mail.Read grants; the policy discloses it" |
 | 4 | Inbox and Sent Items only | `GRAPH_FOLDERS = ['inbox','sentitems']`; schema `oss_folder_check` |
@@ -276,12 +283,126 @@ Draft branch and undeployed; it is not a Production fact.
 
 ---
 
+## 4a. The single-account pilot restriction
+
+A first real pilot has to be limited to **one** designated mailbox. Before this change it
+could not be, and the reason is worth stating precisely, because two things look like
+controls and are not.
+
+**What was actually in place, traced:**
+
+| Gate | What it controls | Can it name one account? |
+|---|---|---|
+| `OUTLOOK_INTEGRATION_ENABLED` (`outlook-oauth-start`) | the OAuth start endpoint, for **every** authenticated Funnl user or none | no — all-or-nothing |
+| `reserve_due_outlook_connection` | picks whichever **active, consented, due** connection exists, for **any** user | no — it has no user predicate, so invoking the worker by hand restricts nothing: the reservation chooses the connection, not the caller |
+| `VITE_OUTLOOK_CONNECTION_ENABLED`, `VITE_OUTLOOK_REVIEW_ENABLED` | what the browser bundle renders | **no, and never could** — a flag in a browser cannot refuse a request |
+
+So a single-account pilot was **not** possible with the previous configuration, and
+account isolation must not be inferred from either a client-side flag or a manual worker
+invocation.
+
+**What is in place now.** One function-environment variable, `OUTLOOK_PILOT_USER_ID`,
+holding one user id, checked by one predicate
+(`supabase/functions/shared/outlookPilotGate.js`) at exactly two server-side points:
+
+1. **Connecting** — `outlook-oauth-start` checks it *after* authentication and *before*
+   any state is minted, answering `403 not_in_pilot`. Gating start is sufficient for
+   connecting at all: the callback only **reads** a state (it never mints one),
+   `microsoft_oauth_states` is `service_role`-only with RLS on, and
+   `finalize_microsoft_connection` takes the new connection's owner from the state row
+   (`v_uid := v_state.user_id`), never from the request. A refused user therefore has
+   nothing for the callback to finalize.
+2. **Importing** — enforced in the **reservation itself**, which is the only place it can
+   be. `reserve_due_outlook_connection` had no user predicate, so it handed the run
+   whichever connection was due for anybody, and the run could not learn whose it was
+   until it had loaded the context — a load that decrypts their tokens and, for an
+   **expired** access token, refreshes it at Microsoft's token endpoint and persists the
+   result. Checking afterwards was therefore too late. Measured, before the change, for a
+   non-pilot connection with an expired token:
+
+   ```
+   {"outcome":"not_in_pilot","tokenEndpointCalls":1,"tokenGrant":"refresh_token",
+    "accessTokenRewritten":true,"expiryRewritten":true,"tokenRowWritten":true,
+    "foldersLeased":2}
+   ```
+
+   A real provider call on an excluded user's behalf, and their stored credentials
+   rewritten. Migration `20261003000000` adds one optional `p_pilot_user_id` argument
+   and one conjunct, so only the designated account's due connection can be reserved;
+   the result also reports `user_id`, which lets the run verify the owner before loading
+   anything. The same measurement after:
+
+   ```
+   {"outcome":"none_due","tokenEndpointCalls":0,"accessTokenRewritten":false,
+    "expiryRewritten":false,"tokenRowWritten":false,"foldersLeased":0}
+   ```
+
+   `none_due` rather than a refusal, which is the stronger answer: an excluded
+   connection is no longer refused, it is never offered.
+
+   **It also fixes starvation.** The ordering is
+   `min(last_success_at) ASC NULLS FIRST, c.id ASC`. A connection that has never
+   succeeded sorts first, and being refused is not succeeding — so one excluded
+   connection returns to the head of the queue every `RETRY_BACKOFF_SECONDS` (300 s)
+   for ever, and at a five-minute cadence it takes every invocation. Reproduced over
+   three invocations as `committed, not_in_pilot, none_due`; after the change,
+   `committed, committed, committed`.
+
+   With `p_pilot_user_id` NULL the selection is byte-for-byte the previous one, which is
+   the behaviour to keep while no pilot is configured.
+
+**It fails closed, and that is the point.** With `OUTLOOK_PILOT_USER_ID` unset — or set to
+anything that is not a well-formed uuid, including `*` or `true` — **nobody** may connect
+or be imported. Enabling Outlook therefore requires deliberately naming the one account,
+rather than opening it to every authenticated user by forgetting a second variable. The
+variable is required configuration: the worker refuses to run without it, alongside the
+client secret and the two keys.
+
+**The browser flags are still not access control, and enabling them is not a pilot.**
+`VITE_OUTLOOK_CONNECTION_ENABLED` and `VITE_OUTLOOK_REVIEW_ENABLED` are compiled into
+the public bundle and apply to **every** signed-in user. Switching
+`VITE_OUTLOOK_CONNECTION_ENABLED` on would offer the Connect card to all of them and
+refuse all but one server-side — safe, but a dead end for everybody else. So the card's
+guard now also requires the viewer to be the designated account
+(`outlookPilotViewer` in `src/lib/outlookConnection.js`, reading a **separate**
+`VITE_OUTLOOK_PILOT_USER_ID`). That check is **presentation only**: it hides a dead end,
+it authorizes nothing, and a user can edit a value in their own browser. The
+authoritative gates are the two server-side ones above.
+
+Two consequences worth stating rather than discovering:
+
+* **The two variables can diverge.** A stale `VITE_OUTLOOK_PILOT_USER_ID` shows the card
+  to somebody the server will refuse, or hides it from the real pilot. Neither is a
+  security failure; both are confusing. Set them together.
+* **The bundle then contains one user id.** Not a credential — a signed-in user can
+  already read their own id — but it does reveal *which* account is piloting to anyone
+  who reads the bundle. Accepted for a one-account pilot, and a reason to unset it when
+  the pilot ends.
+
+**This is not a feature-flag framework** — one server variable, one predicate, three
+server-side enforcement points plus one presentation check. The normal Outlook flags
+stay off and are unchanged.
+
+**Evidence, and which kind each is.** A source assertion is not behavioural coverage, so
+the authorization boundary is executed in three places:
+
+| What | Where | Kind |
+|---|---|---|
+| Another authenticated user gets **403 `not_in_pilot`** with **zero state inserts**, no binding cookie and no authorization URL; the designated account mints exactly one state; unset or malformed designation refuses **everyone** | `tests/outlook-start-integration.test.js` (36 checks, `FUNNL_EDGE_INTEGRATION=1`) | **executed against the real Deno handler** in a container, with a sink that records every state insert |
+| The reservation selects **only** the designated account; an excluded connection is left with **no folder rows at all**; the starvation ordering; `none_due` rather than a fallback; the both-folder fence and the `narrows, never widens` cases; one function, `SECURITY DEFINER`, `search_path` pinned, `authenticated`/`anon` refused EXECUTE | `tests/sql/outlook-pilot-reservation-runtime.sql` | **executed against a real Postgres** with all 26 migrations |
+| An excluded connection with an **expired** token causes **no `/token` call, no rotation write, no lease and no cursor**; two due connections and every invocation goes to the pilot while the excluded row stays byte-for-byte unchanged | `tests/local/outlook-worker-token-access.mjs` (41 checks) | **executed through the real worker handler** over real HTTP, real PostgREST, real Postgres |
+| The predicate's fail-closed behaviour, the import-side refusal touching nothing, a reservation that omits `user_id` being refused, a malformed designation making **zero database calls**, and the **ordering** of the four gate points | `tests/outlook-pilot-gate.test.js` (24 checks) | behavioural on the predicate and the run; **structural** only for ordering, which no single request can show |
+
+All of it is **fixture-only** in the sense that matters: every Microsoft response is
+written by these tests, no mailbox is involved, nothing is deployed, and no consent has
+ever been collected.
+
 ## 5. Claims deliberately NOT made (and why)
 
 | Not claimed | Reason |
 |---|---|
 | A Funnl-side "context deleted after 30 days" promise | The schema **caps** `context_expires_at` at `created_at + 30 days`, but `expire_pending_outlook_context` is **unscheduled** — `pg_cron` is not installed, there is no `cron` schema, and no migration schedules it. Nothing currently erases expired context. Promising a schedule would be false. **Owner decision + implementation required.** |
-| "Your tokens are encrypted" as present tense | No OAuth flow has ever RUN (the Draft PR #54 code is undeployed and dormant, and no Entra app exists), so no token exists. The schema would store them encrypted; the policy says "would be". Token encryption is a **launch requirement**, below. |
+| "Your tokens are encrypted" as present tense | No OAuth flow has ever RUN (the Draft PR #54 code is undeployed and dormant, and although an Entra app is now registered, no client secret or token-encryption key is configured and no Microsoft round trip has ever completed), so no token exists. The schema would store them encrypted; the policy says "would be". Token encryption is a **launch requirement**, below. |
 | "Funnl employees never read your email" | Too absolute. The drafted wording allows support-with-permission, security investigation, and legal requirement — and separately discloses that Anthropic runs its own safety systems and may review flagged content under their policy. |
 | A specific history/lookback window | No import worker exists in any branch, so no lookback is implemented and none may be promised. |
 | That the Microsoft consent screen shows Funnl's Privacy/Terms links | The [consent experience](https://learn.microsoft.com/en-us/entra/identity-platform/application-consent-experience) documents the prompt's building blocks (publisher, verification badge, permissions, report link) and does not confirm Terms/Privacy links appear there. Confirm at registration. |
@@ -305,7 +426,10 @@ Draft branch and undeployed; it is not a Production fact.
 - [ ] 10. The Funnl-side history window **and** the context-erasure schedule — currently undefined
       and unenforced; see §5.
 - [x] 11. The launch-time publication date. **Owner/product decision: September 27, 2026** (supersedes September 20, 2026). If the merge happens after that day, the date must be updated again in the merge commit.
-- [ ] 12. Authorization for a one-account real-mailbox pilot.
+- [ ] 12. Authorization for a one-account real-mailbox pilot, **and which account**. The
+      restriction is now server-enforced and fails closed (§4a), so the pilot cannot begin
+      until the owner names one Funnl user id for `OUTLOOK_PILOT_USER_ID`. Until it is set,
+      nobody can connect or be imported — which is the intended resting state.
 - [ ] 13. Whether disconnect must also revoke the grant at Microsoft before the pilot. A local
       disconnect is implemented and verified; upstream revocation is not implemented and is not claimed.
 - [ ] 14. **The per-conversation continuation record — one policy bullet, and one product choice.**
@@ -354,12 +478,50 @@ Draft branch and undeployed; it is not a Production fact.
 
 ## 7. Downstream technical blockers (each needs its own authorization)
 
-1. Entra app registration.
-2. Redirect URIs and consent configuration.
+1. ~~Entra app registration.~~ **Done** — client ID `af27b250-da0b-443e-bcac-38a67737d640`,
+   registered on the organizational account, supporting work/school **and** personal
+   Microsoft accounts. The earlier personal-account registration is superseded and must
+   not be used. Registration alone changes nothing at runtime: no secret, no key, no
+   deployment, no consent, no round trip.
+2. **Redirect URI matches; consent configuration still open.** The single registered
+   **Web** redirect URI is `https://www.getfunnl.com/api/outlook-oauth-callback`, which is
+   character-for-character `EXPECTED_OUTLOOK_CALLBACK_URL` in
+   `supabase/functions/shared/microsoftOauthHelpers.js`; the start endpoint requires an
+   exact match, and the **Web** platform is what makes `response_mode=form_post` valid.
+   Delegated `Mail.Read` and `User.Read` are registered, matching
+   `OUTLOOK_OAUTH_SCOPES`. Still open: the Privacy Statement / Terms URLs (§6 item 9),
+   publisher verification, and whether anyone has consented — nobody has.
 3. Outlook fingerprint HMAC key and key version provisioning (injected today; does not exist).
 4. OAuth start and callback, including token encryption at rest and the refusal path.
 5. Worker, lease, bounded cursor reset, and candidate persistence — **including scheduling or
    otherwise invoking `expire_pending_outlook_context`**, without which §5's retention gap stands.
+5b. **The browser flags are global, and turning them on is not a pilot.**
+   `VITE_OUTLOOK_CONNECTION_ENABLED` applies to every signed-in user. The Settings card
+   additionally requires the viewer to be the designated account, which is
+   **presentation only** (§4a) — it hides a dead end rather than authorizing anybody.
+
+   **How the first controlled browser test actually runs**, in order:
+   1. The server gates are configured first: `OUTLOOK_PILOT_USER_ID` set to the one
+      Funnl user id, alongside the client secret and the two keys. Until it is set,
+      `outlook-oauth-start` answers **403 `not_in_pilot`** to everybody and the
+      reservation can select nobody.
+   2. `VITE_OUTLOOK_PILOT_USER_ID` is set to the **same** id and
+      `VITE_OUTLOOK_CONNECTION_ENABLED` to `true`, then the frontend is deployed. The
+      card is now rendered for that one account and for nobody else. If the two values
+      disagree, the card appears for somebody the server refuses — confusing, not
+      unsafe.
+   3. The pilot signs in **in their own browser** and uses the card. The request must
+      come from the browser, not from a terminal: the response sets
+      `__Host-fnl_ms_oauth_bind`, and the callback will not accept a state without the
+      matching cookie. This is also why the branded `/api/outlook-oauth-*` rewrites
+      must be live — a cookie set by `*.supabase.co` is never sent to
+      `www.getfunnl.com`.
+   4. They consent at Microsoft and land back on `/api/outlook-oauth-callback`.
+   5. The import is triggered by hand with `OUTLOOK_WORKER_SECRET`. No scheduler is
+      needed for this; one is needed only for unattended operation.
+   6. Afterwards, unset `VITE_OUTLOOK_PILOT_USER_ID` to take the id back out of the
+      public bundle.
+
 5a. Durable continuation is now built and dormant (migration `20261002000000`,
    `outlookContinuedPass.js`, `outlookRoundState.js`). It removes the old blocker that a mailbox
    past the per-invocation ceilings could never make progress. It adds §6.14 above — one policy

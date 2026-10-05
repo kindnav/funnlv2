@@ -166,7 +166,7 @@ function harness ({ now, advance, writeCostMs = 0 } = {}) {
   const rpc = async (name, args) => {
     calls.push({ name, args })
     if (name === 'reserve_due_outlook_connection') {
-      return { data: { result: 'reserved', connection_id: CONN, run_id: RUN }, error: null }
+      return { data: { result: 'reserved', connection_id: CONN, user_id: U1, run_id: RUN }, error: null }
     }
     if (name === 'renew_outlook_sync_lease') return { data: leaseLive, error: null }
     if (name === 'upsert_outlook_interaction_candidate') {
@@ -200,6 +200,7 @@ function harness ({ now, advance, writeCostMs = 0 } = {}) {
 
   const invoke = ({ fetchImpl, requestEntryMs }) => runOutlookImport({
     rpc,
+    pilotUserId: U1,
     encryptCursor: ENCRYPT,
     decryptCursor: DECRYPT,
     loadRunContext: context(),
@@ -216,6 +217,7 @@ function harness ({ now, advance, writeCostMs = 0 } = {}) {
     releases: () => calls.filter((c) => c.name === 'release_outlook_sync_lease'),
     setLease: (v) => { leaseLive = v },
     rpc,
+    pilotUserId: U1,
     // Results ACROSS invocations, which is what a resumed finalisation has to be judged on.
     results: () => ({ ...results }),
     distinctWritten: () => pendingRows.size,
@@ -568,6 +570,7 @@ test('REPRODUCED: a context load longer than the budget is bounded, not killed',
   const mb = bigMailbox({ inboxPages: 2, sentPages: 2, inboundAt: 1, outboundAt: 1 })
   const r = await runOutlookImport({
     rpc: h.rpc,
+pilotUserId: U1,
     encryptCursor: ENCRYPT,
     decryptCursor: DECRYPT,
     // The real loader checks the same deadline between its bounded steps; this stub stands
@@ -598,6 +601,7 @@ test('an invocation with no budget left does not even start the context load', a
   let loads = 0
   const r = await runOutlookImport({
     rpc: h.rpc,
+pilotUserId: U1,
     encryptCursor: ENCRYPT,
     decryptCursor: DECRYPT,
     loadRunContext: async () => { loads += 1; return context()() },
@@ -1049,7 +1053,7 @@ function expiryHarness () {
   const rpc = async (name, args) => {
     calls.push({ name, args })
     if (name === 'reserve_due_outlook_connection') {
-      return { data: { result: 'reserved', connection_id: CONN, run_id: RUN }, error: null }
+      return { data: { result: 'reserved', connection_id: CONN, user_id: U1, run_id: RUN }, error: null }
     }
     if (name === 'renew_outlook_sync_lease') return { data: true, error: null }
     if (name === 'upsert_outlook_interaction_candidate') {
@@ -1070,6 +1074,7 @@ function expiryHarness () {
     now: () => clock,
     invoke: ({ fetchImpl }) => runOutlookImport({
       rpc,
+      pilotUserId: U1,
       encryptCursor: ENCRYPT,
       decryptCursor: DECRYPT,
       loadRunContext: context(),

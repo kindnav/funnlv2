@@ -338,7 +338,8 @@ async function callWorker ({ secret, body, method = 'POST' } = {}) {
 
 // ── fixtures in the database ─────────────────────────────────────────────────
 
-async function seed ({ accessExpired = true, withAccessToken = true, withRefresh = true } = {}) {
+async function seed ({ accessExpired = true, withAccessToken = true, withRefresh = true,
+  owner = U1, alsoSeedExcluded = false } = {}) {
   const key = await importKeyFromBase64(TOKEN_KEY_B64, webcrypto.subtle)
   const acc = await encryptToken('FIXTURE-ACCESS-TOKEN-v1', key, { subtle: webcrypto.subtle })
   const ref = await encryptToken('FIXTURE-REFRESH-TOKEN-v1', key, { subtle: webcrypto.subtle })
@@ -356,23 +357,53 @@ BEGIN
   INSERT INTO public.microsoft_connections
     (user_id, ms_account_id, ms_tenant_id, account_type, ms_email, scopes,
      status, consented_at, consent_policy_version, token_expires_at)
-  VALUES ('${U1}', 'acct-1', 'consumers', 'personal', '${ME}',
+  VALUES ('${owner}', 'acct-1', 'consumers', 'personal', '${ME}',
           ARRAY['Mail.Read','User.Read','offline_access'], 'active', now(),
           'ol-disc-00000000000000000000000000000000', ${expiry})
   RETURNING id INTO k;
   INSERT INTO public.microsoft_tokens
     (connection_id, user_id, access_token_ciphertext, access_token_nonce,
      refresh_token_ciphertext, refresh_token_nonce, key_version, token_expires_at)
-  VALUES (k, '${U1}',
+  VALUES (k, '${owner}',
           ${withAccessToken ? `'${acc.ciphertext}'` : 'NULL'},
           ${withAccessToken ? `'${acc.nonce}'` : 'NULL'},
           ${withRefresh ? `'${ref.ciphertext}'` : 'NULL'},
           ${withRefresh ? `'${ref.nonce}'` : 'NULL'},
           1, ${expiry});
-  INSERT INTO public.contacts (user_id, name, email) VALUES ('${U1}', 'Ava Recruiter', '${RECRUITER}');
+  INSERT INTO public.contacts (user_id, name, email) VALUES ('${owner}', 'Ava Recruiter', '${RECRUITER}');
   -- The SAME address, tracked by a DIFFERENT user. Must never be matched.
-  INSERT INTO public.contacts (user_id, name, email) VALUES ('${U2}', 'Ava (someone else)', '${RECRUITER}');
+  INSERT INTO public.contacts (user_id, name, email)
+  VALUES ('${owner === U1 ? U2 : U1}', 'Ava (someone else)', '${RECRUITER}');
 END $seed$;`, { tuplesOnly: false })
+
+  // A SECOND due connection, owned by the EXCLUDED user, so both are due at once.
+  // Which one the reservation would prefer is decided by
+  // `min(last_success_at) ASC NULLS FIRST, c.id ASC`, and that ORDERING is proved
+  // precisely in tests/sql/outlook-pilot-reservation-runtime.sql, where
+  // last_success_at can be set directly. What this file proves is the consequence
+  // over real HTTP: the pilot still commits, and the excluded connection is never
+  // reserved, read, refreshed or written.
+  if (alsoSeedExcluded) {
+    psql(`
+DO $seed2$
+DECLARE k2 uuid;
+BEGIN
+  INSERT INTO public.microsoft_connections
+    (user_id, ms_account_id, ms_tenant_id, account_type, ms_email, scopes,
+     status, consented_at, consent_policy_version, token_expires_at)
+  VALUES ('${U2}', 'acct-excluded', 'consumers', 'personal', 'excluded@getfunnl.test',
+          ARRAY['Mail.Read','User.Read','offline_access'], 'active', now(),
+          'ol-disc-00000000000000000000000000000000', ${expiry})
+  RETURNING id INTO k2;
+  INSERT INTO public.microsoft_tokens
+    (connection_id, user_id, access_token_ciphertext, access_token_nonce,
+     refresh_token_ciphertext, refresh_token_nonce, key_version, token_expires_at)
+  VALUES (k2, '${U2}', '${acc.ciphertext}', '${acc.nonce}',
+          '${ref.ciphertext}', '${ref.nonce}', 1, ${expiry});
+  INSERT INTO public.contacts (user_id, name, email)
+  VALUES ('${U2}', 'Ava Recruiter', '${RECRUITER}');
+END $seed2$;`, { tuplesOnly: false })
+  }
 }
 
 function teardown () {
@@ -417,6 +448,9 @@ async function main () {
     fingerprintKey: FINGERPRINT_KEY,
     keyVersion: 1,
     scope: 'Mail.Read User.Read offline_access',
+    // Required configuration since the pilot gate landed: without it the handler
+    // refuses `config_missing` before reading a row. U1 owns the seeded connection.
+    pilotUserId: U1,
   })
 
   // ══ the deployed constants are the real ones ══════════════════════════════
@@ -1451,6 +1485,173 @@ END $fill$;`, { tuplesOnly: false })
     assert.strictEqual(graph6.calls.length, 0, 'no mailbox read may happen on a lost lease')
     assert.strictEqual(one(`SELECT count(*) FROM public.interaction_candidates;`), '0')
   })
+  // ══ PILOT ISOLATION: what happens to an EXCLUDED user's connection ═══════
+  // The reservation has no user predicate, so it hands the run whichever connection
+  // is DUE - for anyone. These cases measure what the run does with one that belongs
+  // to somebody who is not the designated pilot account, through the real handler,
+  // real PostgREST and a real Postgres.
+  console.log('\nan EXCLUDED user is refused before any Microsoft or database effect')
+
+  await test('a non-pilot connection with an EXPIRED token: no provider call, no write',
+    async () => {
+      // Only U2 has a due connection; U1 is the designated pilot. The token is EXPIRED,
+      // so the context load would refresh it at Microsoft and persist the rotation. Every
+      // side effect is RECORDED first and asserted afterwards, so one run reports all of
+      // them instead of stopping at whichever fails first.
+      await seed({ accessExpired: true, owner: U2 })
+      const ports = makePorts()
+      const t = tokenFixture()
+      const g = graphFixture()
+      currentEnv = { ...baseEnv(), pilotUserId: U1 }
+      currentDeps = {
+        tokenUrl: FIXTURE_TOKEN_URL,
+        fetchImpl: t.fetchImpl,
+        graphFetchImpl: g.fetchImpl,
+        select: ports.select,
+        rpc: ports.rpc,
+      }
+      const snap = () => ({
+        acc: one(`SELECT coalesce(access_token_ciphertext,'NONE')
+          FROM public.microsoft_tokens WHERE user_id='${U2}';`),
+        exp: one(`SELECT coalesce(token_expires_at::text,'NONE')
+          FROM public.microsoft_tokens WHERE user_id='${U2}';`),
+        upd: one(`SELECT updated_at::text FROM public.microsoft_tokens
+          WHERE user_id='${U2}';`),
+      })
+      const before = snap()
+
+      const r = await callWorker({ secret: WORKER_SECRET })
+      const after = snap()
+
+      const observed = {
+        outcome: r.body?.run?.outcome ?? r.body?.error ?? r.status,
+        tokenEndpointCalls: t.calls.length,
+        tokenGrant: t.calls[0]?.grant ?? null,
+        graphCalls: g.calls.length,
+        accessTokenRewritten: after.acc !== before.acc,
+        expiryRewritten: after.exp !== before.exp,
+        tokenRowWritten: after.upd !== before.upd,
+        foldersLeased: Number(one(`SELECT count(*) FROM public.outlook_sync_state
+          WHERE user_id='${U2}';`)),
+        candidates: Number(one(`SELECT count(*) FROM public.interaction_candidates
+          WHERE user_id='${U2}';`)),
+        interactions: Number(one(`SELECT count(*) FROM public.interactions
+          WHERE user_id='${U2}';`)),
+        cursorsAdvanced: Number(one(`SELECT count(*) FROM public.outlook_sync_state
+          WHERE user_id='${U2}' AND (delta_link_ciphertext IS NOT NULL
+             OR next_link_ciphertext IS NOT NULL);`)),
+      }
+      console.log(`      observed: ${JSON.stringify(observed)}`)
+
+      assert.deepStrictEqual(observed, {
+        // `none_due`, not `not_in_pilot`, and that is the stronger answer: the
+        // reservation is now narrowed to the designated account, so an excluded
+        // connection is not refused - it is never offered. From the worker's side
+        // there is simply nothing due. Before the change this read
+        // {"outcome":"not_in_pilot","tokenEndpointCalls":1,
+        //  "tokenGrant":"refresh_token","accessTokenRewritten":true,
+        //  "expiryRewritten":true,"tokenRowWritten":true,"foldersLeased":2}.
+        outcome: 'none_due',
+        // NO MICROSOFT CALL. This is what the earlier placement could not give: the
+        // check sat AFTER loadRunContext, which refreshes an expired access token at
+        // Microsoft and persists the rotated refresh token before returning.
+        tokenEndpointCalls: 0,
+        tokenGrant: null,
+        graphCalls: 0,
+        // NO WRITE of any kind on their rows.
+        accessTokenRewritten: false,
+        expiryRewritten: false,
+        tokenRowWritten: false,
+        // AND NEVER EVEN RESERVED - no lease was taken on their folder rows.
+        foldersLeased: 0,
+        candidates: 0,
+        interactions: 0,
+        cursorsAdvanced: 0,
+      })
+    })
+  await test('the excluded connection is never even RESERVED', async () => {
+    // The strongest form: not refused after being leased, but never chosen. Measured
+    // by whether the reservation left a lease on its folder rows at all.
+    const leased = one(`SELECT count(*) FROM public.outlook_sync_state WHERE user_id='${U2}';`)
+    assert.strictEqual(leased, '0',
+      `the excluded connection had ${leased} folder rows created by a reservation`)
+  })
+
+  await test('two due connections: the PILOT progresses, the excluded one untouched',
+    async () => {
+      // U1 (the pilot) and U2 (excluded) both have an active, consented, due
+      // connection with an expired token. Invoked repeatedly, every invocation must
+      // go to the pilot and none may be spent on - or leak into - the excluded one.
+      await seed({ accessExpired: true, owner: U1, alsoSeedExcluded: true })
+      const ports = makePorts()
+      const picks = []
+      const excludedTokenCalls = []
+      const excludedBefore = one(`SELECT access_token_ciphertext || updated_at::text
+        FROM public.microsoft_tokens WHERE user_id='${U2}';`)
+      for (let i = 0; i < 3; i++) {
+        const t = tokenFixture()
+        const g = graphFixture()
+        currentEnv = { ...baseEnv(), pilotUserId: U1 }
+        currentDeps = {
+          tokenUrl: FIXTURE_TOKEN_URL,
+          fetchImpl: t.fetchImpl,
+          graphFetchImpl: g.fetchImpl,
+          select: ports.select,
+          rpc: ports.rpc,
+        }
+        const r = await callWorker({ secret: WORKER_SECRET })
+        picks.push(r.body?.run?.outcome ?? r.body?.error ?? r.status)
+        excludedTokenCalls.push(t.calls.length)
+        // Hand the PILOT's lease back so the next invocation is a real choice
+        // between two due connections rather than one blocked by a live lease.
+        psql(`UPDATE public.outlook_sync_state SET sync_status='idle',
+          sync_lease_until=NULL, next_retry_at=NULL, last_success_at=NULL
+          WHERE user_id='${U1}';`, { tuplesOnly: false })
+      }
+      console.log(`      picks: ${JSON.stringify(picks)}`)
+
+      // NO invocation was consumed by the excluded account.
+      assert.ok(!picks.includes('not_in_pilot'),
+        `an invocation went to the excluded connection: ${JSON.stringify(picks)}`)
+      // The pilot made real progress.
+      assert.ok(picks.includes('committed'),
+        `the pilot never committed: ${JSON.stringify(picks)}`)
+      assert.strictEqual(one(`SELECT count(*) FROM public.interaction_candidates
+        WHERE user_id='${U1}' AND source='outlook' AND status='pending';`), '1')
+
+      // THE EXCLUDED CONNECTION IS UNTOUCHED, on every measure.
+      assert.strictEqual(one(`SELECT count(*) FROM public.outlook_sync_state
+        WHERE user_id='${U2}';`), '0', 'the excluded connection was reserved')
+      assert.strictEqual(one(`SELECT count(*) FROM public.interaction_candidates
+        WHERE user_id='${U2}';`), '0')
+      assert.strictEqual(one(`SELECT count(*) FROM public.interactions
+        WHERE user_id='${U2}';`), '0')
+      // Their stored credentials are byte-for-byte what they were.
+      assert.strictEqual(one(`SELECT access_token_ciphertext || updated_at::text
+        FROM public.microsoft_tokens WHERE user_id='${U2}';`), excludedBefore,
+      'the excluded token row was rewritten')
+    })
+  await test('with NO designated pilot, nothing is reserved at all', async () => {
+    await seed({ accessExpired: true, owner: U1 })
+    const ports = makePorts()
+    const t = tokenFixture()
+    currentEnv = { ...baseEnv(), pilotUserId: '*' }
+    currentDeps = {
+      tokenUrl: FIXTURE_TOKEN_URL,
+      fetchImpl: t.fetchImpl,
+      graphFetchImpl: graphFixture().fetchImpl,
+      select: ports.select,
+      rpc: ports.rpc,
+    }
+    const r = await callWorker({ secret: WORKER_SECRET })
+    assert.notStrictEqual(r.status, 200, r.raw.slice(0, 200))
+    assert.deepStrictEqual(t.calls, [])
+    assert.strictEqual(one(`SELECT count(*) FROM public.outlook_sync_state;`), '0',
+      'a malformed designation still reserved something')
+  })
+
+console.log(`\n${passed + failed} checks: ${passed} passed, ${failed} failed\n`)
+if (failed > 0) process.exitCode = 1
 }
 
 try { await main() } catch (e) { console.error(`\nHARNESS ERROR: ${e.message}`); failed++ }
@@ -1458,5 +1659,3 @@ finally {
   if (server) server.close()
   teardown()
 }
-console.log(`\n${passed + failed} checks: ${passed} passed, ${failed} failed\n`)
-if (failed > 0) process.exitCode = 1

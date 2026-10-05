@@ -74,10 +74,16 @@ test('the module-level flag is false outside Vite (fail-safe default)', () => {
   assert.strictEqual(OUTLOOK_CONNECTION_ENABLED, false)
 })
 
-test('Settings renders the card ONLY behind that flag', () => {
-  assert.ok(SETTINGS.includes('OUTLOOK_CONNECTION_ENABLED && ('),
+test('Settings renders the card ONLY behind that flag AND for the pilot viewer', () => {
+  // The flag is global: on its own it would offer the card to every signed-in user,
+  // all but one of whom outlook-oauth-start refuses with 403 not_in_pilot. So the
+  // guard now also requires the viewer to be the designated pilot. That second part
+  // is PRESENTATION ONLY - it hides a dead end, it does not authorize anything.
+  assert.ok(SETTINGS.includes('OUTLOOK_CONNECTION_ENABLED &&'),
     'the card must be inside a flag guard')
-  const guard = SETTINGS.indexOf('OUTLOOK_CONNECTION_ENABLED && (')
+  assert.ok(SETTINGS.includes('outlookPilotViewer(OUTLOOK_PILOT_VIEWER_ID, user?.id)'),
+    'the guard must also require the designated pilot viewer')
+  const guard = SETTINGS.indexOf('OUTLOOK_CONNECTION_ENABLED &&')
   const mount = SETTINGS.indexOf('<OutlookConnectionCard />')
   assert.ok(guard > 0 && mount > guard, 'the mount must sit inside the guard')
   // It must not share the Calendar flag: the two roll out independently.

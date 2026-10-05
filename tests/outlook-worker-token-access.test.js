@@ -464,6 +464,10 @@ const goodEnv = () => ({
   integrationEnabled: 'true', workerEnabled: 'true', workerSecret: SECRET,
   clientId: 'c', clientSecret: 'cs', tokenKeyB64: KEY_B64,
   fingerprintKey: { current: { keyBytes: new Uint8Array(32), keyVersion: 1 } }, keyVersion: 1,
+  // The designated pilot account. REQUIRED, like the other four: the run's pilot gate
+  // fails closed without it, so the handler refuses one step earlier and with a clearer
+  // code than a reserved-then-released lease.
+  pilotUserId: U1,
 })
 
 test('the flags still come first, and a correct secret does not change a disabled answer', async () => {
@@ -682,7 +686,7 @@ function slowRun ({ pagesPerFolder, contextMs = 200_000, writeMs = 5_000, pageMs
 
   const rpc = async (name) => {
     if (name === 'reserve_due_outlook_connection') {
-      return { data: { result: 'reserved', connection_id: CONN, run_id: RUN }, error: null }
+      return { data: { result: 'reserved', connection_id: CONN, user_id: U1, run_id: RUN }, error: null }
     }
     if (name === 'renew_outlook_sync_lease') {
       renewals += 1
@@ -741,6 +745,7 @@ function slowRun ({ pagesPerFolder, contextMs = 200_000, writeMs = 5_000, pageMs
 
   const run = () => runOutlookImport({
     rpc: withRounds(rpc, makeRoundStore()),
+    pilotUserId: U1,
     encryptCursor: ENCRYPT_CURSOR,
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext,
@@ -794,7 +799,7 @@ test('a run slow enough to need renewal DURING the writes still commits', async 
   let renewals = 0
   const rpc = async (name) => {
     if (name === 'reserve_due_outlook_connection') {
-      return { data: { result: 'reserved', connection_id: CONN, run_id: RUN }, error: null }
+      return { data: { result: 'reserved', connection_id: CONN, user_id: U1, run_id: RUN }, error: null }
     }
     if (name === 'renew_outlook_sync_lease') {
       renewals += 1
@@ -835,6 +840,7 @@ test('a run slow enough to need renewal DURING the writes still commits', async 
   }
   const r = await runOutlookImport({
     rpc: withRounds(rpc, makeRoundStore()),
+    pilotUserId: U1,
     encryptCursor: ENCRYPT_CURSOR,
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext: async () => ({
@@ -861,7 +867,7 @@ test('the lease is renewed BEFORE context loading, not after', async () => {
   const rpc = async (name) => {
     order.push(name)
     if (name === 'reserve_due_outlook_connection') {
-      return { data: { result: 'reserved', connection_id: CONN, run_id: RUN }, error: null }
+      return { data: { result: 'reserved', connection_id: CONN, user_id: U1, run_id: RUN }, error: null }
     }
     if (name === 'renew_outlook_sync_lease') return { data: true, error: null }
     if (name === 'release_outlook_sync_lease') return { data: true, error: null }
@@ -869,6 +875,7 @@ test('the lease is renewed BEFORE context loading, not after', async () => {
   }
   await runOutlookImport({
     rpc: withRounds(rpc, makeRoundStore()),
+    pilotUserId: U1,
     encryptCursor: ENCRYPT_CURSOR,
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext: async () => {
@@ -896,7 +903,7 @@ test('a FAILED renewal stops the run and advances NEITHER cursor', async () => {
     let renewCalls = 0
     const rpc = async (name, args) => {
       if (name === 'reserve_due_outlook_connection') {
-        return { data: { result: 'reserved', connection_id: CONN, run_id: RUN }, error: null }
+        return { data: { result: 'reserved', connection_id: CONN, user_id: U1, run_id: RUN }, error: null }
       }
       if (name === 'renew_outlook_sync_lease') {
         renewCalls += 1
@@ -911,6 +918,7 @@ test('a FAILED renewal stops the run and advances NEITHER cursor', async () => {
     }
     const r = await runOutlookImport({
       rpc: withRounds(rpc, makeRoundStore()),
+      pilotUserId: U1,
       encryptCursor: ENCRYPT_CURSOR,
       decryptCursor: DECRYPT_CURSOR,
       loadRunContext: async () => ({
@@ -1148,7 +1156,7 @@ test('an overflowing set NEVER silently treats a tracked contact as unknown', as
   let released = null
   const rpc = async (name, args) => {
     if (name === 'reserve_due_outlook_connection') {
-      return { data: { result: 'reserved', connection_id: CONN, run_id: RUN }, error: null }
+      return { data: { result: 'reserved', connection_id: CONN, user_id: U1, run_id: RUN }, error: null }
     }
     if (name === 'renew_outlook_sync_lease') return { data: true, error: null }
     if (name === 'release_outlook_sync_lease') { released = args; return { data: true, error: null } }
@@ -1156,6 +1164,7 @@ test('an overflowing set NEVER silently treats a tracked contact as unknown', as
   }
   const r = await runOutlookImport({
     rpc: withRounds(rpc, makeRoundStore()),
+    pilotUserId: U1,
     encryptCursor: ENCRYPT_CURSOR,
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext: loaderFor(contactPort(MAX_CONTACTS_LOADED + 1)),
@@ -1217,7 +1226,7 @@ function leaseScenario ({
     clock += RPC_ROUND_TRIP_MS
     if (name === 'reserve_due_outlook_connection') {
       leaseUntil = started + LEASE_SECONDS * 1000
-      return { data: { result: 'reserved', connection_id: CONN, run_id: RUN }, error: null }
+      return { data: { result: 'reserved', connection_id: CONN, user_id: U1, run_id: RUN }, error: null }
     }
     if (name === 'renew_outlook_sync_lease') {
       renewals += 1
@@ -1275,6 +1284,7 @@ function leaseScenario ({
 
   const run = () => runOutlookImport({
     rpc: withRounds(rpc, makeRoundStore()),
+    pilotUserId: U1,
     encryptCursor: ENCRYPT_CURSOR,
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext: async () => {

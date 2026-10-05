@@ -60,6 +60,8 @@
 //   release_failed   every intended write landed but the release did not confirm, so
 //                    the cursor state is UNKNOWN and is not reported as advanced
 //   released_error   the pass itself threw; the lease is released as an error
+//   not_in_pilot     the reserved connection is not the designated pilot account; the
+//                    lease is released and nothing is read, written or advanced
 //
 // PARTIAL WRITES ARE REPORTED, NOT ERASED. A run reports three numbers - intended,
 // accepted and created - so "two of five landed, then one was refused" is legible.
@@ -95,6 +97,7 @@ import {
 import {
   ROUND_TTL_SECONDS, finalizeConversation, summarizeRoundProgress,
 } from './outlookRoundState.js'
+import { checkPilotUser, designatedPilotUser } from './outlookPilotGate.js'
 
 /**
  * Lease length and due interval for one run. Bounded by the RPC's own checks, which
@@ -289,6 +292,10 @@ export const RUN_OUTCOMES = Object.freeze([
   // owns the connection now. Nothing is committed and no cursor is claimed.
   'lease_lost',
   'released_error',      // the pass threw; the lease was released as an error
+  // The reserved connection does not belong to the designated pilot account. Nothing
+  // is read, written or advanced. See outlookPilotGate.js for why the reservation
+  // cannot enforce this itself: it picks whichever connection is DUE, for any user.
+  'not_in_pilot',
 ])
 
 /**
@@ -398,10 +405,16 @@ export function partitionPlan (plan) {
  *        measured from here, not from the reservation, because the platform's 150s idle
  *        timeout and wall clock started before this module was reached. Omitted in tests
  *        that do not exercise the budget, in which case no invocation deadline applies.
+ * @param {string} p.pilotUserId  the designated pilot account, from the function
+ *        environment (OUTLOOK_PILOT_USER_ID). A reserved connection belonging to anyone
+ *        else is released untouched. Absent or malformed means NOBODY is importable:
+ *        the gate fails closed, by design.
  * @param {object} p.deps  passed through to the round slice (fetchImpl, etc.)
  */
 export async function runOutlookImport (p) {
-  const { rpc, encryptCursor, decryptCursor, loadRunContext, requestEntryMs, deps } = p || {}
+  const {
+    rpc, encryptCursor, decryptCursor, loadRunContext, requestEntryMs, pilotUserId, deps,
+  } = p || {}
   if (typeof rpc !== 'function') throw new Error('rpc_not_injected')
   if (typeof encryptCursor !== 'function') throw new Error('encrypt_cursor_not_injected')
   if (typeof decryptCursor !== 'function') throw new Error('decrypt_cursor_not_injected')
@@ -413,10 +426,36 @@ export async function runOutlookImport (p) {
   // response would overstate what is left by a whole round trip, which is exactly how a
   // run with a 285s context path lost a 300s lease it believed ran to 315s.
   const clock = typeof deps?.now === 'function' ? deps.now : Date.now
+
+  // ── THE PILOT GATE, PART 1: before a single RPC ──────────────────────────
+  // A missing or malformed designation refuses here, with NOTHING reserved and no
+  // database call made at all. It also has to happen before the reservation because
+  // the designation is about to be passed to it as a uuid: 'true' or '*' would not
+  // narrow the selection, it would make the call fail on a cast.
+  const designated = designatedPilotUser(pilotUserId)
+  if (designated === null) {
+    return {
+      outcome: 'not_in_pilot',
+      reason: 'pilot_not_configured',
+      intended: 0,
+      accepted: 0,
+      created: 0,
+      cursorsAdvanced: 0,
+    }
+  }
+
   const reserveStartedMs = clock()
+  // ── THE PILOT GATE, PART 2: the reservation itself is narrowed ───────────
+  // Without p_pilot_user_id the reservation takes whichever connection is DUE, for
+  // ANY user - and then the run could only discover whose it was after loading the
+  // context, which refreshes an expired token at Microsoft and persists the rotation.
+  // Narrowing it here is what makes a non-pilot account cost zero provider calls and
+  // zero writes, and what stops an excluded connection taking the pilot's turn every
+  // time its backoff elapses. See migration 20261003000000.
   const reserved = await rpc('reserve_due_outlook_connection', {
     p_lease_seconds: LEASE_SECONDS,
     p_due_after_seconds: DUE_AFTER_SECONDS,
+    p_pilot_user_id: designated,
   })
   if (reserved?.error || !isPlainObject(reserved?.data)) {
     return { outcome: 'reserve_failed' }
@@ -449,6 +488,26 @@ export async function runOutlookImport (p) {
       })
     } catch {
       return { data: null, error: { code: 'release_threw' } }
+    }
+  }
+
+  // ── THE PILOT GATE, PART 3: verify what was handed back ──────────────────
+  // Part 2 narrowed the reservation, so this should be unreachable. It is kept
+  // because it is cheap and because it does not take the reservation's word for the
+  // narrowing: a function that accepted p_pilot_user_id and ignored it, or an older
+  // one that does not report user_id at all, would otherwise go unnoticed. Still
+  // BEFORE loadRunContext, so a wrong answer costs no token refresh and no rotation.
+  const reservedOwner = checkPilotUser(designated, reserved.data.user_id)
+  if (!reservedOwner.ok) {
+    await release('idle', false, null, reservedOwner.reason, RETRY_BACKOFF_SECONDS)
+    return {
+      outcome: 'not_in_pilot',
+      reason: reservedOwner.reason,
+      connectionId,
+      intended: 0,
+      accepted: 0,
+      created: 0,
+      cursorsAdvanced: 0,
     }
   }
 
@@ -556,6 +615,29 @@ export async function runOutlookImport (p) {
       deadlineMs: invocationDeadlineMs,
       now: clock,
     })
+
+    // ── THE PILOT GATE, PART 4: the last backstop ────────────────────────────
+    // Parts 1-3 already decided this, and they ran before any token refresh or write.
+    // This one differs in WHERE it gets the owner: from microsoft_connections itself,
+    // via the context load, rather than from the reservation's own answer. It is the
+    // only check that does not depend on that RPC being truthful.
+    //
+    // It is NOT the enforcement point. Reaching it with a non-pilot connection would
+    // mean parts 2 and 3 both failed, and by then the load has already refreshed an
+    // expired token at Microsoft - which is exactly the defect this ordering fixed.
+    const pilot = checkPilotUser(designated, context.userId)
+    if (!pilot.ok) {
+      await release('idle', false, null, pilot.reason, RETRY_BACKOFF_SECONDS)
+      return {
+        outcome: 'not_in_pilot',
+        reason: pilot.reason,
+        connectionId,
+        intended: 0,
+        accepted: 0,
+        created: 0,
+        cursorsAdvanced: 0,
+      }
+    }
 
     // ── where did the last invocation get to? ────────────────────────────────
     await ensureLease(PROGRESS_STEP_MS)

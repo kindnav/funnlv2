@@ -432,10 +432,16 @@ test('the packet records consent mechanics, decisions and blockers', () => {
     'the packet must state the server value is unset')
   assert.ok(/DRAFT FOR OWNER\/LEGAL REVIEW/.test(PACKET))
   assert.ok(/finalize_microsoft_connection/.test(PACKET), 'consent mechanics cited to the RPC')
-  for (const item of ['Entra registration', 'HMAC key', 'OAuth start and callback',
+  for (const item of ['HMAC key', 'OAuth start and callback',
     'Review UI', 'Pilot authorization', 'Scheduling']) {
     assert.ok(new RegExp(item, 'i').test(PACKET), `blocker listed: ${item}`)
   }
+  // Entra registration is no longer a blocker - an app IS registered - but the item must
+  // stay listed and marked done rather than quietly disappearing, so the packet still
+  // accounts for it.
+  assert.ok(/Entra app registration/i.test(PACKET), 'blocker listed: Entra registration')
+  assert.ok(/~~Entra app registration\.~~ \*\*Done\*\*/.test(PACKET),
+    'registration must be recorded as done, not merely dropped')
   // Twelve recorded owner/legal decisions. Item 11 (the publication date) is now decided,
   // so count every box and require the rest to still be open.
   const allBoxes = (PACKET.match(/- \[( |x)\]/g) || []).length
@@ -465,7 +471,22 @@ test('the packet does not claim the INTEGRATION is live', () => {
   // must stay stated whatever else changes.
   assert.ok(/zero rows/.test(PACKET))
   assert.ok(/never been deployed|never deployed/i.test(PACKET))
-  assert.ok(/no Entra application exists/i.test(PACKET))
+  // An Entra app IS now registered, so the old `no Entra application exists` pin is
+  // false and has been replaced. What must stay stated is the DISTINCTION: registration
+  // is not credentials, not consent, not deployment, and not a completed round trip.
+  assert.ok(!/no Entra application exists/i.test(PACKET),
+    'the packet must not repeat the superseded claim that no Entra app exists')
+  assert.ok(/registration is not the same as credentials/i.test(PACKET),
+    'the packet must distinguish registration from credentials and consent')
+  assert.ok(/no client secret/i.test(PACKET), 'no client secret is configured')
+  assert.ok(/round trip has (ever )?(happened|completed)/i.test(PACKET),
+    'the packet must state that no Microsoft round trip has completed')
+  // And the registered values are recorded, so a later reader cannot confuse this app
+  // with the superseded personal-account registration.
+  assert.ok(/af27b250-da0b-443e-bcac-38a67737d640/.test(PACKET),
+    'the packet records which application is registered')
+  assert.ok(/superseded/i.test(PACKET),
+    'the packet records that the earlier personal-account registration is superseded')
   assert.ok(/no consent has ever been collected/i.test(PACKET))
   assert.ok(/both build flags are unset/i.test(PACKET) || /flags are off/i.test(PACKET))
   assert.ok(/unapplied/i.test(PACKET), 'the forward migrations must be marked unapplied')
