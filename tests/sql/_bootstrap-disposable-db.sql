@@ -42,13 +42,27 @@
 --
 -- WHAT IT DOES NOT AND CANNOT REPRODUCE
 --   * GoTrue itself: no sign-up, no password, no session issuance.
---   * Kong, and therefore the `apikey` gateway check.
 --   * The exact `auth.uid()` body deployed in Production. This image's version
---     reads `request.jwt.claim.sub`. A harness that drives PostgREST must set
---     the claim in the form this definition reads; see
---     tests/local/outlook-rpc-postgrest.mjs, which states that limit where it
---     matters.
---   * A browser. Nothing here is an end-to-end test of the application.
+--     reads the SINGULAR legacy claim `request.jwt.claim.sub`; Production's reads
+--     the JSON form, `request.jwt.claims ->> 'sub'`, which is what PostgREST v14
+--     actually sets. Two remedies, and which one applies depends on the harness:
+--       - a harness that issues its own SQL can set the claim in the form this
+--         definition reads; see tests/local/outlook-rpc-postgrest.mjs, which states
+--         that limit where it matters;
+--       - a harness driven through a BROWSER cannot. supabase-js sends a JWT and
+--         PostgREST decides the claim form, so there is no place to set the
+--         singular one. Such a harness must instead REDEFINE auth.uid() to read
+--         the JSON form, i.e. to match Production. Without that, auth.uid() is
+--         NULL for every request, RLS hides every row, and the application renders
+--         as though the session had expired - which looks like a product defect and
+--         is not one. tests/local/outlook-pilot-browser.mjs does exactly this and
+--         says so where it does it.
+--   * Kong's `apikey` gateway check, and GoTrue's own session issuance - a browser
+--     harness has to stand in a local sink for the `/auth/v1/*` endpoints.
+--
+-- A BROWSER PASS IS POSSIBLE AGAINST THIS BOOTSTRAP, with those two substitutions,
+-- and tests/local/outlook-pilot-browser.mjs is one. What stays out of reach is
+-- Production itself: the hosted GoTrue, Kong, and the deployed Edge Functions.
 
 -- `auth.users` is owned by supabase_auth_admin, not postgres, in this image and
 -- in a real project, and `postgres` may not SET ROLE to it. This file must

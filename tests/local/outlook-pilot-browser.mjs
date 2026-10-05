@@ -1,0 +1,833 @@
+#!/usr/bin/env node
+// THE FIRST-PILOT UI, DRIVEN IN A REAL BROWSER.
+//
+// Real Chrome over the DevTools Protocol (no automation framework; Node 24's global
+// WebSocket is the only thing needed), serving the REAL built bundle over HTTPS on the
+// canonical host, against the REAL PostgREST and a REAL Postgres with every migration.
+//
+// WHY THE CANONICAL HOST. resolveOauthStartUrl refuses any origin but
+// https://www.getfunnl.com, because a binding cookie set elsewhere can never reach the
+// branded callback. So the browser is told to resolve that host to this machine
+// (--host-resolver-rules), and a local HTTPS server answers with a self-signed cert. The
+// app's own origin guard is therefore SATISFIED, not bypassed.
+//
+// WHAT IS STUBBED, AND WHAT IS NOT:
+//   * GoTrue is stubbed by a local sink - a real sign-in POST happens, and the session
+//     supabase-js stores is a JWT minted with the PostgREST secret, so every later read
+//     is a genuine RLS-enforced request.
+//   * /rest/v1/* is PROXIED to the real PostgREST. Nothing about the data path is faked.
+//   * /api/outlook-oauth-start is stubbed: the Edge Function is not deployed and must not
+//     be. Its response is a Microsoft-SHAPED url, and the navigation to it is intercepted
+//     and blocked, so nothing leaves this machine.
+//
+// RUN: node tests/local/outlook-pilot-browser.mjs
+
+import { spawn, execFileSync, spawnSync } from 'node:child_process'
+import { createServer as createHttp } from 'node:http'
+import { createServer as createHttps } from 'node:https'
+import { readFileSync, existsSync, mkdirSync, rmSync, readdirSync } from 'node:fs'
+import { createHmac, randomBytes } from 'node:crypto'
+import { join, extname } from 'node:path'
+import { pathToFileURL } from 'node:url'
+import { tmpdir } from 'node:os'
+import { createServer as netCreateServer } from 'node:net'
+
+const HERE = import.meta.dirname
+const ROOT = join(HERE, '..', '..')
+// The self-signed cert and the two built bundles live OUTSIDE the repo: they are
+// throwaway artefacts, and a minified bundle inside tests/ makes the linter report
+// thousands of warnings in generated code.
+const WORK = join(tmpdir(), 'funnl-pilot-browser')
+const PG = 'funnl-pilot-browser-pg'
+const REST = 'funnl-pilot-browser-rest'
+const NET = 'funnl-pilot-browser-net'
+const PG_IMAGE = 'public.ecr.aws/supabase/postgres:17.6.1.140'
+const REST_IMAGE = 'public.ecr.aws/supabase/postgrest:v14.14'
+const PGRST = 'http://127.0.0.1:53991'
+const SINK = 53992
+const APP_PORT = 443
+// Chosen per run, never fixed. A fixed port is how a STALE browser gets attached to:
+// chrome.kill() reaps the process we spawned, but --headless=new leaves the browser
+// itself alive holding the port, so the next run connects to the PREVIOUS browser -
+// complete with its localStorage session, silently skipping the sign-in this harness
+// is meant to exercise. Found exactly that way: the click log came back with no
+// sign-in entries. Teardown now closes the browser over CDP as well.
+let CDP_PORT = 0
+async function freePort () {
+  const srv = netCreateServer()
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r))
+  const p = srv.address().port
+  await new Promise((r) => srv.close(r))
+  return p
+}
+const CHROME = 'C:/Program Files/Google/Chrome/Application/chrome.exe'
+const ORIGIN = 'https://www.getfunnl.com'
+
+const PILOT_USER = '11111111-1111-1111-1111-111111111111'
+const PILOT_EMAIL = 'pilot@getfunnl.test'
+const PASSWORD = 'pilot-password-not-a-secret'
+const JWT_SECRET = randomBytes(32).toString('hex')
+
+let passed = 0, failed = 0
+const clicked = []
+function check (name, cond, detail = '') {
+  if (cond) { console.log(`  \u2713 ${name}`); passed++ }
+  else { console.error(`  \u2717 ${name}`); if (detail) console.error(`    ${detail}`); failed++ }
+}
+
+// ── docker plumbing ─────────────────────────────────────────────────────────
+const docker = (a, o = {}) => execFileSync('docker', a, { encoding: 'utf8', stdio: 'pipe', ...o })
+const quiet = (a) => spawnSync('docker', a, { stdio: 'ignore' })
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+function psql (sql, { user = 'postgres', tuplesOnly = true } = {}) {
+  const args = ['exec', '-i', PG, 'psql', '-U', user, '-d', 'postgres', '-v', 'ON_ERROR_STOP=1', '-q']
+  if (tuplesOnly) args.push('-At')
+  args.push('-f', '-')
+  return execFileSync('docker', args, { input: sql, encoding: 'utf8', stdio: 'pipe' })
+}
+const one = (sql) => psql(sql).trim()
+
+/**
+ * Align auth.uid() with the PRODUCTION definition.
+ *
+ * This image defines it as `current_setting('request.jwt.claim.sub')` - the SINGULAR
+ * legacy form. PostgREST v14 sets the JSON form, `request.jwt.claims`, so against this
+ * image auth.uid() is NULL for every request and RLS hides everything. Production's
+ * auth.uid() reads the JSON form, which is why Production works.
+ *
+ * tests/sql/_bootstrap-disposable-db.sql records this as a known non-reproduction and
+ * tells a PostgREST-driving harness to set the claim in the form the definition reads.
+ * A BROWSER cannot do that - supabase-js sends a JWT and PostgREST decides the form -
+ * so the harness aligns the DEFINITION instead. This makes the local database behave
+ * like Production; it does not change anything in the repo.
+ */
+function alignAuthUidWithProduction () {
+  psql(`
+CREATE OR REPLACE FUNCTION auth.uid() RETURNS uuid LANGUAGE sql STABLE AS $f$
+  select coalesce(
+    nullif(current_setting('request.jwt.claim.sub', true), ''),
+    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
+  )::uuid;
+$f$;`, { user: 'supabase_admin', tuplesOnly: false })
+}
+
+function waitForPg (timeoutMs = 180000) {
+  const deadline = Date.now() + timeoutMs
+  let streak = 0
+  while (Date.now() < deadline) {
+    const r = spawnSync('docker',
+      ['exec', '-i', PG, 'psql', '-U', 'postgres', '-d', 'postgres', '-v', 'ON_ERROR_STOP=1', '-q', '-f', '-'],
+      { input: 'CREATE TABLE public._p(i int); DROP TABLE public._p;', encoding: 'utf8' })
+    if (r.status === 0) { streak += 1; if (streak >= 3) return } else { streak = 0 }
+    spawnSync('node', ['-e', 'setTimeout(()=>{},1000)'], { stdio: 'ignore' })
+  }
+  throw new Error('Postgres never became stably DDL-ready')
+}
+
+function mintJwt (claims) {
+  const seg = (o) => Buffer.from(JSON.stringify(o)).toString('base64url')
+  const now = Math.floor(Date.now() / 1000)
+  const head = seg({ alg: 'HS256', typ: 'JWT' })
+  const body = seg({ ...claims, iat: now, exp: now + 3600 })
+  const sig = createHmac('sha256', JWT_SECRET).update(`${head}.${body}`).digest('base64url')
+  return `${head}.${body}.${sig}`
+}
+
+// ── the GoTrue sink + PostgREST proxy ───────────────────────────────────────
+const sinkCalls = []
+function startSink () {
+  const srv = createHttp(async (req, res) => {
+    const chunks = []
+    for await (const c of req) chunks.push(c)
+    const bodyRaw = Buffer.concat(chunks).toString('utf8')
+    const path = req.url.split('?')[0]
+    const cors = {
+      'Access-Control-Allow-Origin': ORIGIN,
+      'Access-Control-Allow-Headers': '*',
+      'Access-Control-Allow-Methods': 'GET,POST,PATCH,DELETE,OPTIONS',
+      'Access-Control-Expose-Headers': 'content-range, content-location',
+      'Access-Control-Allow-Credentials': 'true',
+    }
+    if (req.method === 'OPTIONS') { res.writeHead(204, cors); return res.end() }
+    sinkCalls.push({ method: req.method, path, url: req.url })
+
+    const user = {
+      id: PILOT_USER, aud: 'authenticated', role: 'authenticated', email: PILOT_EMAIL,
+      app_metadata: {}, user_metadata: {}, created_at: new Date().toISOString(),
+      email_confirmed_at: new Date().toISOString(),
+    }
+    if (path === '/auth/v1/token') {
+      const access = mintJwt({ sub: PILOT_USER, role: 'authenticated', aud: 'authenticated',
+        email: PILOT_EMAIL, session_id: 'sess-1' })
+      res.writeHead(200, { ...cors, 'Content-Type': 'application/json' })
+      return res.end(JSON.stringify({
+        access_token: access, token_type: 'bearer', expires_in: 3600,
+        expires_at: Math.floor(Date.now() / 1000) + 3600,
+        refresh_token: 'refresh-not-a-secret', user,
+      }))
+    }
+    if (path === '/auth/v1/user') {
+      res.writeHead(200, { ...cors, 'Content-Type': 'application/json' })
+      return res.end(JSON.stringify(user))
+    }
+    if (path === '/auth/v1/logout') { res.writeHead(204, cors); return res.end() }
+
+    if (path.startsWith('/rest/v1/')) {
+      const target = PGRST + path.slice('/rest/v1'.length) + (req.url.includes('?') ? '?' + req.url.split('?')[1] : '')
+      const headers = {}
+      for (const [k, v] of Object.entries(req.headers)) {
+        if (['host', 'connection', 'content-length', 'origin', 'referer'].includes(k)) continue
+        if (typeof v === 'string') headers[k] = v
+      }
+      let r
+      try {
+        r = await fetch(target, {
+          method: req.method, headers,
+          body: ['GET', 'HEAD'].includes(req.method) ? undefined : bodyRaw,
+        })
+      } catch (e) {
+        res.writeHead(502, { ...cors, 'Content-Type': 'application/json' })
+        return res.end(JSON.stringify({ message: 'proxy_failed: ' + e.message }))
+      }
+      const text = await r.text()
+      const out = { ...cors, 'Content-Type': r.headers.get('content-type') ?? 'application/json' }
+      const cr = r.headers.get('content-range')
+      if (cr) out['content-range'] = cr
+      res.writeHead(r.status, out)
+      return res.end(text)
+    }
+    res.writeHead(404, cors); res.end('{}')
+  })
+  return new Promise((r) => srv.listen(SINK, '127.0.0.1', () => r(srv)))
+}
+
+// ── the app, served over HTTPS on the canonical host ────────────────────────
+const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css',
+  '.svg': 'image/svg+xml', '.json': 'application/json', '.woff2': 'font/woff2',
+  '.png': 'image/png', '.ico': 'image/x-icon' }
+let serveDir = null
+const startCalls = []
+let startResponse = null
+
+function startApp () {
+  const srv = createHttps({
+    key: readFileSync(join(WORK, 'key.pem')),
+    cert: readFileSync(join(WORK, 'cert.pem')),
+  }, async (req, res) => {
+    const path = req.url.split('?')[0]
+
+    // The branded start endpoint. The Edge Function is NOT deployed and must not be.
+    if (path === '/api/outlook-oauth-start') {
+      const chunks = []
+      for await (const c of req) chunks.push(c)
+      let body = null
+      try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')) } catch { /* ignore */ }
+      startCalls.push({
+        method: req.method,
+        hasBearer: typeof req.headers.authorization === 'string'
+          && req.headers.authorization.startsWith('Bearer '),
+        consentPolicyVersion: body?.consentPolicyVersion ?? null,
+        returnOrigin: body?.returnOrigin ?? null,
+      })
+      const r = startResponse ?? { status: 503, json: { error: 'config_missing' } }
+      res.writeHead(r.status, {
+        'Content-Type': 'application/json',
+        ...(r.cookie ? { 'Set-Cookie': r.cookie } : {}),
+      })
+      return res.end(JSON.stringify(r.json))
+    }
+
+    let file = join(serveDir, path === '/' ? 'index.html' : path.replace(/^\//, ''))
+    if (!existsSync(file) || path === '/') file = join(serveDir, 'index.html')
+    let stat = null
+    try { stat = readFileSync(file) } catch { file = join(serveDir, 'index.html'); stat = readFileSync(file) }
+    res.writeHead(200, { 'Content-Type': MIME[extname(file)] ?? 'text/html' })
+    res.end(stat)
+  })
+  return new Promise((r) => srv.listen(APP_PORT, '127.0.0.1', () => r(srv)))
+}
+
+// ── CDP ─────────────────────────────────────────────────────────────────────
+class Page {
+  constructor (ws, sessionId) { this.ws = ws; this.S = sessionId; this.id = 0; this.pending = new Map(); this.events = [] }
+  static async attach (wsUrl) {
+    const ws = new WebSocket(wsUrl)
+    await new Promise((r, j) => { ws.onopen = r; ws.onerror = j })
+    const p = new Page(ws, null)
+    ws.onmessage = (ev) => {
+      const m = JSON.parse(ev.data)
+      if (m.id && p.pending.has(m.id)) { p.pending.get(m.id)(m); p.pending.delete(m.id) }
+      else if (m.method) p.events.push(m)
+    }
+    const { result: t } = await p.raw('Target.getTargets')
+    const page = t.targetInfos.find((x) => x.type === 'page')
+    const { result: a } = await p.raw('Target.attachToTarget', { targetId: page.targetId, flatten: true })
+    p.S = a.sessionId
+    await p.send('Runtime.enable')
+    await p.send('Page.enable')
+    await p.send('DOM.enable')
+    await p.send('Network.enable')
+    return p
+  }
+  raw (method, params = {}, sessionId) {
+    return new Promise((res) => {
+      const myId = ++this.id
+      this.pending.set(myId, res)
+      this.ws.send(JSON.stringify({ id: myId, method, params, ...(sessionId ? { sessionId } : {}) }))
+    })
+  }
+  async send (method, params = {}) {
+    const m = await this.raw(method, params, this.S)
+    if (m.error) throw new Error(`${method}: ${m.error.message}`)
+    return m.result
+  }
+  async eval (expression) {
+    const r = await this.send('Runtime.evaluate', {
+      expression: `(() => { ${expression} })()`, returnByValue: true, awaitPromise: true,
+    })
+    if (r.exceptionDetails) {
+      throw new Error('page threw: ' + (r.exceptionDetails.exception?.description
+        ?? r.exceptionDetails.text))
+    }
+    return r.result.value
+  }
+  async goto (url) {
+    await this.send('Page.navigate', { url })
+    await this.waitFor('document.readyState === "complete"', 20000)
+  }
+  async waitFor (expr, timeoutMs = 15000, label = expr) {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      let v = false
+      try { v = await this.eval(`return !!(${expr})`) } catch { v = false }
+      if (v) return true
+      await sleep(150)
+    }
+    throw new Error(`timed out waiting for: ${label}`)
+  }
+  /** A REAL mouse click at the element's centre, not a dispatched DOM event. */
+  async click (selectorOrText, { byText = false } = {}) {
+    const expr = byText
+      ? `const els=[...document.querySelectorAll('button,a,label,input')];
+         const el=els.find(e=>(e.innerText||e.value||'').trim().includes(${JSON.stringify(selectorOrText)}));
+         if(!el) return null; el.scrollIntoView({block:'center'});
+         const r=el.getBoundingClientRect(); return {x:r.x+r.width/2,y:r.y+r.height/2,tag:el.tagName};`
+      : `const el=document.querySelector(${JSON.stringify(selectorOrText)});
+         if(!el) return null; el.scrollIntoView({block:'center'});
+         const r=el.getBoundingClientRect(); return {x:r.x+r.width/2,y:r.y+r.height/2,tag:el.tagName};`
+    const box = await this.eval(expr)
+    if (!box) throw new Error(`no element for click: ${selectorOrText}`)
+    await this.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: box.x, y: box.y, button: 'left', clickCount: 1 })
+    await this.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: box.x, y: box.y, button: 'left', clickCount: 1 })
+    clicked.push(`${byText ? 'text' : 'css'}:${selectorOrText} (<${box.tag.toLowerCase()}>)`)
+    await sleep(250)
+    return box
+  }
+  async type (selector, text) {
+    await this.click(selector)
+    for (const ch of text) {
+      await this.send('Input.dispatchKeyEvent', { type: 'keyDown', text: ch })
+      await this.send('Input.dispatchKeyEvent', { type: 'keyUp', text: ch })
+    }
+    await sleep(100)
+  }
+}
+
+function setServeDir (d) { serveDir = d }
+function setStartResponse (r) { startResponse = r }
+
+// ── the cert for the canonical host, generated on first run ───────────────
+function ensureCert () {
+  mkdirSync(WORK, { recursive: true })
+  if (existsSync(join(WORK, 'cert.pem')) && existsSync(join(WORK, 'key.pem'))) return
+  execFileSync('openssl', [
+    'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
+    '-keyout', join(WORK, 'key.pem'), '-out', join(WORK, 'cert.pem'),
+    '-days', '2', '-subj', '/CN=www.getfunnl.com',
+    '-addext', 'subjectAltName=DNS:www.getfunnl.com',
+  ], { stdio: 'pipe', env: { ...process.env, MSYS_NO_PATHCONV: '1' } })
+}
+
+const DIST_OFF = join(WORK, 'dist-off')
+const DIST_ON = join(WORK, 'dist-on')
+
+function buildApp (outDir, env) {
+  execFileSync('npx', ['vite', 'build', '--outDir', outDir, '--emptyOutDir'], {
+    cwd: ROOT, encoding: 'utf8', stdio: 'pipe', shell: true,
+    env: { ...process.env, ...env },
+  })
+}
+
+let chrome = null, sink = null, app = null, page = null
+/**
+ * Shut everything down, in the one order that actually works.
+ *
+ * THE BUG THIS REPLACES: it closed page.ws FIRST and only then called
+ * page.raw('Browser.close') - over a socket that was already closing - and did not
+ * await the returned promise. So the close command was never reliably delivered, and
+ * --headless=new survived holding its debug port. That is how an earlier run attached
+ * to a PREVIOUS browser, inherited its session, and silently skipped the sign-in.
+ *
+ * Order now: Browser.close over the OPEN socket, awaited -> close the socket -> wait a
+ * bounded time for the process to actually exit, killing it if it will not -> remove
+ * the profile directory, which cannot be deleted while Chrome holds it.
+ */
+async function teardown () {
+  if (page) {
+    try {
+      await Promise.race([
+        page.raw('Browser.close'),
+        new Promise((r) => setTimeout(r, 4000)),
+      ])
+    } catch { /* the browser may already be gone */ }
+    try { page.ws.close() } catch { /* already closed */ }
+  }
+  if (chrome) {
+    const deadline = Date.now() + 8000
+    while (chrome.exitCode === null && chrome.signalCode === null && Date.now() < deadline) {
+      await sleep(150)
+    }
+    if (chrome.exitCode === null && chrome.signalCode === null) {
+      try { chrome.kill() } catch { /* ignore */ }
+      await sleep(500)
+    }
+  }
+  try { if (sink) sink.close() } catch { /* ignore */ }
+  try { if (app) app.close() } catch { /* ignore */ }
+  quiet(['rm', '-f', REST]); quiet(['rm', '-f', PG]); quiet(['network', 'rm', NET])
+  // Only now can the profile go: Chrome holds open handles inside it until it exits.
+  try {
+    for (const p of readdirSync(WORK)) {
+      if (p.startsWith('profile-')) rmSync(join(WORK, p), { recursive: true, force: true })
+    }
+  } catch { /* nothing to clean */ }
+}
+
+async function main () {
+  console.log('\nbuilding the two real bundles (flags off, flags on)')
+  const common = {
+    VITE_SUPABASE_URL: `http://127.0.0.1:${SINK}`,
+    VITE_SUPABASE_ANON_KEY: 'local-anon-key-not-a-secret',
+  }
+  buildApp(DIST_OFF, common)
+  buildApp(DIST_ON, {
+    ...common,
+    VITE_OUTLOOK_CONNECTION_ENABLED: 'true',
+    VITE_OUTLOOK_PILOT_USER_ID: PILOT_USER,
+    VITE_OUTLOOK_REVIEW_ENABLED: 'true',
+  })
+  console.log('  two bundles built')
+
+  console.log('\nbuilding a disposable Postgres + PostgREST')
+  // Awaited: teardown is async, and this pre-run sweep must finish removing any container
+  // or network left by a previous run BEFORE the next `network create` and `docker run`.
+  // Unawaited, the sweep raced the setup below it.
+  await teardown()
+  quiet(['network', 'create', NET])
+  docker(['run', '-d', '--name', PG, '--network', NET, '-e', 'POSTGRES_PASSWORD=disposable', PG_IMAGE])
+  waitForPg()
+  psql(readFileSync(join(ROOT, 'tests/sql/_bootstrap-disposable-db.sql'), 'utf8'),
+    { user: 'supabase_admin', tuplesOnly: false })
+  const migrations = execFileSync('node', ['-e',
+    `const fs=require('fs');console.log(fs.readdirSync(${JSON.stringify(join(ROOT, 'supabase/migrations'))}).filter(f=>f.endsWith('.sql')).sort().join('\\n'))`],
+    { encoding: 'utf8' }).trim().split('\n')
+  for (const m of migrations) {
+    psql(readFileSync(join(ROOT, 'supabase/migrations', m), 'utf8'), { tuplesOnly: false })
+  }
+  console.log(`  applied ${migrations.length} migrations`)
+  alignAuthUidWithProduction()
+  console.log('  auth.uid() aligned with the Production definition (JSON claims)')
+
+  psql(`ALTER ROLE authenticator WITH PASSWORD 'disposable';`, { user: 'supabase_admin', tuplesOnly: false })
+  docker(['run', '-d', '--name', REST, '--network', NET, '-p', '53991:3000',
+    '-e', `PGRST_DB_URI=postgres://authenticator:disposable@${PG}:5432/postgres`,
+    '-e', 'PGRST_DB_SCHEMAS=public', '-e', 'PGRST_DB_ANON_ROLE=anon',
+    '-e', `PGRST_JWT_SECRET=${JWT_SECRET}`, REST_IMAGE])
+  for (let i = 0; i < 60; i++) {
+    try { const r = await fetch('http://127.0.0.1:53991/'); if (r.status < 500) break } catch { /* wait */ }
+    await sleep(400)
+  }
+
+  // ── fixtures ──────────────────────────────────────────────────────────────
+  const CONTACT_NAME = 'Ava Recruiter'
+  psql(`
+UPDATE auth.users SET email = '${PILOT_EMAIL}' WHERE id = '${PILOT_USER}';
+INSERT INTO public.profiles (id, email, ai_enabled)
+VALUES ('${PILOT_USER}', '${PILOT_EMAIL}', false)
+ON CONFLICT (id) DO UPDATE SET email = EXCLUDED.email;
+DELETE FROM public.interaction_candidates WHERE user_id = '${PILOT_USER}';
+DELETE FROM public.interactions WHERE user_id = '${PILOT_USER}';
+DELETE FROM public.contacts WHERE user_id = '${PILOT_USER}';
+INSERT INTO public.contacts (user_id, name, email)
+VALUES ('${PILOT_USER}', '${CONTACT_NAME}', 'ava@bank.test');
+INSERT INTO public.interaction_candidates
+  (user_id, contact_id, source, source_fingerprint, proposed_type,
+   proposed_interaction_date, status, source_last_state, context_expires_at)
+SELECT '${PILOT_USER}', c.id, 'outlook', repeat('e',64), 'Email',
+       current_date - 1, 'pending', 'active', now() + interval '30 days'
+  FROM public.contacts c WHERE c.user_id = '${PILOT_USER}' LIMIT 1;`,
+  { tuplesOnly: false })
+  console.log('  seeded: 1 contact, 1 PENDING Outlook suggestion, 0 interactions')
+
+  ensureCert()
+  sink = await startSink()
+  app = await startApp()
+  console.log(`  sink on ${SINK}; app served over HTTPS as ${ORIGIN}`)
+
+  // ── Chrome, resolving the canonical host to this machine ──────────────────
+  // A UNIQUE profile per run. Deleting a shared one is not reliable on Windows while
+  // a previous Chrome may still hold a handle, and an inherited profile carries an
+  // inherited localStorage session - which silently skips the sign-in this harness is
+  // supposed to exercise. A fresh directory cannot be inherited.
+  CDP_PORT = await freePort()
+  const PROFILE = join(WORK, `profile-${Date.now()}`)
+  rmSync(PROFILE, { recursive: true, force: true })
+  chrome = spawn(CHROME, [
+    '--headless=new', `--remote-debugging-port=${CDP_PORT}`,
+    `--user-data-dir=${PROFILE}`,
+    '--host-resolver-rules=MAP www.getfunnl.com 127.0.0.1:443',
+    '--ignore-certificate-errors', '--no-first-run', '--no-default-browser-check',
+    '--disable-gpu', '--window-size=1280,1100', 'about:blank',
+  ], { stdio: 'ignore' })
+  let ver = null
+  for (let i = 0; i < 80; i++) {
+    try { const r = await fetch(`http://127.0.0.1:${CDP_PORT}/json/version`); if (r.ok) { ver = await r.json(); break } }
+    catch { /* wait */ }
+    await sleep(300)
+  }
+  if (!ver) throw new Error('Chrome devtools endpoint never came up')
+  console.log(`  ${ver.Browser}, resolving www.getfunnl.com -> 127.0.0.1:443`)
+  // Logged so a caller can verify afterwards that nothing was left holding the port.
+  console.log(`  devtools port ${CDP_PORT}, profile ${PROFILE}\n`)
+  page = await Page.attach(ver.webSocketDebuggerUrl)
+
+  // Idempotent: the session lives in localStorage on this origin, so it survives a
+  // bundle swap and App.jsx then redirects /signin away. Sign in only when needed.
+  const signIn = async () => {
+    await page.goto(`${ORIGIN}/`)
+    await sleep(600)
+    const already = await page.eval(
+      'return /Settings/.test(document.body.innerText)'
+      + ' && !document.querySelector(\'input[type="password"]\')')
+    if (already) return 'already'
+    await page.goto(`${ORIGIN}/signin`)
+    await page.waitFor('document.querySelector(\'input[type="email"]\')', 20000,
+      'the sign-in form')
+    await page.type('input[type="email"]', PILOT_EMAIL)
+    await page.type('input[type="password"]', PASSWORD)
+    await page.click('Sign in', { byText: true })
+    await page.waitFor('!document.querySelector(\'input[type="password"]\')', 20000,
+      'the app shell after sign-in')
+    return 'signed-in'
+  }
+
+  // ══ 1. flags off ═════════════════════════════════════════════════════════
+  console.log('1. with flags off, neither card is in the UI')
+  setServeDir(DIST_OFF)
+  const firstSignIn = await signIn()
+  console.log(`      sign-in path: ${firstSignIn}`)
+  check('the FIRST sign-in used the real form, not an inherited session',
+    firstSignIn === 'signed-in', `signIn() returned ${firstSignIn}`)
+  await page.goto(`${ORIGIN}/settings`)
+  await page.waitFor('/PROFILE/.test(document.body.innerText)', 20000,
+    'the Settings page')
+  const off = await page.eval(`
+    const t = document.body.innerText
+    return { outlook: /Outlook/i.test(t), calendar: /Google Calendar/i.test(t),
+             connected: /Connected accounts/i.test(t), len: t.length }`)
+  check('Settings renders, and Outlook is ABSENT', off.len > 100 && !off.outlook,
+    JSON.stringify(off))
+  check('Google Calendar is ABSENT', !off.calendar, JSON.stringify(off))
+  check('no "Connected accounts" section at all', !off.connected, JSON.stringify(off))
+  const navOff = await page.eval(`return document.body.innerText`)
+  check('no Suggestions entry in the nav', !/Suggestions/i.test(navOff),
+    'suggestions surface is off with the review flag unset')
+
+  // ══ 2. flags on: the real disclosure ═════════════════════════════════════
+  console.log('\n2. with pilot flags on, the card renders the shipped disclosure')
+  setServeDir(DIST_ON)
+  await signIn()
+  await page.goto(`${ORIGIN}/settings`)
+  await page.waitFor('/Outlook/i.test(document.body.innerText)', 20000, 'the Outlook card')
+
+  const mod = await import(pathToFileURL(join(ROOT, 'src/lib/outlookDisclosure.js')).href)
+  const shipped = mod.OUTLOOK_DISCLOSURE_PARAGRAPHS
+  const rendered = await page.eval(`
+    const t = document.body.innerText
+    return { text: t, version: (t.match(/ol-disc-[0-9a-f]{32}/) || [null])[0] }`)
+  const missing = shipped.filter((p) => !rendered.text.includes(p))
+  check(`all ${shipped.length} shipped paragraphs are rendered verbatim`,
+    missing.length === 0, missing.length ? `missing: ${missing[0].slice(0, 70)}...` : '')
+  check('the rendered version is the current derived one',
+    rendered.version === mod.OUTLOOK_DISCLOSURE_VERSION,
+    `rendered=${rendered.version} derived=${mod.OUTLOOK_DISCLOSURE_VERSION}`)
+
+  const box0 = await page.eval(`
+    const b = document.querySelector('input[type="checkbox"]')
+    const btn = [...document.querySelectorAll('button')].find(e=>/Connect Outlook/i.test(e.innerText))
+    return { checked: b ? b.checked : null, disabled: btn ? btn.disabled : null }`)
+  check('the acknowledgement starts UNCHECKED', box0.checked === false, JSON.stringify(box0))
+  check('Connect is disabled while unacknowledged', box0.disabled === true, JSON.stringify(box0))
+
+  // A REAL mouse press on Connect while the box is unchecked. The control is disabled,
+  // so the browser itself swallows the press - which is exactly the user-level fact
+  // worth proving: pressing it does nothing and sends nothing.
+  startCalls.length = 0
+  await page.click('Connect Outlook', { byText: true })
+  await sleep(500)
+  check('a real mouse press on Connect while UNCHECKED sends no start request',
+    startCalls.length === 0, `startCalls=${startCalls.length}`)
+  const stillUnchecked = await page.eval(
+    'return document.querySelector(\'input[type="checkbox"]\').checked')
+  check('and the box is still unchecked afterwards', stillUnchecked === false)
+
+  // ── stale version -> 409 withdraws the acknowledgement ──────────────────
+  await page.click('input[type="checkbox"]')
+  const acked = await page.eval(`
+    const b=document.querySelector('input[type="checkbox"]')
+    const btn=[...document.querySelectorAll('button')].find(e=>/Connect Outlook/i.test(e.innerText))
+    return { checked: b.checked, disabled: btn ? btn.disabled : null }`)
+  check('clicking the box acknowledges, enabling Connect',
+    acked.checked === true && acked.disabled === false, JSON.stringify(acked))
+
+  startCalls.length = 0
+  setStartResponse({ status: 409, json: { error: 'consent_version_mismatch' } })
+  await page.click('Connect Outlook', { byText: true })
+  await sleep(700)
+  const after409 = await page.eval(`
+    const b=document.querySelector('input[type="checkbox"]')
+    return { checked: b.checked, text: document.body.innerText }`)
+  check('a stale-version 409 made exactly one request', startCalls.length === 1,
+    `startCalls=${startCalls.length}`)
+  check('the 409 WITHDRAWS the acknowledgement (box back to unchecked)',
+    after409.checked === false, `checked=${after409.checked}`)
+  check('the user is told, without a raw server message',
+    /updated|again|changed/i.test(after409.text), 'a message is shown')
+
+  // ══ 3. a stubbed successful start ════════════════════════════════════════
+  console.log('\n3. an acknowledged click makes ONE request and navigates ONCE')
+  const PROVIDER = 'https://login.microsoftonline.test/common/oauth2/v2.0/authorize?x=1'
+  await page.send('Page.setInterceptFileChooserDialog', {}).catch(() => {})
+  await page.send('Network.setRequestInterception', { patterns: [{ urlPattern: '*microsoftonline*' }] })
+    .catch(() => {})
+  const navAttempts = []
+  page.events.length = 0
+  startCalls.length = 0
+  setStartResponse({
+    status: 200,
+    json: { url: PROVIDER },
+    cookie: '__Host-fnl_ms_oauth_bind=state-not-a-secret; Max-Age=600; Path=/; Secure; HttpOnly; SameSite=None',
+  })
+  await page.click('input[type="checkbox"]')
+  await page.click('Connect Outlook', { byText: true })
+  await sleep(1500)
+  // Tally PER EVENT METHOD. `new Set(urls).size === 1` only showed that one distinct
+  // URL was involved - it would read the same for one attempt or for five retries of
+  // the same URL. So count each method separately and assert on ONE of them.
+  const navByMethod = {}
+  for (const e of page.events) {
+    const url = e.params?.request?.url ?? e.params?.url ?? e.params?.documentURL ?? ''
+    if (!/microsoftonline/.test(url)) continue
+    navByMethod[e.method] = (navByMethod[e.method] ?? 0) + 1
+    navAttempts.push(url)
+  }
+  console.log(`      provider events by method: ${JSON.stringify(navByMethod)}`)
+  const loc = await page.eval(`return location.href`).catch(() => 'navigated-away')
+  check('exactly ONE start request was made', startCalls.length === 1,
+    `startCalls=${startCalls.length}`)
+  check('it carried a bearer token and the shipped disclosure version',
+    startCalls[0]?.hasBearer === true
+    && startCalls[0]?.consentPolicyVersion === mod.OUTLOOK_DISCLOSURE_VERSION,
+    JSON.stringify(startCalls[0]))
+  check('it declared the canonical return origin', startCalls[0]?.returnOrigin === ORIGIN,
+    JSON.stringify(startCalls[0]))
+  // ONE event method, counted. Measured shape for this flow:
+  //   Page.frameRequestedNavigation 1 | Page.frameScheduledNavigation 1
+  //   Page.frameStartedNavigating   2 | Network.requestWillBeSent     2
+  // frameRequestedNavigation is the one that means `the page asked to go here`, and
+  // it fires ONCE. The two that fire twice are Chrome retrying the transport because
+  // the .test host does not resolve - a browser retry, not a second navigation the
+  // application asked for. The claim is scoped to what the APP did, and the retry is
+  // reported rather than hidden.
+  check('the APP requested the provider navigation exactly once',
+    navByMethod['Page.frameRequestedNavigation'] === 1,
+    `Page.frameRequestedNavigation=${navByMethod['Page.frameRequestedNavigation']} `
+    + `(all methods: ${JSON.stringify(navByMethod)})`)
+  check('every provider URL Chrome touched was the .test sink, never Microsoft',
+    navAttempts.length > 0 && navAttempts.every((u) => /\.test\//.test(u)),
+    JSON.stringify([...new Set(navAttempts)]))
+  check('exactly one distinct provider URL was involved',
+    new Set(navAttempts).size === 1, JSON.stringify([...new Set(navAttempts)]))
+  console.log(`      transport attempts (Chrome retries an unresolvable host): `
+    + `${navByMethod['Network.requestWillBeSent'] ?? 0}`)
+  console.log(`      navigation observed: ${navAttempts[0] ?? '(none captured)'} | now at ${loc}`)
+
+  // ══ 4. the suggestion queue ══════════════════════════════════════════════
+  console.log('\n4. one pending suggestion: edit+accept, then dismiss')
+  setStartResponse(null)
+  await signIn()
+  const before = {
+    interactions: one(`SELECT count(*) FROM public.interactions WHERE user_id='${PILOT_USER}';`),
+    pending: one(`SELECT count(*) FROM public.interaction_candidates
+      WHERE user_id='${PILOT_USER}' AND status='pending';`),
+  }
+  await page.goto(`${ORIGIN}/suggestions`)
+  await page.waitFor(`document.body.innerText.includes(${JSON.stringify(CONTACT_NAME)})`,
+    20000, 'the suggestion for the seeded contact')
+  const afterView = one(`SELECT count(*) FROM public.interactions WHERE user_id='${PILOT_USER}';`)
+  check('opening the queue saved NOTHING',
+    afterView === before.interactions && before.interactions === '0',
+    `before=${before.interactions} afterView=${afterView}`)
+  check('the pending suggestion is visible', before.pending === '1', `pending=${before.pending}`)
+
+  // The note field sits behind the card's own "Edit details" toggle, so this is the
+  // real two-step a user performs: reveal the fields, type, then accept.
+  const EDIT = 'Edited in the browser before accepting.'
+  await page.click('Edit details', { byText: true })
+  await page.waitFor('document.querySelector(\'textarea\')', 8000, 'the note field')
+  await page.click('textarea')
+  await page.type('textarea', EDIT)
+  const typed = await page.eval('return document.querySelector(\'textarea\').value')
+  check('the note field accepted browser keystrokes', typed.includes(EDIT),
+    `textarea=${JSON.stringify(typed)}`)
+  await page.click('Accept', { byText: true })
+  await sleep(1200)
+  const saved = psql(`SELECT count(*), coalesce(max(notes),'NULL'), coalesce(max(type),'NULL')
+    FROM public.interactions WHERE user_id='${PILOT_USER}';`).trim().split('|')
+  check('exactly ONE interaction was saved', saved[0] === '1', `rows=${saved[0]}`)
+  check('it is typed Email', saved[2] === 'Email', `type=${saved[2]}`)
+  check('it carries the note typed IN THE BROWSER', saved[1] === EDIT,
+    `notes=${JSON.stringify(saved[1])}`)
+  check('the candidate is no longer pending',
+    one(`SELECT count(*) FROM public.interaction_candidates
+      WHERE user_id='${PILOT_USER}' AND status='pending';`) === '0')
+
+  // Dismiss a second one.
+  psql(`INSERT INTO public.interaction_candidates
+    (user_id, contact_id, source, source_fingerprint, proposed_type,
+     proposed_interaction_date, status, source_last_state, context_expires_at)
+  SELECT '${PILOT_USER}', c.id, 'outlook', repeat('d',64), 'Email',
+         current_date - 2, 'pending', 'active', now() + interval '30 days'
+    FROM public.contacts c WHERE c.user_id='${PILOT_USER}' LIMIT 1;`, { tuplesOnly: false })
+  await page.goto(`${ORIGIN}/suggestions`)
+  await page.waitFor(`document.body.innerText.includes(${JSON.stringify(CONTACT_NAME)})`, 20000)
+  const beforeDismiss = one(`SELECT count(*) FROM public.interactions WHERE user_id='${PILOT_USER}';`)
+  // Dismiss is two-step by design: the first click only opens a confirmation.
+  await page.click('Dismiss', { byText: true })
+  await sleep(400)
+  const confirmShown = await page.eval(
+    'return /Dismiss this suggestion\\?/.test(document.body.innerText)')
+  check('the first Dismiss click only opens a confirmation', confirmShown === true)
+  const midDismiss = one(`SELECT count(*) FROM public.interaction_candidates
+    WHERE user_id='${PILOT_USER}' AND source_fingerprint=repeat('d',64) AND status='pending';`)
+  check('and dismisses nothing yet', midDismiss === '1', `pending=${midDismiss}`)
+  await page.click('Yes, dismiss', { byText: true })
+  await sleep(1400)
+  check('dismissing saved NO interaction',
+    one(`SELECT count(*) FROM public.interactions WHERE user_id='${PILOT_USER}';`) === beforeDismiss,
+    `before=${beforeDismiss}`)
+  check('the dismissed candidate is terminal, not pending',
+    one(`SELECT count(*) FROM public.interaction_candidates
+      WHERE user_id='${PILOT_USER}' AND source_fingerprint=repeat('d',64)
+        AND status='dismissed';`) === '1')
+
+  // ══ 5. the disconnect confirmation ═══════════════════════════════════════
+  console.log('\n5. the disconnect confirmation, as rendered')
+  psql(`
+INSERT INTO public.microsoft_connections
+  (user_id, ms_account_id, ms_tenant_id, account_type, ms_email, scopes,
+   status, consented_at, consent_policy_version)
+VALUES ('${PILOT_USER}','acct-1','consumers','personal','${PILOT_EMAIL}',
+        ARRAY['Mail.Read','User.Read','offline_access'],'active',now(),
+        '${mod.OUTLOOK_DISCLOSURE_VERSION}')
+ON CONFLICT DO NOTHING;`, { tuplesOnly: false })
+  await page.goto(`${ORIGIN}/settings`)
+  await page.waitFor('/Disconnect/i.test(document.body.innerText)', 20000, 'the connected card')
+  await page.click('Disconnect', { byText: true })
+  await sleep(500)
+  const panel = await page.eval(`return document.body.innerText`)
+  const discMod = await import(pathToFileURL(join(ROOT, 'src/lib/outlookDisconnect.js')).href)
+  const missingCons = discMod.DISCONNECT_CONSEQUENCES.filter((c) => !panel.includes(c.text))
+  check('every shipped consequence is rendered verbatim', missingCons.length === 0,
+    missingCons.length ? `missing: ${missingCons[0].text.slice(0, 80)}...` : '')
+  // Each consequence carries a short effect label. EFFECT_LABEL in the card is keyed by
+  // the effect name, so renaming an effect without updating the map renders a BLANK
+  // label - which is exactly what `invalidated` did until this was asserted.
+  const labels = await page.eval(`
+    const li = [...document.querySelectorAll('li')]
+      .filter((e) => /invalidated|is deleted|are kept|already under way|at Microsoft/i.test(e.innerText))
+    return li.map((e) => (e.querySelector('span') ? e.querySelector('span').innerText.trim() : ''))`)
+  // Compared case-insensitively: the card styles these labels `uppercase`, and innerText
+  // returns the CSS-transformed text, so the DOM says INVALIDATED for 'Invalidated'.
+  check('the retained-suggestion consequence is labelled "Invalidated"',
+    labels.some((l) => l.toLowerCase() === 'invalidated'),
+    `rendered labels: ${JSON.stringify(labels)}`)
+  check('and no label is the superseded "Emptied"',
+    !labels.some((l) => /^empt/i.test(l)), `rendered labels: ${JSON.stringify(labels)}`)
+  check('no consequence renders a BLANK effect label',
+    labels.length > 0 && labels.every((l) => l.length > 0),
+    `rendered labels: ${JSON.stringify(labels)}`)
+  check('the rendered panel does NOT call the retained row empty',
+    !/empt(y|ied|ies)/i.test(panel), 'no "empty" in the rendered confirmation')
+  check('it states the record is kept with its contact, date and fingerprint',
+    /The record itself is kept/.test(panel)
+    && /still holding the contact it was about, the proposed date and a one-way fingerprint/.test(panel),
+    'retained-row wording present')
+  check('it does not promise upstream revocation',
+    /does not withdraw the permission at Microsoft/.test(panel))
+
+  // Cancel: no RPC.
+  // Count the RPC itself, not only its database effect: a Cancel that quietly fired
+  // the call and failed would otherwise look identical to a Cancel that fired nothing.
+  const DISCONNECT_RPC = '/rest/v1/rpc/disconnect_my_outlook'
+  const rpcCount = () => sinkCalls.filter((c) => c.path === DISCONNECT_RPC).length
+  const rpcBeforeCancel = rpcCount()
+  const rpcBefore = one(`SELECT count(*) FROM public.microsoft_connections WHERE user_id='${PILOT_USER}';`)
+  await page.click('Cancel', { byText: true })
+  await sleep(700)
+  const afterCancel = rpcCount()
+  check('CANCEL sent ZERO disconnect_my_outlook requests',
+    afterCancel - rpcBeforeCancel === 0,
+    `${DISCONNECT_RPC} count went ${rpcBeforeCancel} -> ${afterCancel}`)
+  check('and the connection is still there',
+    one(`SELECT count(*) FROM public.microsoft_connections WHERE user_id='${PILOT_USER}';`) === rpcBefore
+    && rpcBefore === '1', `connections=${rpcBefore}`)
+
+  // Confirm: exactly one RPC, and it takes effect.
+  await page.click('Disconnect', { byText: true })
+  await sleep(400)
+  await page.click(discMod.DISCONNECT_CONFIRM_LABEL, { byText: true })
+  await sleep(1500)
+  const afterConfirm = rpcCount()
+  check('CONFIRM sent EXACTLY ONE disconnect_my_outlook request',
+    afterConfirm - afterCancel === 1,
+    `${DISCONNECT_RPC} count went ${afterCancel} -> ${afterConfirm}`)
+  check('and the connection is gone',
+    one(`SELECT count(*) FROM public.microsoft_connections WHERE user_id='${PILOT_USER}';`) === '0')
+  check('and the accepted interaction SURVIVED the disconnect',
+    one(`SELECT count(*) FROM public.interactions WHERE user_id='${PILOT_USER}';`) === '1')
+
+  console.log('\n── what was actually CLICKED in the browser ──')
+  for (const c of clicked) console.log(`   ${c}`)
+}
+
+// A THROWN setup or browser error must fail the command, even when no check has
+// recorded a failure yet. Without this the harness could time out standing the stack
+// up, print `0 checks: 0 passed, 0 failed`, and exit 0 - a green run that proved
+// nothing. The error is counted as a failure in its own right.
+let harnessError = null
+try {
+  await main()
+} catch (e) {
+  harnessError = e
+  failed += 1
+  console.error(`\nHARNESS ERROR: ${e.message}\n${e.stack}`)
+} finally {
+  await teardown()
+  console.log(`\n${passed + failed} checks: ${passed} passed, ${failed} failed`)
+  if (harnessError) {
+    console.error('FAILED: the harness threw before finishing; the run proves nothing.')
+  }
+  if (failed > 0 || harnessError) process.exitCode = 1
+}
