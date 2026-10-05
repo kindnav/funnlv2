@@ -142,3 +142,123 @@ export async function redeemAuthorizationCode ({
     clearTimeout(timer)
   }
 }
+
+/**
+ * Shape check on a REFRESH response. Deliberately different from the
+ * authorization-code one:
+ *
+ *   id_token       NOT required. It is only returned when openid is still in the
+ *                  granted scope set, and nothing in a background refresh needs it -
+ *                  the account was already identified at connect time.
+ *   refresh_token  NOT required. Microsoft MAY return a rotated refresh token and may
+ *                  equally omit it, in which case the existing one stays valid.
+ *                  Treating an absent one as failure would break every other refresh.
+ */
+export function validateRefreshResponseShape (body) {
+  if (!body || typeof body !== 'object') return { ok: false, reason: 'token_response_malformed' }
+  if (typeof body.access_token !== 'string' || body.access_token.length === 0) {
+    return { ok: false, reason: 'token_response_no_access_token' }
+  }
+  const expiresIn = Number(body.expires_in)
+  if (!Number.isFinite(expiresIn) || expiresIn <= 0) {
+    return { ok: false, reason: 'token_response_no_expiry' }
+  }
+  const rotated = typeof body.refresh_token === 'string' && body.refresh_token.length > 0
+  return { ok: true, expiresIn, rotated }
+}
+
+/**
+ * Exchange a refresh token for a fresh access token.
+ *
+ * Same confidential-client shape as redeemAuthorizationCode above, and
+ * deliberately the same request discipline: one deadline covering the request AND
+ * the body read, a bounded body, and `redirect: 'error'` - this POST carries the
+ * client secret and the refresh token, and a 307/308 preserves method and body, so a
+ * followed redirect would repost both to whatever host the response named.
+ *
+ * NEVER LOGGED OR RETURNED TO A CALLER: the refresh token, the client secret, the new
+ * access token, or any provider response body. Failures surface as controlled reasons.
+ *
+ * `scope` is sent so the refreshed token is constrained to what the connection already
+ * holds rather than whatever the app registration happens to allow.
+ *
+ * Returns { ok, accessToken, refreshToken|null, rotated, grantedScopes, expiresAt }
+ * or { ok: false, reason }.
+ */
+export async function refreshAccessToken ({
+  refreshToken, clientId, clientSecret, scope,
+  fetchImpl = globalThis.fetch, tokenUrl, timeoutMs = TOKEN_TIMEOUT_MS,
+  now = () => Date.now(), maxBytes = MAX_TOKEN_RESPONSE_BYTES,
+}) {
+  for (const [v, reason] of [
+    [refreshToken, 'no_refresh_token'], [clientId, 'no_client_id'],
+    [clientSecret, 'no_client_secret'], [tokenUrl, 'no_token_url'],
+  ]) {
+    if (typeof v !== 'string' || v.length === 0) return { ok: false, reason }
+  }
+
+  const form = new URLSearchParams({
+    client_id: clientId,
+    client_secret: clientSecret,
+    grant_type: 'refresh_token',
+    refresh_token: refreshToken,
+  })
+  // redirect_uri is not part of a refresh grant and is deliberately not sent.
+  if (typeof scope === 'string' && scope.length > 0) form.set('scope', scope)
+
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs)
+  try {
+    let res
+    try {
+      res = await fetchImpl(tokenUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
+        body: form.toString(),
+        signal: ctrl.signal,
+        redirect: 'error',
+      })
+    } catch {
+      return { ok: false, reason: 'token_endpoint_unreachable' }
+    }
+
+    if (!res || typeof res.status !== 'number') return { ok: false, reason: 'token_response_malformed' }
+    if (res.status !== 200) {
+      // A 400 here usually means the refresh token was revoked or expired, which is
+      // recoverable only by the user reconnecting. It is distinguished from a provider
+      // outage so a caller can mark the connection as needing re-consent rather than
+      // retrying forever. The body is neither logged nor returned.
+      return {
+        ok: false,
+        reason: res.status >= 500 ? 'token_endpoint_server_error' : 'refresh_rejected',
+      }
+    }
+
+    const read = await readJsonBounded(res, maxBytes)
+    if (!read.ok) {
+      return { ok: false, reason: read.reason === 'response_malformed'
+        ? 'token_response_malformed' : read.reason }
+    }
+    const shape = validateRefreshResponseShape(read.value)
+    if (!shape.ok) return { ok: false, reason: shape.reason }
+
+    const granted = parseGrantedScopes(read.value.scope)
+    // A refresh that came back WITHOUT the permissions the connection needs is not a
+    // usable token: the user may have revoked one of them at Microsoft.
+    if (granted.length > 0) {
+      const sufficient = grantedScopesSufficient(granted)
+      if (!sufficient.ok) return { ok: false, reason: 'refresh_scopes_insufficient' }
+    }
+
+    return {
+      ok: true,
+      accessToken: read.value.access_token,
+      refreshToken: shape.rotated ? read.value.refresh_token : null,
+      rotated: shape.rotated,
+      grantedScopes: granted,
+      expiresAt: new Date(now() + shape.expiresIn * 1000).toISOString(),
+    }
+  } finally {
+    clearTimeout(timer)
+  }
+}
