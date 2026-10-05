@@ -143,9 +143,55 @@ export function classifyStartResponse (status, body) {
   return { kind: 'error' }
 }
 
+// ── The post-OAuth return to Settings ───────────────────────────────────────
+//
+// outlook-oauth-callback redirects to /settings?outlook=connected or
+// ?outlook=error. Nothing read that parameter, so a refused connection returned
+// to a Settings page indistinguishable from one where nothing was attempted -
+// the silence the first live pilot consent landed in.
+//
+// The parameter is deliberately the ONLY thing the callback tells the browser:
+// every failing path returns the same redirect, so an unbound request and a
+// bound-but-refused one stay byte-identical. There is therefore no provider
+// detail to surface, and none must be invented - the reason lives in the Edge
+// log alone.
+
+/** The only two values the callback can produce. Anything else is ignored. */
+export const OUTLOOK_CALLBACK_RESULTS = Object.freeze(['connected', 'error'])
+
+/**
+ * Read the callback result from a query string or a URLSearchParams-like value.
+ *
+ * CONTROLLED: only the two values above are recognised, so a hand-typed or
+ * injected parameter cannot put arbitrary text on the page. Duplicates are
+ * refused rather than resolved first-wins or last-wins, matching the callback's
+ * own no-last-wins form parsing.
+ *
+ * @param {string|{getAll: (name: string) => string[]}} search
+ * @returns {'connected'|'error'|null}
+ */
+export function readOutlookCallbackResult (search) {
+  let params = null
+  if (search && typeof search.getAll === 'function') {
+    params = search
+  } else if (typeof search === 'string' && search.length > 0) {
+    try { params = new URLSearchParams(search) } catch { return null }
+  }
+  if (!params) return null
+  let all
+  try { all = params.getAll('outlook') } catch { return null }
+  if (!Array.isArray(all) || all.length !== 1) return null
+  return OUTLOOK_CALLBACK_RESULTS.includes(all[0]) ? all[0] : null
+}
+
 /** User-facing copy for each outcome. Never echoes a server message. */
 export function messageForOutcome (kind) {
   switch (kind) {
+    case 'callback_failed':
+      // "Nothing was connected" is accurate: the error redirect is returned on
+      // every path that stops before finalize_microsoft_connection stores a
+      // row, and on a non-'stored' result.
+      return 'Could not connect your Outlook account. Nothing was connected - please try again.'
     case 'stale_version':
       return 'The Outlook disclosure has been updated. Reload this page to read the current version before connecting.'
     case 'not_enabled':

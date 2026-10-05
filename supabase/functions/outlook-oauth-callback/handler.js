@@ -288,10 +288,24 @@ export async function handleOutlookCallback (req, endpoints = PRODUCTION_ENDPOIN
     const mailbox = await fetchMailboxAddress({
       accessToken: redeemed.accessToken,
       oid: identity.msAccountId,
+      // Labels the mismatch diagnostic only. It comes from the VALIDATED
+      // id_token `tid`, and it grants nothing: the comparison is exact for
+      // both account types.
+      accountType: identity.accountType,
       meUrl: endpoints.graphMeUrl,
     })
     if (!mailbox.ok) {
-      console.error('outlook-oauth-callback mailbox_unresolved', mailbox.reason)
+      // The structured diagnostic is logged for graph_identity_mismatch ONLY.
+      // Every other mailbox failure keeps its bare controlled reason code, as
+      // before. The diagnostic is shapes, lengths and booleans - it cannot
+      // contain an oid, a Graph id, an address, a state, a code, a cookie or a
+      // token, nor any substring of one. See describeIdentityMismatch.
+      if (mailbox.reason === 'graph_identity_mismatch' && mailbox.diagnostic) {
+        console.error('outlook-oauth-callback mailbox_unresolved', mailbox.reason,
+          JSON.stringify(mailbox.diagnostic))
+      } else {
+        console.error('outlook-oauth-callback mailbox_unresolved', mailbox.reason)
+      }
       return redirect(failRedirect)
     }
 

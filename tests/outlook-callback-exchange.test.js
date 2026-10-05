@@ -326,6 +326,13 @@ test('prefers mail, falls back to a mail-shaped UPN only', () => {
   assert.strictEqual(pickMailboxAddress(null), null)
 })
 
+// LIMITATION OF THE FIXTURES BELOW, stated because it mattered. The identifiers
+// here ('oid-1', 'oid-' + tid) are SYNTHETIC: neither GUIDs nor hex, so no
+// realistic Microsoft representation is exercised by this file. A live personal
+// account refused with graph_identity_mismatch and nothing here could have
+// caught it. Realistic GUID / 16-hex / zero-padded coverage, and the privacy-safe
+// mismatch diagnostic, live in tests/outlook-graph-identity.test.js. These cases
+// are kept as-is: they still prove the comparison is exact and case-insensitive.
 test('Graph id must match the validated oid — fails closed on mismatch', () => {
   assert.deepStrictEqual(
     resolveMailboxFromGraphBody({ id: 'OID-1', mail: 'a@b.co' }, 'oid-1'),

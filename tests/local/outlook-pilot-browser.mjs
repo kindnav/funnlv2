@@ -808,6 +808,91 @@ ON CONFLICT DO NOTHING;`, { tuplesOnly: false })
   check('and the accepted interaction SURVIVED the disconnect',
     one(`SELECT count(*) FROM public.interactions WHERE user_id='${PILOT_USER}';`) === '1')
 
+  // == 6. the post-OAuth return to Settings ==================================
+  // The callback redirects to /settings?outlook=error on EVERY failing path, and
+  // until now nothing read that parameter - so a refused connection returned to a
+  // page indistinguishable from one where nothing was attempted. That is the
+  // silence the first live pilot consent landed in.
+  console.log('\n6. ?outlook=error shows a generic notice, and a confirmed connection suppresses it')
+  const connMod = await import(pathToFileURL(join(ROOT, 'src/lib/outlookConnection.js')).href)
+  const NOTICE = connMod.messageForOutcome('callback_failed')
+
+  // Section 5 just disconnected, so the database says NOT connected.
+  check('the account is disconnected before this scenario',
+    one(`SELECT count(*) FROM public.microsoft_connections WHERE user_id='${PILOT_USER}';`) === '0')
+
+  // A control first: with NO parameter there must be no notice, so its later
+  // presence is caused by the parameter and not by the page itself.
+  await page.goto(`${ORIGIN}/settings`)
+  await page.waitFor('/Connect Outlook/.test(document.body.innerText)', 20000,
+    'the not-connected Outlook card')
+  const plain = await page.eval(
+    `return document.body.innerText.includes(${JSON.stringify(NOTICE)})`)
+  check('plain /settings shows NO connection-failure notice', plain === false)
+
+  await page.goto(`${ORIGIN}/settings?outlook=error`)
+  await page.waitFor('/Connect Outlook/.test(document.body.innerText)', 20000,
+    'the not-connected Outlook card')
+  // Found by its announced role, then matched on the shipped copy - so this
+  // asserts the real element, not merely that the string appears somewhere.
+  const notice = await page.eval(`
+    const el = [...document.querySelectorAll('[role="status"]')]
+      .find((e) => (e.innerText || '').includes(${JSON.stringify(NOTICE)}))
+    if (!el) return null
+    const cs = getComputedStyle(el)
+    return { text: el.innerText.trim(), live: el.getAttribute('aria-live'),
+             shown: !!(el.offsetWidth || el.offsetHeight),
+             hidden: cs.display === 'none' || cs.visibility === 'hidden' }`)
+  check('?outlook=error DISPLAYS the generic notice while disconnected',
+    notice !== null && notice.shown === true && notice.hidden === false,
+    JSON.stringify(notice))
+  check('it is the shipped copy, verbatim', notice?.text === NOTICE,
+    `rendered=${JSON.stringify(notice?.text)}`)
+  check('it is announced politely to assistive technology',
+    notice?.live === 'polite', `aria-live=${notice?.live}`)
+  // Scoped to the NOTICE, not the page: the disclosure legitimately names
+  // Microsoft and Outlook, but the failure notice must stay generic.
+  const leaks = ['graph', 'oid', 'tenant', 'token', 'scope', 'mismatch',
+    'identity', 'entra', 'rpc', 'finalize', '401', '403', '500']
+    .filter((w) => (notice?.text ?? '').toLowerCase().includes(w))
+  check('the notice reveals no provider detail',
+    notice !== null && leaks.length === 0,
+    notice === null ? 'no notice was rendered, so this proves nothing'
+      : `leaked: ${JSON.stringify(leaks)}`)
+  // The card still offers the retry path rather than dead-ending.
+  check('the Connect control is still offered alongside the notice',
+    await page.eval('return /Connect Outlook/.test(document.body.innerText)') === true)
+
+  // Now a CONFIRMED connection, with the stale parameter still in the address bar.
+  psql(`
+INSERT INTO public.microsoft_connections
+  (user_id, ms_account_id, ms_tenant_id, account_type, ms_email, scopes,
+   status, consented_at, consent_policy_version)
+VALUES ('${PILOT_USER}','acct-2','consumers','personal','${PILOT_EMAIL}',
+        ARRAY['Mail.Read','User.Read','offline_access'],'active',now(),
+        '${mod.OUTLOOK_DISCLOSURE_VERSION}');`, { tuplesOnly: false })
+  check('a connection row now exists',
+    one(`SELECT count(*) FROM public.microsoft_connections WHERE user_id='${PILOT_USER}';`) === '1')
+
+  await page.goto(`${ORIGIN}/settings?outlook=error`)
+  await page.waitFor('/Disconnect Outlook/.test(document.body.innerText)', 20000,
+    'the connected Outlook card')
+  const whenConnected = await page.eval(`
+    const t = document.body.innerText
+    return { notice: t.includes(${JSON.stringify(NOTICE)}),
+             connected: /Connected to/.test(t),
+             url: location.search }`)
+  check('the stale ?outlook=error parameter is still in the URL',
+    whenConnected.url.includes('outlook=error'), `search=${whenConnected.url}`)
+  check('a CONFIRMED connected status SUPPRESSES the stale error notice',
+    whenConnected.notice === false, JSON.stringify(whenConnected))
+  check('and the connected state is what is shown instead',
+    whenConnected.connected === true, JSON.stringify(whenConnected))
+
+  // Leave no row behind for anything added after this.
+  psql(`DELETE FROM public.microsoft_connections WHERE user_id='${PILOT_USER}';`,
+    { tuplesOnly: false })
+
   console.log('\n── what was actually CLICKED in the browser ──')
   for (const c of clicked) console.log(`   ${c}`)
 }

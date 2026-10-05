@@ -52,7 +52,12 @@ const CLIENT_ID = 'test-client-id'
 const CALLBACK_URL = 'https://www.getfunnl.com/api/outlook-oauth-callback'
 const USER_ID = '22222222-3333-4444-5555-666666666666'
 const CONSUMERS = '9188040d-6c67-4c5b-b112-36a304b66dad'
-const OID = '00000000-0000-0000-0000-0000000000aa'
+// A plausible PERSONAL-account shape: a GUID whose leading 16 hex digits are
+// zero. OID_SHORT_16 is its trailing 16 hex digits - the representation a live
+// refusal raised a question about. Both are invented for this harness and are
+// not any real account's identifier.
+const OID = '00000000-0000-0000-7a3b-9c15e204d6f8'
+const OID_SHORT_16 = '7a3b9c15e204d6f8'
 const MAILBOX = 'student@outlook.test'
 
 let passed = 0, failed = 0
@@ -339,6 +344,38 @@ async function run () {
     check('MISMATCHED Graph identity: fails closed, no finalize',
       seen.rpcArgs.length === 0 && String(r.location).includes('outlook=error'),
       `rpc=${seen.rpcArgs.length}`)
+
+    // THE REALISTIC PERSONAL-ACCOUNT CASE, which is the live pilot refusal
+    // reproduced against the real handler. Graph returns the 16-hex trailing
+    // half of the GUID the id_token asserted. The two LOOK like one account in
+    // two representations, but that equivalence is undocumented (see the
+    // EVIDENCE block in shared/microsoftGraphMe.js), so the handler must still
+    // refuse: no finalize, and the same generic error redirect as every other
+    // failing path.
+    scenario.meBody = { id: OID_SHORT_16, mail: MAILBOX }
+    r = await post(`${COOKIE}=${state}`)
+    check('16-hex Graph id vs zero-padded GUID oid: NO finalize',
+      seen.rpcArgs.length === 0, `rpc=${seen.rpcArgs.length}`)
+    check('16-hex Graph id vs zero-padded GUID oid: generic error redirect',
+      r.status === 303 && String(r.location).endsWith('/settings?outlook=error'),
+      `${r.status} ${r.location}`)
+    check('that refusal happened AFTER Graph /me was called, not instead of it',
+      seen.meCalls === 1, `me=${seen.meCalls}`)
+
+    // The reverse representation - a flat 32-hex GUID - is equally refused.
+    scenario.meBody = { id: OID.replace(/-/g, ''), mail: MAILBOX }
+    r = await post(`${COOKIE}=${state}`)
+    check('flat 32-hex Graph id vs GUID oid: NO finalize',
+      seen.rpcArgs.length === 0 && String(r.location).includes('outlook=error'),
+      `rpc=${seen.rpcArgs.length}`)
+
+    // POSITIVE CONTROL FOR THOSE REFUSALS: the same request with an exactly
+    // equal id DOES finalize, so the zero counts above are not vacuous.
+    scenario.meBody = { id: OID, mail: MAILBOX, userPrincipalName: 'upn@outlook.test' }
+    r = await post(`${COOKIE}=${state}`)
+    check('the SAME request with an exactly equal Graph id DOES finalize',
+      seen.rpcArgs.length === 1 && String(r.location).endsWith('/settings?outlook=connected'),
+      `rpc=${seen.rpcArgs.length} ${r.location}`)
 
     scenario.meBody = { id: OID, userPrincipalName: 'NOT-AN-ADDRESS' }
     r = await post(`${COOKIE}=${state}`)
