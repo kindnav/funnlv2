@@ -420,7 +420,10 @@ async function main () {
   console.log('  two bundles built')
 
   console.log('\nbuilding a disposable Postgres + PostgREST')
-  teardown()
+  // Awaited: teardown is async, and this pre-run sweep must finish removing any container
+  // or network left by a previous run BEFORE the next `network create` and `docker run`.
+  // Unawaited, the sweep raced the setup below it.
+  await teardown()
   quiet(['network', 'create', NET])
   docker(['run', '-d', '--name', PG, '--network', NET, '-e', 'POSTGRES_PASSWORD=disposable', PG_IMAGE])
   waitForPg()
