@@ -122,6 +122,38 @@ export const CONTENT_SELECT = Object.freeze([
 export const PREFER_TEXT_BODY = 'outlook.body-content-type="text"'
 export const PREFER_MAX_PAGE_SIZE = (n) => `odata.maxpagesize=${n}`
 
+// IMMUTABLE IDS, and this header is the whole mechanism.
+//
+// Outlook item ids are NOT stable by default: per Microsoft, "their IDs change ...
+// only if the item is moved". A round can span pages, invocations and hours, so an
+// id recorded on page 1 can be dead by the time the round is finalized and the
+// body is fetched - the user only has to move the message.
+//
+// Opting in: "your application needs to send an additional HTTP header in your API
+// requests: Prefer: IdType="ImmutableId"". After that "an item's immutable ID won't
+// change so long as the item stays in the same mailbox ... immutable ID will NOT
+// change if the item is moved to a different folder in the mailbox."
+//
+// IT STILL CHANGES if the user moves the item to an ARCHIVE mailbox, or exports and
+// re-imports it. Those are real but bounded failure modes and they surface as a
+// failed fetch, which DEFERS the conversation rather than guessing.
+//
+// SAFE FOR THE CURSORS WE ALREADY HAVE: "The @odata.nextLink and @odata.deltaLink
+// values returned by delta queries are compatible with both ID formats, so your
+// application doesn't need to re-synchronize." So adding this does not invalidate
+// the committed delta links of the live pilot connection.
+//
+// THE HEADER IS PER REQUEST - "This header only applies to the request it is
+// included with. If you want to always use immutable IDs, you must include this
+// header with every API request." - so it is attached to the delta request, every
+// follow-link request AND the content request. Omitting it from any one of them
+// would mix id formats across a round.
+export const PREFER_IMMUTABLE_ID = 'IdType="ImmutableId"'
+
+// RFC 7240 allows several preferences in one header, comma separated, which is how
+// Graph's own examples combine them.
+const preferAll = (...parts) => parts.filter(Boolean).join(', ')
+
 // Controlled result codes. These are the ONLY strings this module returns on failure.
 export const GRAPH_CODES = Object.freeze([
   'ok', 'unauthorized', 'forbidden', 'not_found', 'throttled', 'server_error',
@@ -184,7 +216,7 @@ export function buildFolderDeltaRequest(p) {
   return {
     method: 'GET',
     url,
-    headers: { Prefer: PREFER_MAX_PAGE_SIZE(size) },
+    headers: { Prefer: preferAll(PREFER_MAX_PAGE_SIZE(size), PREFER_IMMUTABLE_ID) },
     stage: 'envelope',
   }
 }
@@ -203,7 +235,9 @@ export function buildFollowLinkRequest(p) {
   return {
     method: 'GET',
     url: v.url,
-    headers: { Prefer: PREFER_MAX_PAGE_SIZE(boundedPageSize(p.pageSize)) },
+    headers: {
+      Prefer: preferAll(PREFER_MAX_PAGE_SIZE(boundedPageSize(p.pageSize)), PREFER_IMMUTABLE_ID),
+    },
     stage: 'envelope',
   }
 }
@@ -223,7 +257,7 @@ export function buildMessageContentRequest(p) {
   return {
     method: 'GET',
     url,
-    headers: { Prefer: PREFER_TEXT_BODY },
+    headers: { Prefer: preferAll(PREFER_TEXT_BODY, PREFER_IMMUTABLE_ID) },
     stage: 'content',
   }
 }

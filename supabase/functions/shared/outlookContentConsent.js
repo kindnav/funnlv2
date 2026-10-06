@@ -34,6 +34,10 @@ export const CONTENT_CONSENT_CODES = Object.freeze([
   'content_consent_not_configured',  // no approved content disclosure exists yet
   'content_consent_missing',         // the connection records no version at all
   'content_consent_stale',           // the recorded version predates the content one
+  // The third-party gate, which is SEPARATE on purpose - see below.
+  'third_party_consent_not_configured',
+  'third_party_consent_missing',
+  'third_party_consent_stale',
 ])
 
 /**
@@ -45,6 +49,26 @@ export const CONTENT_CONSENT_CODES = Object.freeze([
  * somebody agreed to text that was never shown to them.
  */
 export const REQUIRED_CONTENT_CONSENT_VERSION = null
+
+/**
+ * The disclosure version an account must have consented to before any part of a
+ * message may be sent to a THIRD PARTY (Anthropic, via
+ * shared/outlookDraftContract.js).
+ *
+ * WHY THIS IS A SEPARATE GATE AND NOT THE SAME ONE. Reading a body inside
+ * Funnl's own infrastructure and handing a fragment of someone else's email to
+ * another company are different things to agree to, and they have different
+ * consequences: the second adds a named recipient and that recipient's own
+ * retention window (Anthropic's standard commercial terms delete inputs and
+ * outputs within 30 days, with a documented exception for content flagged by
+ * automated Usage Policy enforcement - up to 2 years, and trust-and-safety
+ * scores up to 7 years). An account must be able to have agreed to one and not
+ * the other, so the two are checked independently and the caller must pass BOTH
+ * to use the model path.
+ *
+ * null, for the same reason as above: nothing is approved yet.
+ */
+export const REQUIRED_THIRD_PARTY_CONSENT_VERSION = null
 
 /** The shape a disclosure version has: the derived `ol-disc-<32 hex>` form. */
 const VERSION_RE = /^ol-disc-[0-9a-f]{32}$/
@@ -87,6 +111,52 @@ export function contentProcessingAllowed (
 }
 
 /**
+ * May any part of this connection's message content be sent to the THIRD-PARTY
+ * draft model?
+ *
+ * Checked independently of contentProcessingAllowed, and the caller must satisfy
+ * BOTH: there is no path on which a body reaches Anthropic without the account
+ * having agreed to both the reading and the sending.
+ *
+ * @returns {{allowed: true} | {allowed: false, reason: string}}
+ */
+export function thirdPartyProcessingAllowed (
+  storedVersion, requiredVersion = REQUIRED_THIRD_PARTY_CONSENT_VERSION,
+) {
+  if (!isDisclosureVersion(requiredVersion)) {
+    return { allowed: false, reason: 'third_party_consent_not_configured' }
+  }
+  if (!isDisclosureVersion(storedVersion)) {
+    return { allowed: false, reason: 'third_party_consent_missing' }
+  }
+  if (storedVersion.trim() !== requiredVersion.trim()) {
+    return { allowed: false, reason: 'third_party_consent_stale' }
+  }
+  return { allowed: true }
+}
+
+/**
+ * The two gates together, which is the only form the run should use.
+ *
+ * FAIL CLOSED AND FAIL SEPARATELY. `body` false means fetch nothing at all.
+ * `body` true with `thirdParty` false is a coherent state: the exchange may be
+ * read inside Funnl, but no fragment of it may leave - so the model path is
+ * skipped and the run must say so rather than quietly summarizing anyway.
+ */
+export function contentPermissions (storedVersion, required = {}) {
+  const body = contentProcessingAllowed(storedVersion, 'content' in required
+    ? required.content : REQUIRED_CONTENT_CONSENT_VERSION)
+  const third = thirdPartyProcessingAllowed(storedVersion, 'thirdParty' in required
+    ? required.thirdParty : REQUIRED_THIRD_PARTY_CONSENT_VERSION)
+  return {
+    body: body.allowed === true,
+    bodyReason: body.allowed === true ? null : body.reason,
+    thirdParty: third.allowed === true,
+    thirdPartyReason: third.allowed === true ? null : third.reason,
+  }
+}
+
+/**
  * The one shape of this decision that may be logged: the controlled reason, and
  * booleans. Never the version strings themselves - a disclosure version is not
  * secret, but a per-connection log line pairing one with a run is a record of
@@ -99,5 +169,20 @@ export function summarizeContentConsent (decision) {
     content_allowed: allowed,
     reason: allowed ? null
       : (CONTENT_CONSENT_CODES.includes(decision?.reason) ? decision.reason : 'content_consent_stale'),
+  }
+}
+
+/** The logged form of the combined decision. Booleans and controlled codes only. */
+export function summarizeContentPermissions (perms) {
+  const ok = (v) => v === true
+  return {
+    body_allowed: ok(perms?.body),
+    body_reason: ok(perms?.body) ? null
+      : (CONTENT_CONSENT_CODES.includes(perms?.bodyReason)
+          ? perms.bodyReason : 'content_consent_not_configured'),
+    third_party_allowed: ok(perms?.thirdParty),
+    third_party_reason: ok(perms?.thirdParty) ? null
+      : (CONTENT_CONSENT_CODES.includes(perms?.thirdPartyReason)
+          ? perms.thirdPartyReason : 'third_party_consent_not_configured'),
   }
 }

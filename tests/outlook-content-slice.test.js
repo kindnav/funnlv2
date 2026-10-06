@@ -22,8 +22,10 @@
 import assert from 'node:assert'
 import { readFileSync } from 'node:fs'
 import {
-  REQUIRED_CONTENT_CONSENT_VERSION, CONTENT_CONSENT_CODES,
-  isDisclosureVersion, contentProcessingAllowed, summarizeContentConsent,
+  REQUIRED_CONTENT_CONSENT_VERSION, REQUIRED_THIRD_PARTY_CONSENT_VERSION,
+  CONTENT_CONSENT_CODES, isDisclosureVersion, contentProcessingAllowed,
+  thirdPartyProcessingAllowed, contentPermissions, summarizeContentConsent,
+  summarizeContentPermissions,
 } from '../supabase/functions/shared/outlookContentConsent.js'
 import {
   MAX_NOTE_CHARS, MAX_FOLLOW_UP_CHARS, MAX_SUBJECT_CHARS, MIN_EPISODE_CONTENT_CHARS,
@@ -107,6 +109,78 @@ test('the logged summary carries no version string', () => {
   for (const c of CONTENT_CONSENT_CODES) {
     assert.strictEqual(summarizeContentConsent({ allowed: false, reason: c }).reason, c)
   }
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+console.log('')
+console.log('the THIRD-PARTY gate is separate, and both must pass to use the model')
+
+test('nothing is approved today, so both gates are closed', () => {
+  assert.strictEqual(REQUIRED_THIRD_PARTY_CONSENT_VERSION, null)
+  const p = contentPermissions(ENVELOPE_ONLY)
+  assert.strictEqual(p.body, false)
+  assert.strictEqual(p.bodyReason, 'content_consent_not_configured')
+  assert.strictEqual(p.thirdParty, false)
+  assert.strictEqual(p.thirdPartyReason, 'third_party_consent_not_configured')
+})
+
+test('BODY-ONLY is a coherent state: read inside Funnl, send nothing out', () => {
+  // Reading a body and handing a fragment of it to another company are different
+  // things to agree to, so an account must be able to have agreed to one and not
+  // the other. This is the state that makes the model path skippable rather than
+  // silently used.
+  const p = contentPermissions(APPROVED, { content: APPROVED })
+  assert.strictEqual(p.body, true)
+  assert.strictEqual(p.bodyReason, null)
+  assert.strictEqual(p.thirdParty, false, 'the third-party gate must NOT ride on the body one')
+  assert.strictEqual(p.thirdPartyReason, 'third_party_consent_not_configured')
+})
+
+test('both gates open only when both versions match exactly', () => {
+  const p = contentPermissions(APPROVED, { content: APPROVED, thirdParty: APPROVED })
+  assert.strictEqual(p.body, true)
+  assert.strictEqual(p.thirdParty, true)
+  // The pilot's envelope-only consent is stale against both.
+  const stale = contentPermissions(ENVELOPE_ONLY, { content: APPROVED, thirdParty: APPROVED })
+  assert.strictEqual(stale.bodyReason, 'content_consent_stale')
+  assert.strictEqual(stale.thirdPartyReason, 'third_party_consent_stale')
+  // And a DIFFERENT approved third-party version is not satisfied by the body one.
+  const other = 'ol-disc-' + 'c'.repeat(32)
+  const split = contentPermissions(APPROVED, { content: APPROVED, thirdParty: other })
+  assert.strictEqual(split.body, true)
+  assert.strictEqual(split.thirdParty, false)
+  assert.strictEqual(split.thirdPartyReason, 'third_party_consent_stale')
+})
+
+test('thirdPartyProcessingAllowed behaves exactly like its content twin', () => {
+  assert.deepStrictEqual(thirdPartyProcessingAllowed(APPROVED, APPROVED), { allowed: true })
+  assert.strictEqual(thirdPartyProcessingAllowed(ENVELOPE_ONLY, APPROVED).reason,
+    'third_party_consent_stale')
+  for (const v of [null, undefined, '', '   ', 42]) {
+    assert.strictEqual(thirdPartyProcessingAllowed(v, APPROVED).reason,
+      'third_party_consent_missing', String(v))
+  }
+  assert.strictEqual(thirdPartyProcessingAllowed(APPROVED).reason,
+    'third_party_consent_not_configured', 'no approved version means closed')
+})
+
+test('the logged permissions carry no version string', () => {
+  const log = summarizeContentPermissions(
+    contentPermissions(ENVELOPE_ONLY, { content: APPROVED, thirdParty: APPROVED }))
+  assert.deepStrictEqual(log, {
+    body_allowed: false, body_reason: 'content_consent_stale',
+    third_party_allowed: false, third_party_reason: 'third_party_consent_stale',
+  })
+  assert.ok(!JSON.stringify(log).includes('ol-disc'))
+  // Every reason it can emit is in the declared vocabulary.
+  for (const r of [log.body_reason, log.third_party_reason]) {
+    assert.ok(CONTENT_CONSENT_CODES.includes(r), r)
+  }
+  // An unknown reason is normalised, never echoed.
+  const junk = summarizeContentPermissions({ body: false, bodyReason: 'made-up',
+    thirdParty: false, thirdPartyReason: 'also-made-up' })
+  assert.strictEqual(junk.body_reason, 'content_consent_not_configured')
+  assert.strictEqual(junk.third_party_reason, 'third_party_consent_not_configured')
 })
 
 // ════════════════════════════════════════════════════════════════════════════
