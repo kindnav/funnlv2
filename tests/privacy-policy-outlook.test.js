@@ -427,7 +427,20 @@ console.log('\nsuggestion behavior')
 
 test('no automatic contact or interaction creation is claimed', () => {
   assert.ok(/Nothing would be added to your network automatically/.test(OUTLOOK))
-  assert.ok(/accept, dismiss, or defer/.test(OUTLOOK))
+  // INVERTED. The policy promised "you accept, dismiss, or defer them" while NEITHER
+  // review card has a defer control - defer_candidate exists in the database and
+  // nothing in the UI calls it. The consent notice had already been corrected; the
+  // policy had not, so the two contradicted each other on what a reviewer can do.
+  assert.ok(!/accept, dismiss, or defer/.test(OUTLOOK),
+    'the policy must not promise a deferral the UI does not offer')
+  assert.ok(/you accept, edit or dismiss them/.test(OUTLOOK_PROSE),
+    'the three options that exist must be named')
+  assert.ok(/There is no deferral option/.test(OUTLOOK_PROSE),
+    'and the absent one stated rather than silently dropped')
+  const page = read('src/pages/SuggestionsPage.jsx')
+  const card = read('src/components/NewContactSuggestionCard.jsx')
+  assert.ok(!/Defer/.test(page) && !/Defer/.test(card),
+    'if a Defer control is ever added, this wording must change with it')
   assert.ok(/never creates a contact or an interaction on its own/.test(OUTLOOK))
   for (const bad of [/automatically (creates|adds) (a )?contact/i, /added for you automatically/i]) {
     assert.ok(!bad.test(OUTLOOK), `must not claim: ${bad}`)
@@ -473,8 +486,19 @@ test('disconnect wording matches what the applied cleanup RPC actually does', ()
     'what the window actually enforces')
   assert.ok(/reappears the next time the page loads/.test(OUTLOOK_PROSE),
     'that taking a row off the list is not a database change')
-  assert.ok(/stay stored until you accept it, dismiss it, disconnect Outlook/
-    .test(OUTLOOK_PROSE), 'and that the text stays stored until an actual event')
+  // CORRECTED. This pinned "stay stored until you accept it, dismiss it, disconnect
+  // Outlook" - listing ACCEPTANCE as a removal path for an expired suggestion, which
+  // it is not: accepting one is refused, so the row stays pending. Dismissal is the
+  // path that actually clears it, and it is not refused by the window.
+  assert.ok(/stay stored until you dismiss it, disconnect Outlook/.test(OUTLOOK_PROSE),
+    'and that the text stays stored until an actual removal event')
+  assert.ok(/acceptance is not a way to clear an expired suggestion/
+    .test(OUTLOOK_PROSE.replace(/\s+/g, ' ')),
+  'acceptance must not be offered as a way to clear an expired suggestion')
+  assert.ok(/Dismissing an expired suggestion does work, and does clear it/
+    .test(OUTLOOK_PROSE), 'and dismissal must be distinguished from it')
+  assert.ok(/erases the drafted context/.test(OUTLOOK_PROSE),
+    'with what dismissal actually erases')
   // And the working records are disclosed with the right verb.
   // 'short-lived' is gone: the measurement shows they can stay stored indefinitely.
   assert.ok(!/short-lived/.test(OUTLOOK_PROSE),
@@ -616,8 +640,24 @@ test('the packet records consent mechanics, decisions and blockers', () => {
   // user would actually see. Asserted in full by outlook-consent-ui.test.js.
   assert.ok(/quoted from `src\/lib\/outlookDisclosure\.js` verbatim/.test(PACKET),
     'the packet must say the paragraphs are the shipped ones')
-  assert.ok(/OUTLOOK_DISCLOSURE_VERSION` is unset/.test(PACKET),
-    'the packet must state the server value is unset')
+  // CORRECTED. This asserted the packet says "`OUTLOOK_DISCLOSURE_VERSION` is unset",
+  // which is the false claim itself: that variable WAS configured in Production for
+  // the envelope-only disclosure - the pilot connected under it and completed a real
+  // import, which outlook-oauth-start would have refused otherwise. What the packet
+  // must now do is keep three values apart and not assert the one it has not read.
+  assert.ok(/CURRENT STATE/.test(PACKET),
+    'the packet needs an accurate current-state summary above the historical parts')
+  assert.ok(/HISTORICAL/.test(PACKET),
+    'and the older inventories must be marked as historical')
+  assert.ok(/[Ww]as configured in Production/.test(PACKET),
+    'the previously configured server version must be acknowledged')
+  assert.ok(/has not been read from this branch/.test(PACKET),
+    'and its CURRENT value must not be asserted without a read')
+  assert.ok(/[Bb]oth `null`/.test(PACKET),
+    'the two worker consent constants must be stated as the gate that is closed')
+  // The one claim that must NOT appear, because it is the one that was wrong.
+  assert.ok(!/OUTLOOK_DISCLOSURE_VERSION` is unset in (any|every) environment/
+    .test(PACKET), 'the packet must not claim the server version is unset everywhere')
   assert.ok(/DRAFT FOR OWNER\/LEGAL REVIEW/.test(PACKET))
   assert.ok(/finalize_microsoft_connection/.test(PACKET), 'consent mechanics cited to the RPC')
   for (const item of ['HMAC key', 'OAuth start and callback',

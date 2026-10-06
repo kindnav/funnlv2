@@ -249,9 +249,31 @@ test('the notice DOES describe Anthropic processing, with its retention terms', 
   assert.ok(/where the law requires it/i.test(text),
     'the legal-obligation exception must be stated too')
 
-  // And what it does NOT receive, which is the part a reader cannot infer.
-  assert.ok(/does not receive your email address/i.test(text))
-  assert.ok(/or any Funnl identifier/i.test(text))
+  // ── WHAT IT DOES RECEIVE, STATED BEFORE WHAT IT DOES NOT ──────────────
+  // The notice used to say Anthropic "does not receive your email address, the other
+  // person's email address, your Microsoft account details, or any Funnl identifier"
+  // and stopped there - which a reader would take as "nothing identifying". It is
+  // not: buildUserContent sends the provider DISPLAY NAME for a new-contact proposal,
+  // and the retained message text and signature block are whatever the two people
+  // wrote. So the notice now names the display name and says plainly that the extract
+  // can identify people, and the exclusions are stated as the narrower guarantee they
+  // are.
+  assert.ok(/display name your mail provider shows/i.test(text),
+    'the display name Anthropic actually receives must be named')
+  assert.ok(/This is not anonymous, and Funnl does not claim it is/i.test(text),
+    'the extract must not be presented as anonymous')
+  assert.ok(/can contain names, employers/i.test(text),
+    'and the body/signature must be acknowledged as potentially identifying')
+  assert.ok(/Assume the extract can identify the people/i.test(text))
+  // The NARROWER guarantees are kept, because they are the ones the code enforces.
+  assert.ok(/email address, their email domain/i.test(text))
+  assert.ok(/authorisation tokens/i.test(text) && /raw headers are not included/i.test(text))
+  assert.ok(/checked for\s*each of them before it is sent/i.test(text.replace(/\s+/g, ' '))
+    || /the outgoing request is checked/i.test(text),
+  'and stated as a checked guarantee rather than an assurance')
+  // The overclaim must not come back.
+  assert.ok(!/nothing that identifies the people/i.test(text),
+    'the "nothing identifying" overclaim must not return')
 
   // No accuracy or deletion promise Funnl cannot keep.
   for (const overclaim of [/Anthropic will delete/i, /guaranteed/i,
@@ -324,12 +346,15 @@ test('the short disclosure says no LESS than the published policy on the materia
 })
 
 test('the disclosure is longer than before and still one paragraph per idea', () => {
-  // 11 -> 15. The content release replaces three envelope-only paragraphs and adds
-  // five: the selection and truncation bounds, the Anthropic processing and its
-  // retention, the stored-but-not-in-your-network distinction with the editable-field
-  // list, the set-aside rule, and the encrypted message references. The count is
-  // pinned so a silent shrink cannot drop a material fact.
-  assert.strictEqual(DISCLOSURE_PARAGRAPH_COUNT, 18,
+  // 11 -> 18 -> 21. The content release replaced three envelope-only paragraphs and
+  // added the selection and truncation bounds, the Anthropic processing and its
+  // retention, the stored-but-not-in-your-network distinction with the
+  // editable-field list, the set-aside rule, and the encrypted message references.
+  // The last three come from the disclosure correction: one saying the Anthropic
+  // extract is not anonymous, and two separating what expiry does to ACCEPTANCE from
+  // what DISMISSAL does. The count is pinned so a silent shrink cannot drop a
+  // material fact.
+  assert.strictEqual(DISCLOSURE_PARAGRAPH_COUNT, 21,
     'the paragraph count is pinned; change it deliberately with the text')
   assert.strictEqual(DISCLOSURE_PARAGRAPH_COUNT, OUTLOOK_DISCLOSURE_PARAGRAPHS.length,
     'the rendered count is derived from the array, so the card shows all of them')

@@ -255,10 +255,20 @@ function PrivacyPage() {
 
             <li><strong className="text-hi font-semibold">Anthropic would see a minimized, pseudonymized extract</strong> — to turn an exchange
               into a draft you can edit, Funnl would send <strong className="text-hi font-semibold">Anthropic</strong> (Claude) a reduced copy of
-              the current message text, an optional signature block, a shortened subject, the direction and date, and nothing that identifies the
-              people involved: the two parties are labelled only <em>USER</em> and <em>CONTACT</em>. Email addresses, the recipient's email domain,
-              Microsoft account, tenant, message and conversation identifiers, authorization tokens, attachments and raw headers are
-              <strong className="text-hi font-semibold"> not</strong> included.</li>
+              the current message text, an optional signature block, a shortened subject, and the direction and date of each message. The two
+              parties are labelled only <em>USER</em> and <em>CONTACT</em> rather than by address.
+              <strong className="text-hi font-semibold"> This is not anonymous, and Funnl does not claim it is.</strong> When Funnl is proposing
+              someone who is not yet one of your contacts, the extract also includes
+              <strong className="text-hi font-semibold"> the display name your mail provider shows for that person</strong>, because that name is
+              what the proposal is for. And the message text and signature block are what the two of you wrote: they can contain names, employers,
+              phone numbers or anything else either of you chose to put in an email. Funnl does not attempt to strip that, and you should assume
+              the extract can identify the people in the exchange.</li>
+
+            <li><strong className="text-hi font-semibold">What is excluded from that extract, specifically</strong> —
+              Email addresses, the recipient's email domain, Microsoft account, tenant, message and conversation identifiers, authorization
+              tokens, attachments and raw headers are <strong className="text-hi font-semibold">not</strong> included, and Funnl's code checks
+              the outgoing request for each of them before it is sent. These are narrower guarantees than "nothing identifying", and they are
+              the ones Funnl can actually keep.</li>
 
             <li><strong className="text-hi font-semibold">Anthropic's retention — 30 days, and not Zero Data Retention</strong> — Funnl uses
               Anthropic's standard commercial API terms. Anthropic automatically deletes API inputs and outputs from its systems within
@@ -275,7 +285,13 @@ function PrivacyPage() {
               Anthropic does with the extract Funnl sends, and says nothing about the records in Funnl's own database. Funnl's own retention of
               Outlook-derived records, and when draft context is erased, is described under "What Funnl would keep" and in "Your rights".</li>
 
-            <li><strong className="text-hi font-semibold">What Funnl would keep</strong> — only bounded, derived records, never message content:
+            <li><strong className="text-hi font-semibold">What Funnl would keep</strong> — bounded records.
+              <strong className="text-hi font-semibold"> Raw message bodies, HTML, attachments and header collections are not stored</strong>, and
+              are held only in server memory while a message is being processed. Some of what <em>is</em> stored, however, is derived from the
+              message rather than merely about it: a <strong className="text-hi font-semibold">shortened subject line</strong> (up to 160
+              characters, kept verbatim so you can recognise the conversation) and the
+              <strong className="text-hi font-semibold"> drafted summary and suggested next step</strong>, which are written from what the
+              messages said. So "no message content" would be too strong a claim, and this list says what is kept instead:
               <ul className="list-disc pl-5 space-y-1 mt-2">
                 <li>connection details: the Microsoft account and tenant identifiers, whether the account is personal or work, the connected
                   address, the normalized permission list, connection status, the time you consented and the version of the disclosure you
@@ -286,10 +302,14 @@ function PrivacyPage() {
                 <li>for a draft about someone already in your contacts: a summary of at most 200 characters, an optional suggested next step of
                   at most 160 characters, a code saying whether the summary came from the message body or only the subject, a code saying whether
                   the draft was produced deterministically or with AI, and review state;</li>
-                <li>for a suggested new contact: the proposed email address, name, company, role, how you met and LinkedIn profile URL — each
-                  length-limited and each stored with a code recording the evidence it came from (provider metadata, an explicit signature, or an
-                  explicit statement in the message) and a confidence level; plus the same summary and next-step fields, the proposed date, the
-                  interaction type (always Email), and a subject line shortened to at most 160 characters so you can recognize the conversation;</li>
+                <li>for a suggested new contact: the proposed email address and the proposed name — each length-limited, and the name stored with
+                  a code recording where it came from — <code>provider_metadata</code> for the display name your mail provider shows, or
+                  <code>explicit_signature</code> when the name came from an explicit signature in the person's own message — and a
+                  confidence level; plus the same summary and next-step fields, the proposed date, the interaction type (always Email), and a subject line
+                  shortened to at most 160 characters so you can recognize the conversation. <strong className="text-hi font-semibold">In this
+                  release the company, role, how-you-met, LinkedIn and tag fields start blank</strong> and are stored only if
+                  <em> you</em> fill them in while reviewing. Funnl does not store a company or job title it inferred — the database columns for
+                  them exist, and the import does not write to them;</li>
                 <li>one-way keyed fingerprints (with the key version) of the conversation and of the person, so the same exchange is not suggested
                   twice. Funnl does not store Microsoft message or conversation identifiers, mailbox addresses, or subject lines in these
                   provenance records. These fingerprints are <strong className="text-hi font-semibold">pseudonymous, not anonymous</strong>:
@@ -308,13 +328,21 @@ function PrivacyPage() {
                   <strong className="text-hi font-semibold">reset</strong>, or you <strong className="text-hi font-semibold">disconnecting</strong>.
                   <strong className="text-hi font-semibold">No scheduled job</strong> acts on the deadline, so a read abandoned
                   without any of those four leaves its working records stored;</li>
+                <li><strong className="text-hi font-semibold">encrypted references to the messages Funnl selected</strong> — up to six per
+                  exchange, each an encrypted Microsoft message identifier, so Funnl can read those messages once both folders have been
+                  examined. They are encrypted with the same key as the synchronization position; the identifier itself is never stored in
+                  readable form, and they carry no subject, address, name or message text. They belong to the same single read as the working
+                  records above, are removed by the same four events, and are also removed if you delete your account. The
+                  <strong className="text-hi font-semibold"> same 24-hour limit and the same absent sweep apply</strong>: reaching the deadline
+                  does not remove them, so a read abandoned without one of those events leaves its references stored;</li>
               </ul>
             </li>
 
             <li><strong className="text-hi font-semibold">Nothing would be added to your network automatically</strong> — a draft about someone you
               already track becomes a suggested interaction; an exchange with someone you do not yet track, where you and they actually replied to
               each other, may become a suggested new contact. Both are <strong className="text-hi font-semibold">suggestions you review</strong>:
-              you accept, dismiss, or defer them. Funnl never creates a contact or an interaction on its own.</li>
+              you accept, edit or dismiss them. There is no deferral option.
+              Funnl never creates a contact or an interaction on its own.</li>
 
             <li><strong className="text-hi font-semibold">A stored suggestion is not part of your network</strong> — Funnl does store the
               suggestion, because that is how it is still waiting when you come back to it. But it sits in a review queue as a draft: it is not
@@ -348,14 +376,25 @@ function PrivacyPage() {
             <li><strong className="text-hi font-semibold">When Outlook-derived records are deleted</strong> — removal is driven by
               <strong className="text-hi font-semibold">events, not by a timer</strong>. The invalidated record described above is deleted
               when you delete the contact it refers to, or when you delete your Funnl account. A pending suggestion carries a
-              <strong className="text-hi font-semibold"> 30-day review window</strong>. After that window
-              <strong className="text-hi font-semibold"> Funnl will not let you accept it</strong> — accepting or dismissing an expired
-              suggestion tells you it has expired and takes it off the list you are looking at. Taking it off that list is a change to what is
-              on your screen, not to what is stored: the suggestion is still in Funnl’s database and it
-              <strong className="text-hi font-semibold"> reappears the next time the page loads</strong>. Funnl runs
-              <strong className="text-hi font-semibold"> no scheduled job</strong> that acts on that deadline today, so an expired
-              suggestion’s summary and subject stay stored until you accept it, dismiss it, disconnect Outlook, delete the contact it refers
-              to, or delete your account. Deleting your account removes all of your data.</li>
+              <strong className="text-hi font-semibold"> 30-day review window</strong>, and what that window does depends on which button you
+              press.</li>
+
+            <li><strong className="text-hi font-semibold">Accepting an expired suggestion is refused</strong> —
+              Funnl will not let you accept it: it will not turn the suggestion into a contact or an interaction, and tells you it has expired. The row is taken off the list you are looking at, but that is a change to
+              what is on your screen and not to what is stored: it is still in Funnl’s database, still pending, and it
+              <strong className="text-hi font-semibold"> reappears the next time the page loads</strong>. So acceptance is
+              <strong className="text-hi font-semibold"> not</strong> a way to clear an expired suggestion.</li>
+
+            <li><strong className="text-hi font-semibold">Dismissing an expired suggestion does work, and does clear it</strong> — dismissal is
+              not refused by the review window. It marks the suggestion dismissed and
+              <strong className="text-hi font-semibold"> erases the drafted context</strong> in the same step: the summary, the suggested next
+              step and, for a proposed contact, the proposed email address and name. What remains is the terminal record and its one-way
+              fingerprint, so the same exchange is not suggested again.</li>
+
+            <li><strong className="text-hi font-semibold">Nothing happens on its own</strong> — Funnl runs
+              <strong className="text-hi font-semibold"> no scheduled job</strong> that acts on that deadline today. An expired suggestion’s
+              summary and subject therefore stay stored until you dismiss it, disconnect Outlook, delete the contact it refers to, or delete
+              your account. Deleting your account removes all of your data.</li>
           </ul>
           <p className="mt-3">
             Outlook data would be used only to produce the suggestions you can see in Funnl. It would not be sold, not shared with advertisers or

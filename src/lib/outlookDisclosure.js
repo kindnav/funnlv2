@@ -15,13 +15,28 @@
 // which disables the consent control. A test asserts that.
 //
 // NOT PUBLISHED, NOT APPROVED. This wording is the content-release draft in
-// docs/outlook-content-disclosure-draft.md section A, awaiting owner approval. It
-// is inert while VITE_OUTLOOK_CONNECTION_ENABLED is off, and the server refuses to
-// mint a state unless OUTLOOK_DISCLOSURE_VERSION is configured to match this
-// version - which it is not. Both must be approved together before either is
-// enabled, and the two worker consent constants in
-// supabase/functions/shared/outlookContentConsent.js remain null regardless: this
-// file decides what a user is TOLD, not what the server will DO.
+// docs/outlook-content-disclosure-draft.md section A, awaiting owner approval.
+//
+// THREE DIFFERENT VALUES, AND THEY ARE NOT INTERCHANGEABLE. Earlier notes in this
+// branch said OUTLOOK_DISCLOSURE_VERSION was "unset in every environment", which was
+// wrong and contradicted the project's own history:
+//
+//   1. OUTLOOK_DISCLOSURE_VERSION, server-side, read by outlook-oauth-start and
+//      stamped into the OAuth state. It WAS configured in Production for the
+//      envelope-only text (ol-disc-81fe8944fd2be59ac3c059c229b4d28e): the pilot
+//      connected under it and completed a real import, which that function would
+//      have refused with config_missing otherwise. Its CURRENT value has not been
+//      read from this branch and is not asserted here either way.
+//   2. The version derived below, from THIS text. It is new, and is configured
+//      nowhere.
+//   3. REQUIRED_CONTENT_CONSENT_VERSION and REQUIRED_THIRD_PARTY_CONSENT_VERSION in
+//      supabase/functions/shared/outlookContentConsent.js, both null. These are what
+//      gate body reading and the third-party call, and while they are null the server
+//      performs neither - whatever any connection recorded, and whatever (1) is set
+//      to.
+//
+// So this file decides what a user is TOLD. (3) decides what the server will DO, and
+// it currently does neither.
 //
 // SEPARATE FROM THE PUBLISHED PRIVACY POLICY, AND NARROWER THAN IT.
 // The Outlook section at /privacy is the full account. This is the short version
@@ -125,9 +140,19 @@ export const OUTLOOK_DISCLOSURE_PARAGRAPHS = Object.freeze([
     + 'characters.',
   'To write the summary, Funnl sends that cleaned text to Anthropic, the company that '
     + 'provides Funnl’s AI. Anthropic receives the message text, the subject, the date, and a '
-    + 'label saying which side wrote each message. It does not receive your email address, '
-    + 'the other person’s email address, your Microsoft account details, or any Funnl '
-    + 'identifier.',
+    + 'label saying which side wrote each message — you and the other person are labelled '
+    + 'only as USER and CONTACT rather than by address. When Funnl is proposing someone who '
+    + 'is not yet one of your contacts, it also sends the display name your mail provider '
+    + 'shows for that person, because that name is what the proposal is for.',
+  'This is not anonymous, and Funnl does not claim it is. The message text and the '
+    + 'signature block are what the two of you wrote, so they can contain names, employers, '
+    + 'phone numbers or anything else either of you put in an email, and Funnl does not try '
+    + 'to strip that out. Assume the extract can identify the people in the exchange. What '
+    + 'Funnl does guarantee is narrower and checkable: your email address, the other person’s '
+    + 'email address, their email domain, your Microsoft account and tenant details, '
+    + 'Microsoft message and conversation identifiers, authorisation tokens, attachments and '
+    + 'raw headers are not included, and the outgoing request is checked for each of them '
+    + 'before it is sent.',
   'Anthropic’s published policy for its API is to delete inputs and outputs from its '
     + 'systems within 30 days of receiving or generating them. Three things can extend that: '
     + 'where its automated systems flag something as violating its usage policy, the inputs '
@@ -173,6 +198,16 @@ export const OUTLOOK_DISCLOSURE_PARAGRAPHS = Object.freeze([
     + 'later read starts, when a read completes, when a read is reset, or when you '
     + 'disconnect. Waiting, or looking at the progress of a read, removes nothing — so if a '
     + 'read is abandoned and none of those happens, its working records stay stored.',
+  'A suggestion you never act on carries a 30-day review window, and what that window '
+    + 'does depends on which button you press. After it passes, Funnl will not let you accept '
+    + 'the suggestion: it tells you the suggestion has expired and takes it off the list on '
+    + 'screen. But it stays stored, still waiting, and comes back the next time the page '
+    + 'loads — so accepting is not a way to clear an expired suggestion.',
+  'Dismissing it does work, and is not refused by that window. Dismissing marks the '
+    + 'suggestion dismissed and erases the drafted summary, the suggested next step and any '
+    + 'proposed email address and name in the same step. Nothing acts on the deadline on its '
+    + 'own, so an expired suggestion stays stored until you dismiss it, disconnect, delete '
+    + 'the contact it refers to, or delete your Funnl account.',
   'You can disconnect at any time from this screen. That deletes the connection, the '
     + 'stored Microsoft authorisation, the mailbox synchronisation state, the working '
     + 'records, the message references and the provenance records, and invalidates any '
@@ -220,11 +255,14 @@ export function disclosureFingerprint (paragraphs) {
  * version, so a reviewed edit can never quietly keep the old identifier.
  */
 // THE CONTENT RELEASE. The previous value, 81fe8944fd2be59ac3c059c229b4d28e,
-// identified the envelope-only text and is the version the live pilot connection
-// recorded. It is deliberately NOT kept as an accepted alternative: the two
-// documents say opposite things about body reading, so a connection that agreed to
-// the old one must reconnect rather than be treated as having agreed to this.
-export const DISCLOSURE_FINGERPRINT = '544d70f25797530bc953c6ed9cd95574'
+// identified the envelope-only text. That one WAS published and WAS configured as the
+// server's OUTLOOK_DISCLOSURE_VERSION in Production: the pilot account connected under
+// it and completed a real mailbox import, which could not have happened otherwise -
+// outlook-oauth-start refuses to mint a state unless the configured value matches the
+// text it shows. It is deliberately NOT kept as an accepted alternative here: the two
+// documents say opposite things about body reading, so that connection must disconnect
+// and reconnect rather than be treated as having agreed to this one.
+export const DISCLOSURE_FINGERPRINT = 'f142258e3aa0fdc3c47a53af92a648f5'
 
 /**
  * True only when the paragraphs still match the fingerprint the version was
