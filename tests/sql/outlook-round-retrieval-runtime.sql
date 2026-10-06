@@ -406,6 +406,140 @@ BEGIN
     'the cascade removes the filler handles with their parent';
 END $$;
 
+-- == the ceiling is measured on the RESULTING RETAINED SET ==================
+-- Two cases refused despite causing NO storage growth, both reproduced at
+-- exactly 4000 stored handles with the naive `existing + offered` check:
+--   * a DUPLICATE, whose insert is a no-op on the message fingerprint;
+--   * a NEWER message for a conversation ALREADY HOLDING SIX, where the
+--     selection evicts the oldest to make room.
+-- The second matters most: refusing it would stall a busy round precisely when
+-- the newest reply arrives.
+DO $$
+DECLARE
+  u     uuid := '55555555-5555-5555-5555-555555555555';
+  conn  uuid := '66666666-6666-6666-6666-666666666666';
+  run2  uuid := '88888888-8888-8888-8888-888888888888';
+  round uuid := '99999999-9999-9999-9999-999999999999';
+  full6 text := repeat('a1', 32);
+  pad   text := repeat('b2', 32);
+  grow  text := repeat('c9', 32);
+  conv  jsonb;
+  v     jsonb;
+  stored integer;
+BEGIN
+  -- Deliberately NOT a blanket delete: earlier sections' handles belong to a
+  -- conversation a later section reads, and wiping the round removed them.
+  UPDATE public.outlook_sync_state
+     SET round_folder_complete = false, round_page_seq = 20,
+         round_expires_at = now() + interval '1 hour'
+   WHERE connection_id = conn;
+
+  INSERT INTO public.outlook_conversation_progress
+    (connection_id, user_id, round_id, conversation_fingerprint, person_fingerprint,
+     episode_fingerprint, first_message_fingerprint, key_version, first_seen_at,
+     last_seen_at, inbound_count, outbound_count, message_count)
+  VALUES (conn, u, round, full6, repeat('c3', 32), repeat('d4', 32), repeat('e5', 32),
+          1, now(), now(), 3, 3, 6),
+         (conn, u, round, pad,   repeat('f6', 32), repeat('a7', 32), repeat('b8', 32),
+          1, now(), now(), 1, 1, 2),
+         (conn, u, round, grow,  repeat('da', 32), repeat('eb', 32), repeat('fc', 32),
+          1, now(), now(), 1, 1, 2)
+  ON CONFLICT DO NOTHING;
+
+  INSERT INTO public.outlook_round_messages
+    (connection_id, user_id, round_id, conversation_fingerprint, message_fingerprint,
+     folder, sent_at, message_id_ciphertext, message_id_nonce, key_version)
+  SELECT conn, u, round, full6, lpad(g::text, 64, '1'),
+         CASE WHEN g % 2 = 0 THEN 'sentitems' ELSE 'inbox' END,
+         ('2026-09-0' || g::text || 'T10:00:00Z')::timestamptz, 'CT', 'N', 1
+    FROM generate_series(1, 6) AS gs(g);
+  -- Filler sized from the ACTUAL current total, so the round lands exactly on the
+  -- ceiling whatever earlier sections left behind.
+  SELECT count(*) INTO stored FROM public.outlook_round_messages
+   WHERE connection_id = conn AND round_id = round;
+  INSERT INTO public.outlook_round_messages
+    (connection_id, user_id, round_id, conversation_fingerprint, message_fingerprint,
+     folder, sent_at, message_id_ciphertext, message_id_nonce, key_version)
+  SELECT conn, u, round, pad, lpad(g::text, 64, 'f'), 'inbox', now(), 'CT', 'N', 1
+    FROM generate_series(1, 4000 - stored) AS gs(g);
+  SELECT count(*) INTO stored FROM public.outlook_round_messages
+   WHERE connection_id = conn AND round_id = round;
+  ASSERT stored = 4000, 'the round must sit exactly on the ceiling';
+
+  conv := jsonb_build_object('cfp', full6, 'pfp', repeat('c3', 32),
+    'efp', repeat('d4', 32), 'first_fp', repeat('e5', 32), 'first_at', now(),
+    'last_at', now(), 'contact_id', NULL, 'key_version', 1,
+    'inbound', 3, 'outbound', 3, 'messages', 6, 'taint', NULL);
+
+  -- CASE A: a DUPLICATE causes no growth, so it must NOT refuse.
+  v := public.record_outlook_page_progress(
+         conn, run2, 'inbox', round, 21, 'NXA', 'N', NULL, NULL,
+         1::smallint, false, 1, 0, jsonb_build_array(conv), 86400,
+         jsonb_build_array(jsonb_build_object('cfp', full6, 'mfp', lpad('1', 64, '1'),
+           'mid_ct', 'CT-DUP', 'mid_nonce', 'N', 'key_version', 1, 'folder', 'inbox',
+           'sent_at', '2026-09-01T10:00:00Z')));
+  ASSERT v ->> 'result' = 'recorded',
+    'A DUPLICATE AT THE CEILING MUST NOT REFUSE, it adds no row: ' || v::text;
+  ASSERT (SELECT count(*) FROM public.outlook_round_messages
+           WHERE connection_id = conn AND round_id = round) = 4000,
+    'and must not have grown the set';
+
+  -- CASE B: a NEWER message for a conversation already holding six evicts the
+  -- oldest, so it must NOT refuse either, and the newest reply must be kept.
+  UPDATE public.outlook_sync_state SET round_folder_complete = false
+   WHERE connection_id = conn;
+  v := public.record_outlook_page_progress(
+         conn, run2, 'inbox', round, 22, 'NXB', 'N', NULL, NULL,
+         1::smallint, false, 1, 0, jsonb_build_array(conv), 86400,
+         jsonb_build_array(jsonb_build_object('cfp', full6, 'mfp', repeat('9', 64),
+           'mid_ct', 'CT-NEWER', 'mid_nonce', 'N', 'key_version', 1, 'folder', 'inbox',
+           'sent_at', '2026-09-30T10:00:00Z')));
+  ASSERT v ->> 'result' = 'recorded',
+    'A NEWER MESSAGE REPLACING A SELECTED ONE MUST NOT REFUSE: ' || v::text;
+  ASSERT (v ->> 'handles_evicted')::int = 1, 'one handle should be evicted';
+  ASSERT (SELECT count(*) FROM public.outlook_round_messages
+           WHERE connection_id = conn AND round_id = round) = 4000,
+    'the set size is unchanged';
+  ASSERT EXISTS (SELECT 1 FROM public.outlook_round_messages
+                  WHERE connection_id = conn AND round_id = round
+                    AND message_fingerprint = repeat('9', 64)),
+    'and the NEWEST reply is what was kept';
+  ASSERT (SELECT count(*) FROM public.outlook_round_messages
+           WHERE connection_id = conn AND round_id = round
+             AND conversation_fingerprint = full6) = 6,
+    'still six for that conversation';
+
+  -- CONTROL: GENUINE GROWTH still refuses, before any write.
+  UPDATE public.outlook_sync_state SET round_folder_complete = false
+   WHERE connection_id = conn;
+  v := public.record_outlook_page_progress(
+         conn, run2, 'inbox', round, 23, 'NXC', 'N', NULL, NULL,
+         1::smallint, false, 1, 0,
+         jsonb_build_array(jsonb_build_object('cfp', grow, 'pfp', repeat('da', 32),
+           'efp', repeat('eb', 32), 'first_fp', repeat('fc', 32), 'first_at', now(),
+           'last_at', now(), 'contact_id', NULL, 'key_version', 1,
+           'inbound', 1, 'outbound', 1, 'messages', 2, 'taint', NULL)), 86400,
+         jsonb_build_array(jsonb_build_object('cfp', grow, 'mfp', repeat('8', 64),
+           'mid_ct', 'CT-GROW', 'mid_nonce', 'N', 'key_version', 1, 'folder', 'inbox',
+           'sent_at', now())));
+  ASSERT v ->> 'result' = 'handle_budget_exhausted',
+    'GENUINE GROWTH MUST STILL REFUSE: ' || v::text;
+  ASSERT (v ->> 'projected_handles')::int = 4001,
+    'and report the projection that exceeded the ceiling: ' || v::text;
+  ASSERT (SELECT next_link_ciphertext IS DISTINCT FROM 'NXC'
+          FROM public.outlook_sync_state
+           WHERE connection_id = conn AND folder = 'inbox'),
+    'refused before the checkpoint';
+  ASSERT (SELECT count(*) FROM public.outlook_round_messages
+           WHERE connection_id = conn AND round_id = round
+             AND conversation_fingerprint = grow) = 0,
+    'and before any handle write';
+
+  DELETE FROM public.outlook_conversation_progress
+   WHERE connection_id = conn AND round_id = round
+     AND conversation_fingerprint IN (full6, pad, grow);
+END $$;
+
 -- ══ 4. THE RESPONSE FITS THE REAL PORT, AT MAXIMUM CIPHERTEXT ═══════════════
 DO $$
 DECLARE
@@ -621,6 +755,13 @@ BEGIN
   ASSERT (SELECT pg_get_constraintdef(oid) LIKE '%1024%' FROM pg_constraint
            WHERE conname = 'orm_ct_bounds'),
     'the ciphertext ceiling must be 1024, not 4000';
+  -- NO REDUNDANT PARENT INDEX. An earlier draft created one because a grep for
+  -- the table name missed ocp_round_conv_unique, and a later regeneration of the
+  -- migration reinstated it after it had been removed. Asserted, not trusted.
+  ASSERT NOT EXISTS (SELECT 1 FROM pg_indexes
+    WHERE schemaname = 'public'
+      AND indexname = 'outlook_conversation_progress_round_conv_uidx'),
+    'the redundant parent unique index must not be created';
 
   ASSERT has_table_privilege('service_role', 'public.outlook_round_messages', 'SELECT');
   ASSERT NOT has_table_privilege('authenticated', 'public.outlook_round_messages', 'SELECT'),

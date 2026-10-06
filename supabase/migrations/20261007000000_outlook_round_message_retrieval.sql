@@ -40,10 +40,13 @@
 --    supersede and takeover. Measured: erasing the accumulator left 6 orphan
 --    handles behind.
 --
---    FIXED by a narrow cascading foreign key to the parent accumulator row,
---    (connection_id, round_id, conversation_fingerprint). That triple was NOT a
---    key - outlook_conversation_progress had only non-unique indexes on it, with
---    uniqueness enforced by the merge logic - so a UNIQUE INDEX is added first.
+--    FIXED by a narrow cascading foreign key to the parent accumulator row's
+--    EXISTING key. outlook_conversation_progress already declares
+--    `ocp_round_conv_unique UNIQUE (connection_id, round_id,
+--    conversation_fingerprint)` (20261002000000), so NO new parent constraint is
+--    created - the FK points straight at it. An earlier draft added a redundant
+--    unique index because a grep for the table name missed that constraint: it is
+--    declared inside the CREATE TABLE block and does not repeat the name.
 --    It fits the write order: the conversation merge loop runs BEFORE the handle
 --    loop in the same function, so the parent always exists.
 --
@@ -109,21 +112,12 @@
 
 
 -- ============================================================================
--- 1. The parent key the handles hang from.
+-- 1. The table the protected handles live in.
 -- ============================================================================
--- outlook_conversation_progress has only NON-UNIQUE indexes on this triple;
--- uniqueness is enforced by record_outlook_page_progress's select-then-merge,
--- which is safe because the lease fence admits one run per connection. A foreign
--- key needs a real unique constraint, so one is added here. It also hardens the
--- invariant the merge logic already relies on.
-CREATE UNIQUE INDEX IF NOT EXISTS outlook_conversation_progress_round_conv_uidx
-  ON public.outlook_conversation_progress
-     (connection_id, round_id, conversation_fingerprint);
-
-
--- ============================================================================
--- 2. The table the protected handles live in.
--- ============================================================================
+-- NO NEW PARENT CONSTRAINT IS CREATED. outlook_conversation_progress already
+-- declares `ocp_round_conv_unique UNIQUE (connection_id, round_id,
+-- conversation_fingerprint)`, which is exactly the key the foreign key below
+-- needs.
 CREATE TABLE IF NOT EXISTS public.outlook_round_messages (
   id                      uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
   connection_id           uuid        NOT NULL,
@@ -182,7 +176,7 @@ GRANT ALL  ON TABLE public.outlook_round_messages TO service_role;
 
 
 -- ============================================================================
--- 3. record_outlook_page_progress, extended to commit the handles atomically.
+-- 2. record_outlook_page_progress, extended to commit the handles atomically.
 -- ============================================================================
 -- DROP AND CREATE, not CREATE OR REPLACE: a parameter is being added, and
 -- CREATE OR REPLACE cannot change a signature - it would leave a second overload
@@ -236,6 +230,7 @@ DECLARE
   v_msgs     integer := 0;
   v_evicted  integer := 0;
   v_msg_rows integer;
+  v_projected integer;
   v_cfps     text[] := ARRAY[]::text[];
   v_cfp      text;
   v_keep     uuid[];
@@ -347,13 +342,69 @@ BEGIN
   -- THE WHOLE-ROUND CEILING, also before any write. Over it the page is REFUSED:
   -- recording a page whose handles were dropped would commit a cursor for mail
   -- that can never be summarized.
+  --
+  -- MEASURED ON THE *RESULTING RETAINED SET*, not on `existing + offered`. The
+  -- naive sum refused two cases that cause no storage growth at all, both
+  -- reproduced at exactly 4000 stored handles:
+  --
+  --   * A DUPLICATE. The handle's message fingerprint is already stored, so the
+  --     insert is a no-op (ON CONFLICT DO NOTHING) and the set does not grow.
+  --   * A NEWER MESSAGE FOR A CONVERSATION ALREADY HOLDING SIX. The selection
+  --     evicts the oldest to make room, so the set does not grow either - and
+  --     this is the case that matters most, because refusing it would stall a
+  --     busy round precisely when the newest reply arrives.
+  --
+  -- The projection below is exact for both, because it applies the same two rules
+  -- the write path applies: dedupe on the message fingerprint, then cap each
+  -- conversation at six.
+  --
+  --   untouched conversations  -> keep their current count
+  --   touched conversations    -> LEAST(existing + genuinely new, 6)
+  --
+  -- GENUINE GROWTH STILL REFUSES: a new conversation, or one under six gaining
+  -- handles, raises the projection and is refused before any checkpoint,
+  -- conversation merge or handle write.
   IF jsonb_array_length(COALESCE(p_messages, '[]'::jsonb)) > 0 THEN
-    SELECT count(*) INTO v_msg_rows
-      FROM public.outlook_round_messages m
-     WHERE m.connection_id = p_connection_id AND m.round_id = p_round_id;
-    IF v_msg_rows + jsonb_array_length(p_messages) > c_max_handle_rows_per_round THEN
+    WITH batch AS (
+      -- DISTINCT, so duplicates WITHIN one page are counted once as well.
+      SELECT DISTINCT m->>'cfp' AS cfp, m->>'mfp' AS mfp
+        FROM jsonb_array_elements(p_messages) AS m
+    ),
+    fresh AS (
+      -- Handles that are not already stored for this round: the only ones that
+      -- can add a row.
+      SELECT b.cfp, count(*) AS n_new
+        FROM batch b
+       WHERE NOT EXISTS (
+         SELECT 1 FROM public.outlook_round_messages r
+          WHERE r.connection_id = p_connection_id AND r.round_id = p_round_id
+            AND r.message_fingerprint = b.mfp)
+       GROUP BY b.cfp
+    ),
+    held AS (
+      SELECT r.conversation_fingerprint AS cfp, count(*) AS n_old
+        FROM public.outlook_round_messages r
+       WHERE r.connection_id = p_connection_id AND r.round_id = p_round_id
+       GROUP BY r.conversation_fingerprint
+    ),
+    touched AS (SELECT DISTINCT cfp FROM batch)
+    SELECT
+      COALESCE((SELECT sum(h.n_old) FROM held h
+                 WHERE NOT EXISTS (SELECT 1 FROM touched t WHERE t.cfp = h.cfp)), 0)
+      + COALESCE((SELECT sum(LEAST(COALESCE(h.n_old, 0) + COALESCE(f.n_new, 0),
+                                   c_handles_per_conv))
+                    FROM touched t
+                    LEFT JOIN held  h ON h.cfp = t.cfp
+                    LEFT JOIN fresh f ON f.cfp = t.cfp), 0)
+      INTO v_projected;
+
+    IF v_projected > c_max_handle_rows_per_round THEN
+      SELECT count(*) INTO v_msg_rows
+        FROM public.outlook_round_messages m
+       WHERE m.connection_id = p_connection_id AND m.round_id = p_round_id;
       RETURN jsonb_build_object('result', 'handle_budget_exhausted',
-                                'round_handles', v_msg_rows);
+                                'round_handles', v_msg_rows,
+                                'projected_handles', v_projected);
     END IF;
   END IF;
   IF p_conversations IS NOT NULL AND jsonb_typeof(p_conversations) <> 'array' THEN
@@ -725,7 +776,7 @@ GRANT EXECUTE ON FUNCTION public.record_outlook_page_progress(
 
 
 -- ============================================================================
--- 4. The bounded, PAGED finalize-time read.
+-- 3. The bounded, PAGED finalize-time read.
 -- ============================================================================
 -- SEPARATE from list_outlook_round_conversations on purpose. That call is already
 -- paged at 200 conversations against a 256 KiB body bound; attaching a kilobyte
