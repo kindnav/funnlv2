@@ -11,7 +11,7 @@ import { fileURLToPath } from 'url'
 import { join, dirname } from 'path'
 import {
   GRAPH_BASE, GRAPH_HOST, GRAPH_FOLDERS, GRAPH_MAIL_READ_SCOPE,
-  DISCOVERY_SELECT, ENVELOPE_SELECT, CONTENT_SELECT, PREFER_TEXT_BODY,
+  DISCOVERY_SELECT, ENVELOPE_SELECT, CONTENT_SELECT, PREFER_TEXT_BODY, PREFER_IMMUTABLE_ID,
   MAX_PAGE_SIZE, MAX_PAGES_PER_RUN, MAX_MESSAGES_PER_RUN, MAX_RETRIES,
   MAX_RETRY_AFTER_MS, MAX_TOTAL_RETRY_DELAY_MS, MAX_RESPONSE_BYTES,
   buildFolderDeltaRequest, buildFollowLinkRequest, buildMessageContentRequest,
@@ -100,7 +100,13 @@ test('delta request targets only a well-known folder and sets a bounded page siz
     const r = buildFolderDeltaRequest({ folder })
     assert.strictEqual(r.method, 'GET')
     assert.ok(r.url.startsWith(`${GRAPH_BASE}/me/mailFolders/${folder}/messages/delta`))
-    assert.strictEqual(r.headers.Prefer, `odata.maxpagesize=${MAX_PAGE_SIZE}`)
+    // BOTH preferences, comma separated in one header (RFC 7240). The page size is
+    // still pinned exactly; the immutable-id opt-in is asserted alongside it rather
+    // than replacing it, because omitting EITHER changes behaviour: no page size
+    // means an unbounded page, and no IdType means ids that stop resolving as soon
+    // as the user moves a message mid-round.
+    assert.strictEqual(r.headers.Prefer,
+      `odata.maxpagesize=${MAX_PAGE_SIZE}, ${PREFER_IMMUTABLE_ID}`)
     assert.strictEqual(r.stage, 'envelope')
     assert.ok(!/\$select=[^&]*\bbody\b/.test(r.url), 'no body in the delta select')
   }
@@ -110,15 +116,21 @@ test('delta request targets only a well-known folder and sets a bounded page siz
 
 test('page size is clamped in both directions', () => {
   assert.strictEqual(buildFolderDeltaRequest({ folder: 'inbox', pageSize: 9999 }).headers.Prefer,
-    `odata.maxpagesize=${MAX_PAGE_SIZE}`)
+    `odata.maxpagesize=${MAX_PAGE_SIZE}, ${PREFER_IMMUTABLE_ID}`)
   assert.strictEqual(buildFolderDeltaRequest({ folder: 'inbox', pageSize: 0 }).headers.Prefer,
-    'odata.maxpagesize=1')
+    `odata.maxpagesize=1, ${PREFER_IMMUTABLE_ID}`)
 })
 
 test('content request asks for text bodies with the exact documented Prefer value', () => {
   const r = buildMessageContentRequest({ messageId: 'AAMkAGI1AAAoZCfHAAA=' })
-  assert.strictEqual(r.headers.Prefer, 'outlook.body-content-type="text"')
+  assert.strictEqual(r.headers.Prefer,
+    `outlook.body-content-type="text", ${PREFER_IMMUTABLE_ID}`)
   assert.strictEqual(PREFER_TEXT_BODY, 'outlook.body-content-type="text"')
+  // The content GET must use the SAME id format the delta recorded. Microsoft:
+  // "This header only applies to the request it is included with. If you want to
+  // always use immutable IDs, you must include this header with every API request."
+  // Mixing formats across a round is how a stored id stops resolving.
+  assert.strictEqual(PREFER_IMMUTABLE_ID, 'IdType="ImmutableId"')
   assert.ok(r.url.startsWith(`${GRAPH_BASE}/me/messages/`))
   assert.ok(r.url.includes(`$select=${CONTENT_SELECT.join(',')}`))
   assert.ok(r.url.includes('uniqueBody') && r.url.includes('internetMessageHeaders'),

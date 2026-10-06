@@ -50,6 +50,11 @@ const ACCEPT_RESULTS = {
   dismissed:                      { message: 'This suggestion was already dismissed.',           tone: 'info',    removeFromQueue: true },
   invalidated:                    { message: 'This suggestion is no longer available.',          tone: 'info',    removeFromQueue: true },
   not_found:                      { message: 'This suggestion is no longer available.',          tone: 'info',    removeFromQueue: true },
+  // Both accept RPCs refuse a draft whose 30-day context window has passed. Without
+  // an entry here that answer fell through to the generic "Something went wrong -
+  // please try again", which is both untrue and unactionable: the row can never be
+  // accepted, and retrying cannot change that, so it sat in the queue forever.
+  expired:                        { message: 'This suggestion has expired.',                     tone: 'info',    removeFromQueue: true },
   invalid_type:                   { message: 'Pick a valid interaction type.',                   tone: 'error',   removeFromQueue: false },
   invalid_date:                   { message: 'Pick a valid date.',                               tone: 'error',   removeFromQueue: false },
   invalid_notes:                  { message: 'Note is too long (200 characters max).',           tone: 'error',   removeFromQueue: false },
@@ -63,6 +68,7 @@ const DISMISS_RESULTS = {
   already_accepted:  { message: 'This was already accepted.',               tone: 'info',  removeFromQueue: true },
   invalidated:       { message: 'This suggestion is no longer available.',  tone: 'info',  removeFromQueue: true },
   not_found:         { message: 'This suggestion is no longer available.',  tone: 'info',  removeFromQueue: true },
+  expired:           { message: 'This suggestion has expired.',             tone: 'info',  removeFromQueue: true },
   unauthenticated:   { message: 'Please sign in again.',                    tone: 'error', removeFromQueue: false },
 }
 

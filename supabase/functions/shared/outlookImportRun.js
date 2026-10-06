@@ -98,6 +98,11 @@ import {
   ROUND_TTL_SECONDS, finalizeConversation, summarizeRoundProgress,
 } from './outlookRoundState.js'
 import { checkPilotUser, designatedPilotUser } from './outlookPilotGate.js'
+import { buildMessageHandles } from './outlookHandleProducer.js'
+import {
+  summarizeOneConversation, planContentWrite, summarizeContentStage, CONTENT_WRITE_RPCS,
+} from './outlookContentStage.js'
+import { contentPermissions } from './outlookContentConsent.js'
 
 /**
  * Lease length and due interval for one run. Bounded by the RPC's own checks, which
@@ -218,6 +223,31 @@ export const WRITE_STEP_RESERVE_MS = WRITE_STEP_MS + PROGRESS_STEP_MS + RELEASE_
 export const FINALIZE_RESERVE_MS = PROGRESS_STEP_MS + WRITE_STEP_RESERVE_MS
 
 /**
+ * The FLOOR for admitting one conversation's content stage.
+ *
+ * REPRODUCED, and the reason this is a floor rather than a sum. The first version of
+ * this constant was PROGRESS_STEP_MS + FETCH_ADMIT_MS + DRAFT_ADMIT_MS = 85s, which
+ * with the 60s write reserve needed 145s remaining out of a 120s invocation budget.
+ * It therefore admitted NOTHING, every conversation took the retryable path, and the
+ * run wrote zero suggestions and answered `continued` forever. Seven durable
+ * continuation tests failed on exactly that.
+ *
+ * So it is sized like PAGE_ADMIT_FLOOR_MS: a floor for the first conversation,
+ * replaced by the OBSERVED cost of the slowest one after that. A handle read, one
+ * body read and one short summary call measure well under this in practice; a
+ * conversation that turns out slower is stopped by the pass's own checks, with
+ * nothing written, and redone by the next invocation.
+ */
+export const CONTENT_ADMIT_FLOOR_MS = 20_000
+
+/**
+ * The ceiling on content-processed conversations per INVOCATION, independent of the
+ * clock. A second bound, so a wrong deadline calculation still cannot read a whole
+ * mailbox's bodies in one request.
+ */
+export const MAX_CONTENT_CONVERSATIONS_PER_INVOCATION = 20
+
+/**
  * What the FINALISATION stage must keep in hand before starting one more suggestion:
  * the write itself, the call that records how far it got, and the release.
  *
@@ -330,7 +360,10 @@ export const ROUND_INCOMPLETE_REASONS = Object.freeze([
 
 /** Why a plan entry produced no suggestion. Controlled; safe to log. */
 export const ENTRY_SKIP_CODES = Object.freeze([
-  'new_contact_not_supported',   // out of this slice: needs the header/content pass
+  // KEPT, though it is no longer reached while the content stage is on. An entry for
+  // someone not yet in Funnl needs a body to propose anything about them, so with the
+  // content gate closed it is still unwritable - and that is what this code says.
+  'new_contact_not_supported',
   'missing_contact',             // defensive: an entry claiming a contact without one
 ])
 
@@ -370,12 +403,26 @@ export function writeAccepted (result) {
  * Which plan entries this slice can persist, and why the rest cannot.
  * Pure, so the decision is testable without a database.
  */
-export function partitionPlan (plan) {
+export function partitionPlan (plan, { contentStageOn = false } = {}) {
   const writable = []
   const skipped = Object.create(null)
   const bump = (c) => { skipped[c] = (skipped[c] || 0) + 1 }
   for (const e of Array.isArray(plan) ? plan : []) {
-    if (e?.kind === 'new_contact_suggestion') { bump('new_contact_not_supported'); continue }
+    if (e?.kind === 'new_contact_suggestion') {
+      // REPRODUCED BY THE LOCAL HARNESS. This used to drop every unknown-person entry
+      // unconditionally, which was right while nothing could propose a person - and
+      // wrong the moment the content stage could. With it dropped here the entry never
+      // reached the content stage at all: the demo summarized one conversation instead
+      // of two and wrote no proposal, while reporting a clean committed run.
+      //
+      // So the condition is now what it always meant: an unknown person needs a body
+      // to propose anything about them. With the content stage ON the entry is passed
+      // through and the stage decides; with it OFF this is still unwritable, and the
+      // code still says so.
+      if (!contentStageOn) { bump('new_contact_not_supported'); continue }
+      writable.push(e)
+      continue
+    }
     if (typeof e?.contactId !== 'string' || e.contactId.length === 0) { bump('missing_contact'); continue }
     writable.push(e)
   }
@@ -397,6 +444,18 @@ export function partitionPlan (plan) {
  *          accessToken: string, keyRing: object}>} p.loadRunContext
  *        everything the pass needs for ONE connection. Supplied by the caller so this
  *        module performs no query of its own and cannot widen its own scope.
+ * @param {object} [p.requiredConsent] INJECTED ONLY BY TESTS. Overrides which
+ *        disclosure version the two gates demand. Omitted - which is what the worker
+ *        does - both gates fall back to the module constants, and those are null, so
+ *        every connection fails closed. A harness that wants to exercise the content
+ *        path supplies its own invented version here rather than changing a shipped
+ *        constant, which is why those constants can stay null while the flow is
+ *        proven end to end.
+ * @param {string|null} [p.anthropicApiKey] the key for the SUMMARY call, and only that.
+ *        Absent means no draft is attempted and every conversation reports the
+ *        deferral - never a placeholder note. Both consent gates are checked
+ *        against the CONNECTION's recorded version before this is ever read, so a
+ *        configured key does not by itself enable anything.
  * @param {(ct: string, nonce: string) => Promise<string>} p.decryptCursor
  *        already bound to a key. Needed only for a SAVED @odata.nextLink: a pending
  *        deltaLink never has to be decrypted, because release takes ciphertext and the
@@ -414,6 +473,7 @@ export function partitionPlan (plan) {
 export async function runOutlookImport (p) {
   const {
     rpc, encryptCursor, decryptCursor, loadRunContext, requestEntryMs, pilotUserId, deps,
+    anthropicApiKey = null, requiredConsent = {},
   } = p || {}
   if (typeof rpc !== 'function') throw new Error('rpc_not_injected')
   if (typeof encryptCursor !== 'function') throw new Error('encrypt_cursor_not_injected')
@@ -735,12 +795,31 @@ export async function runOutlookImport (p) {
         p_messages_dropped: c.messagesDropped ?? 0,
         p_conversations: c.conversations ?? [],
         p_round_ttl_seconds: ROUND_TTL_SECONDS,
+        // The page's retrieval handles, committed in the SAME transaction as the fold
+        // and the resume position. EMPTY unless the content consent gate is open, so
+        // the production default stores none. A refusal here - a handle ceiling the
+        // round cannot grow past - is returned before any write, so the cursor does
+        // not move on a page whose handles were dropped.
+        p_messages: Array.isArray(c.messages) && c.messages.length > 0 ? c.messages : null,
       })
       if (res?.error) return { result: 'rpc_error' }
       const out = res?.data ?? { result: 'unknown' }
       if (out.result === 'recorded') durableProgress = true
       return out
     }
+
+    // ── the handle producer, bound to THIS connection ────────────────────────
+    // Same AES-GCM sealer as the cursors, same key ring, so no new key handling and no
+    // key material in this file. The producer checks the content gate itself against
+    // the version the CONNECTION recorded - not a request parameter, not a flag - and
+    // returns an empty array when it is closed, which is the state of every existing
+    // connection including the live pilot.
+    const produceHandles = (selected) => buildMessageHandles({
+      selected,
+      consentVersion: context.consentVersion ?? null,
+      requiredConsent,
+      seal: encryptCursor,
+    })
 
     // And again before the first Graph page, because the context load may have consumed
     // most of what was left.
@@ -765,7 +844,7 @@ export async function runOutlookImport (p) {
         reserveMs: CHECKPOINT_RESERVE_MS,
       },
       checkpoint,
-      deps,
+      deps: { ...deps, produceHandles },
       onPageComplete,
     })
   } catch (e) {
@@ -862,11 +941,19 @@ export async function runOutlookImport (p) {
 
   // ── 3c. the round did not finish for a reason that is not "later" ──────────
   if (slice.roundComplete !== true) {
-    await release('idle', false, null, null)
+    // A refused page is named rather than folded into the generic reason: the folder
+    // stopped because a handle it was required to store could not be sealed, which
+    // is a local failure an operator can act on, not a provider or budget outcome.
+    const reasons = typeof slice.handleFailure === 'string'
+      ? ['handle_production_failed']
+      : ['folder_incomplete']
+    await release('idle', false, null,
+      typeof slice.handleFailure === 'string' ? 'handle_production_failed' : null)
     return {
       ...nothingWritten,
       outcome: 'incomplete',
-      incompleteReasons: ['folder_incomplete'],
+      incompleteReasons: reasons,
+      handleFailure: slice.handleFailure ?? null,
     }
   }
 
@@ -913,6 +1000,48 @@ export async function runOutlookImport (p) {
   let pagesRead = 0
   let moreRows = false
   let roundTruncatedEpisodes = 0
+  // The content stage's own accounting. Counts and controlled codes only.
+  const content = {
+    attempted: 0, notesWritten: 0, proposalsWritten: 0, metadataOnly: 0,
+    bodiesRead: 0, modelCalls: 0,
+    deferred: Object.create(null), ignored: Object.create(null),
+  }
+  const bumpDeferral = (c) => { content.deferred[c] = (content.deferred[c] || 0) + 1 }
+  // The observed cost of the slowest content stage so far, for the admission check.
+  let slowestContentMs = 0
+
+  // ── IS THE CONTENT STAGE ON AT ALL? Decided ONCE, before the loop ────────
+  // It has to be decided before partitionPlan runs, not just before the stage: an
+  // unknown-person entry is writable only when a body can be read for it, and that
+  // is the same question.
+  // Both gates against the version the CONNECTION recorded, plus the presence of a
+  // summary key. Checked here rather than per conversation so that the normal
+  // answer - closed, for every connection that exists - costs nothing and the run
+  // behaves exactly as the envelope-only run behaves today: every conversation gets
+  // its metadata candidate, and ONE reason is reported for the absent notes rather
+  // than four hundred identical ones.
+  const contentPerms = contentPermissions(context.consentVersion ?? null, requiredConsent)
+  // TWO SEPARATE QUESTIONS, and conflating them is what produced the empty note.
+  //
+  //   consentOpen      is this connection on the CONTENT RELEASE? Both gates match
+  //                    the required disclosure version, so the account has been told
+  //                    it will get a summary of what was discussed.
+  //   contentStageOn   can a summary actually be attempted right now? That needs
+  //                    consentOpen AND a configured provider key.
+  //
+  // A connection can be on the content release with no key configured. Treating that
+  // as "no consent" would write the envelope-only metadata row - the exact noteless
+  // suggestion the release exists to fix - so the two are tracked apart: the write
+  // decision keys on consentOpen, and the attempt keys on contentStageOn.
+  const consentOpen = contentPerms.body === true && contentPerms.thirdParty === true
+  const contentStageReason = !contentPerms.body
+    ? 'content_consent_missing'
+    : (!contentPerms.thirdParty
+        ? 'third_party_consent_missing'
+        : (typeof anthropicApiKey !== 'string' || anthropicApiKey.length === 0
+            ? 'summary_key_absent'
+            : null))
+  const contentStageOn = contentStageReason === null
   // The round's deadline passed while this run was working on it. Nothing of it may be
   // committed: its records are about to be discarded as a unit, so a cursor would be
   // claiming mail that no longer has a suggestion behind it.
@@ -974,14 +1103,15 @@ export async function runOutlookImport (p) {
       // silently become `how many we got round to`, which `accepted` already reports.
       const decisions = []
       for (const row of rows) {
-        const one = finalizeConversation(row, (iso) => localDateFor(iso, context.timeZone))
+        const one = finalizeConversation(row, (iso) => localDateFor(iso, context.timeZone),
+          { contentStageOn })
         const cfp = typeof row?.cfp === 'string' ? row.cfp : null
         if (one.entry === null) {
           bumpSkip(one.skip)
           decisions.push({ cfp, entry: null })
           continue
         }
-        const { writable, skipped: entrySkipped } = partitionPlan([one.entry])
+        const { writable, skipped: entrySkipped } = partitionPlan([one.entry], { contentStageOn })
         for (const [code, n] of Object.entries(entrySkipped)) {
           skipped[code] = (skipped[code] || 0) + n
         }
@@ -1007,20 +1137,136 @@ export async function runOutlookImport (p) {
         // away a run that had otherwise succeeded.
         await ensureLease(WRITE_STEP_MS)
 
-        const res = await rpc('upsert_outlook_interaction_candidate', {
+        // -- THE CONTENT STAGE, for this one conversation ------------------
+        // `pass` defaults to the stage's own off-reason, which planContentWrite
+        // treats as terminal: the conversation gets exactly the metadata candidate
+        // the envelope-only run writes today, and the reason is reported.
+        let pass = { outcome: 'defer', reason: contentStageReason ?? 'no_usable_content' }
+        if (contentStageOn) {
+          // THE CEILING, and the BUDGET, both before anything is read. Neither is a
+          // failure of this conversation: they mean "come back", so the batch stops
+          // here WITHOUT writing a noteless candidate and without passing the
+          // conversation. The next invocation re-lists from the same write cursor
+          // and redoes it from the start.
+          if (content.attempted >= MAX_CONTENT_CONVERSATIONS_PER_INVOCATION) {
+            bumpDeferral('budget_exhausted')
+            outOfBudget = true
+            break
+          }
+          const admitMs = Math.max(CONTENT_ADMIT_FLOOR_MS, slowestContentMs)
+          if (!budgetAllows(admitMs + WRITE_STEP_RESERVE_MS)) {
+            bumpDeferral('budget_exhausted')
+            outOfBudget = true
+            break
+          }
+
+          content.attempted += 1
+          await ensureLease(PROGRESS_STEP_MS + admitMs)
+          const startedMs = clock()
+          try {
+            pass = await summarizeOneConversation({
+              conversation: {
+                cfp,
+                contactId: entry.contactId,
+                messageCount: entry.messageCount,
+                lastLocalDate: entry.proposedDate,
+              },
+              rpc,
+              connectionId,
+              runId,
+              roundId,
+              decryptCursor,
+              accessToken: context.accessToken,
+              apiKey: anthropicApiKey,
+              consentVersion: context.consentVersion ?? null,
+              requiredConsent,
+              // This conversation reached the stage only because its automation facts
+              // had never been read. It may be proposed ONLY if this fetch returns the
+              // headers and they screen clean.
+              requiresScreening: entry.requiresContent === true,
+              selfAddresses: [context.primaryEmail, ...(context.aliases ?? [])],
+              // The pass's own admission checks, against the SAME invocation
+              // deadline every other stage uses. Only the RELEASE is reserved here,
+              // not the whole write reserve: the outer loop already proved there is
+              // room for the write, and reserving it again on every internal step
+              // would refuse a fetch the invocation can plainly afford.
+              budgetAllows: (marginMs) => budgetAllows(marginMs + RELEASE_WORST_MS),
+              deps,
+            })
+          } catch {
+            // Nothing from the thrown value is read: it can carry a URL, an
+            // address or a body. Retryable, so nothing is written for it.
+            pass = { outcome: 'defer', reason: 'fetch_failed' }
+          }
+          const tookMs = clock() - startedMs
+          if (tookMs > slowestContentMs) slowestContentMs = tookMs
+          content.bodiesRead += Number.isInteger(pass.fetched) ? pass.fetched : 0
+          // A model call was made for every outcome the provider decided. An
+          // `ignore` from the automation headers never reaches the provider.
+          const reachedModel = pass.outcome === 'interaction_draft'
+            || pass.outcome === 'new_contact_suggestion'
+            || pass.reason === 'model_output_invalid'
+            || pass.reason === 'model_unavailable'
+            || pass.reason === 'model_deferred'
+            || (pass.outcome === 'ignore' && pass.reason === 'model_ignored')
+          if (reachedModel) content.modelCalls += 1
+        }
+
+        // ── WHAT IS LEFT, RECHECKED AFTER CONTENT PROCESSING ───────────────
+        // The check before the stage proved there was room for the stage AND a
+        // write. The stage may have taken far longer than the floor it was admitted
+        // on - six body reads and a provider call with retries - so the write,
+        // the progress record and the release are re-proved against the clock as it
+        // is NOW, not as it was before the summary.
+        //
+        // Stopping here is safe in both directions: a draft that was produced and
+        // not written is re-produced next invocation from handles that are still
+        // stored, and the write cursor has not passed the conversation.
+        if (!budgetAllows(WRITE_STEP_RESERVE_MS)) {
+          if (contentStageOn) bumpDeferral('budget_exhausted')
+          outOfBudget = true
+          break
+        }
+
+        const plan = planContentWrite(entry, pass, { consentOpen })
+        if (plan.deferral !== null) bumpDeferral(plan.deferral)
+        if (typeof plan.ignored === 'string') {
+          content.ignored[plan.ignored] = (content.ignored[plan.ignored] || 0) + 1
+        }
+
+        if (plan.write === 'none') {
+          if (plan.retryable === true) {
+            // RETRYABLE: unfinished work is preserved. Stop here WITHOUT passing
+            // this conversation, so the next invocation redoes it from the start.
+            outOfBudget = true
+            break
+          }
+          // Settled without a write - an ignored newsletter, or an unknown person
+          // with nothing worth proposing. A decision, so finalisation may pass it.
+          rowsProcessed += 1
+          if (cfp !== null) processedThrough = cfp
+          continue
+        }
+
+        // DISPATCHED BY NAME, from a frozen allowlist. The run must not be able to
+        // call an arbitrary database function because a planner returned a string:
+        // the two candidate writes are the only ones it may reach, and anything
+        // else is a bug in planContentWrite rather than a call to make.
+        if (!CONTENT_WRITE_RPCS.includes(plan.rpc)) {
+          if (firstRefusal === null) firstRefusal = 'write_not_permitted'
+          break
+        }
+        const res = await rpc(plan.rpc, {
+          ...plan.args,
           p_connection_id: connectionId,
           p_run_id: runId,
-          p_contact_id: entry.contactId,
-          p_episode_fingerprint: entry.episodeFingerprint,
-          p_person_fingerprint: entry.personFingerprint,
-          p_key_version: entry.keyVersion,
-          p_proposed_type: entry.proposedType,
-          p_proposed_date: entry.proposedDate,
-          p_lookup_fingerprints: entry.episodeLookupFingerprints?.length
-            ? entry.episodeLookupFingerprints
-            : null,
         })
         const code = res?.error ? 'rpc_error' : (res?.data?.result ?? 'unknown')
+        if (writeAccepted(code)) {
+          if (plan.write === 'interaction_with_note') content.notesWritten += 1
+          else if (plan.write === 'new_contact_proposal') content.proposalsWritten += 1
+          else content.metadataOnly += 1
+        }
         results[code] = (results[code] || 0) + 1
         if (writeAccepted(code)) {
           accepted += 1
@@ -1120,6 +1366,13 @@ export async function runOutlookImport (p) {
       cursor_advanced: writeCursorAdvanced,
       complete: batchComplete,
     },
+    // THE EXPLICIT DEFERRAL REPORT. Every conversation that got no note says why,
+    // by controlled code. 'content_consent_missing' across the board is the normal,
+    // expected answer for a connection made under the envelope-only disclosure.
+    content: summarizeContentStage(content),
+    // Why the round stored no retrieval handle, when it stored none.
+    handleReason: slice.handleReason ?? null,
+    handlesStored: slice.totals.handlesStored ?? 0,
   }
 
   // ── the round did not finish for a reason that forfeits every cursor ──────

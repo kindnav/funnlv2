@@ -668,8 +668,15 @@ BEGIN
            (v ->> 'name') || ' has no pinned search_path';
   END LOOP;
 
+  -- THE SIGNATURE GAINED A SIXTEENTH ARGUMENT (p_messages, the protected message
+  -- handles) in 20261007000000_outlook_round_message_retrieval.sql, which DROPs
+  -- and re-CREATEs this function. has_function_privilege() resolves by EXACT
+  -- argument list, so these two name the 16-argument form; against the old
+  -- 15-argument form they raise "function does not exist" rather than failing an
+  -- assertion. A dropped function loses its ACL, so these are what prove the
+  -- REVOKE/GRANT pair was restated after the DROP.
   ASSERT NOT has_function_privilege('authenticated',
-           'public.record_outlook_page_progress(uuid,uuid,text,uuid,integer,text,text,text,text,smallint,boolean,integer,integer,jsonb,integer)',
+           'public.record_outlook_page_progress(uuid,uuid,text,uuid,integer,text,text,text,text,smallint,boolean,integer,integer,jsonb,integer,jsonb)',
            'EXECUTE'),
          'authenticated gained EXECUTE on the checkpoint RPC';
   ASSERT NOT has_function_privilege('anon',
@@ -682,7 +689,7 @@ BEGIN
            'public.advance_outlook_round_write_cursor(uuid,uuid,uuid,text)', 'EXECUTE'),
          'service_role must be able to record finalisation progress';
   ASSERT has_function_privilege('service_role',
-           'public.record_outlook_page_progress(uuid,uuid,text,uuid,integer,text,text,text,text,smallint,boolean,integer,integer,jsonb,integer)',
+           'public.record_outlook_page_progress(uuid,uuid,text,uuid,integer,text,text,text,text,smallint,boolean,integer,integer,jsonb,integer,jsonb)',
            'EXECUTE'),
          'service_role must be able to checkpoint';
 

@@ -663,8 +663,14 @@ test('enabled but unauthenticated is refused; enabled+authorised now RUNS', () =
 })
 
 test('the handler touches no provider, no database and no scheduler', () => {
-  for (const banned of ['fetch(', 'graph.microsoft', 'createClient', '.rpc(', 'cron',
-    'setInterval', 'setTimeout', 'anthropic', 'runOutlookMetadataPass']) {
+  // `anthropic` has left this list because the handler now forwards a key. The
+  // invariant that replaced it is stronger where it counts: the handler itself must
+  // not reach either provider - no fetch, no Graph host, no Anthropic host, no
+  // request builder, no credential header.
+  for (const banned of ['fetch(', 'graph.microsoft', 'api.anthropic.com', 'x-api-key',
+    'callDraftModel', 'buildDraftRequest',
+    'createClient', '.rpc(', 'cron',
+    'setInterval', 'setTimeout', 'runOutlookMetadataPass']) {
     assert.ok(!HANDLER_CODE.includes(banned), `the handler must not reference ${banned}`)
   }
   const code = HANDLER_CODE

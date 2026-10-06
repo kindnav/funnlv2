@@ -303,9 +303,17 @@ test('collection statement is scoped, not absolute', () => {
 test('effective date and contact', () => {
   // History: the Gmail wording was published 2026-09-20, once both corrected cleanup callers
   // were deployed; the version before that was dated September 18, 2026. The date then moved
-  // to 2026-09-27 for the approved Outlook disclosure publication. This assertion tracks the
-  // single public date line, whatever the current approved date is.
-  assert.ok(/Last updated: September 27, 2026/.test(POLICY))
+  // to 2026-09-27 for the approved Outlook disclosure publication, and to 2026-10-06 for the
+  // Outlook content release.
+  //
+  // THE SPECIFIC DATE IS DELIBERATELY NOT PINNED HERE. There is one public date line for the
+  // whole policy, and the publication decision that sets it belongs to whichever section is
+  // being republished - currently tests/privacy-policy-outlook.test.js, which pins it exactly.
+  // Pinning the same value in two suites meant every republication broke an unrelated suite
+  // that had no opinion about the date, which is what happened on this line twice. What the
+  // Gmail suite actually needs is that the policy carries exactly one well-formed public date.
+  const dateLines = POLICY.match(/Last updated: [A-Z][a-z]+ \d{1,2}, \d{4}/g) || []
+  assert.strictEqual(dateLines.length, 1, 'exactly one well-formed public date line')
   assert.ok(!/Last updated: September 2026</.test(POLICY))
   assert.ok((POLICY.match(/navbir12345@gmail\.com/g) || []).length >= 3)
 })

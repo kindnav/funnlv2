@@ -84,6 +84,13 @@ export const CHECKPOINT_RESERVE_MS = 20_000
 
 /** Why one folder stopped reading. Controlled set; safe to log. */
 export const FOLDER_STOP_CODES = Object.freeze([
+  // A handle the page was REQUIRED to produce could not be produced. Deliberately
+  // NOT continuable: a continuable stop is retried after the short continue backoff,
+  // and a deterministic seal failure would then spin. This ends the invocation as
+  // INCOMPLETE instead, which the reservation predicate retries after five minutes
+  // and gives up on after ten attempts - a bounded, visible stall rather than a hot
+  // loop, and no cursor moves either way.
+  'handle_production_failed',
   'complete',              // reached its @odata.deltaLink in this round
   'already_complete',      // it had reached it in an earlier invocation
   'budget_exhausted',      // the invocation deadline would not cover another page
@@ -167,6 +174,12 @@ export async function readFolderContinued (p) {
   let complete = round?.folderComplete === true
   let linkRejected = null
   let checkpointRefusal = null
+  // Handle accounting, counts and controlled codes only.
+  let handlesOffered = 0
+  let handlesStored = 0
+  let handlesEvicted = 0
+  const handleSkips = Object.create(null)
+  let handleReason = null
 
   if (complete) {
     return {
@@ -181,6 +194,11 @@ export async function readFolderContinued (p) {
       conversationsDropped,
       linkRejected: null,
       checkpointRefusal: null,
+      handlesOffered: 0,
+      handlesStored: 0,
+      handlesEvicted: 0,
+      handleSkips: {},
+      handleReason: null,
     }
   }
 
@@ -258,6 +276,32 @@ export async function readFolderContinued (p) {
       message: m, extra: norm.extras.get(m.providerMessageKey),
     })))
 
+    // ── A FAILED REQUIRED HANDLE STOPS THE FOLDER, BEFORE THE CHECKPOINT ──
+    // Checked here rather than after the commit, because the whole point is that
+    // nothing commits: the page sequence is not incremented, record_outlook_page_
+    // progress is never called, so the resume position, the conversation merge and
+    // the handle write all stay exactly as the previous page left them. The next
+    // invocation re-reads this page from the same link and, if the seal succeeds,
+    // stores every message of it.
+    if (typeof folded.handleFailure === 'string' && folded.handleFailure.length > 0) {
+      stop = 'handle_production_failed'
+      handleReason = folded.handleFailure
+      break
+    }
+
+    if (isPlainObject(folded.handles)) {
+      handlesOffered += Array.isArray(folded.messages) ? folded.messages.length : 0
+      for (const [code, n] of Object.entries(folded.handles.skipped ?? {})) {
+        if (Number.isInteger(n)) handleSkips[code] = (handleSkips[code] || 0) + n
+      }
+      // The LAST page's reason wins only when nothing has been produced all folder:
+      // 'content_consent_missing' on page one is the fact worth reporting, and it
+      // cannot be contradicted by a later page since the gate does not change mid-run.
+      if (typeof folded.handles.reason === 'string' && handlesOffered === 0) {
+        handleReason = folded.handles.reason
+      }
+    }
+
     pageSeq += 1
     const checkpointRes = await checkpoint({
       folder,
@@ -268,6 +312,10 @@ export async function readFolderContinued (p) {
       messagesSeen: norm.counts.input,
       messagesDropped: 0,
       conversations: folded.contributions,
+      // The retrieval handles for this page, committed in the SAME call as the fold
+      // and the resume position. Empty whenever the content consent gate is closed,
+      // which is the envelope-only path and the production default.
+      messages: folded.messages ?? [],
       removals: norm.removals,
     })
 
@@ -290,6 +338,10 @@ export async function readFolderContinued (p) {
       conversationsDropped += Number.isInteger(checkpointRes.conversations_dropped)
         ? checkpointRes.conversations_dropped
         : 0
+      // What the DATABASE actually retained, which is the only number that matters:
+      // its six-message selection may keep fewer than the page offered.
+      handlesStored += Number.isInteger(checkpointRes.handles_offered) ? checkpointRes.handles_offered : 0
+      handlesEvicted += Number.isInteger(checkpointRes.handles_evicted) ? checkpointRes.handles_evicted : 0
     }
 
     pagesThisInvocation += 1
@@ -324,6 +376,11 @@ export async function readFolderContinued (p) {
     conversationsDropped,
     linkRejected,
     checkpointRefusal,
+    handlesOffered,
+    handlesStored,
+    handlesEvicted,
+    handleSkips,
+    handleReason,
   }
 }
 
@@ -418,6 +475,19 @@ export async function runOutlookRoundSlice (p) {
       roundMessages: GRAPH_FOLDERS.reduce((n, f) => n + folders[f].roundMessages, 0),
       messagesDropped: GRAPH_FOLDERS.reduce((n, f) => n + folders[f].messagesDropped, 0),
       conversationsDropped: GRAPH_FOLDERS.reduce((n, f) => n + folders[f].conversationsDropped, 0),
+      handlesStored: GRAPH_FOLDERS.reduce((n, f) => n + (folders[f].handlesStored ?? 0), 0),
+      handlesEvicted: GRAPH_FOLDERS.reduce((n, f) => n + (folders[f].handlesEvicted ?? 0), 0),
     },
+    // Why no handle was produced, when none was. 'content_consent_missing' here is
+    // the normal, expected answer for the live pilot connection.
+    handleReason: GRAPH_FOLDERS
+      .map((f) => folders[f].handleReason)
+      .find((r) => typeof r === 'string') ?? null,
+    // A page was refused because a required handle could not be produced. Reported
+    // as its own incomplete reason: the folder did not finish, and the cause is not
+    // Microsoft, a cap, or the clock.
+    handleFailure: GRAPH_FOLDERS
+      .map((f) => (folders[f].stop === 'handle_production_failed' ? folders[f].handleReason : null))
+      .find((r) => typeof r === 'string') ?? null,
   }
 }

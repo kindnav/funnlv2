@@ -431,10 +431,16 @@ test('applied migrations are unmodified; the only addition is the forward scope 
   const files = readdirSync(join(ROOT, 'supabase/migrations')).sort()
   assert.ok(files.includes('20260921000000_add_outlook_content_draft_primitives.sql'))
   assert.ok(files.includes('20260922175616_revoke_service_role_from_outlook_user_rpcs.sql'))
-  // FIVE UNAPPLIED forward migrations now exist. Every one must sort after every
+  // EIGHT UNAPPLIED forward migrations now exist. Every one must sort after every
   // applied one, and in this order, so `db push` applies them as reviewed: the scope
   // widening, the connection-status read path, the candidate write path, the token
-  // rotation, then durable continuation.
+  // rotation, durable continuation, the pilot reservation, then the content note and
+  // new-contact write paths.
+  //
+  // The last entry is the newest and must stay last: it DROPs and re-CREATEs
+  // upsert_outlook_interaction_candidate to add the note parameter, so applying it
+  // before 20260930000000 (which creates the 9-argument form) would drop a function
+  // that does not exist yet and then be overwritten by the older file.
   const UNAPPLIED = [
     '20260928000000_outlook_add_user_read_scope.sql',
     '20260929000000_outlook_connection_status_rpc.sql',
@@ -442,6 +448,8 @@ test('applied migrations are unmodified; the only addition is the forward scope 
     '20261001000000_outlook_rotate_access_token.sql',
     '20261002000000_outlook_durable_continuation.sql',
     '20261003000000_outlook_pilot_reservation.sql',
+    '20261006000000_outlook_content_note_and_new_contact_write.sql',
+    '20261007000000_outlook_round_message_retrieval.sql',
   ]
   assert.deepStrictEqual(files.slice(-UNAPPLIED.length), UNAPPLIED,
     'the unapplied forward migrations must be the newest, in this order')

@@ -71,6 +71,29 @@ const APPROVED_RETENTION_DISCLOSURES = [
     text: "Anthropic's 30 days is not a Funnl deletion schedule" },
 ]
 
+/**
+ * Approved FUNNL durations - a SEPARATE list, because the invariant differs.
+ *
+ * Every entry in APPROVED_RETENTION_DISCLOSURES is attributed to Anthropic, and the
+ * test above checks that attribution: a duration drifting onto Funnl is the precise
+ * failure that list exists to catch. This one is a Funnl duration on purpose, so it
+ * cannot live there - putting it there would have meant relaxing the attribution
+ * check for all six, and the suite said so.
+ *
+ * The content release introduces exactly one: a suggestion has a 30-day review
+ * window, after which it CANNOT BE ACCEPTED. That is enforced rather than
+ * aspirational - both accept RPCs refuse an expired suggestion, proven against real
+ * Postgres in tests/sql/outlook-accept-expiry-runtime.sql.
+ *
+ * It is emphatically NOT a deletion promise, and is admitted here only because the
+ * policy also states what it does not mean. Those statements are asserted
+ * separately, so removing any of them while keeping this duration fails the suite.
+ */
+const APPROVED_FUNNL_DURATIONS = [
+  { why: 'the review window, which is a refusal and not a deletion',
+    text: 'A pending suggestion carries a 30-day review window' },
+]
+
 // A retention duration is a QUANTITY, optionally restated in digits, optionally qualified,
 // then a UNIT. Kept as small named pieces so the invariant can be audited by eye, and written
 // generically so it catches the class rather than a list of phrasings. Earlier versions missed
@@ -95,6 +118,7 @@ const durationRe = (flags) => new RegExp('\\b' + DURATION_QUANTITY + DURATION_RE
 function unapprovedDurations () {
   let rest = OUTLOOK_PROSE
   for (const { text } of APPROVED_RETENTION_DISCLOSURES) rest = rest.split(text).join(' [APPROVED] ')
+  for (const { text } of APPROVED_FUNNL_DURATIONS) rest = rest.split(text).join(' [APPROVED] ')
   return (rest.match(durationRe('ig')) || []).map((hit) => {
     const at = rest.indexOf(hit)
     return `${hit} -> ...${rest.slice(Math.max(0, at - 90), at + hit.length + 40)}...`
@@ -144,8 +168,14 @@ test('the section describes the RESTRICTION, not non-existence', () => {
   const flat = OUTLOOK.replace(/\s+/g, ' ')
   assert.ok(/if, and only if,<\/em> you choose to connect Outlook/i.test(flat),
     'uses the conditional "if, and only if" framing')
-  assert.ok(/belong to a later release and are not part of the first pilot/
-    .test(OUTLOOK_PROSE), 'body reading and AI stay conditional on a later release')
+  // THE LATER-RELEASE FRAMING IS GONE, deliberately: body reading and the Anthropic
+  // call are what this release does, so deferring them to a later one would now be
+  // the false statement. What stays conditional is CONNECTING - the integration is
+  // still restricted to one designated account and gated by a flag.
+  assert.ok(!/later release/.test(OUTLOOK_PROSE),
+    'the section must no longer defer body reading or AI to a later release')
+  assert.ok(!/first pilot/.test(OUTLOOK_PROSE),
+    'nor describe an envelope-only first pilot as what will happen')
   // The superseded absolutes must not come back.
   for (const gone of [/This connection does not exist yet/,
     /Nothing here is in\s+effect today/,
@@ -154,18 +184,40 @@ test('the section describes the RESTRICTION, not non-existence', () => {
   }
 })
 
-test('the FIRST PILOT is described as envelope-only', () => {
-  assert.ok(/read message envelopes only/.test(OUTLOOK_PROSE),
-    'names the envelope-only behaviour')
-  assert.ok(/will not fetch message bodies or attachments/.test(OUTLOOK_PROSE))
-  assert.ok(/send nothing to Anthropic or any other AI service/.test(OUTLOOK_PROSE))
-  assert.ok(/produce no summaries or drafts/.test(OUTLOOK_PROSE))
-  assert.ok(/people already in that account.s contacts/.test(OUTLOOK_PROSE),
-    'no new-contact proposals are claimed for the pilot')
-  // Which is what the worker actually does: the envelope projection is the only one
-  // the delta request uses, and the content projection has no caller in the run path.
+test('the section describes the CONTENT RELEASE, with its bounds', () => {
+  // REPLACES 'the FIRST PILOT is described as envelope-only'. That guard asserted
+  // 'read message envelopes only', 'will not fetch message bodies or attachments'
+  // and 'send nothing to Anthropic or any other AI service' - all correct for the
+  // envelope-only pilot and all false now. A policy that denied body reading while
+  // the worker performed it would be the same failure in the opposite direction.
+  assert.ok(/message\s+<strong[^>]*>envelopes<\/strong>/.test(OUTLOOK)
+    || /message envelopes/.test(OUTLOOK_PROSE), 'the envelope read is still stated')
+  assert.ok(/text of up to six of those messages/.test(OUTLOOK_PROSE),
+    'the body read must be stated, with its bound')
+  assert.ok(/does not read attachments/.test(OUTLOOK_PROSE))
+  assert.ok(/does not read one-sided exchanges/.test(OUTLOOK_PROSE))
+
+  // The superseded absolutes must not come back.
+  for (const gone of [/read message envelopes only/,
+    /will not fetch message bodies or attachments/,
+    /send nothing to Anthropic or any other AI service/,
+    /produce no summaries or drafts/]) {
+    assert.ok(!gone.test(OUTLOOK_PROSE), `a superseded envelope-only claim is back: ${gone}`)
+  }
+
+  // And the bounds, because "reads the text" alone says nothing about how much.
+  assert.ok(/4,000 characters/.test(OUTLOOK_PROSE) && /12,000/.test(OUTLOOK_PROSE),
+    'both truncation bounds')
+  assert.ok(/the oldest are left out/.test(OUTLOOK_PROSE))
+  assert.ok(/your own is not sent/.test(OUTLOOK_PROSE), 'the signature asymmetry')
+
+  // The transport still uses the envelope projection for the DELTA request - the
+  // content projection is a separate, per-message read, which is what makes the
+  // six-message bound meaningful rather than decorative.
   assert.ok(/\$select=\$\{DISCOVERY_SELECT\.join/.test(TRANSPORT),
-    'the folder delta request uses the envelope projection')
+    'the folder delta request still uses the envelope projection')
+  assert.ok(/\$select=\$\{CONTENT_SELECT\.join/.test(TRANSPORT),
+    'and the per-message content read is its own bounded request')
 })
 
 test('no statement claims the pilot is running, verified or certified', () => {
@@ -185,7 +237,14 @@ test('no statement claims the pilot is running, verified or certified', () => {
   // Instead: the restriction, and what the first pilot will do WHEN enabled.
   assert.ok(/When this integration is enabled/.test(OUTLOOK_PROSE),
     'the pilot is described conditionally on being enabled')
-  assert.ok(/What the first pilot will do, when it is enabled/.test(OUTLOOK_PROSE))
+  // The heading moved from 'What the first pilot will do, when it is enabled' to a
+  // description of what Funnl reads, because there is no longer a narrower first
+  // pilot to describe separately. The CONDITIONAL framing is what this guard is
+  // actually for, and it is asserted above and below.
+  assert.ok(/What Funnl reads from your Outlook mailbox/.test(OUTLOOK_PROSE),
+    'the read is described under its own heading')
+  assert.ok(/if, and only if,/.test(OUTLOOK.replace(/\s+/g, ' ')),
+    'and the whole section stays conditional on choosing to connect')
 })
 
 // ── Permission scope ─────────────────────────────────────────────────────────
@@ -311,7 +370,29 @@ console.log('\nAnthropic disclosures')
 test('Anthropic is named and the extract is described as minimized and pseudonymized', () => {
   assert.ok(/Anthropic/.test(OUTLOOK), 'Anthropic is named')
   assert.ok(/USER<\/em> and <em>CONTACT/.test(OUTLOOK), 'pseudonymous labels disclosed')
-  assert.ok(/Email addresses, the recipient's email domain/.test(OUTLOOK), 'exclusions disclosed')
+  // THIS PINNED THE WRONG SENTENCE. "Email addresses, the recipient's email domain ...
+  // are not included" described an exclusion list that was never checked as a list:
+  // the code supplies only addresses to assertRequestMinimization, and there is no
+  // domain check at all. Worse, the replacement wording briefly opened the "can
+  // remain" paragraph with that same phrase, which read as though an address became
+  // exempt once it appeared in message text - it does not, since the scan covers the
+  // whole serialized request.
+  //
+  // So the guard now pins the two halves separately: addresses ARE checked across the
+  // whole request, and the bare DOMAIN is named as something that can remain.
+  assert.ok(/whole outgoing request, the message text included/.test(OUTLOOK_PROSE),
+    'the address check must be stated as covering the message text')
+  assert.ok(/An address written in the body of a message is therefore caught/
+    .test(OUTLOOK_PROSE), 'and an address in the body must not read as exempt')
+  assert.ok(/shaped\s*like an email address, a Bearer token or a JWT-like string/
+    .test(OUTLOOK_PROSE.replace(/\s+/g, ' ')), 'the three shapes must be named')
+  assert.ok(/email domain on its own/.test(OUTLOOK_PROSE)
+    && /can remain/.test(OUTLOOK_PROSE),
+  'and the bare domain named as something that can remain')
+  // The overclaim must not come back.
+  assert.ok(!/checks\s*the outgoing request for each of them/
+    .test(OUTLOOK_PROSE.replace(/\s+/g, ' ')),
+  'the per-category check overclaim must not return')
   assert.ok(DRAFT.includes('assertRequestMinimization'), 'the code enforces minimization')
 })
 
@@ -368,7 +449,20 @@ console.log('\nsuggestion behavior')
 
 test('no automatic contact or interaction creation is claimed', () => {
   assert.ok(/Nothing would be added to your network automatically/.test(OUTLOOK))
-  assert.ok(/accept, dismiss, or defer/.test(OUTLOOK))
+  // INVERTED. The policy promised "you accept, dismiss, or defer them" while NEITHER
+  // review card has a defer control - defer_candidate exists in the database and
+  // nothing in the UI calls it. The consent notice had already been corrected; the
+  // policy had not, so the two contradicted each other on what a reviewer can do.
+  assert.ok(!/accept, dismiss, or defer/.test(OUTLOOK),
+    'the policy must not promise a deferral the UI does not offer')
+  assert.ok(/you accept, edit or dismiss them/.test(OUTLOOK_PROSE),
+    'the three options that exist must be named')
+  assert.ok(/There is no deferral option/.test(OUTLOOK_PROSE),
+    'and the absent one stated rather than silently dropped')
+  const page = read('src/pages/SuggestionsPage.jsx')
+  const card = read('src/components/NewContactSuggestionCard.jsx')
+  assert.ok(!/Defer/.test(page) && !/Defer/.test(card),
+    'if a Defer control is ever added, this wording must change with it')
   assert.ok(/never creates a contact or an interaction on its own/.test(OUTLOOK))
   for (const bad of [/automatically (creates|adds) (a )?contact/i, /added for you automatically/i]) {
     assert.ok(!bad.test(OUTLOOK), `must not claim: ${bad}`)
@@ -405,8 +499,28 @@ test('disconnect wording matches what the applied cleanup RPC actually does', ()
   assert.ok(/events, not by a timer/.test(OUTLOOK_PROSE))
   assert.ok(/deleted when you delete the contact it refers to, or when you delete your Funnl account/
     .test(OUTLOOK_PROSE), 'only the cascade-verified deletion paths are claimed')
-  assert.ok(/no scheduled job that acts on it today/.test(OUTLOOK_PROSE),
-    'the absent sweep is disclosed as a limit')
+  assert.ok(/no scheduled job<\/strong> that acts on that deadline today/.test(
+    OUTLOOK.replace(/\s+/g, ' ')) || /no scheduled job/.test(OUTLOOK_PROSE),
+  'the absent sweep is disclosed as a limit')
+  // THE REVIEW WINDOW IS A REFUSAL, NOT A DELETION, and the policy must say both
+  // halves. The approved-duration list admits the clause only because these do.
+  assert.ok(/Funnl will not let you accept it/.test(OUTLOOK_PROSE),
+    'what the window actually enforces')
+  assert.ok(/reappears the next time the page loads/.test(OUTLOOK_PROSE),
+    'that taking a row off the list is not a database change')
+  // CORRECTED. This pinned "stay stored until you accept it, dismiss it, disconnect
+  // Outlook" - listing ACCEPTANCE as a removal path for an expired suggestion, which
+  // it is not: accepting one is refused, so the row stays pending. Dismissal is the
+  // path that actually clears it, and it is not refused by the window.
+  assert.ok(/stay stored until you dismiss it, disconnect Outlook/.test(OUTLOOK_PROSE),
+    'and that the text stays stored until an actual removal event')
+  assert.ok(/acceptance is not a way to clear an expired suggestion/
+    .test(OUTLOOK_PROSE.replace(/\s+/g, ' ')),
+  'acceptance must not be offered as a way to clear an expired suggestion')
+  assert.ok(/Dismissing an expired suggestion does work, and does clear it/
+    .test(OUTLOOK_PROSE), 'and dismissal must be distinguished from it')
+  assert.ok(/erases the drafted context/.test(OUTLOOK_PROSE),
+    'with what dismissal actually erases')
   // And the working records are disclosed with the right verb.
   // 'short-lived' is gone: the measurement shows they can stay stored indefinitely.
   assert.ok(!/short-lived/.test(OUTLOOK_PROSE),
@@ -460,12 +574,13 @@ test('human-access wording is precise and includes the Anthropic safety exceptio
 // ── Date guard and non-regression ────────────────────────────────────────────
 console.log('\npublication date guard')
 
-test('the public date is the approved October 5, 2026 publication date', () => {
-  // Owner/product decision: publish THIS revised wording dated 2026-10-05, the actual
-  // New York date of the publishing commit. September 27 covered the superseded text
-  // and is historical. If a later merge moves the day, this pin must move with it in
-  // that same commit - which is the point of pinning it rather than leaving it free.
-  assert.ok(POLICY.includes('Last updated: October 5, 2026'),
+test('the public date is the actual October 6, 2026 publication date', () => {
+  // Owner/product decision: publish THIS content-release wording dated 2026-10-06, the
+  // actual New York date of the publishing commit. October 5 and September 27 covered
+  // the superseded envelope-only text and are historical. If a later merge moves the
+  // day, this pin must move with it in that same commit - which is the point of pinning
+  // it rather than leaving it free.
+  assert.ok(POLICY.includes('Last updated: October 6, 2026'),
     'the approved publication date must be present')
   assert.ok(!/Last updated: September 2[07], 2026/.test(POLICY),
     'a superseded Last-updated date must be gone')
@@ -475,16 +590,25 @@ test('the public date is the approved October 5, 2026 publication date', () => {
     'exactly one public date line')
   // Once in the public line, twice in the source decision comment (the approval and
   // the recheck instruction). Pinned so a stray extra date cannot creep in unnoticed.
-  assert.strictEqual((POLICY.match(/October 5, 2026/g) || []).length, 3,
+  assert.strictEqual((POLICY.match(/October 6, 2026/g) || []).length, 3,
     'one public date line plus the two source-comment mentions')
-  assert.strictEqual((POLICY.match(/Last updated: October 5, 2026/g) || []).length, 1,
+  assert.strictEqual((POLICY.match(/Last updated: October 6, 2026/g) || []).length, 1,
     'exactly one public Last-updated line carries the date')
-  // September 27 survives ONCE, in the comment, recorded as historical - so the
-  // superseded approval stays auditable rather than being quietly erased.
+  // The two superseded approval dates survive ONCE EACH, in the comment, recorded as
+  // history - so a replaced approval stays auditable rather than being quietly erased.
+  // October 5 is the envelope-only wording this release replaces; September 27 is the
+  // one before that.
   assert.strictEqual((POLICY.match(/September 27, 2026/g) || []).length, 1,
-    'the superseded approval is recorded once, as history')
-  assert.ok(/September 27, 2026 approval covered/.test(POLICY),
-    'and is labelled as covering the superseded wording')
+    'the oldest superseded approval is recorded once, as history')
+  assert.strictEqual((POLICY.match(/October 5, 2026/g) || []).length, 1,
+    'and so is the envelope-only approval this release supersedes')
+  assert.ok(/October 5, 2026 and September 27, 2026 approvals\s+covered the superseded envelope-only wording/
+    .test(POLICY.replace(/\s+/g, ' ')),
+    'both are labelled as covering the superseded envelope-only wording')
+  // And the current approval says what it actually covers: body processing and the
+  // extract sent to Anthropic, not just a reworded disclosure.
+  assert.ok(/selected message-body\s+processing/.test(POLICY),
+    'the recorded approval names the body processing it authorizes')
 })
 
 test('the section still carries a mandatory date-recheck instruction and an approval that is not legal advice', () => {
@@ -541,10 +665,31 @@ test('the packet records consent mechanics, decisions and blockers', () => {
   // version from the disclosure text, so the packet records the MECHANISM and
   // the current draft value rather than a standalone placeholder string.
   assert.ok(/ol-disc-/.test(PACKET), 'derived consent version recorded')
-  assert.ok(/derived, not declared/i.test(PACKET) && /computes it from the/.test(PACKET),
-    'the derivation mechanism is recorded')
-  assert.ok(/OUTLOOK_DISCLOSURE_VERSION` is unset/.test(PACKET),
-    'the packet must state the server value is unset')
+  assert.ok(/derived, not declared/i.test(PACKET)
+    && /computed from the text above/.test(PACKET),
+  'the derivation mechanism is recorded')
+  // And the packet quotes the SHIPPED strings, so an approval attaches to what a
+  // user would actually see. Asserted in full by outlook-consent-ui.test.js.
+  assert.ok(/quoted from `src\/lib\/outlookDisclosure\.js` verbatim/.test(PACKET),
+    'the packet must say the paragraphs are the shipped ones')
+  // CORRECTED. This asserted the packet says "`OUTLOOK_DISCLOSURE_VERSION` is unset",
+  // which is the false claim itself: that variable WAS configured in Production for
+  // the envelope-only disclosure - the pilot connected under it and completed a real
+  // import, which outlook-oauth-start would have refused otherwise. What the packet
+  // must now do is keep three values apart and not assert the one it has not read.
+  assert.ok(/CURRENT STATE/.test(PACKET),
+    'the packet needs an accurate current-state summary above the historical parts')
+  assert.ok(/HISTORICAL/.test(PACKET),
+    'and the older inventories must be marked as historical')
+  assert.ok(/[Ww]as configured in Production/.test(PACKET),
+    'the previously configured server version must be acknowledged')
+  assert.ok(/has not been read from this branch/.test(PACKET),
+    'and its CURRENT value must not be asserted without a read')
+  assert.ok(/[Bb]oth `null`/.test(PACKET),
+    'the two worker consent constants must be stated as the gate that is closed')
+  // The one claim that must NOT appear, because it is the one that was wrong.
+  assert.ok(!/OUTLOOK_DISCLOSURE_VERSION` is unset in (any|every) environment/
+    .test(PACKET), 'the packet must not claim the server version is unset everywhere')
   assert.ok(/DRAFT FOR OWNER\/LEGAL REVIEW/.test(PACKET))
   assert.ok(/finalize_microsoft_connection/.test(PACKET), 'consent mechanics cited to the RPC')
   for (const item of ['HMAC key', 'OAuth start and callback',
@@ -630,6 +775,28 @@ test('each approved Anthropic retention disclosure appears exactly once, attribu
   assert.ok(/within 30 days/.test(OUTLOOK_PROSE), 'Anthropic 30-day window')
   assert.ok(/up to 2 years/.test(OUTLOOK_PROSE), 'two-year flagged-content exception')
   assert.ok(/up to 7 years/.test(OUTLOOK_PROSE), 'seven-year classification-score retention')
+})
+
+test('the one approved FUNNL duration is a refusal, and says so', () => {
+  for (const { why, text } of APPROVED_FUNNL_DURATIONS) {
+    const count = OUTLOOK_PROSE.split(text).length - 1
+    assert.strictEqual(count, 1, `${why}: expected exactly one occurrence, found ${count}`)
+    // It must NOT be stated as a deletion, and the three sentences that keep it
+    // honest must accompany it.
+    const at = OUTLOOK_PROSE.indexOf(text)
+    const after = OUTLOOK_PROSE.slice(at, at + 1200)
+    assert.ok(/Funnl will not let you accept it/.test(after),
+      `${why}: the window must be stated as a refusal`)
+    assert.ok(/no scheduled job/.test(after),
+      `${why}: the absent sweep must accompany it`)
+    assert.ok(/reappears the next time the page loads/.test(after),
+      `${why}: and that hiding a row is not a database change`)
+    assert.ok(!/delete[sd]? (it|them|the suggestion) (after|within|at) 30/i.test(after),
+      `${why}: it must not be restated as a deletion schedule`)
+  }
+  // Exactly one. A second Funnl duration needs its own review, not a silent addition.
+  assert.strictEqual(APPROVED_FUNNL_DURATIONS.length, 1,
+    'adding a Funnl duration is a deliberate act')
 })
 
 test('no unapproved retention duration survives anywhere in the Outlook section', () => {

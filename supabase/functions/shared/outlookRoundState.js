@@ -69,6 +69,16 @@ export const MAX_PAGES_PER_ROUND = 200
 export const MAX_MESSAGES_PER_ROUND = 10_000
 export const MAX_CONVERSATIONS_PER_ROUND = 2_000
 
+/**
+ * How many retrieval handles ONE page offers for one conversation PER FOLDER.
+ *
+ * The database retains six per conversation with two places reserved per folder, so
+ * the most it can ever draw from one folder is six. Offering the latest six per
+ * folder therefore cannot change its answer, and bounds a single page's handle
+ * payload at twelve entries per conversation however long the thread is.
+ */
+export const HANDLES_OFFERED_PER_FOLDER = 6
+
 /** Why a conversation can never become a suggestion in this round. Controlled set. */
 export const ROUND_TAINT_CODES = Object.freeze([
   'ambiguous_counterparties', 'ambiguous_contact', 'automation_facts_incomplete',
@@ -82,6 +92,12 @@ export const ROUND_SKIP_CODES = Object.freeze([
   'not_two_sided',          // one side only, across the whole round
   'invalid_timestamp',      // a stored timestamp could not be read as a local date
 ])
+
+/**
+ * The ONE taint the content stage can resolve, because it is the only one that is a
+ * missing ANSWER rather than a property of the exchange. See finalizeConversation.
+ */
+export const CONTENT_RESOLVABLE_TAINT = 'automation_facts_incomplete'
 
 const isPlainObject = (v) => typeof v === 'object' && v !== null && !Array.isArray(v)
 
@@ -151,8 +167,14 @@ export function buildMessageFingerprintFields (p) {
  * @param {Map} p.contactIndex
  * @param {string} p.connectionId
  * @param {object} p.keyRing
- * @param {{computeFingerprintSet?:Function}} [p.deps]
- * @returns {Promise<{contributions:Array<object>, counts:object}>}
+ * @param {{computeFingerprintSet?:Function, produceHandles?:Function}} [p.deps]
+ *   `produceHandles` is OPTIONAL. Supplied, it is buildMessageHandles bound to the
+ *   connection's sealer and recorded consent version, and the fold additionally
+ *   returns `messages` - the protected retrieval handles for this page. Omitted,
+ *   the fold behaves exactly as it always has and `messages` is an empty array,
+ *   which is the envelope-only path.
+ * @returns {Promise<{contributions:Array<object>, counts:object, messages:Array<object>,
+ *                    handles:object|null}>}
  */
 export async function foldPage (p) {
   const { entries, selfSet, contactIndex, connectionId, keyRing, deps } = p || {}
@@ -162,6 +184,9 @@ export async function foldPage (p) {
   const fpSet = typeof deps?.computeFingerprintSet === 'function'
     ? deps.computeFingerprintSet
     : computeFingerprintSet
+  // No default. Without an injected producer this fold stores no retrieval handles
+  // at all, which is the behaviour every existing caller and test relies on.
+  const produceHandles = typeof deps?.produceHandles === 'function' ? deps.produceHandles : null
 
   const list = entries instanceof Map ? [...entries.values()] : (Array.isArray(entries) ? entries : [])
   const counts = { eligible: 0, deferred: 0, excluded: 0, unkeyed: 0 }
@@ -207,20 +232,34 @@ export async function foldPage (p) {
         lastIso: null,
         counterparties: new Set(),
         contactIds: new Set(),
+        // Plaintext Graph ids, in memory only, for the handle producer below. They
+        // are never put on a contribution and never leave this function except
+        // sealed.
+        candidates: [],
       }
       byConversation.set(conversationKey, slot)
     }
     slot.messages += 1
 
-    if (res.outcome === 'deferred') {
-      // A deferral anywhere in a conversation taints the whole episode: we must not
-      // quietly summarize the subset we happened to understand.
+    // A deferral anywhere in a conversation taints the whole episode: we must not
+    // quietly summarize the subset we happened to understand. The taint is set for
+    // EVERY deferral, including the resolvable one.
+    const deferred = res.outcome === 'deferred'
+    if (deferred) {
       counts.deferred += 1
       if (slot.taint === null) slot.taint = res.code
-      continue
+      // `automation_facts_incomplete` is the ONE deferral whose envelope facts are
+      // fully known - see evaluateMessage. Its counts and fingerprints are
+      // accumulated so the content stage has something to resolve the taint INTO;
+      // without them finalisation can only ever answer `no_eligible_messages`, and no
+      // unknown person could be proposed however much was read. Every other deferral
+      // still contributes nothing but the taint.
+      if (res.code !== CONTENT_RESOLVABLE_TAINT || typeof res.counterparty !== 'string') {
+        continue
+      }
+    } else {
+      counts.eligible += 1
     }
-
-    counts.eligible += 1
     const iso = canonicalIso(message.timestampIso)
     if (iso === null) {
       // A message whose timestamp cannot be read cannot be ordered, and the proposed
@@ -239,6 +278,18 @@ export async function foldPage (p) {
       buildMessageFingerprintFields({ connectionId, conversationKey, messageKey }), keyRing,
     )).writeFingerprint
 
+    // A RETRIEVAL CANDIDATE, recorded only for an ELIGIBLE message: a deferred or
+    // excluded one can never feed a summary, so keeping a key to it would store a
+    // reference with no purpose. The folder comes from the extra the normalizer
+    // attached, not from folderHint, because the column stores Graph's own folder
+    // name.
+    if (produceHandles !== null) {
+      const folderName = e?.extra?.folder
+      if (folderName === 'inbox' || folderName === 'sentitems') {
+        slot.candidates.push({ mfp: msgFp, messageId: messageKey, folder: folderName, sentAtIso: iso })
+      }
+    }
+
     // EARLIEST WINS, on exactly the pair the database merge compares.
     const isEarlier = slot.firstIso === null
       || iso < slot.firstIso
@@ -253,6 +304,7 @@ export async function foldPage (p) {
   }
 
   const contributions = []
+  const selected = []
   for (const slot of byConversation.values()) {
     // Within-page disagreement is decided here; across-page disagreement is decided by
     // the same two rules inside record_outlook_page_progress.
@@ -300,11 +352,48 @@ export async function foldPage (p) {
     }
 
     contributions.push(contribution)
+
+    // ── the page's OFFER for this conversation ──────────────────────────────
+    // The database makes the final six-message selection across everything the
+    // round has stored, with two places reserved per folder. This only decides
+    // what one page offers it, and it offers the LATEST few per folder: more than
+    // that cannot change the database's answer, and sending the lot would bloat
+    // the checkpoint payload on a long thread.
+    if (produceHandles !== null && slot.candidates.length > 0) {
+      const byFolder = new Map()
+      for (const c of slot.candidates.slice()
+        .sort((a, b) => (a.sentAtIso < b.sentAtIso ? 1 : a.sentAtIso > b.sentAtIso ? -1 : 0))) {
+        const list = byFolder.get(c.folder) ?? []
+        if (list.length >= HANDLES_OFFERED_PER_FOLDER) continue
+        list.push(c)
+        byFolder.set(c.folder, list)
+      }
+      for (const list of byFolder.values()) {
+        for (const c of list) selected.push({ ...c, cfp: conversationFingerprint })
+      }
+    }
   }
 
   // Deterministic order, so a fixture produces one payload and a diff is readable.
   contributions.sort((a, b) => a.cfp.localeCompare(b.cfp))
-  return { contributions, counts }
+
+  // ── the handles, produced ONCE for the whole page ──────────────────────────
+  // The producer checks the content consent gate itself and returns an empty array
+  // with a reason when it is closed, so this call is safe to make unconditionally:
+  // the envelope-only path simply ships no handles.
+  let handles = null
+  if (produceHandles !== null) {
+    handles = await produceHandles(selected)
+  }
+  return {
+    contributions,
+    counts,
+    messages: Array.isArray(handles?.handles) ? handles.handles : [],
+    handles,
+    // Set when a handle the page was REQUIRED to produce could not be produced. The
+    // caller must not checkpoint such a page: see HANDLE_FAILURES.
+    handleFailure: typeof handles?.failure === 'string' ? handles.failure : null,
+  }
 }
 
 /**
@@ -350,15 +439,35 @@ export function finalizeRound (p) {
  *
  * @param {object} r  one row from list_outlook_round_conversations
  * @param {(iso:string)=>string|null} localDateFor  bound to the user's time zone
+ * @param {{contentStageOn?: boolean}} [opts]
  * @returns {{entry: object, skip: null}|{entry: null, skip: string}}
  */
-export function finalizeConversation (r, localDateFor) {
+export function finalizeConversation (r, localDateFor, opts = {}) {
   if (typeof localDateFor !== 'function') throw new Error('local_date_required')
   const bump = (code) => ({ entry: null, skip: code })
   {
     if (!isPlainObject(r)) return bump('no_eligible_messages')
     const taint = typeof r.taint === 'string' && r.taint.length > 0 ? r.taint : null
-    if (taint !== null) return bump(ROUND_TAINT_CODES.includes(taint) ? taint : 'no_eligible_messages')
+    // ── ONE TAINT IS RESOLVABLE, AND ONLY ONE ────────────────────────────────
+    // `automation_facts_incomplete` is raised for an UNKNOWN counterparty because the
+    // discovery projection does not request headers, so the envelope pass cannot tell
+    // a person from a newsletter. It is therefore not a statement about the exchange -
+    // it is a statement that a question has not been asked yet.
+    //
+    // The content read asks it: CONTENT_SELECT requests internetMessageHeaders in the
+    // SAME request as the body, and the content pass refuses bulk or list mail from
+    // them. So when the content stage is on, this taint is carried forward as
+    // `requiresContent` instead of ending the conversation, and the stage must
+    // actually resolve it before anything is written. With the stage off it still
+    // skips, exactly as before.
+    //
+    // Every other taint stays terminal: they are about the exchange's own structure -
+    // two counterparties, two contacts, a thread longer than the bound - and no amount
+    // of body reading makes any of them true.
+    const resolvable = opts.contentStageOn === true && taint === 'automation_facts_incomplete'
+    if (taint !== null && !resolvable) {
+      return bump(ROUND_TAINT_CODES.includes(taint) ? taint : 'no_eligible_messages')
+    }
 
     const efp = typeof r.efp === 'string' ? r.efp : null
     const pfp = typeof r.pfp === 'string' ? r.pfp : null
@@ -381,6 +490,12 @@ export function finalizeConversation (r, localDateFor) {
       conversationFingerprint: typeof r.cfp === 'string' ? r.cfp : null,
       kind: contactId ? 'known_contact_interaction' : 'new_contact_suggestion',
       contactId,
+      // TRUE when this entry only exists because the content stage is expected to
+      // establish its eligibility. Nothing may be written for it unless the stage
+      // actually produces a draft: without the headers there is no evidence this was
+      // a person rather than a mailing list, and a metadata-only fallback would be a
+      // suggestion resting on a question nobody answered.
+      requiresContent: resolvable,
       // Not stored, and not needed: only a new-contact proposal would use them, and this
       // pass always defers those.
       counterparty: null,

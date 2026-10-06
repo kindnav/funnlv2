@@ -161,16 +161,25 @@ BEGIN
   ASSERT (SELECT status FROM public.interaction_candidates WHERE user_id = u1) = 'dismissed';
 
   -- ── 6. grants: worker only ────────────────────────────────────────────────
+  -- THE SIGNATURE GAINED A TENTH ARGUMENT (p_proposed_notes) in
+  -- 20261006000000_outlook_content_note_and_new_contact_write.sql, which DROPs and
+  -- re-CREATEs this function. has_function_privilege() resolves by EXACT argument
+  -- list, so these three name the 10-argument form; against the old 9-argument
+  -- form they raise "function does not exist" rather than failing an assertion -
+  -- which is exactly how the signature change was caught.
+  --
+  -- These are not cosmetic. A dropped function loses its ACL, so this is what
+  -- proves the REVOKE/GRANT pair was restated after the DROP.
   ASSERT has_function_privilege('service_role',
-           'public.upsert_outlook_interaction_candidate(uuid,uuid,uuid,text,text,smallint,text,date,text[])',
+           'public.upsert_outlook_interaction_candidate(uuid,uuid,uuid,text,text,smallint,text,date,text[],text)',
            'EXECUTE'),
          'the worker lost EXECUTE';
   ASSERT NOT has_function_privilege('authenticated',
-           'public.upsert_outlook_interaction_candidate(uuid,uuid,uuid,text,text,smallint,text,date,text[])',
+           'public.upsert_outlook_interaction_candidate(uuid,uuid,uuid,text,text,smallint,text,date,text[],text)',
            'EXECUTE'),
          'a user must never be able to manufacture a suggestion';
   ASSERT NOT has_function_privilege('anon',
-           'public.upsert_outlook_interaction_candidate(uuid,uuid,uuid,text,text,smallint,text,date,text[])',
+           'public.upsert_outlook_interaction_candidate(uuid,uuid,uuid,text,text,smallint,text,date,text[],text)',
            'EXECUTE'),
          'anon gained EXECUTE on the write RPC';
 

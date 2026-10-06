@@ -185,14 +185,34 @@ export function evaluateMessage(p) {
   // and subject rules above have already run independently. For proposing a BRAND NEW
   // contact they are not: defer instead.
   const automationComplete = isPlainObject(extra) && extra.automationFactsComplete === true
-  if (!automationComplete && contactId === null) {
-    return { outcome: 'deferred', code: 'automation_facts_incomplete' }
-  }
 
   const direction = parts.fromIsSelf || message.folderHint === 'sent' ? 'outbound' : 'inbound'
   const displayName = isPlainObject(extra) && isPlainObject(extra.displayNames)
     ? (extra.displayNames[counterparty] ?? null)
     : null
+
+  if (!automationComplete && contactId === null) {
+    // STILL DEFERRED - but the envelope facts come WITH it, and they are not a guess:
+    // who the message is between and which way it went are fully known here. The ONLY
+    // open question is whether the sender is a person or a mailing list, which needs
+    // the headers the discovery projection does not request.
+    //
+    // REPRODUCED BY THE LOCAL HARNESS. This used to return the code alone, so the
+    // round accumulator recorded no counterparty, no direction and no first message
+    // for the conversation - which meant it had no episode or person fingerprint, and
+    // finalisation answered `no_eligible_messages` whatever the content stage did
+    // later. An unknown person could therefore never be proposed, no matter how much
+    // was read. Carrying the facts is what makes the deferral resolvable instead of
+    // terminal; the taint still blocks every write until the headers are seen.
+    return {
+      outcome: 'deferred',
+      code: 'automation_facts_incomplete',
+      counterparty,
+      contactId,
+      direction,
+      displayName,
+    }
+  }
 
   return { outcome: 'eligible', counterparty, contactId, direction, displayName }
 }

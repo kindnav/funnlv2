@@ -187,6 +187,7 @@ export function statusForOutcome (outcome) {
  * @param {{integrationEnabled?:string|null, workerEnabled?:string|null,
  *          workerSecret?:string|null, clientId?:string|null, clientSecret?:string|null,
  *          tokenKeyB64?:string|null, fingerprintKey?:object|null, keyVersion?:number,
+ *          anthropicApiKey?:string|null,
  *          scope?:string}} env
  *        read by the caller, never here, so this stays drivable in a test.
  * @param {{tokenUrl:string, fetchImpl?:Function, graphFetchImpl?:Function,
@@ -266,6 +267,13 @@ export async function handleOutlookImportWorker (req, env, deps) {
       // The designated pilot account. A reserved connection belonging to anyone else is
       // released untouched; absent or malformed means nobody is importable (fails closed).
       pilotUserId: e.pilotUserId,
+      // The SUMMARY key, and deliberately NOT in REQUIRED_CONFIG: absent, the run
+      // still does everything else and reports the deferral per conversation. Making
+      // it required would turn "no summaries yet" into "the worker refuses to run",
+      // which is a worse answer and a worse rollback story. The consent gates are
+      // checked against the CONNECTION's recorded disclosure version regardless, so
+      // configuring this key does not by itself enable any body read.
+      anthropicApiKey: e.anthropicApiKey ?? null,
       // The Graph fetch is separable from the token fetch so a test can fail one
       // without the other; in production both are the platform fetch.
       //
