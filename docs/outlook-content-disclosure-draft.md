@@ -81,9 +81,20 @@ a text would be worthless. So what follows replaces
 2. Access is restricted to one designated Funnl-controlled test account. Funnl's
    servers refuse a connection request from any other account.
 
-3. *(unchanged — the six scopes)*
+3. You would grant six Microsoft scopes. Two of them read data, and both are
+   read-only: Mail.Read ("Read user mail") and User.Read ("Sign in and read user
+   profile"). Three are the standard sign-in scopes openid, profile and email. The
+   sixth, offline_access, grants no new access of its own — it is what lets Funnl
+   keep using those two read permissions while you are not using the app, so a read
+   can run without asking you to sign in again.
 
-4. *(unchanged — Microsoft grants those two more broadly than Funnl uses them)*
+4. Microsoft grants those two more broadly than Funnl uses them. Mail.Read is granted
+   at the mailbox level: it would technically permit reading message bodies and
+   attachments anywhere in your mailbox. User.Read permits your profile and basic
+   company information; Funnl asks it for three fields and uses them only to record
+   which mailbox is connected. Neither requires administrator consent by default, but
+   a work or school tenant can be configured to require an administrator to approve
+   the app, and then you may not be able to consent for yourself.
 
 5. **(replaces the envelope-only paragraph)** Funnl reads message envelopes — who
    sent each message, who it was addressed to, the subject, the times, which
@@ -110,11 +121,15 @@ a text would be worthless. So what follows replaces
    company that provides Funnl's AI. Anthropic receives the message text, the
    subject, the date, and a label saying which side wrote each message. It does not
    receive your email address, the other person's email address, your Microsoft
-   account details, or any Funnl identifier. Under Anthropic's standard commercial
-   terms this data is deleted within 30 days. There is an exception: material that
-   Anthropic's automated policy enforcement flags may be kept for up to two years,
-   and safety classification scores for up to seven years. This is not
-   zero-retention processing.
+   account details, or any Funnl identifier. Anthropic's published policy for its API
+   is to delete inputs and outputs from its systems within 30 days of receiving or
+   generating them. Three things can extend that: where its automated systems flag
+   something as violating its usage policy, the inputs and outputs may be kept for up
+   to 2 years and the resulting trust-and-safety classification scores for up to 7
+   years; it may keep data where the law requires it, or as necessary to act on
+   usage-policy violations; and a customer can negotiate different terms, including
+   zero retention. **Funnl has no zero-retention agreement with Anthropic**, so this
+   is not zero-retention processing.
 
 8. **(replaces "no subject line, summary or message text is kept")** A suggestion
    keeps the summary, the suggested next step, the subject line, the contact, the
@@ -133,12 +148,15 @@ a text would be worthless. So what follows replaces
    are left blank for you to fill in if you want them.
 
 10. **(new)** Nothing enters your network until you accept it. Funnl stores the
-    suggestion so it is still waiting when you come back, and you can edit every
-    proposed field first, including the name and the summary. Accepting a proposed
-    contact creates the contact and the first interaction together. **You can also
-    choose to save the contact without logging the conversation** — the interaction
-    is a checkbox you can clear. Dismissing a suggestion creates neither and deletes
-    the draft.
+    suggestion so it is still waiting when you come back. Before accepting you can
+    edit the name, the company, the role, how you met, the relationship, the tags,
+    the summary, the interaction type, the date and the follow-up date. **The email
+    address is the one exception: it is taken from the message itself and shown
+    read-only** — it is the one part of the proposal Funnl did not infer, and it is
+    what identifies the person. Accepting creates the contact and the first
+    interaction together. **You can also choose to save the contact without logging
+    the conversation** — the interaction is a checkbox you can clear. Dismissing a
+    suggestion creates neither and deletes the draft.
 
 11. **(new)** Where an exchange is unclear, Funnl sets it aside rather than guessing:
     more than one other person involved, a message Funnl could not read, a message
@@ -166,15 +184,14 @@ a text would be worthless. So what follows replaces
     fingerprint so the same exchange is not suggested again, and it goes when you
     delete that contact or your Funnl account.
 
-14. *(unchanged — and this is the in-flight acknowledgement, already correct)*
-    Disconnecting removes Funnl's copy of the authorisation, so Funnl has nothing
+14. Disconnecting removes Funnl's copy of the authorisation, so Funnl has nothing
     left to start a new read with. A read already under way may finish using access
     it had already obtained. Disconnecting does not withdraw the permission at
     Microsoft — to do that, remove Funnl from the permissions page of your Microsoft
     account.
 
-15. *(unchanged)* Funnl's Privacy Policy sets all of this out in full, including what
-    is kept and when it is deleted.
+15. Funnl's Privacy Policy sets all of this out in full, including what is kept and
+    when it is deleted.
 
 ### For the owner to confirm
 
@@ -221,11 +238,13 @@ rest — scopes, deletion, the pilot framing — stays as published on October 5
 > **Who else sees it.** To draft a summary, the cleaned message text is sent to
 > Anthropic, which provides Funnl's AI. Anthropic receives the message text, the
 > subject, the date and a label for which side wrote each message, and does not
-> receive email addresses, Microsoft account details or Funnl identifiers. Under
-> Anthropic's standard commercial terms the data is deleted within 30 days;
-> material flagged by automated policy enforcement may be kept up to two years and
-> safety classification scores up to seven years. This is not zero-retention
-> processing.
+> receive email addresses, Microsoft account details or Funnl identifiers.
+> Anthropic's published policy for its API is to delete inputs and outputs within 30
+> days of receipt or generation. Where its automated systems flag something as
+> violating its usage policy, inputs and outputs may be kept up to 2 years and
+> trust-and-safety classification scores up to 7 years; it may also keep data where
+> the law requires it, or as necessary to act on usage-policy violations. Funnl has no
+> zero-retention agreement with Anthropic, so this is not zero-retention processing.
 >
 > **What Funnl keeps.** The message text is discarded once the summary is written:
 > it is not stored in Funnl's database and not written to any log. What is stored
@@ -248,21 +267,28 @@ rest — scopes, deletion, the pilot framing — stays as published on October 5
 > sits in a review queue as a draft: it is not among your contacts, your
 > interactions or your follow-ups, and is not visible to Funnl's AI assistant.
 > **A contact and an interaction are created only when you accept them**, and only
-> with the values you have approved — and for someone new you may save the contact
-> **without** logging the conversation, by clearing the interaction checkbox.
-> Dismissing a suggestion creates neither and deletes the draft.
+> with the values you have approved. Every proposed field is editable except the
+> email address, which is taken from the message and shown read-only. For someone new
+> you may save the contact **without** logging the conversation, by clearing the
+> interaction checkbox. Dismissing a suggestion creates neither and deletes the
+> draft.
 >
 > **How long proposals last.** A suggestion carries a 30-day review window.
-> **After that window Funnl will not let you accept it** — accepting or dismissing
-> an expired suggestion tells you it has expired and removes it from your queue.
+> **After that window Funnl will not let you accept it** — accepting or dismissing an
+> expired suggestion tells you it has expired and takes it off the list you are
+> looking at. Taking it off that list is a change to what is on your screen, not to
+> what is stored: the suggestion is still in Funnl's database, still marked pending,
+> and it reappears the next time the page loads. It stops being offered only when it
+> is actually resolved — accepted, dismissed, invalidated by disconnecting, or deleted
+> with the contact or the account.
 > Being expired is not the same as being erased: the summary and subject stay stored
 > until the suggestion is removed, and they are removed when you accept it, dismiss
 > it, disconnect Outlook, delete the contact it belongs to, or delete your account.
 > Accepting turns a suggestion into your own contact and interaction, which stay
 > until you delete them or delete your account. Disconnecting Outlook deletes the
-> credentials, the sync state, the working records and the message references, and
-> stops any new reading; a sync already running may finish the one message it has
-> already requested, which is not saved. A suggestion you already accepted stays,
+> credentials, the sync state, the working records and the message references, so
+> Funnl has nothing left to start a new read with. A read already under way may finish
+> using access it had already obtained. A suggestion you already accepted stays,
 > because it is now your own data.
 
 **The `Last updated` date must be set to the actual New York publication date**,
@@ -331,37 +357,60 @@ fails and Funnl sets the exchange aside rather than guessing.
 ## C2. What the 30-day window actually does, and what it does not
 
 The earlier draft said a pending proposal "expires 30 days after it is created and
-is then no longer offered". **The first half is enforced; the second half was not
-true**, and the wording above now says only the part that is.
+is then no longer offered". **Neither half was fully true when that was written**, and
+the wording above now says only what is enforced.
 
-WHAT IS ENFORCED, in the database, today:
+### What is enforced, in the database
 
-- `accept_new_contact_candidate` and `accept_interaction_candidate` both read
-  `context_expires_at` and return `expired` once it has passed. An expired draft
-  **cannot be turned into a contact or an interaction** by any path.
-- The review surface now treats that answer as terminal and removes the row from the
-  queue with "This suggestion has expired." Before this change the interaction card
-  had no entry for `expired` at all, so the answer fell through to a generic
-  "Something went wrong — please try again": the row could never be accepted,
-  retrying could not help, and it sat in the queue indefinitely. That is fixed, and
-  it is the reason the wording promises a refusal rather than a disappearance.
+- `accept_new_contact_candidate` reads `context_expires_at` and returns `expired` once
+  it has passed. It always did.
+- `accept_interaction_candidate` **now does too** — it did not before. An earlier
+  version of this packet claimed both acceptance RPCs refused an expired suggestion;
+  that claim came from a grep for the `'expired'` result token whose two matches were
+  both inside `defer_candidate`, a different function. The interaction path never read
+  the column. Reproduced against a disposable Postgres: an Outlook candidate 40 days
+  past its deadline answered `accepted` and created an interaction.
 
-WHAT IS **NOT** ENFORCED, and must be said plainly:
+  The guard is **Outlook-scoped** and added by `CREATE OR REPLACE` in the unapplied
+  forward migration — no applied migration is edited, and replacing in place preserves
+  the function's ACL. It is scoped because Calendar and Gmail candidates carry NULL in
+  that column by design, so an unscoped rule would refuse every Calendar suggestion
+  ever made. For an Outlook row NULL fails closed, since every writer sets it. And it
+  sits **after** every terminal-status check, because acceptance erases the column to
+  NULL and a guard placed earlier would answer `expired` for a row that had already
+  been accepted. All of that is proven in
+  `tests/sql/outlook-accept-expiry-runtime.sql`.
 
-- **Nothing is scheduled.** `expire_pending_outlook_context` exists, is bounded, and
-  erases the drafted text of expired candidates — but no cron job, no worker and no
-  request calls it. Grepped: its only mentions outside its own definition are in a
-  revoke-list comment. So an expired suggestion's summary and subject **remain
-  stored** until one of the removal events above happens.
+- The review surface treats `expired` as settled and takes the row off the list on
+  screen. Before this round the interaction card had no entry for `expired` at all, so
+  the answer fell through to a generic "Something went wrong — please try again": the
+  row could never be accepted, retrying could not help, and it stayed on the list
+  indefinitely.
+
+### What is **not** enforced, and must be said plainly
+
+- **Nothing is scheduled to delete anything.** `expire_pending_outlook_context` exists
+  and is bounded, and erases the drafted text of expired candidates — but no cron job,
+  no worker and no request calls it. Its only mentions outside its own definition are
+  in a revoke-list comment. So an expired suggestion's summary and subject **remain
+  stored** until it is accepted, dismissed, invalidated by a disconnect, or deleted
+  with the contact or the account.
+- **Taking a row off the list is not a database change.** The review surface removes it
+  from component state only. The row stays `pending` in the database and **reappears on
+  the next page load**. That is why the wording distinguishes what is on screen from
+  what is stored: three different things could be meant by "no longer offered" — hidden
+  in the current view, marked terminal in the database, or deleted — and only the first
+  happens on expiry today.
 - **The queue does not filter on expiry.** Neither read adds a
   `context_expires_at > now()` predicate, and it could not easily: that column is
   deliberately excluded from the columns `authenticated` may select. So an expired
-  suggestion is still listed; it simply cannot be accepted.
+  suggestion is still listed on a fresh load; it simply cannot be accepted.
 
-This is why the policy paragraph says "Funnl will not let you accept it" and
-"expired is not the same as erased", rather than "no longer offered". **A scheduled
-sweep is a prerequisite for claiming automatic deletion, and it is listed as a
-blocker in the PR rather than described here as though it existed.**
+This is why the policy paragraph promises a **refusal**, says expired is not the same
+as erased, and says the row comes back on reload. **A scheduled sweep is a
+prerequisite for claiming automatic deletion. It does not exist, is not added in this
+change, and is listed as an unattended-operation requirement rather than described
+here as though it were already true.**
 
 ---
 
@@ -424,8 +473,8 @@ can check the prose against the code without reading the code.
 | a message whose headers were not returned yields no proposal | `requiresScreening` + `automation_unverified` | same suite: zero model calls, no proposal |
 | never a suggestion with an empty note on the content release | `planContentWrite` keys on `consentOpen` | same suite: the three codes that used to write one now write nothing |
 | the interaction is optional | `p_create_interaction` on the accept RPC; a checkbox on the card | `outlook-new-contact-review.test.js`; the browser harness renders and uses the checkbox |
-| an expired suggestion cannot be accepted | `context_expires_at` checked in both accept RPCs | `outlook-content-slice-runtime.sql` |
-| an expired suggestion is REMOVED from the queue, not retried | the `expired` outcome in both review maps | `outlook-new-contact-review.test.js` (exhaustive code-map check) |
+| an expired suggestion cannot be accepted | `context_expires_at` checked in BOTH accept RPCs — the interaction one only as of this round | `outlook-accept-expiry-runtime.sql`: the reproduction (40 days past, `accepted`, an interaction created), the refusal, the unexpired acceptance with the user's edits, unchanged Calendar and Gmail behaviour, unchanged `already_accepted` idempotency, and the preserved ACL, `search_path`, SECURITY DEFINER and single overload |
+| an expired suggestion is taken off the CURRENT VIEW, not deleted | the `expired` outcome in both review maps sets `removeFromQueue`, which filters component state only | `outlook-new-contact-review.test.js` (exhaustive code-map check). The row stays `pending` in the database and returns on reload — stated in section C2 rather than glossed |
 | nothing is scheduled to erase an expired draft | `expire_pending_outlook_context` has no caller | grepped; stated as a blocker, not as behaviour |
 | the provider calls are bounded in time and size, and refuse redirects | one AbortController across headers and body, `readJsonBounded`, `redirect: 'manual'` | `outlook-content-corrections.test.js` — headers-then-stall, oversized streamed bodies, redirects, and budget-admitted retries, on both the Anthropic and the Graph path |
 | **the NON-200 Graph body is bounded too** | the controller is held until the error body is read, and `MAX_ERROR_BODY_BYTES` (64 KiB) applies to it | same suite. This was NOT true when the claim was first written: the timer was cleared before the error body was read, and that read was an unbounded `res.json()`. A stalled 400 hung with no deadline; an oversized one buffered 4,100,048 bytes. Both reproduced and now refused. |
@@ -435,7 +484,7 @@ can check the prose against the code without reading the code.
 | a caller with no budget is unaffected | `budgetAllows` defaults to "yes" | same suite — the OAuth callback and the identity probe are single requests in short-lived handlers and pass none |
 | a failed required handle does not advance the page | `HANDLE_FAILURES` → `handle_production_failed`, checked before the checkpoint | same suite: the second of two encryptions failing writes nothing, and the retry retains both |
 | every proposal is reachable | the proposals queue's own keyset cursor and refill | the browser harness reaches proposal 21 |
-| Anthropic's retention window | Anthropic's published commercial terms | not a code claim; owner to re-check against the current terms at publication |
+| Anthropic's retention window | Anthropic's published commercial data-retention article (privacy.claude.com, "How long do you store personal data") — 30 days normally; up to 2 years for inputs/outputs flagged by automated usage-policy enforcement and up to 7 years for the resulting trust-and-safety classification scores; longer where law requires or to act on violations; different under a negotiated agreement | **Not a code claim.** Read from that article while preparing this packet. Funnl holds no zero-retention agreement. The owner must re-read it at publication, since Anthropic can change it without Funnl knowing |
 
 The one item on that list that is **not** verifiable from this repository is
 Anthropic's retention window. It is quoted from their published terms and should
@@ -452,6 +501,75 @@ be re-read at publication rather than trusted from this document.
    this choice exists.
 3. Confirm the pilot account will **disconnect and reconnect** to give fresh
    consent, and that both gates stay closed until it does.
-4. Note the remaining implementation work recorded in the PR description. This
-   wording is written for the finished behaviour so it can be reviewed once,
-   rather than twice.
+
+---
+
+## E. The staged plan, in three separable groups
+
+Grouped because the requirements differ in kind, and bundling them is how a
+publication decision quietly becomes an unattended-operation decision. **Nothing
+below has been done.** Each group's gate must hold before the next begins.
+
+### E1. Publication requirements — what must be true before the wording goes live
+
+| # | Step | Gate |
+|---|---|---|
+| 1 | Owner approves the section A paragraphs and the section B policy text | Sign-off on the exact text, not the summary of it |
+| 2 | Re-read Anthropic's retention article and confirm the figures in paragraph 7 still match | Anthropic can change it without Funnl knowing; the packet's figures were read once, while preparing it |
+| 3 | Replace `OUTLOOK_DISCLOSURE_PARAGRAPHS` in `src/lib/outlookDisclosure.js` with the approved fifteen, and the Outlook section of `src/pages/PrivacyPage.jsx` with the section B text | Published text byte-identical to what was approved. Three published paragraphs are **replaced**, not supplemented — see the table in section A |
+| 4 | Set the policy `Last updated` date to the actual New York publication date | Same rule applied on 5 October |
+| 5 | **Merge the PR into `main`** | This is also the **frontend deployment**: `vercel.json` sets `git.deploymentEnabled` to `{ main: true, "*": false }`, so merging triggers a Production Vercel build automatically and no separate frontend step exists. Wait for READY before step 6 |
+| 6 | Read the derived version from the published paragraphs — `computeDisclosureVersion()`, not typed by hand | One `ol-disc-…` value, copied from its output |
+
+At the end of E1 the wording is live and the gates are still closed: every constant
+below is still `null`, so the published notice describes a capability nothing can yet
+exercise. That ordering is deliberate — a consent version cannot be derived from text
+that is not published.
+
+### E2. Live-pilot requirements — what must be true before one real mailbox is read
+
+| # | Step | Gate |
+|---|---|---|
+| 7 | Apply the two unapplied migrations | `supabase migration list --linked` shows exactly two pending. Afterwards verify the new RPC signatures, the preserved `accept_interaction_candidate` ACL, and that `authenticated` has no EXECUTE on either producer |
+| 8 | Set **three** values to the version from step 6: the server's `OUTLOOK_DISCLOSURE_VERSION` (read by `outlook-oauth-start`, which stamps it into the OAuth state), and the worker's `REQUIRED_CONTENT_CONSENT_VERSION` and `REQUIRED_THIRD_PARTY_CONSENT_VERSION` | **All three, before the reconnect.** The start function stamps the state with whatever it is configured with; the worker compares the stored value against its two constants. A reconnect done while the server still carries the old version records the old version, and no later configuration change can upgrade it in place — the only remedy is another disconnect and reconnect |
+| 9 | Configure `ANTHROPIC_API_KEY` for `outlook-import-worker` | Present. On its own it opens nothing: both gates are still checked against the connection's recorded version |
+| 10 | Deploy `outlook-import-worker` | Deployed files byte-compared against merged `main`. `outlook-oauth-start` also needs redeploying if step 8 changed its configuration |
+| 11 | Pilot **disconnects**, then **reconnects**, reading the new notice | A connection row whose `consent_policy_version` equals the step-6 value. Treat the connection as unverified until a row is actually finalized |
+| 12 | Check the connection is due under its retry backoff | If not due, report when it becomes due and stop |
+| 13 | **One** authorized worker invocation, using the secret the owner already holds, supplied through a hidden input — never echoed, never pasted into chat, never logged, and **not rotated** | `OUTLOOK_IMPORT_WORKER_ENABLED` set immediately before and unset in a `finally`, then **verified off by name**. The secret's unreadability from this environment is not a blocker: the owner holds it and supplies it directly |
+
+### E3. Unattended-operation requirements — what must be true before it runs on a schedule
+
+Deliberately last, and **out of scope for the current change**. No scheduler and no
+retention framework is added here.
+
+| # | Requirement | Why it gates unattended running, not the pilot |
+|---|---|---|
+| 14 | A scheduled caller for `expire_pending_outlook_context` | Until it exists, an expired suggestion's summary and subject stay stored indefinitely. A supervised pilot can resolve its own suggestions by hand; an unattended one accumulates them. **The policy must not claim automatic deletion before this exists** — and it does not |
+| 15 | A scheduled worker trigger | Every invocation so far is manual and authorized one at a time. A schedule removes the human from each one |
+| 16 | Operational visibility on the deferral report | `content.deferred` already reports every reason. Unattended running needs somewhere that report is actually read, or a silent stall looks like a quiet success |
+
+### The pilot checklist — what the one invocation must demonstrate
+
+In order, with the state checked after each:
+
+1. **Useful notes on existing contacts.** At least one `interaction_candidates` row
+   for a known contact whose `proposed_notes` describes what was discussed — not the
+   subject line, not a count. Read it and judge it.
+2. **An unknown-person proposal carrying both records.** One `new_contact_candidates`
+   row with a `proposed_email` from the message envelope, a name with its evidence,
+   and a `draft_summary` — the contact and the interaction offered together.
+3. **Edit and accept.** Change fields on each kind of card, accept once, and confirm
+   the saved `contacts` / `interactions` rows carry the edited values and not the
+   proposal's. Confirm the email came from the envelope and could not be edited.
+4. **Dismiss.** Dismiss a suggestion of each kind and confirm **no** contact and
+   **no** interaction were created, and the candidate is terminal.
+5. **Disconnect cleanup.** Disconnect and confirm the connection, tokens, sync state,
+   working records and message references are gone, unreviewed suggestions are
+   invalidated, and the records accepted in step 3 **survive** — they are the user's
+   own data now.
+6. **The worker flag is OFF.** Verified by name, not inferred from the absence of
+   activity.
+
+Stop at the first step that does not hold. Steps 3, 5, 7, 8, 9, 10 and 13 are each
+separately authorized; approving the wording authorizes none of them.

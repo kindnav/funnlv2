@@ -230,6 +230,54 @@ test('the drafted migration is NOT applied and says so', () => {
     'the producer must not be grantable to authenticated')
 })
 
+test('the Outlook context window is enforced on the interaction acceptance path', () => {
+  // An approval packet claimed both acceptance RPCs refused an expired suggestion.
+  // Only accept_new_contact_candidate did: the claim came from a grep whose two
+  // matches were both inside defer_candidate. Reproduced against real Postgres - an
+  // Outlook candidate 40 days past its deadline answered 'accepted' and created an
+  // interaction - and guarded in the UNAPPLIED forward migration.
+  const m = read('supabase/migrations/20261006000000_outlook_content_note_and_new_contact_write.sql')
+  const at = m.indexOf('CREATE OR REPLACE FUNCTION public.accept_interaction_candidate(')
+  assert.ok(at > 0, 'the forward migration must replace the acceptance RPC')
+  const fn = m.slice(at)
+
+  // OUTLOOK-SCOPED, and failing closed on NULL. Calendar and Gmail carry NULL here
+  // by design, so an unscoped rule would refuse every Calendar suggestion ever made.
+  // Checked as substrings on one logical condition, collapsed to single spaces so
+  // the assertion does not depend on where the source happens to wrap.
+  const flat = fn.replace(/\s+/g, ' ')
+  assert.ok(flat.includes(
+    "IF v_cand.source = 'outlook' AND (v_cand.context_expires_at IS NULL"
+    + ' OR v_cand.context_expires_at <= now()) THEN'),
+  'the guard must be Outlook-scoped and fail closed on NULL')
+  assert.ok(fn.includes("RETURN jsonb_build_object('result', 'expired')"))
+
+  // PLACED AFTER the terminal-status checks. Acceptance erases the deadline to NULL,
+  // so a guard placed earlier would answer 'expired' for an already-accepted row.
+  const guardAt = fn.indexOf("v_cand.source = 'outlook'")
+  for (const earlier of ["'already_accepted'", "'dismissed'", "'invalidated'",
+    "'interaction_previously_deleted'"]) {
+    const idx = fn.indexOf(earlier)
+    assert.ok(idx > 0 && idx < guardAt,
+      `${earlier} must still be decided BEFORE the expiry guard`)
+  }
+
+  // REPLACED IN PLACE, not dropped: a DROP loses the ACL and hands EXECUTE back to
+  // PUBLIC unless every grant is restated.
+  assert.ok(!/DROP FUNCTION[^;]*accept_interaction_candidate/.test(m),
+    'the applied function must not be dropped')
+  assert.ok(fn.includes("SET search_path = ''"), 'the pinned empty search_path is preserved')
+  assert.ok(fn.includes('SECURITY DEFINER'))
+  assert.ok(m.replace(/\s+/g, ' ').includes(
+    'GRANT EXECUTE ON FUNCTION public.accept_interaction_candidate(uuid, text, date, text)'
+    + ' TO authenticated'), 'authenticated must keep EXECUTE')
+
+  // And NO applied migration is edited to achieve it.
+  const applied = read('supabase/migrations/20260921000000_add_outlook_content_draft_primitives.sql')
+  assert.ok(!applied.replace(/\s+/g, ' ').includes("IF v_cand.source = 'outlook' AND (v_cand.context_expires_at"),
+    'the applied migration must not carry the guard')
+})
+
 console.log('')
 console.log(`${passed + failed} tests: ${passed} passed, ${failed} failed`)
 console.log('')
