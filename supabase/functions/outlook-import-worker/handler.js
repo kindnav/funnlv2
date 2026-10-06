@@ -268,7 +268,20 @@ export async function handleOutlookImportWorker (req, env, deps) {
       pilotUserId: e.pilotUserId,
       // The Graph fetch is separable from the token fetch so a test can fail one
       // without the other; in production both are the platform fetch.
-      deps: { fetchImpl: d.graphFetchImpl ?? d.fetchImpl, now: d.now },
+      //
+      // THE PLATFORM FETCH IS THE LAST FALLBACK, and it has to be. The deployed
+      // entry (index.ts) passes tokenUrl, select and rpc only - no fetch of
+      // either name - so without this both operands were undefined and the Graph
+      // deps went in with fetchImpl: undefined. readFolderContinued then threw
+      // fetch_not_injected BEFORE the first page, the catch below released the
+      // lease as pass_failed, and the invocation answered 503 released_error.
+      // Measured in Production: two error sync rows, zero pages, zero pending
+      // suggestions, zero saved interactions.
+      //
+      // The token path never had this defect: makeRunContextLoader applies its
+      // own `deps.fetchImpl ?? globalThis.fetch` default internally, which is
+      // why the refresh worked and only the Graph read failed.
+      deps: { fetchImpl: d.graphFetchImpl ?? d.fetchImpl ?? globalThis.fetch, now: d.now },
     })
   } catch {
     // Nothing from the thrown value is read: it can carry a URL, an address or a
