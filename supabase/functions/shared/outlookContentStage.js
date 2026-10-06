@@ -172,7 +172,7 @@ export async function readConversationHandles (p) {
  * could disagree.
  */
 export function makeMessageFetcher (p) {
-  const { accessToken, deps } = p || {}
+  const { accessToken, deps, budgetAllows } = p || {}
   if (!isPlainObject(deps) || typeof deps.fetchImpl !== 'function') {
     throw new Error('fetch_not_injected')
   }
@@ -196,6 +196,11 @@ export function makeMessageFetcher (p) {
       fetchImpl: deps.fetchImpl,
       sleepImpl: deps.sleepImpl,
       now: deps.now,
+      // THE SAME INVOCATION BUDGET the pass checks before each fetch, handed to the
+      // transport so its RETRIES are bounded by it too. The pass's own check admits
+      // one body read; without this the transport could then spend four attempts and
+      // two backoffs inside that single admission.
+      budgetAllows,
     })
     if (!res?.ok) return { ok: false, code: typeof res?.code === 'string' ? res.code : 'transport_failure' }
     const content = readMessageContent(res.json, messageId)
@@ -280,7 +285,7 @@ export async function summarizeOneConversation (p) {
     requiredConsent: requiredConsent ?? {},
     handles: read.handles,
     decryptHandle: ({ ciphertext, nonce }) => decryptCursor(ciphertext, nonce),
-    fetchMessage: makeMessageFetcher({ accessToken, deps }),
+    fetchMessage: makeMessageFetcher({ accessToken, deps, budgetAllows }),
     // STRAIGHT THROUGH, with no reshaping: the pass's port contract is this
     // function's own return shape, so there is nothing here to get wrong.
     //

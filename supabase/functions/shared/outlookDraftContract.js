@@ -518,6 +518,12 @@ export function parseDraftPayload(json) {
 export async function callDraftModel(p) {
   if (!isPlainObject(p)) throw new Error('invalid_params')
   const { body, apiKey, fetchImpl, sleepImpl, budgetAllows } = p
+  // INJECTABLE only so a test can prove the deadline is in force without waiting out
+  // a real 30-second abort. Defaults to the shipped constant; no production caller
+  // passes it.
+  const timeoutMs = Number.isFinite(p.timeoutMs) && p.timeoutMs > 0
+    ? p.timeoutMs
+    : DRAFT_TIMEOUT_MS
   if (typeof fetchImpl !== 'function') throw new Error('fetch_not_injected')
   const headers = buildDraftHeaders(apiKey)
   const sleep = typeof sleepImpl === 'function' ? sleepImpl : (ms) => new Promise((r) => setTimeout(r, ms))
@@ -533,7 +539,7 @@ export async function callDraftModel(p) {
     // produces a killed invocation that wrote nothing and recorded nothing. The first
     // attempt is checked too, so a conversation admitted long ago cannot slip a call
     // past the deadline.
-    if (!affordable(DRAFT_TIMEOUT_MS)) {
+    if (!affordable(timeoutMs)) {
       return { ok: false, code: attempt === 0 ? 'budget_exhausted' : 'retry_budget_exhausted' }
     }
 
@@ -547,7 +553,7 @@ export async function callDraftModel(p) {
     // readJsonBounded, which aborts the underlying stream.
     const controller = typeof AbortController === 'function' ? new AbortController() : null
     const timer = controller !== null
-      ? setTimeout(() => { try { controller.abort() } catch { /* already gone */ } }, DRAFT_TIMEOUT_MS)
+      ? setTimeout(() => { try { controller.abort() } catch { /* already gone */ } }, timeoutMs)
       : null
     const clearTimer = () => { if (timer !== null) clearTimeout(timer) }
 
@@ -570,7 +576,7 @@ export async function callDraftModel(p) {
         return { ok: false, code: timedOut ? 'provider_timeout' : 'transport_failure' }
       }
       const waitMs = 1000 * Math.pow(2, attempt)
-      if (!affordable(DRAFT_TIMEOUT_MS + waitMs)) {
+      if (!affordable(timeoutMs + waitMs)) {
         return { ok: false, code: timedOut ? 'provider_timeout' : 'transport_failure' }
       }
       await sleep(waitMs)
@@ -612,7 +618,7 @@ export async function callDraftModel(p) {
         if (ra !== null && /^\d{1,4}$/.test(String(ra).trim())) waitMs = Math.min(Number(ra) * 1000, 30_000)
       } catch { /* keep backoff */ }
       // The backoff AND the attempt it precedes must both fit what is left.
-      if (!affordable(DRAFT_TIMEOUT_MS + waitMs)) {
+      if (!affordable(timeoutMs + waitMs)) {
         return { ok: false, code: status === 429 ? 'provider_rate_limited' : 'provider_unavailable' }
       }
       await sleep(waitMs)

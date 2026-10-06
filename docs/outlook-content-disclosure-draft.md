@@ -365,6 +365,35 @@ blocker in the PR rather than described here as though it existed.**
 
 ---
 
+## C3. A note on how the provider bounds were verified
+
+Two of the bound claims in the table below were **written before they were true**, and
+both were caught by an independent re-run of the same test file rather than by the
+tests as first written. That is worth recording, because it says something about what
+a passing suite does and does not establish.
+
+The first round added one AbortController across headers and body, `readJsonBounded`
+and `redirect: 'manual'` to the SUCCESS path, tested all three, and wrote the claim as
+though it covered the whole call. It did not cover the **non-200** path: the timer was
+cleared on the line above the error-body read, and that read was an unbounded
+`res.json()` wrapped in a try/catch. A 400 that stalled its body hung with no deadline
+in force; one that streamed 4,100,048 bytes was buffered whole. The tests passed
+because they only ever exercised a 200.
+
+The second was the same shape. Retries were bounded by `MAX_RETRIES`,
+`MAX_TOTAL_RETRY_DELAY_MS` and a per-attempt timeout - all of which are real bounds,
+and none of which knows how much of the INVOCATION is left. With 25 seconds
+available, attempts started at 0, 50,000 and 100,000 ms.
+
+Both are now fixed and both reproductions are in the suite. The unbounded reader was
+**deleted** rather than repaired, so there is no longer one in the module for a later
+caller to reach for. And the per-attempt deadline is now injectable - defaulting to
+the shipped constant, passed by no production caller - so a stall test proves the
+bound in milliseconds instead of waiting out a real 20- or 30-second abort, which is
+what made these tests cheap enough to keep.
+
+---
+
 ## D. Every factual claim above, and where it was checked
 
 The wording was revised AFTER the path was built, and each number in it was read
@@ -399,6 +428,11 @@ can check the prose against the code without reading the code.
 | an expired suggestion is REMOVED from the queue, not retried | the `expired` outcome in both review maps | `outlook-new-contact-review.test.js` (exhaustive code-map check) |
 | nothing is scheduled to erase an expired draft | `expire_pending_outlook_context` has no caller | grepped; stated as a blocker, not as behaviour |
 | the provider calls are bounded in time and size, and refuse redirects | one AbortController across headers and body, `readJsonBounded`, `redirect: 'manual'` | `outlook-content-corrections.test.js` — headers-then-stall, oversized streamed bodies, redirects, and budget-admitted retries, on both the Anthropic and the Graph path |
+| **the NON-200 Graph body is bounded too** | the controller is held until the error body is read, and `MAX_ERROR_BODY_BYTES` (64 KiB) applies to it | same suite. This was NOT true when the claim was first written: the timer was cleared before the error body was read, and that read was an unbounded `res.json()`. A stalled 400 hung with no deadline; an oversized one buffered 4,100,048 bytes. Both reproduced and now refused. |
+| Graph error classification is unchanged by that bound | the token is still recovered and `classifyFailure` still decides | same suite — `syncStateNotFound`, `resyncRequired`, `syncStateNotSupported` and `synchronizationStateExpired` still answer `cursor_invalid` on both 400 and 410; an ordinary 400 is still `bad_request`; a malformed error body still classifies on status alone |
+| a redirect's body is never read | the 3xx is refused before the body is touched | same suite — the fixture fails the test if `body` or `json()` is reached, and `Location` is never read |
+| **Graph retries respect the invocation budget** | `budgetAllows` threaded `summarizeOneConversation` → `makeMessageFetcher` → `executeGraphRequest`, checked before the first attempt, before backoff-plus-next-attempt, and again after the backoff | same suite. Also NOT true when first claimed: with 25s available the loop started attempts at 0, 50,000 and 100,000 ms and spent 120s, because the only bounds consulted were its own. Proven through the real stage wiring, not by calling the transport directly. |
+| a caller with no budget is unaffected | `budgetAllows` defaults to "yes" | same suite — the OAuth callback and the identity probe are single requests in short-lived handlers and pass none |
 | a failed required handle does not advance the page | `HANDLE_FAILURES` → `handle_production_failed`, checked before the checkpoint | same suite: the second of two encryptions failing writes nothing, and the retry retains both |
 | every proposal is reachable | the proposals queue's own keyset cursor and refill | the browser harness reaches proposal 21 |
 | Anthropic's retention window | Anthropic's published commercial terms | not a code claim; owner to re-check against the current terms at publication |

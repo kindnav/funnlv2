@@ -30,7 +30,11 @@ import {
 } from '../supabase/functions/shared/outlookDraftContract.js'
 import {
   executeGraphRequest, buildMessageContentRequest, MAX_RESPONSE_BYTES,
+  MAX_ERROR_BODY_BYTES, GRAPH_CODES, REQUEST_TIMEOUT_MS, MAX_RETRIES,
 } from '../supabase/functions/shared/outlookGraphTransport.js'
+import {
+  summarizeOneConversation, planContentWrite as planWrite,
+} from '../supabase/functions/shared/outlookContentStage.js'
 
 let passed = 0, failed = 0
 const pending = []
@@ -144,6 +148,16 @@ function pass (over = {}) {
   }
   return { calls, params: { ...base, ...over } }
 }
+
+/**
+ * A SHORT per-attempt deadline, injected.
+ *
+ * The stall tests previously waited out the real constants - 20s for Graph, 30s for
+ * the provider - which proved the bound and cost 30 seconds of every suite run. The
+ * deadline is now injectable for exactly this, defaulting to the shipped constant, so
+ * these tests assert both the controlled code AND that the call returned promptly.
+ */
+const FAST_TIMEOUT_MS = 150
 
 const planEntry = (over = {}) => ({
   kind: 'known_contact_interaction',
@@ -537,6 +551,7 @@ test('REPRODUCED: headers-then-stall now TIMES OUT instead of pinning the call',
   // passed to fetch at all. Even passing one only to fetch would be half a fix,
   // since fetch resolves on headers.
   let aborts = 0
+  const startedDraft = Date.now()
   const r = await callDraftModel({
     body: DRAFT_BODY,
     apiKey: 'sk-ant-fixture',
@@ -560,12 +575,17 @@ test('REPRODUCED: headers-then-stall now TIMES OUT instead of pinning the call',
       }
     },
     sleepImpl: async () => {},
+    timeoutMs: FAST_TIMEOUT_MS,
     // One attempt only, so the test does not wait for retries.
-    budgetAllows: (ms) => ms <= DRAFT_TIMEOUT_MS,
+    budgetAllows: (ms) => ms <= FAST_TIMEOUT_MS,
   })
   assert.strictEqual(r.ok, false)
   assert.strictEqual(r.code, 'provider_timeout', JSON.stringify(r))
   assert.ok(aborts >= 1, 'the controller must have aborted the body stream')
+  assert.ok(Date.now() - startedDraft < 5_000,
+    'the deadline must bound the body read, not merely exist')
+  // And the shipped default is the real constant, not this test's figure.
+  assert.strictEqual(DRAFT_TIMEOUT_MS, 30_000)
 })
 
 test('an OVERSIZED streamed draft response is refused mid-read', async () => {
@@ -645,10 +665,13 @@ console.log('   the same bounds on the Graph content read')
 const CONTENT_REQ = buildMessageContentRequest({ messageId: 'AAkALgAAmsg1' })
 
 test('headers-then-stall on a CONTENT read times out', async () => {
+  const started200 = Date.now()
   const r = await executeGraphRequest({
     request: CONTENT_REQ,
     accessToken: 'injected-fixture-token',
     sleepImpl: async () => {},
+    timeoutMs: FAST_TIMEOUT_MS,
+    budgetAllows: (ms) => ms <= FAST_TIMEOUT_MS,
     fetchImpl: async (_url, init) => {
       assert.ok(init.signal, 'no signal reached the Graph fetch')
       return {
@@ -669,6 +692,8 @@ test('headers-then-stall on a CONTENT read times out', async () => {
   })
   assert.strictEqual(r.ok, false)
   assert.strictEqual(r.code, 'timeout', JSON.stringify(r))
+  assert.ok(Date.now() - started200 < 5_000, 'the deadline must actually bound the read')
+  assert.strictEqual(REQUEST_TIMEOUT_MS, 20_000, 'and the shipped default is unchanged')
 })
 
 test('an OVERSIZED streamed Graph body is refused mid-read', async () => {
@@ -717,6 +742,413 @@ test('and the happy path still reads a content response', async () => {
   })
   assert.strictEqual(r.ok, true, JSON.stringify(r))
   assert.strictEqual(r.json.id, 'AAkALgAAmsg1')
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+console.log('')
+console.log('6. the NON-200 Graph body is bounded too')
+
+/** A non-200 whose headers arrive at once and whose body never does. */
+function stallingErrorBody (status) {
+  return (_url, init) => Promise.resolve({
+    status,
+    headers: { get: () => null },
+    body: {
+      getReader: () => ({
+        read: () => new Promise((_res, rej) => {
+          init.signal.addEventListener('abort', () => {
+            const e = new Error('aborted'); e.name = 'AbortError'; rej(e)
+          })
+        }),
+        cancel: async () => {},
+      }),
+    },
+    // If anything reached for the unbounded reader, this would hang forever and the
+    // test would time out rather than pass.
+    json: () => new Promise(() => {}),
+  })
+}
+
+/** A non-200 that streams more bytes than the error ceiling allows. */
+function oversizedErrorBody (status, totalBytes) {
+  const chunk = 32 * 1024
+  let sent = 0
+  let read = 0
+  return () => Promise.resolve({
+    status,
+    headers: { get: () => null },
+    body: {
+      getReader: () => ({
+        read: async () => {
+          if (sent >= totalBytes) return { done: true, value: undefined }
+          const n = Math.min(chunk, totalBytes - sent)
+          sent += n
+          read += n
+          return { done: false, value: new Uint8Array(n) }
+        },
+        cancel: async () => {},
+      }),
+    },
+    get __bytesRead () { return read },
+    json: () => new Promise(() => {}),
+  })
+}
+
+test('REPRODUCED: a STALLED 400 body now times out instead of hanging', async () => {
+  // The timer was cleared BEFORE the error body was read, and that read was an
+  // unbounded res.json(). A 400 that sent headers promptly and then stalled its body
+  // hung with no deadline in force at all.
+  let aborted = 0
+  const started = Date.now()
+  const r = await executeGraphRequest({
+    request: CONTENT_REQ,
+    accessToken: 'injected-fixture-token',
+    sleepImpl: async () => {},
+    fetchImpl: (url, init) => {
+      assert.ok(init.signal, 'no signal reached the Graph fetch')
+      init.signal.addEventListener('abort', () => { aborted += 1 })
+      return stallingErrorBody(400)(url, init)
+    },
+    timeoutMs: FAST_TIMEOUT_MS,
+    // One attempt's worth, so the assertion is about the body read and not retries.
+    budgetAllows: (ms) => ms <= FAST_TIMEOUT_MS,
+  })
+  assert.strictEqual(r.ok, false)
+  assert.strictEqual(r.code, 'timeout', JSON.stringify(r))
+  assert.ok(aborted >= 1, 'the controller must have aborted the error-body stream')
+  // THE POINT: it returned under its own deadline rather than hanging. Before the
+  // fix the timer was cleared before this read and nothing bounded it at all, so
+  // this assertion could never have been satisfied by any wait.
+  assert.ok(Date.now() - started < 5_000, 'the error-body read must be bounded in time')
+})
+
+test('REPRODUCED: an OVERSIZED error body is refused mid-stream', async () => {
+  // Measured before: 4,100,048 bytes were read against a ceiling never applied to an
+  // error body. The ceiling for an error payload is now its own, far smaller one -
+  // an error carries a code, not a page of messages.
+  const impl = oversizedErrorBody(400, MAX_ERROR_BODY_BYTES + 4096)
+  let captured = null
+  const r = await executeGraphRequest({
+    request: CONTENT_REQ,
+    accessToken: 'injected-fixture-token',
+    sleepImpl: async () => {},
+    fetchImpl: async (...a) => { captured = await impl(...a); return captured },
+    timeoutMs: 5_000,
+    budgetAllows: (ms) => ms <= 5_000,
+  })
+  assert.strictEqual(r.ok, false)
+  assert.strictEqual(r.code, 'response_too_large', JSON.stringify(r))
+  // And it stopped EARLY rather than buffering the lot: the reader is cancelled the
+  // moment the running total passes the ceiling.
+  assert.ok(captured.__bytesRead <= MAX_ERROR_BODY_BYTES + 32 * 1024,
+    `read ${captured.__bytesRead} bytes`)
+  assert.ok(MAX_ERROR_BODY_BYTES < MAX_RESPONSE_BYTES,
+    'an error body must not be allowed a whole page')
+})
+
+test('CLASSIFICATION IS PRESERVED: a 400 carrying a dead-cursor code still says so', async () => {
+  for (const [token, status] of [
+    ['syncStateNotFound', 400], ['resyncRequired', 400],
+    ['syncStateNotSupported', 400], ['synchronizationStateExpired', 410],
+  ]) {
+    const r = await executeGraphRequest({
+      request: buildMessageContentRequest({ messageId: 'AAkALgAAmsg1' }),
+      accessToken: 'injected-fixture-token',
+      sleepImpl: async () => {},
+      fetchImpl: async () => jsonBody({ error: { code: token } }, status),
+    })
+    assert.strictEqual(r.ok, false, token)
+    assert.strictEqual(r.code, 'cursor_invalid', `${token}/${status}: ${JSON.stringify(r)}`)
+  }
+})
+
+test('and an ordinary 400 with a readable body is still bad_request', async () => {
+  const r = await executeGraphRequest({
+    request: buildMessageContentRequest({ messageId: 'AAkALgAAmsg1' }),
+    accessToken: 'injected-fixture-token',
+    sleepImpl: async () => {},
+    fetchImpl: async () => jsonBody({ error: { code: 'invalidRequest' } }, 400),
+  })
+  assert.strictEqual(r.code, 'bad_request', JSON.stringify(r))
+})
+
+test('a MALFORMED error body classifies on status alone, as it always did', async () => {
+  const r = await executeGraphRequest({
+    request: buildMessageContentRequest({ messageId: 'AAkALgAAmsg1' }),
+    accessToken: 'injected-fixture-token',
+    sleepImpl: async () => {},
+    fetchImpl: async () => {
+      const bytes = new TextEncoder().encode('<html>not json at all</html>')
+      let done = false
+      return {
+        status: 400,
+        headers: { get: () => null },
+        body: { getReader: () => ({
+          read: async () => (done ? { done: true } : (done = true, { done: false, value: bytes })),
+          cancel: async () => {},
+        }) },
+      }
+    },
+  })
+  assert.strictEqual(r.code, 'bad_request', JSON.stringify(r))
+})
+
+test('a REDIRECT body is never read at all', async () => {
+  let bodyTouched = false
+  let locationRead = false
+  const r = await executeGraphRequest({
+    request: CONTENT_REQ,
+    accessToken: 'injected-fixture-token',
+    sleepImpl: async () => {},
+    fetchImpl: async () => ({
+      status: 302,
+      headers: { get: (h) => { if (String(h).toLowerCase() === 'location') locationRead = true; return null } },
+      get body () { bodyTouched = true; return null },
+      json: async () => { bodyTouched = true; return {} },
+    }),
+  })
+  assert.strictEqual(r.code, 'unexpected_redirect', JSON.stringify(r))
+  assert.strictEqual(bodyTouched, false,
+    'the body of a response we refuse to follow must not be read')
+  assert.strictEqual(locationRead, false)
+})
+
+test('every code this module can return is declared', () => {
+  for (const c of ['timeout', 'response_too_large', 'budget_exhausted', 'bad_request',
+    'cursor_invalid', 'unexpected_redirect', 'malformed_response']) {
+    assert.ok(GRAPH_CODES.includes(c), `${c} is not in GRAPH_CODES`)
+  }
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+console.log('')
+console.log('7. Graph retries respect the INVOCATION budget')
+
+const retryable = (status) => () => Promise.resolve({
+  status, headers: { get: () => null },
+  body: { getReader: () => ({ read: async () => ({ done: true }), cancel: async () => {} }) },
+})
+
+test('NO BUDGET means NO REQUEST', async () => {
+  let attempts = 0
+  const r = await executeGraphRequest({
+    request: CONTENT_REQ,
+    accessToken: 'injected-fixture-token',
+    sleepImpl: async () => {},
+    fetchImpl: async () => { attempts += 1; return jsonBody({ id: 'x' }) },
+    budgetAllows: () => false,
+  })
+  assert.strictEqual(attempts, 0, 'a request was issued with no budget for it')
+  assert.strictEqual(r.code, 'budget_exhausted', JSON.stringify(r))
+  assert.strictEqual(r.attempts, 0)
+})
+
+test('REPRODUCED: 25 seconds of budget no longer buys 120 seconds of retries', async () => {
+  // Before: attempts started at 0, 50,000 and 100,000 ms and the loop spent 120
+  // seconds, because the only bounds consulted were MAX_RETRIES,
+  // MAX_TOTAL_RETRY_DELAY_MS and the per-attempt timeout - none of which knows how
+  // much of the INVOCATION is left.
+  let elapsed = 0
+  const REMAINING = 25_000
+  const attemptStarts = []
+  let slept = 0
+  const r = await executeGraphRequest({
+    request: CONTENT_REQ,
+    accessToken: 'injected-fixture-token',
+    // A clock that charges the per-attempt timeout for each attempt, as a stalled
+    // attempt would.
+    sleepImpl: async (ms) => { slept += ms; elapsed += ms },
+    fetchImpl: async () => {
+      attemptStarts.push(elapsed)
+      elapsed += REQUEST_TIMEOUT_MS
+      return retryable(503)()
+    },
+    budgetAllows: (marginMs) => REMAINING - elapsed > marginMs,
+  })
+  assert.strictEqual(r.ok, false)
+  // ONE attempt fits in 25s: the second would need its backoff plus another 20s.
+  assert.deepStrictEqual(attemptStarts, [0],
+    `attempts started at ${JSON.stringify(attemptStarts)}`)
+  assert.strictEqual(slept, 0, 'and no backoff was slept through')
+  assert.ok(elapsed <= REMAINING + REQUEST_TIMEOUT_MS,
+    `spent ${elapsed}ms of ${REMAINING}ms`)
+  // The PROVIDER's answer is what the caller acts on, not our budget bookkeeping.
+  assert.strictEqual(r.code, 'server_error', JSON.stringify(r))
+})
+
+test('a generous budget still retries exactly as before', async () => {
+  let attempts = 0
+  const r = await executeGraphRequest({
+    request: CONTENT_REQ,
+    accessToken: 'injected-fixture-token',
+    sleepImpl: async () => {},
+    fetchImpl: async () => { attempts += 1; return retryable(503)() },
+    budgetAllows: () => true,
+  })
+  assert.strictEqual(attempts, MAX_RETRIES + 1,
+    `retried ${attempts} times; the budget must not have narrowed the loop`)
+  assert.strictEqual(r.ok, false)
+})
+
+test('a caller that supplies NO budget is unchanged', async () => {
+  let attempts = 0
+  const r = await executeGraphRequest({
+    request: CONTENT_REQ,
+    accessToken: 'injected-fixture-token',
+    sleepImpl: async () => {},
+    fetchImpl: async () => { attempts += 1; return retryable(503)() },
+  })
+  assert.strictEqual(attempts, MAX_RETRIES + 1, 'omitting the budget must not bound the loop')
+  assert.strictEqual(r.ok, false)
+})
+
+test('the budget is re-checked AFTER the backoff, not only before it', async () => {
+  // The sleep is the one step whose real duration this module does not control.
+  let elapsed = 0
+  let budget = 10 * REQUEST_TIMEOUT_MS
+  let attempts = 0
+  const r = await executeGraphRequest({
+    request: CONTENT_REQ,
+    accessToken: 'injected-fixture-token',
+    // A backoff that OVERRUNS: it was affordable when checked, and consumed the whole
+    // remaining budget while it ran.
+    sleepImpl: async () => { elapsed = budget },
+    fetchImpl: async () => { attempts += 1; return retryable(503)() },
+    budgetAllows: (marginMs) => budget - elapsed > marginMs,
+  })
+  assert.strictEqual(attempts, 1,
+    'a second attempt was issued after a backoff that ate the budget')
+  assert.strictEqual(r.code, 'budget_exhausted', JSON.stringify(r))
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+console.log('')
+console.log('   through the ACTUAL content-stage wiring')
+
+/** The stage's own ports, with a fixture rpc serving one conversation's handles. */
+function stageParams (over = {}) {
+  const seen = { fetches: 0, model: 0 }
+  const base = {
+    conversation: { cfp: CFP, contactId: CONTACT_ID, messageCount: 2, lastLocalDate: '2026-09-22' },
+    rpc: async (name) => {
+      if (name !== 'list_outlook_round_message_handles') return { data: { result: 'ok' }, error: null }
+      return {
+        error: null,
+        data: {
+          result: 'ok',
+          next_cursor: null,
+          handles: [
+            { cfp: CFP, mfp: '1'.repeat(64), folder: 'inbox', sent_at: '2026-09-21T10:00:00Z',
+              mid_ct: 'SEAL:AAkALgAAmsg1', mid_nonce: 'N1', key_version: 1 },
+            { cfp: CFP, mfp: '2'.repeat(64), folder: 'sentitems', sent_at: '2026-09-22T10:00:00Z',
+              mid_ct: 'SEAL:AAkALgAAmsg2', mid_nonce: 'N1', key_version: 1 },
+          ],
+        },
+      }
+    },
+    connectionId: CONN,
+    runId: '44444444-4444-4444-4444-444444444444',
+    roundId: '55555555-5555-5555-5555-555555555555',
+    decryptCursor: async (ct) => String(ct).replace(/^SEAL:/, ''),
+    accessToken: 'injected-fixture-token',
+    apiKey: 'sk-ant-fixture-not-a-real-key',
+    consentVersion: APPROVED,
+    requiredConsent: BOTH,
+    selfAddresses: [ME],
+    budgetAllows: () => true,
+    deps: {
+      sleepImpl: async () => {},
+      fetchImpl: async (url) => {
+        if (String(url).includes('api.anthropic.com')) {
+          seen.model += 1
+          return jsonBody({
+            content: [{ type: 'text', text: JSON.stringify(draftReply().parsed) }],
+            stop_reason: 'end_turn',
+          })
+        }
+        seen.fetches += 1
+        const m = String(url).match(/\/me\/messages\/([^?]+)\?/)
+        const id = decodeURIComponent(m[1])
+        return jsonBody({
+          id,
+          body: { contentType: 'text', content: id.endsWith('1') ? BODY_IN : BODY_OUT },
+          uniqueBody: { contentType: 'text', content: id.endsWith('1') ? BODY_IN : BODY_OUT },
+          subject: 'Following up after the panel',
+          from: id.endsWith('1')
+            ? { emailAddress: { address: THEM, name: 'Priya Nair' } }
+            : { emailAddress: { address: ME, name: 'Pilot' } },
+          toRecipients: [{ emailAddress: { address: id.endsWith('1') ? ME : THEM } }],
+          internetMessageHeaders: [{ name: 'Received', value: 'by fixture' }],
+        })
+      },
+    },
+  }
+  return { seen, params: { ...base, ...over } }
+}
+
+test('POSITIVE CONTROL: the whole stage still produces a draft through the real transport', async () => {
+  const { seen, params } = stageParams()
+  const r = await summarizeOneConversation(params)
+  assert.strictEqual(r.outcome, 'interaction_draft', JSON.stringify(r))
+  assert.strictEqual(seen.fetches, 2, 'both bodies read through executeGraphRequest')
+  assert.strictEqual(seen.model, 1)
+  assert.ok(/insight week/i.test(r.summary), r.summary)
+})
+
+test('THE BUDGET REACHES THE TRANSPORT: no budget, no Graph request', async () => {
+  // Proved through the real wiring, not by calling the transport directly: the
+  // fetcher is constructed inside summarizeOneConversation, so this is the thread
+  // summarizeOneConversation -> makeMessageFetcher -> executeGraphRequest.
+  const { seen, params } = stageParams({ budgetAllows: () => false })
+  const r = await summarizeOneConversation(params)
+  assert.strictEqual(seen.fetches, 0, 'a Graph request was issued with no budget')
+  assert.strictEqual(seen.model, 0)
+  // The pass's own admission check fires first, which is the right order.
+  assert.strictEqual(r.outcome, 'defer')
+  assert.strictEqual(r.reason, 'budget_exhausted', JSON.stringify(r))
+})
+
+test('RETRY BUDGET EXHAUSTION through the stage defers, and reads no more', async () => {
+  // Enough budget for the pass to admit a fetch, and a transport that keeps failing
+  // retryably. Without the thread the transport would burn four attempts and two
+  // backoffs inside that one admission.
+  let elapsed = 0
+  const REMAINING = 40_000
+  let graphAttempts = 0
+  const { seen, params } = stageParams({
+    budgetAllows: (marginMs) => REMAINING - elapsed > marginMs,
+    deps: {
+      sleepImpl: async (ms) => { elapsed += ms },
+      fetchImpl: async () => {
+        graphAttempts += 1
+        elapsed += REQUEST_TIMEOUT_MS
+        return retryable(503)()
+      },
+    },
+  })
+  const r = await summarizeOneConversation(params)
+  assert.ok(graphAttempts <= 2,
+    `the transport made ${graphAttempts} attempts inside one admission`)
+  assert.strictEqual(seen.model, 0, 'and never reached the provider')
+  assert.strictEqual(r.outcome, 'defer', JSON.stringify(r))
+  // A fetch that failed is `fetch_failed`, which is RETRYABLE - the conversation is
+  // not settled and the handles are untouched.
+  assert.ok(['fetch_failed', 'budget_exhausted'].includes(r.reason), JSON.stringify(r))
+})
+
+test('A DEFERRED CONVERSATION STAYS RESUMABLE: no write, no cursor advance', () => {
+  // The chain that matters: a retryable deferral must plan NO write and must NOT let
+  // the finalisation cursor pass the conversation. Asserted on the planner, which is
+  // what the run consults, for every reason this round can produce.
+  for (const reason of ['fetch_failed', 'budget_exhausted', 'model_unavailable',
+    'handles_unreadable', 'summary_key_absent', 'minimization_failed']) {
+    const plan = planWrite(planEntry(), { outcome: 'defer', reason }, { consentOpen: true })
+    assert.strictEqual(plan.write, 'none', `${reason} wrote something`)
+    assert.strictEqual(plan.rpc, null, reason)
+    assert.strictEqual(plan.retryable, true,
+      `${reason} must leave the conversation unprocessed so the next invocation redoes it`)
+    assert.strictEqual(plan.deferral, reason, 'and the reason must be reported')
+  }
 })
 
 await Promise.all(pending)

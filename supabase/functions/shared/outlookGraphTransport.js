@@ -65,6 +65,19 @@ export const MAX_PAGES_PER_RUN = 20        // delta pages followed in one run
 export const MAX_MESSAGES_PER_RUN = 500    // hard ceiling across all pages
 export const MAX_CONTENT_FETCHES_PER_RUN = 120 // stage-2 body reads per run
 export const MAX_RESPONSE_BYTES = 4_000_000    // one page/response ceiling
+
+/**
+ * Ceiling for a NON-200 body, which is read only to recover Graph's controlled
+ * `error.code` token.
+ *
+ * Far below MAX_RESPONSE_BYTES on purpose. That bound exists because a successful
+ * delta page legitimately carries hundreds of messages; an error payload carries a
+ * code, a message and a request id. Reusing the page bound would mean buffering up
+ * to 4 MB to find a token that is never more than a few dozen characters - which is
+ * exactly what an oversized error body exploited: 4,100,048 bytes were read before
+ * anything refused them.
+ */
+export const MAX_ERROR_BODY_BYTES = 64 * 1024
 export const MAX_BODY_CHARS = 200_000      // raw body chars accepted before sanitizing
 export const MAX_RETRIES = 3               // per request (so at most 4 attempts)
 export const MAX_RETRY_AFTER_MS = 30_000   // one honored Retry-After is capped here
@@ -161,6 +174,9 @@ export const GRAPH_CODES = Object.freeze([
   'timeout', 'invalid_link', 'response_too_large', 'malformed_response',
   'retry_exhausted', 'cursor_invalid', 'message_gone', 'unexpected_redirect',
   'bad_request', 'transport_failure',
+  // The invocation had no room for this attempt, or for the backoff plus the attempt
+  // after it. Not a provider outcome: nothing was requested, or nothing further was.
+  'budget_exhausted',
 ])
 
 // Graph error codes that mean the stored delta state can no longer be used. Compared
@@ -447,7 +463,19 @@ export function readProviderErrorCode(json) {
  */
 export async function executeGraphRequest(p) {
   assertSafeParams(p)
-  const { request, accessToken, fetchImpl, sleepImpl, now } = p
+  const { request, accessToken, fetchImpl, sleepImpl, now, budgetAllows } = p
+  /**
+   * The per-attempt deadline, INJECTABLE only so a test can prove it is in force.
+   *
+   * It defaults to the shipped constant and no production caller passes it, so
+   * behaviour is unchanged. The seam exists because the alternative is asserting the
+   * deadline by waiting for it: a stalled-body test that waits out a real 20-second
+   * abort proves the same thing and costs 20 seconds every run. Same pattern as
+   * `fetchImpl`, `sleepImpl` and `now`, which are injected here for the same reason.
+   */
+  const timeoutMs = Number.isFinite(p.timeoutMs) && p.timeoutMs > 0
+    ? p.timeoutMs
+    : REQUEST_TIMEOUT_MS
   if (typeof fetchImpl !== 'function') throw new Error('fetch_not_injected')
   if (typeof accessToken !== 'string' || accessToken.length === 0) throw new Error('missing_access_token')
   if (!isPlainObject(request) || request.method !== 'GET' || typeof request.url !== 'string') {
@@ -459,10 +487,30 @@ export async function executeGraphRequest(p) {
 
   const clock = typeof now === 'function' ? now : Date.now
   const sleep = typeof sleepImpl === 'function' ? sleepImpl : (ms) => new Promise((r) => setTimeout(r, ms))
+  /**
+   * Will `marginMs` of INVOCATION budget still be there?
+   *
+   * No default beyond "yes", because most callers of this module have no invocation
+   * deadline to respect - the OAuth callback and the identity probe are single
+   * requests inside a short-lived handler. The worker always injects one.
+   *
+   * REPRODUCED WITHOUT IT: with 25 seconds of invocation left, the retry loop started
+   * attempts at 0, 50,000 and 100,000 ms and spent 120 seconds, because the only
+   * bounds it consulted were its own - MAX_RETRIES, MAX_TOTAL_RETRY_DELAY_MS and the
+   * per-attempt timeout - none of which knows how long the invocation has.
+   */
+  const affordable = typeof budgetAllows === 'function' ? budgetAllows : () => true
   let elapsedRetryMs = 0
   let attempts = 0
 
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    // BEFORE THE FIRST ATTEMPT TOO, not only before a retry. A request admitted on a
+    // budget check made long ago must not be issued into an invocation that is about
+    // to be killed: the platform would stop it mid-flight, and nothing would be
+    // recorded about why.
+    if (!affordable(timeoutMs)) {
+      return { ok: false, code: 'budget_exhausted', attempts }
+    }
     attempts += 1
     let res
     // ONE CONTROLLER FOR THE WHOLE EXCHANGE - headers AND body.
@@ -475,7 +523,7 @@ export async function executeGraphRequest(p) {
     // the underlying stream and refuses an oversized one mid-read.
     const controller = typeof AbortController === 'function' ? new AbortController() : null
     const timer = controller !== null
-      ? setTimeout(() => { try { controller.abort() } catch { /* already gone */ } }, REQUEST_TIMEOUT_MS)
+      ? setTimeout(() => { try { controller.abort() } catch { /* already gone */ } }, timeoutMs)
       : null
     const clearTimer = () => { if (timer !== null) clearTimeout(timer) }
 
@@ -495,7 +543,7 @@ export async function executeGraphRequest(p) {
         redirect: 'manual',
         ...(controller !== null
           ? { signal: controller.signal }
-          : { signal: makeTimeoutSignal(REQUEST_TIMEOUT_MS) }),
+          : { signal: makeTimeoutSignal(timeoutMs) }),
       })
     } catch (e) {
       clearTimer()
@@ -505,17 +553,40 @@ export async function executeGraphRequest(p) {
         ? 'timeout' : 'transport_failure'
       const plan = planRetry({ status: 503, retryAfterHeader: null, attempt, elapsedRetryMs })
       if (!plan.retry) return { ok: false, code, attempts }
+      // The BACKOFF AND THE ATTEMPT AFTER IT must both fit what is left. Sleeping
+      // first and discovering afterwards that there is no time to retry wastes the
+      // remainder of the invocation on a sleep.
+      if (!affordable(plan.delayMs + timeoutMs)) {
+        return { ok: false, code, attempts }
+      }
       elapsedRetryMs += plan.delayMs
       await sleep(plan.delayMs)
+      // AND AGAIN AFTER THE BACKOFF. The sleep is the one step whose real duration
+      // this module does not control - an injected sleep, a throttled timer or a
+      // suspended instance can all overrun it - so what was affordable before it is
+      // re-proved after it rather than assumed.
+      if (!affordable(timeoutMs)) {
+        return { ok: false, code: 'budget_exhausted', attempts }
+      }
       continue
     }
 
     const status = typeof res?.status === 'number' ? res.status : 0
 
-    // A 3xx needs no special case here: with redirect:'manual' it arrives as an
-    // ordinary non-200 and classifyFailure already answers `unexpected_redirect`,
-    // which is the code every caller and test already knows. Adding a second code
-    // for the same condition would just be a synonym to keep in step.
+    // ── A REDIRECT IS REFUSED BEFORE ITS BODY IS TOUCHED ────────────────────
+    // This DID need a special case, and the comment that previously stood here said
+    // it did not. The reasoning was that classifyFailure already answers
+    // `unexpected_redirect` for a 3xx, which is true - but it answers it only AFTER
+    // the non-200 path has read the body to look for an error token. A redirect has
+    // no error token worth having, and reading the body of a response we have
+    // already decided not to follow is work done on behalf of whatever the
+    // `Location` points at. The code returned is the same one every caller and test
+    // already knows; only the reading stops.
+    if (status >= 300 && status < 400) {
+      clearTimer()
+      return { ok: false, code: 'unexpected_redirect', attempts }
+    }
+
     if (status === 200) {
       // The declared length first, which refuses before a byte is buffered.
       const sizeCode = checkResponseSize(res)
@@ -535,13 +606,39 @@ export async function executeGraphRequest(p) {
       if (!isPlainObject(read.value)) return { ok: false, code: 'malformed_response', attempts }
       return { ok: true, json: read.value, attempts }
     }
+    // ── THE NON-200 BODY, UNDER THE SAME DEADLINE AND A SIZE CEILING ───────
+    // The timer used to be cleared on the line above this, before the error body was
+    // read at all - and that read was an unbounded `res.json()`. So a 400 that sent
+    // its headers promptly and then stalled its body hung forever with no deadline
+    // in force, and one that streamed 4,100,048 bytes was buffered whole against a
+    // ceiling that was never applied to it. Reproduced both ways.
+    //
+    // The controller therefore stays alive until the error body is finished with,
+    // exactly as it does for a success, and the read is bounded.
+    const stage = request.stage === 'content' ? 'content' : 'envelope'
+    const errRead = await readJsonBounded(res, MAX_ERROR_BODY_BYTES)
     clearTimer()
 
-    // Non-200. Read ONLY Graph's controlled error token so an expired delta cursor can
-    // be told apart from an ordinary bad request. Everything else in the payload —
-    // message, inner error, request id, Location — is discarded unread.
-    const errorCode = await readErrorCode(res)
-    const stage = request.stage === 'content' ? 'content' : 'envelope'
+    // CLASSIFICATION IS UNCHANGED when the body is readable: the token is recovered
+    // and classifyFailure decides, so a 400 or 410 carrying a dead-cursor code still
+    // answers `cursor_invalid` and still stops the run without advancing anything.
+    //
+    // When the body is NOT readable the token is simply absent, which is the same
+    // null `readErrorCode` has always produced for an unusable payload - so a
+    // malformed error body classifies on status alone, as before. Only the two
+    // BOUNDED failures are reported as themselves, because they say something
+    // different: the response could not be read in time, or was too large to read.
+    // Neither is retried: a body that stalls or floods is not a transient we should
+    // ask for again.
+    if (errRead.ok !== true
+        && (errRead.reason === 'response_body_timeout' || errRead.reason === 'response_too_large')) {
+      return {
+        ok: false,
+        code: errRead.reason === 'response_too_large' ? 'response_too_large' : 'timeout',
+        attempts,
+      }
+    }
+    const errorCode = errRead.ok === true ? readProviderErrorCode(errRead.value) : null
     const code = classifyFailure({ status, errorCode, stage })
 
     // Unusable delta state is never retried: retrying the same dead cursor cannot
@@ -557,8 +654,19 @@ export async function executeGraphRequest(p) {
       elapsedRetryMs,
     })
     if (!plan.retry) return { ok: false, code: plan.code, attempts }
+    // The backoff plus the attempt it precedes. A Retry-After of 30 seconds is a
+    // perfectly ordinary answer from Graph and a perfectly impossible one inside the
+    // last ten seconds of an invocation; the PROVIDER's code is returned rather than
+    // `budget_exhausted`, because the provider did answer and that answer is what the
+    // caller should act on.
+    if (!affordable(plan.delayMs + timeoutMs)) {
+      return { ok: false, code, attempts }
+    }
     elapsedRetryMs += plan.delayMs
     await sleep(plan.delayMs)
+    if (!affordable(timeoutMs)) {
+      return { ok: false, code: 'budget_exhausted', attempts }
+    }
     void clock
   }
   return { ok: false, code: 'retry_exhausted', attempts }
@@ -573,19 +681,11 @@ function makeTimeoutSignal(ms) {
   return undefined
 }
 
-/**
- * Best-effort read of Graph's controlled error token from a failure response.
- * Returns null on anything unusable. The payload is never retained or returned.
- */
-async function readErrorCode(res) {
-  try {
-    if (!res || typeof res.json !== 'function') return null
-    const json = await res.json()
-    return readProviderErrorCode(json)
-  } catch {
-    return null
-  }
-}
+// `readErrorCode` lived here. It wrapped an UNBOUNDED res.json() in a try/catch,
+// which is how the error path came to have neither a deadline nor a size ceiling.
+// Deleting it rather than fixing it in place means there is no longer an unbounded
+// reader in this module for a later caller to reach for: the non-200 path now uses
+// readJsonBounded directly, inside the request's own controller.
 
 function readHeader(res, name) {
   try {
