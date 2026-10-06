@@ -83,7 +83,9 @@ const isPlainObject = (v) => typeof v === 'object' && v !== null && !Array.isArr
 export const TERMINAL_DEFERRALS = Object.freeze([
   'content_consent_missing',       // the gate is closed; it will not open mid-round
   'third_party_consent_missing',
-  'summary_key_absent',            // no provider key is configured for this function
+  // The provider returned no header collection, so the exchange could not be
+  // screened. Terminal for this round: the same fetch would answer the same way.
+  'automation_unverified',
   'no_handles',                    // nothing was stored to fetch with
   'no_usable_content',             // the bodies sanitized to nothing
   'minimization_failed',           // the request would have carried something forbidden
@@ -102,6 +104,12 @@ export const RETRYABLE_DEFERRALS = Object.freeze([
   'fetch_failed',          // a transient Graph failure, or a moved message
   'model_unavailable',     // the provider failed after its own retries
   'handles_unreadable',    // the handle RPC itself failed
+  // A CONFIGURATION fact, not a property of the mail: the key is absent or the
+  // request could not be built. Configuring the key makes the same conversation
+  // summarizable, so the work is preserved for a retry rather than settled - which
+  // is the whole difference between "come back" and "there was nothing to say".
+  'summary_key_absent',
+  'minimization_failed',
 ])
 
 /**
@@ -238,6 +246,7 @@ export async function summarizeOneConversation (p) {
   const {
     conversation, rpc, connectionId, runId, roundId, decryptCursor, accessToken,
     apiKey, consentVersion, selfAddresses, budgetAllows, deps, requiredConsent,
+    requiresScreening,
   } = p || {}
 
   // ── the gates FIRST, before the handle read ──────────────────────────────
@@ -274,12 +283,24 @@ export async function summarizeOneConversation (p) {
     fetchMessage: makeMessageFetcher({ accessToken, deps }),
     // STRAIGHT THROUGH, with no reshaping: the pass's port contract is this
     // function's own return shape, so there is nothing here to get wrong.
+    //
+    // The SAME budget function the pass uses is handed to the provider call, so its
+    // retries are admitted against the real invocation deadline rather than a local
+    // guess. Without it, a 429 at second 110 of a 120-second invocation would sleep
+    // and then start a fresh 30-second attempt the platform was about to kill.
     callModel: ({ body }) => callDraftModel({
-      body, apiKey, fetchImpl: deps?.fetchImpl, sleepImpl: deps?.sleepImpl,
+      body,
+      apiKey,
+      fetchImpl: deps?.fetchImpl,
+      sleepImpl: deps?.sleepImpl,
+      budgetAllows,
     }),
     apiKey,
     selfAddresses,
     budgetAllows,
+    // Carried from the plan entry: an unknown person whose automation facts were
+    // never read may only be proposed if THIS fetch screens clean.
+    requiresScreening: requiresScreening === true,
   })
 }
 
@@ -287,10 +308,31 @@ export async function summarizeOneConversation (p) {
  * Turn a pass result plus the metadata entry into the ONE write to make.
  *
  * Pure: it decides the RPC name and arguments and nothing else, so the decision is
- * testable without a database. `write: 'none'` means the conversation must NOT be
- * marked processed.
+ * testable without a database.
+ *
+ * ── THE METADATA FALLBACK IS SCOPED TO THE ENVELOPE-CONSENT PILOT ───────────
+ * `consentOpen` says whether THIS CONNECTION is on the content release - both gates
+ * matching the required disclosure version. It is NOT the same question as whether
+ * the content stage ran: a connection can be on the content release and still have
+ * the stage off because no provider key is configured.
+ *
+ * That distinction is the whole correction. A connection on the ENVELOPE-ONLY
+ * disclosure gets what it gets today: the metadata candidate with no note, because
+ * reading the body was never authorized and a suggestion without context is still
+ * better than no suggestion at all. A connection on the CONTENT RELEASE has been
+ * told it will get a summary, so a failed summary must not quietly become the exact
+ * empty-note experience the release was built to fix. It is reported instead, and
+ * nothing is written.
+ *
+ * `write: 'none'` means the conversation must NOT be marked processed when
+ * `retryable` is true, and MAY be when it is false.
+ *
+ * @param {object} entry   the plan entry
+ * @param {object} pass    the content pass result
+ * @param {{consentOpen?: boolean}} [opts]
  */
-export function planContentWrite (entry, pass) {
+export function planContentWrite (entry, pass, opts = {}) {
+  const consentOpen = opts.consentOpen === true
   const base = {
     p_connection_id: null, p_run_id: null,
     p_episode_fingerprint: entry?.episodeFingerprint ?? null,
@@ -370,11 +412,24 @@ export function planContentWrite (entry, pass) {
     }
   }
 
-  // A TERMINAL deferral. The candidate is written exactly as the metadata-only
-  // path writes it today - with NO note, never a placeholder - and the reason is
-  // reported so the absence is explained rather than silent. The RPC coalesces a
-  // null note against whatever is already stored, so a content failure on a later
-  // round cannot blank a note an earlier round produced.
+  // A TERMINAL deferral.
+  //
+  // ON THE CONTENT RELEASE: no write. The connection was told it would get a
+  // summary of what was discussed; a noteless row is the original complaint, and
+  // producing one here would make the release indistinguishable from not having it.
+  // Reported, and settled - the conversation is not retried, because retrying would
+  // read the same mail to the same end.
+  if (consentOpen) {
+    return {
+      write: 'none', rpc: null, args: null,
+      deferral: reason ?? 'no_usable_content', retryable: false,
+    }
+  }
+
+  // ON THE ENVELOPE-ONLY DISCLOSURE: exactly today's behaviour. The candidate is
+  // written with NO note - never a placeholder - and the reason is reported so the
+  // absence is explained rather than silent. The RPC coalesces a null note against
+  // whatever is already stored, so this cannot blank a note an earlier round wrote.
   if (typeof entry?.contactId === 'string' && entry.contactId.length > 0) {
     return {
       write: 'interaction_metadata',
@@ -392,9 +447,9 @@ export function planContentWrite (entry, pass) {
     }
   }
 
-  // An unknown person with no usable summary. There is nothing to propose: a
-  // contact card with a bare address and no reason for existing is not a
-  // suggestion, so this is reported and skipped.
+  // An unknown person with no usable summary, on either disclosure. There is
+  // nothing to propose: a contact card with a bare address and no reason for
+  // existing is not a suggestion, so this is reported and skipped.
   return {
     write: 'none', rpc: null, args: null,
     deferral: reason ?? 'no_usable_content', retryable: false,

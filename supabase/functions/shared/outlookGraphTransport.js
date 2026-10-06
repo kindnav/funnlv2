@@ -43,6 +43,7 @@
 
 // The header classifier lives with the payload contract (outlookMessageNormalize.js);
 // that module imports nothing from here, so this direction introduces no cycle.
+import { readJsonBounded } from './boundedJson.js'
 import { automationFactsFromHeaders } from './outlookMessageNormalize.js'
 
 export const GRAPH_ORIGIN = 'https://graph.microsoft.com'
@@ -464,6 +465,20 @@ export async function executeGraphRequest(p) {
   for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
     attempts += 1
     let res
+    // ONE CONTROLLER FOR THE WHOLE EXCHANGE - headers AND body.
+    //
+    // AbortSignal.timeout was passed to fetch, which bounded the header phase; but
+    // the body was then read with an unbounded `res.json()`. fetch resolves when the
+    // headers arrive, so a response that answered promptly and then trickled or
+    // stalled its body was unbounded in time, and one of any size was unbounded in
+    // memory. The controller now stays alive through readJsonBounded, which aborts
+    // the underlying stream and refuses an oversized one mid-read.
+    const controller = typeof AbortController === 'function' ? new AbortController() : null
+    const timer = controller !== null
+      ? setTimeout(() => { try { controller.abort() } catch { /* already gone */ } }, REQUEST_TIMEOUT_MS)
+      : null
+    const clearTimer = () => { if (timer !== null) clearTimeout(timer) }
+
     try {
       res = await fetchImpl(request.url, {
         method: 'GET',
@@ -474,15 +489,20 @@ export async function executeGraphRequest(p) {
         },
         // NEVER auto-follow a redirect. Graph can answer an expired delta cursor with a
         // redirect to a full resynchronization; silently following it would turn a
-        // bounded incremental run into an unbounded full mailbox read. The `Location`
+        // bounded incremental run into an unbounded full mailbox read. It would also
+        // re-send the bearer token to whatever host the Location names. The `Location`
         // header is deliberately never read, logged or returned.
         redirect: 'manual',
-        signal: makeTimeoutSignal(REQUEST_TIMEOUT_MS),
+        ...(controller !== null
+          ? { signal: controller.signal }
+          : { signal: makeTimeoutSignal(REQUEST_TIMEOUT_MS) }),
       })
     } catch (e) {
+      clearTimer()
       // An abort is a timeout; anything else is an opaque transport failure. The
       // thrown error's message is NEVER surfaced (it can contain the URL).
-      const code = e && e.name === 'AbortError' ? 'timeout' : 'transport_failure'
+      const code = e && (e.name === 'AbortError' || e.name === 'TimeoutError')
+        ? 'timeout' : 'transport_failure'
       const plan = planRetry({ status: 503, retryAfterHeader: null, attempt, elapsedRetryMs })
       if (!plan.retry) return { ok: false, code, attempts }
       elapsedRetryMs += plan.delayMs
@@ -491,14 +511,31 @@ export async function executeGraphRequest(p) {
     }
 
     const status = typeof res?.status === 'number' ? res.status : 0
+
+    // A 3xx needs no special case here: with redirect:'manual' it arrives as an
+    // ordinary non-200 and classifyFailure already answers `unexpected_redirect`,
+    // which is the code every caller and test already knows. Adding a second code
+    // for the same condition would just be a synonym to keep in step.
     if (status === 200) {
+      // The declared length first, which refuses before a byte is buffered.
       const sizeCode = checkResponseSize(res)
-      if (sizeCode) return { ok: false, code: sizeCode, attempts }
-      let json
-      try { json = await res.json() } catch { return { ok: false, code: 'malformed_response', attempts } }
-      if (!isPlainObject(json)) return { ok: false, code: 'malformed_response', attempts }
-      return { ok: true, json, attempts }
+      if (sizeCode) { clearTimer(); return { ok: false, code: sizeCode, attempts } }
+      // Then the STREAMED bytes, under the same deadline.
+      const read = await readJsonBounded(res, MAX_RESPONSE_BYTES)
+      clearTimer()
+      if (read.ok !== true) {
+        return {
+          ok: false,
+          code: read.reason === 'response_too_large'
+            ? 'response_too_large'
+            : (read.reason === 'response_body_timeout' ? 'timeout' : 'malformed_response'),
+          attempts,
+        }
+      }
+      if (!isPlainObject(read.value)) return { ok: false, code: 'malformed_response', attempts }
+      return { ok: true, json: read.value, attempts }
     }
+    clearTimer()
 
     // Non-200. Read ONLY Graph's controlled error token so an expired delta cursor can
     // be told apart from an ordinary bad request. Everything else in the payload —

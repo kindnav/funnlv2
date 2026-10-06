@@ -84,6 +84,13 @@ export const CHECKPOINT_RESERVE_MS = 20_000
 
 /** Why one folder stopped reading. Controlled set; safe to log. */
 export const FOLDER_STOP_CODES = Object.freeze([
+  // A handle the page was REQUIRED to produce could not be produced. Deliberately
+  // NOT continuable: a continuable stop is retried after the short continue backoff,
+  // and a deterministic seal failure would then spin. This ends the invocation as
+  // INCOMPLETE instead, which the reservation predicate retries after five minutes
+  // and gives up on after ten attempts - a bounded, visible stall rather than a hot
+  // loop, and no cursor moves either way.
+  'handle_production_failed',
   'complete',              // reached its @odata.deltaLink in this round
   'already_complete',      // it had reached it in an earlier invocation
   'budget_exhausted',      // the invocation deadline would not cover another page
@@ -268,6 +275,19 @@ export async function readFolderContinued (p) {
     const folded = await fold(norm.messages.map((m) => ({
       message: m, extra: norm.extras.get(m.providerMessageKey),
     })))
+
+    // ── A FAILED REQUIRED HANDLE STOPS THE FOLDER, BEFORE THE CHECKPOINT ──
+    // Checked here rather than after the commit, because the whole point is that
+    // nothing commits: the page sequence is not incremented, record_outlook_page_
+    // progress is never called, so the resume position, the conversation merge and
+    // the handle write all stay exactly as the previous page left them. The next
+    // invocation re-reads this page from the same link and, if the seal succeeds,
+    // stores every message of it.
+    if (typeof folded.handleFailure === 'string' && folded.handleFailure.length > 0) {
+      stop = 'handle_production_failed'
+      handleReason = folded.handleFailure
+      break
+    }
 
     if (isPlainObject(folded.handles)) {
       handlesOffered += Array.isArray(folded.messages) ? folded.messages.length : 0
@@ -462,6 +482,12 @@ export async function runOutlookRoundSlice (p) {
     // the normal, expected answer for the live pilot connection.
     handleReason: GRAPH_FOLDERS
       .map((f) => folders[f].handleReason)
+      .find((r) => typeof r === 'string') ?? null,
+    // A page was refused because a required handle could not be produced. Reported
+    // as its own incomplete reason: the folder did not finish, and the cause is not
+    // Microsoft, a cap, or the clock.
+    handleFailure: GRAPH_FOLDERS
+      .map((f) => (folders[f].stop === 'handle_production_failed' ? folders[f].handleReason : null))
       .find((r) => typeof r === 'string') ?? null,
   }
 }

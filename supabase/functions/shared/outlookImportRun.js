@@ -941,11 +941,19 @@ export async function runOutlookImport (p) {
 
   // ── 3c. the round did not finish for a reason that is not "later" ──────────
   if (slice.roundComplete !== true) {
-    await release('idle', false, null, null)
+    // A refused page is named rather than folded into the generic reason: the folder
+    // stopped because a handle it was required to store could not be sealed, which
+    // is a local failure an operator can act on, not a provider or budget outcome.
+    const reasons = typeof slice.handleFailure === 'string'
+      ? ['handle_production_failed']
+      : ['folder_incomplete']
+    await release('idle', false, null,
+      typeof slice.handleFailure === 'string' ? 'handle_production_failed' : null)
     return {
       ...nothingWritten,
       outcome: 'incomplete',
-      incompleteReasons: ['folder_incomplete'],
+      incompleteReasons: reasons,
+      handleFailure: slice.handleFailure ?? null,
     }
   }
 
@@ -1013,6 +1021,19 @@ export async function runOutlookImport (p) {
   // its metadata candidate, and ONE reason is reported for the absent notes rather
   // than four hundred identical ones.
   const contentPerms = contentPermissions(context.consentVersion ?? null, requiredConsent)
+  // TWO SEPARATE QUESTIONS, and conflating them is what produced the empty note.
+  //
+  //   consentOpen      is this connection on the CONTENT RELEASE? Both gates match
+  //                    the required disclosure version, so the account has been told
+  //                    it will get a summary of what was discussed.
+  //   contentStageOn   can a summary actually be attempted right now? That needs
+  //                    consentOpen AND a configured provider key.
+  //
+  // A connection can be on the content release with no key configured. Treating that
+  // as "no consent" would write the envelope-only metadata row - the exact noteless
+  // suggestion the release exists to fix - so the two are tracked apart: the write
+  // decision keys on consentOpen, and the attempt keys on contentStageOn.
+  const consentOpen = contentPerms.body === true && contentPerms.thirdParty === true
   const contentStageReason = !contentPerms.body
     ? 'content_consent_missing'
     : (!contentPerms.thirdParty
@@ -1159,6 +1180,10 @@ export async function runOutlookImport (p) {
               apiKey: anthropicApiKey,
               consentVersion: context.consentVersion ?? null,
               requiredConsent,
+              // This conversation reached the stage only because its automation facts
+              // had never been read. It may be proposed ONLY if this fetch returns the
+              // headers and they screen clean.
+              requiresScreening: entry.requiresContent === true,
               selfAddresses: [context.primaryEmail, ...(context.aliases ?? [])],
               // The pass's own admission checks, against the SAME invocation
               // deadline every other stage uses. Only the RELEASE is reserved here,
@@ -1187,7 +1212,23 @@ export async function runOutlookImport (p) {
           if (reachedModel) content.modelCalls += 1
         }
 
-        const plan = planContentWrite(entry, pass)
+        // ── WHAT IS LEFT, RECHECKED AFTER CONTENT PROCESSING ───────────────
+        // The check before the stage proved there was room for the stage AND a
+        // write. The stage may have taken far longer than the floor it was admitted
+        // on - six body reads and a provider call with retries - so the write,
+        // the progress record and the release are re-proved against the clock as it
+        // is NOW, not as it was before the summary.
+        //
+        // Stopping here is safe in both directions: a draft that was produced and
+        // not written is re-produced next invocation from handles that are still
+        // stored, and the write cursor has not passed the conversation.
+        if (!budgetAllows(WRITE_STEP_RESERVE_MS)) {
+          if (contentStageOn) bumpDeferral('budget_exhausted')
+          outOfBudget = true
+          break
+        }
+
+        const plan = planContentWrite(entry, pass, { consentOpen })
         if (plan.deferral !== null) bumpDeferral(plan.deferral)
         if (typeof plan.ignored === 'string') {
           content.ignored[plan.ignored] = (content.ignored[plan.ignored] || 0) + 1

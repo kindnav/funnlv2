@@ -598,10 +598,39 @@ test('an empty interaction queue with a proposal waiting is NOT "all caught up"'
   const code = codeOnly(PAGE_SRC)
   assert.ok(/const queueEmpty = items\.length === 0 && proposals\.length === 0/.test(code),
     'emptiness must span both queues')
-  // The "all caught up" state is gated on that, not on items alone.
-  assert.ok(/status === 'ready' && queueEmpty && !hasMore/.test(code))
+  // AND neither queue may have anything past its own cursor. "All caught up" with
+  // proposal 21 still in the database was the defect: the proposals queue had a bare
+  // limit of 20 and no continuation at all, so draining the visible page ended the
+  // review. Emptiness now requires both lists empty AND both cursors exhausted.
+  assert.ok(/const anyMore = hasMore \|\| proposalsHaveMore/.test(code),
+    'exhaustion must span both cursors')
+  assert.ok(/status === 'ready' && queueEmpty && !anyMore/.test(code),
+    'the "all caught up" state must be gated on both')
   assert.ok(!/items\.length === 0 && !hasMore/.test(code),
     'the old items-only emptiness test must be gone')
+})
+
+test('the proposals queue is keyset-paged, refilled, and single-flighted', () => {
+  const code = codeOnly(PAGE_SRC)
+  // Its OWN cursor, not a shared one: the two tables have independent id spaces.
+  assert.ok(/proposalCursorRef/.test(code), 'the proposals queue needs its own cursor')
+  assert.ok(/fetchProposals = useCallback\(async \(cursor\)/.test(code),
+    'and the fetch must take one')
+  assert.ok(/keysetFilter\(cursor\)/.test(code))
+  // Reusing the existing helpers rather than a new pagination layer. Both queues are
+  // ordered by the same pair, so the same keyset applies unchanged.
+  assert.ok(/cursorFrom\(proposals\)/.test(code))
+  assert.ok(/computeHasMore\(proposals\.length\)/.test(code))
+  // A refill when the visible page drains but more remain.
+  assert.ok(/proposals\.length === 0 && proposalsHaveMore/.test(code),
+    'draining the visible proposals must pull the next page')
+  // And a synchronous single-flight, so a refill and a Load more cannot race.
+  assert.ok(/loadingProposalsRef/.test(code))
+  // No bare limit without continuation anywhere in the proposals path.
+  const fetchFn = code.slice(code.indexOf('const fetchProposals'),
+    code.indexOf('const loadInitial'))
+  assert.ok(/\.limit\(REVIEW_PAGE_SIZE\)/.test(fetchFn), 'still one bounded page at a time')
+  assert.ok(/\.or\(filter\)/.test(fetchFn), 'with the keyset applied')
 })
 
 test('the page explains that nothing is saved until acceptance', () => {

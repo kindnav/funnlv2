@@ -63,6 +63,22 @@ export function isUsableMessageId (id) {
 }
 
 /**
+ * Codes that mean a handle this page was REQUIRED to produce could not be produced.
+ *
+ * These are NOT the same as a malformed selection. A message that failed its own
+ * shape checks was never a candidate for retrieval - the fold had nothing usable to
+ * offer. But a message that passed every check and then failed to SEAL, or sealed to
+ * something the column will not hold, is a message the page meant to make
+ * retrievable and did not. Checkpointing such a page would commit a resume position
+ * past an exchange that can no longer be summarized: the conversation row says six
+ * messages, the handles say five, and nothing afterwards can tell that the sixth was
+ * lost rather than never offered.
+ *
+ * So the page fails instead, and the previous checkpoint stands.
+ */
+export const HANDLE_FAILURES = Object.freeze(['seal_failed', 'ciphertext_too_large'])
+
+/**
  * Build the handle array for ONE page.
  *
  * @param {object} p
@@ -72,26 +88,38 @@ export function isUsableMessageId (id) {
  * @param {string|null} p.consentVersion  microsoft_connections.consent_policy_version
  * @param {object} [p.requiredConsent]    injected only by tests
  * @param {Function} p.seal    async (plaintext) => { ciphertext, nonce, keyVersion }
- * @returns {Promise<{handles: Array, skipped: object, reason: string|null}>}
+ * @returns {Promise<{handles: Array, skipped: object, reason: string|null,
+ *                    failure: string|null}>}
  *          `handles` is ready to pass as p_messages. `skipped` counts controlled
- *          codes. `reason` is set when the WHOLE page produced none.
+ *          codes. `reason` is set when the WHOLE page produced none. `failure` is set
+ *          when a REQUIRED handle could not be produced - see HANDLE_FAILURES - and
+ *          the caller must then NOT checkpoint the page.
  */
 export async function buildMessageHandles (p) {
   const skipped = Object.create(null)
   const bump = (c) => { skipped[c] = (skipped[c] || 0) + 1 }
-  if (!isPlainObject(p)) return { handles: [], skipped, reason: 'no_selected_messages' }
+  if (!isPlainObject(p)) {
+    return { handles: [], skipped, reason: 'no_selected_messages', failure: null }
+  }
 
   // ── THE GATE, before a single id is sealed ───────────────────────────────
   const perms = contentPermissions(p.consentVersion, p.requiredConsent ?? {})
   if (!perms.body) {
     // Not an error and not a failure of the page: the import simply stays
     // envelope-only. The caller records the reason and carries on.
-    return { handles: [], skipped, reason: 'content_consent_missing', consent: perms }
+    // WITH THE GATE CLOSED THERE IS NO SUCH THING AS A FAILED HANDLE: none was
+    // required, so `failure` stays null and the page checkpoints exactly as the
+    // envelope-only import always has.
+    return {
+      handles: [], skipped, reason: 'content_consent_missing', consent: perms, failure: null,
+    }
   }
 
   const selected = Array.isArray(p.selected) ? p.selected : []
   if (selected.length === 0) {
-    return { handles: [], skipped, reason: 'no_selected_messages', consent: perms }
+    return {
+      handles: [], skipped, reason: 'no_selected_messages', consent: perms, failure: null,
+    }
   }
   if (typeof p.seal !== 'function') throw new Error('seal_not_injected')
 
@@ -115,24 +143,35 @@ export async function buildMessageHandles (p) {
     if (seenFp.has(m.mfp)) continue
     seenFp.add(m.mfp)
 
+    // ── FROM HERE ON, A FAILURE FAILS THE PAGE ───────────────────────────
+    // Every shape check above has passed, so this message IS one the page must
+    // make retrievable. `continue` here used to drop it and hand back a shorter
+    // array that the caller checkpointed - committing a resume position past an
+    // exchange that could no longer be summarized in full, with nothing afterwards
+    // able to tell the loss from a message never offered.
     let sealed
     try {
       sealed = await p.seal(m.messageId)
     } catch {
       // The thrown value is not read: it could carry the plaintext id.
-      bump('seal_failed'); continue
+      bump('seal_failed')
+      return { handles: [], skipped, reason: null, consent: perms, failure: 'seal_failed' }
     }
     if (!isPlainObject(sealed)
         || typeof sealed.ciphertext !== 'string' || sealed.ciphertext.length === 0
         || typeof sealed.nonce !== 'string' || sealed.nonce.length === 0) {
-      bump('seal_failed'); continue
+      bump('seal_failed')
+      return { handles: [], skipped, reason: null, consent: perms, failure: 'seal_failed' }
     }
     if (sealed.ciphertext.length > MAX_HANDLE_CIPHERTEXT_CHARS
         || sealed.nonce.length > MAX_HANDLE_NONCE_CHARS) {
       // Refused rather than truncated: a truncated ciphertext will not decrypt,
       // and storing one would turn a summarizable exchange into a permanent
       // fetch failure.
-      bump('ciphertext_too_large'); continue
+      bump('ciphertext_too_large')
+      return {
+        handles: [], skipped, reason: null, consent: perms, failure: 'ciphertext_too_large',
+      }
     }
 
     handles.push({
@@ -151,6 +190,7 @@ export async function buildMessageHandles (p) {
     skipped,
     reason: handles.length === 0 ? 'no_selected_messages' : null,
     consent: perms,
+    failure: null,
   }
 }
 
@@ -168,6 +208,7 @@ export function summarizeProducer (out) {
     handles: Array.isArray(out?.handles) ? out.handles.length : 0,
     skipped: clean,
     reason: PRODUCER_SKIPS.includes(out?.reason) ? out.reason : null,
+    failure: HANDLE_FAILURES.includes(out?.failure) ? out.failure : null,
     content_allowed: out?.consent?.body === true,
   }
 }

@@ -46,6 +46,13 @@
 import { boundEpisodeContent, sanitizeMessageContent, sanitizeSubject } from './outlookContentSanitizer.js'
 import { buildDraftRequest, assertRequestMinimization, validateDraftResponse } from './outlookDraftContract.js'
 import { contentPermissions } from './outlookContentConsent.js'
+// THE SAME CLASSIFIERS THE ENVELOPE PASS USES, not a second opinion. An earlier
+// version of this file checked only hasListId / hasListUnsubscribe / precedence
+// inline, which is a strict subset: it missed Auto-Submitted, X-Auto-Response-
+// Suppress, no-reply senders, delivery failures, out-of-office replies and calendar
+// notifications. Reusing bulkListReason and nonHumanReason means the content stage
+// cannot drift from the screening the rest of the pipeline applies.
+import { bulkListReason, nonHumanReason } from './emailAutomation.js'
 
 /** At most this many bodies are fetched for one conversation. */
 export const MAX_FETCH_PER_CONVERSATION = 6
@@ -83,7 +90,11 @@ export const PASS_OUTCOMES = Object.freeze([
  * DEFER_REASONS so the two cannot be confused in a log or a test.
  */
 export const IGNORE_REASONS = Object.freeze([
-  'bulk_or_list_mail',   // List-Id / List-Unsubscribe / bulk precedence
+  'bulk_or_list_mail',   // List-Id / List-Unsubscribe / bulk-list-junk precedence
+  // Auto-Submitted, X-Auto-Response-Suppress, a no-reply sender, a delivery failure,
+  // an out-of-office reply or a calendar notification - decided by the SAME
+  // nonHumanReason the envelope pass uses, not by a local subset of it.
+  'automated_message',
   'model_ignored',       // the model judged there is nothing worth proposing
 ])
 
@@ -99,6 +110,11 @@ export const DEFER_REASONS = Object.freeze([
   'minimization_failed',           // the request would have carried something forbidden
   'ambiguous_counterparty',        // more than one external person
   'counterparty_unusable',         // no usable envelope address for an unknown person
+  // The provider did not return the header collection, so the exchange could not be
+  // screened for automation. For an unknown person that is terminal: proposing a
+  // contact on the strength of headers nobody saw is exactly the guess the envelope
+  // pass refused to make, and reading the body does not answer the question.
+  'automation_unverified',
   'model_deferred',                // the model itself asked to be asked again
 ])
 
@@ -179,10 +195,17 @@ export function counterpartyFromEnvelopes (messages, selfAddresses) {
  * @param {string}   p.apiKey
  * @param {string[]} p.selfAddresses
  * @param {Function} p.budgetAllows  (marginMs) => boolean
+ * @param {boolean} [p.requiresScreening] TRUE when this conversation reached the
+ *   content stage only because `automation_facts_incomplete` was treated as
+ *   resolvable - i.e. an unknown counterparty whose headers had not been read. Such a
+ *   conversation may be summarized ONLY if this fetch actually returns the header
+ *   collection and it screens clean. FALSE for a contact the user already tracks,
+ *   whose eligibility the envelope pass established without headers.
  */
 export async function summarizeConversation (p) {
   if (!isPlainObject(p)) return deferral('no_handles')
   const conv = isPlainObject(p.conversation) ? p.conversation : {}
+  const requiresScreening = p.requiresScreening === true
 
   // ── 1. CONSENT, before anything is read ──────────────────────────────────
   const perms = contentPermissions(p.consentVersion, p.requiredConsent ?? {})
@@ -254,15 +277,39 @@ export async function summarizeConversation (p) {
         sanitized: { text: clean.text, signature: clean.signature ?? null },
       })
     }
-    // AUTOMATED MAIL, decided from the headers the SAME fetch returned. A
-    // newsletter or a no-reply notification is never summarized, and an absent
-    // header collection is never mistaken for "no automation".
-    if (msg.automationComplete === true && isPlainObject(msg.automation)) {
-      const a = msg.automation
-      if (a.hasListId === true || a.hasListUnsubscribe === true
-          || a.precedence === 'bulk' || a.precedence === 'list' || a.precedence === 'junk') {
-        return { outcome: 'ignore', reason: 'bulk_or_list_mail', fetched }
+    // ── AUTOMATION SCREENING, from the headers the SAME fetch returned ────
+    // CONTENT_SELECT asks for internetMessageHeaders alongside the body, so this is
+    // the request that can answer the question the envelope pass could not.
+    //
+    // The shape the classifiers take. They read `automation`, `fromAddress` and
+    // `subject` and nothing else, and they return controlled codes - never an
+    // address, a subject or a header value.
+    const screened = {
+      automation: isPlainObject(msg.automation) ? msg.automation : {},
+      fromAddress: typeof msg.from?.address === 'string' ? msg.from.address : '',
+      subject: typeof msg.subject === 'string' ? msg.subject : '',
+    }
+
+    if (msg.automationComplete !== true) {
+      // THE COLLECTION IS ABSENT, so nothing has been screened. An absent header
+      // collection must never be read as "no automation found".
+      //
+      // REPRODUCED: automationComplete=false reached Anthropic and came back as a
+      // new_contact_suggestion. The taint that put the conversation here exists
+      // precisely because these headers had not been seen, and if they still have
+      // not been seen it is unresolved - reading the body answers a different
+      // question. So for a conversation that NEEDS screening this is terminal.
+      if (requiresScreening) {
+        return deferral('automation_unverified', { fetched })
       }
+      // For a contact the user already tracks, the envelope pass accepted the
+      // exchange on its own no-reply, bounce, system and subject rules, and chose
+      // not to require headers. That decision is not revisited here.
+    } else {
+      const bulk = bulkListReason(screened)
+      if (bulk !== null) return { outcome: 'ignore', reason: 'bulk_or_list_mail', fetched }
+      const nonHuman = nonHumanReason(screened)
+      if (nonHuman !== null) return { outcome: 'ignore', reason: 'automated_message', fetched }
     }
     envelopes.push({
       direction: directionFor(h.folder),

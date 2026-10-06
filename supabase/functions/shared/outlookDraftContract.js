@@ -33,6 +33,8 @@
 // a stored value that violates the schema, the length bounds, the evidence enums, or
 // the rule that the email address never comes from the model.
 
+import { readJsonBounded } from './boundedJson.js'
+
 export const ANTHROPIC_MESSAGES_URL = 'https://api.anthropic.com/v1/messages'
 export const ANTHROPIC_VERSION = '2023-06-01'   // current version per the API reference
 
@@ -56,6 +58,16 @@ export const DRAFT_MAX_TOKENS = 1024
 export const THINKING_DISABLED = Object.freeze({ type: 'disabled' })
 export const DRAFT_TIMEOUT_MS = 30_000
 export const DRAFT_MAX_RETRIES = 2
+
+/**
+ * Hard ceiling on the provider's RESPONSE, enforced against the streamed bytes.
+ *
+ * A draft is a few hundred characters of JSON; DRAFT_MAX_TOKENS caps the generation
+ * at 1024 tokens. 256 KiB is therefore an enormous allowance and anything past it is
+ * not a draft - it is a misrouted or hostile response, and buffering it whole is how
+ * a bounded call becomes an unbounded one.
+ */
+export const MAX_DRAFT_RESPONSE_BYTES = 256 * 1024
 export const MAX_REQUEST_CHARS = 20_000         // whole serialized body ceiling
 
 // Field bounds — these MIRROR the applied CHECK constraints in 20260921000000 exactly.
@@ -505,30 +517,91 @@ export function parseDraftPayload(json) {
  */
 export async function callDraftModel(p) {
   if (!isPlainObject(p)) throw new Error('invalid_params')
-  const { body, apiKey, fetchImpl, sleepImpl } = p
+  const { body, apiKey, fetchImpl, sleepImpl, budgetAllows } = p
   if (typeof fetchImpl !== 'function') throw new Error('fetch_not_injected')
   const headers = buildDraftHeaders(apiKey)
   const sleep = typeof sleepImpl === 'function' ? sleepImpl : (ms) => new Promise((r) => setTimeout(r, ms))
+  // No budget function injected means "no invocation deadline to respect", which is
+  // the right default for a direct unit call. The worker always injects one.
+  const affordable = typeof budgetAllows === 'function' ? budgetAllows : () => true
   const payload = JSON.stringify(body)
   if (payload.length > MAX_REQUEST_CHARS) return { ok: false, code: 'request_too_large' }
 
   for (let attempt = 0; attempt <= DRAFT_MAX_RETRIES; attempt++) {
+    // ── A RETRY IS ADMITTED ONLY WITHIN THE REMAINING INVOCATION BUDGET ───
+    // Starting a 30-second attempt with ten seconds left does not produce a draft; it
+    // produces a killed invocation that wrote nothing and recorded nothing. The first
+    // attempt is checked too, so a conversation admitted long ago cannot slip a call
+    // past the deadline.
+    if (!affordable(DRAFT_TIMEOUT_MS)) {
+      return { ok: false, code: attempt === 0 ? 'budget_exhausted' : 'retry_budget_exhausted' }
+    }
+
+    // ONE CONTROLLER FOR THE WHOLE EXCHANGE - headers AND body.
+    //
+    // The deadline used to be a declared constant that reached no request at all: no
+    // signal was passed to fetch, so DRAFT_TIMEOUT_MS bounded nothing. Even passing
+    // it only to fetch would be half a fix, because fetch resolves when the HEADERS
+    // arrive - a provider that answers promptly and then trickles the body forever
+    // would pin the invocation. The controller therefore stays alive through
+    // readJsonBounded, which aborts the underlying stream.
+    const controller = typeof AbortController === 'function' ? new AbortController() : null
+    const timer = controller !== null
+      ? setTimeout(() => { try { controller.abort() } catch { /* already gone */ } }, DRAFT_TIMEOUT_MS)
+      : null
+    const clearTimer = () => { if (timer !== null) clearTimeout(timer) }
+
     let res
     try {
-      res = await fetchImpl(ANTHROPIC_MESSAGES_URL, { method: 'POST', headers, body: payload })
+      res = await fetchImpl(ANTHROPIC_MESSAGES_URL, {
+        method: 'POST',
+        headers,
+        body: payload,
+        // NEVER auto-follow a redirect. The request carries the API key in a header,
+        // and a followed redirect would re-send those headers to whatever host the
+        // Location names. The header is never read, logged or returned.
+        redirect: 'manual',
+        ...(controller !== null ? { signal: controller.signal } : {}),
+      })
     } catch (e) {
+      clearTimer()
+      const timedOut = e && (e.name === 'AbortError' || e.name === 'TimeoutError')
       if (attempt >= DRAFT_MAX_RETRIES) {
-        return { ok: false, code: e && e.name === 'AbortError' ? 'provider_timeout' : 'transport_failure' }
+        return { ok: false, code: timedOut ? 'provider_timeout' : 'transport_failure' }
       }
-      await sleep(1000 * Math.pow(2, attempt))
+      const waitMs = 1000 * Math.pow(2, attempt)
+      if (!affordable(DRAFT_TIMEOUT_MS + waitMs)) {
+        return { ok: false, code: timedOut ? 'provider_timeout' : 'transport_failure' }
+      }
+      await sleep(waitMs)
       continue
     }
+
     const status = typeof res?.status === 'number' ? res.status : 0
-    if (status === 200) {
-      let json
-      try { json = await res.json() } catch { return { ok: false, code: 'malformed_response' } }
-      return parseDraftPayload(json)
+
+    // A redirect is refused outright rather than retried: with redirect:'manual' the
+    // 3xx is handed back, and following it by hand would be the same leak.
+    if (status >= 300 && status < 400) {
+      clearTimer()
+      return { ok: false, code: 'provider_redirected' }
     }
+
+    if (status === 200) {
+      // BOUNDED, and still inside the controller's deadline.
+      const read = await readJsonBounded(res, MAX_DRAFT_RESPONSE_BYTES)
+      clearTimer()
+      if (read.ok !== true) {
+        return {
+          ok: false,
+          code: read.reason === 'response_too_large'
+            ? 'response_too_large'
+            : (read.reason === 'response_body_timeout' ? 'provider_timeout' : 'malformed_response'),
+        }
+      }
+      return parseDraftPayload(read.value)
+    }
+
+    clearTimer()
     if (status === 429 || status === 529 || status >= 500) {
       if (attempt >= DRAFT_MAX_RETRIES) {
         return { ok: false, code: status === 429 ? 'provider_rate_limited' : 'provider_unavailable' }
@@ -538,6 +611,10 @@ export async function callDraftModel(p) {
         const ra = res.headers && typeof res.headers.get === 'function' ? res.headers.get('retry-after') : null
         if (ra !== null && /^\d{1,4}$/.test(String(ra).trim())) waitMs = Math.min(Number(ra) * 1000, 30_000)
       } catch { /* keep backoff */ }
+      // The backoff AND the attempt it precedes must both fit what is left.
+      if (!affordable(DRAFT_TIMEOUT_MS + waitMs)) {
+        return { ok: false, code: status === 429 ? 'provider_rate_limited' : 'provider_unavailable' }
+      }
       await sleep(waitMs)
       continue
     }

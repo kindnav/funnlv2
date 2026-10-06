@@ -390,6 +390,9 @@ export async function foldPage (p) {
     counts,
     messages: Array.isArray(handles?.handles) ? handles.handles : [],
     handles,
+    // Set when a handle the page was REQUIRED to produce could not be produced. The
+    // caller must not checkpoint such a page: see HANDLE_FAILURES.
+    handleFailure: typeof handles?.failure === 'string' ? handles.failure : null,
   }
 }
 

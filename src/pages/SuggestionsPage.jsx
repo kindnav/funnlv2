@@ -204,12 +204,15 @@ export default function SuggestionsPage() {
   const [status, setStatus] = useState('loading')   // loading | error | ready
   const [items, setItems] = useState([])
   const [proposals, setProposals] = useState([])   // people not yet in Funnl
+  const [proposalsHaveMore, setProposalsHaveMore] = useState(false)
   const [hasMore, setHasMore] = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
   const [banner, setBanner] = useState('')
   const viewedRef = useRef(false)
   const aliveRef = useRef(true)          // false after unmount → drop late responses
   const cursorRef = useRef(null)         // keyset boundary: last row FETCHED (not last shown)
+  const proposalCursorRef = useRef(null) // the same, for the proposals queue
+  const loadingProposalsRef = useRef(false)  // synchronous single-flight for its refill
   const initGenRef = useRef(0)           // generation guard so a stale (re)load can't win
   const loadingMoreRef = useRef(false)   // synchronous single-flight for Load more
 
@@ -233,24 +236,31 @@ export default function SuggestionsPage() {
     return (data || []).map((r) => ({ ...r, kind: 'interaction' }))
   }, [])
 
-  // ── the PROPOSED-PEOPLE queue, read once ─────────────────────────────────
-  // Deliberately NOT keyset-paged alongside the interaction queue. The two live in
-  // different tables with independent id spaces, so one shared cursor cannot order
-  // them, and two cursors would make "Load more" ambiguous. Proposals are far rarer
-  // than interactions - one per previously-unknown person, bounded by the round's
-  // own conversation cap - so a single bounded read is honest and simple. If that
-  // ever stops being true the right fix is a second cursor, not a wider limit.
+  // ── the PROPOSED-PEOPLE queue, keyset-paged on its OWN cursor ────────────
+  // ITS OWN CURSOR, not a shared one. The two queues live in different tables with
+  // independent id spaces, so no single cursor can order them - but each is ordered
+  // by exactly the same pair, (proposed_interaction_date DESC, id DESC), so the
+  // keyset helpers the interaction queue already uses work unchanged here. Two
+  // cursors, one page size, no combined-provider pagination layer.
+  //
+  // This replaced a single bounded read of 20 with no continuation. Resolving those
+  // twenty drained the list and the page then said "You're all caught up" while
+  // proposal 21 sat unreachable in the database - a queue that quietly loses work
+  // past its first page is worse than one that is slow.
   //
   // READ-ONLY. Rendering the queue runs no mutation: nothing is created until the
   // reviewer presses Save on a card.
-  const fetchProposals = useCallback(async () => {
-    const { data, error } = await supabase
+  const fetchProposals = useCallback(async (cursor) => {
+    let q = supabase
       .from('new_contact_candidates')
       .select(NCC_SELECT)
       .eq('status', 'pending')
       .order('proposed_interaction_date', { ascending: false })
       .order('id', { ascending: false })
       .limit(REVIEW_PAGE_SIZE)
+    const filter = keysetFilter(cursor)
+    if (filter) q = q.or(filter)
+    const { data, error } = await q
     if (error) throw error
     return (data || []).map((r) => ({ ...r, kind: 'new_contact' }))
   }, [])
@@ -258,18 +268,20 @@ export default function SuggestionsPage() {
   const loadInitial = useCallback(async () => {
     const gen = ++initGenRef.current      // invalidate any in-flight load
     loadingMoreRef.current = false
+    loadingProposalsRef.current = false
     setStatus('loading')
     try {
       // Both queues in parallel. A failure in EITHER is a failed load: showing an
       // interaction queue while silently hiding every proposed person would make the
       // "all caught up" state a lie.
-      const [rows, proposals] = await Promise.all([fetchPage(null), fetchProposals()])
+      const [rows, proposals] = await Promise.all([fetchPage(null), fetchProposals(null)])
       if (!aliveRef.current || gen !== initGenRef.current) return   // stale / unmounted
-      // The cursor tracks ONLY the interaction queue, which is the paged one.
       cursorRef.current = cursorFrom(rows)
+      proposalCursorRef.current = cursorFrom(proposals)
       setItems(rows)
       setProposals(proposals)
       setHasMore(computeHasMore(rows.length))
+      setProposalsHaveMore(computeHasMore(proposals.length))
       setStatus('ready')
       if (!viewedRef.current) {
         viewedRef.current = true
@@ -290,24 +302,53 @@ export default function SuggestionsPage() {
     loadInitial()
   }, [loadInitial])
 
+  /** One more page of PROPOSALS, on its own cursor and its own single-flight. */
+  const loadMoreProposals = useCallback(async () => {
+    if (loadingProposalsRef.current) return
+    loadingProposalsRef.current = true
+    const gen = initGenRef.current
+    try {
+      const rows = await fetchProposals(proposalCursorRef.current)
+      if (!aliveRef.current || gen !== initGenRef.current) return
+      if (rows.length > 0) proposalCursorRef.current = cursorFrom(rows)
+      setProposals((prev) => dedupeById(prev, rows))
+      setProposalsHaveMore(computeHasMore(rows.length))
+    } catch {
+      /* keep the existing list; the refill and Load more can both be retried */
+    } finally {
+      loadingProposalsRef.current = false
+    }
+  }, [fetchProposals])
+
+  // Load more pulls the next page of EACH queue that still has one, so one button
+  // means "show me more to review" rather than "more of whichever list I happen to
+  // be looking at". Each queue keeps its own cursor and its own single-flight, so a
+  // failure in one does not disturb the other.
   const loadMore = useCallback(async () => {
     if (loadingMoreRef.current) return        // synchronous single-flight
     loadingMoreRef.current = true
     const gen = initGenRef.current            // tie this page to the current load session
     setLoadingMore(true)
     try {
-      const rows = await fetchPage(cursorRef.current)
-      if (!aliveRef.current || gen !== initGenRef.current) return   // stale / reloaded / unmounted
-      if (rows.length > 0) cursorRef.current = cursorFrom(rows)
-      setItems((prev) => dedupeById(prev, rows))
-      setHasMore(computeHasMore(rows.length))
+      const work = []
+      if (hasMore) {
+        work.push((async () => {
+          const rows = await fetchPage(cursorRef.current)
+          if (!aliveRef.current || gen !== initGenRef.current) return
+          if (rows.length > 0) cursorRef.current = cursorFrom(rows)
+          setItems((prev) => dedupeById(prev, rows))
+          setHasMore(computeHasMore(rows.length))
+        })())
+      }
+      if (proposalsHaveMore) work.push(loadMoreProposals())
+      await Promise.all(work)
     } catch {
-      /* keep existing list; Load more can be retried */
+      /* keep existing lists; Load more can be retried */
     } finally {
       if (aliveRef.current && gen === initGenRef.current) setLoadingMore(false)
       loadingMoreRef.current = false
     }
-  }, [fetchPage])
+  }, [fetchPage, hasMore, proposalsHaveMore, loadMoreProposals])
 
   // If resolving rows drains the visible page while more remain beyond the cursor,
   // pull the next page so the user never sees a false "all caught up".
@@ -317,9 +358,21 @@ export default function SuggestionsPage() {
     }
   }, [status, items.length, hasMore, loadMore])
 
+  // THE SAME REFILL FOR THE PROPOSALS QUEUE. Resolving every visible proposal while
+  // more remain past the cursor must pull the next page, not show "all caught up" -
+  // which is exactly what happened when this queue had no continuation at all.
+  useEffect(() => {
+    if (status === 'ready' && proposals.length === 0 && proposalsHaveMore
+        && !loadingProposalsRef.current) {
+      loadMoreProposals()
+    }
+  }, [status, proposals.length, proposalsHaveMore, loadMoreProposals])
+
   // Nothing at all is left to review. Both queues, because an empty interaction queue
   // with a proposed person still waiting is emphatically not "all caught up".
   const queueEmpty = items.length === 0 && proposals.length === 0
+  // And neither queue may have anything past its cursor.
+  const anyMore = hasMore || proposalsHaveMore
 
   function handleResolved(id, message) {
     // Only the rendered list shrinks; cursorRef is untouched, so Load more still
@@ -364,11 +417,11 @@ export default function SuggestionsPage() {
           </div>
         )}
 
-        {status === 'ready' && queueEmpty && hasMore && (
+        {status === 'ready' && queueEmpty && anyMore && (
           <div role="status" aria-live="polite" className="text-[13px] text-muted py-10 text-center">Loading more…</div>
         )}
 
-        {status === 'ready' && queueEmpty && !hasMore && (
+        {status === 'ready' && queueEmpty && !anyMore && (
           <div className="text-center py-14">
             <span className={SECTION_LABEL}>Suggestions</span>
             <h2 className="font-display font-semibold text-[18px] text-hi mb-2">You’re all caught up</h2>
@@ -389,7 +442,7 @@ export default function SuggestionsPage() {
               ))}
               {items.map((c) => <CandidateCard key={c.id} candidate={c} onResolved={handleResolved} />)}
             </div>
-            {hasMore && (
+            {anyMore && (
               <div className="mt-4 text-center">
                 <button type="button" onClick={loadMore} disabled={loadingMore}
                         className="bg-elevated text-mid text-[12px] font-semibold px-[18px] py-[8px] rounded-[9px] disabled:opacity-40 hover:text-hi transition-colors">
