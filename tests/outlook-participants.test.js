@@ -348,10 +348,28 @@ test('a discovery item has incomplete facts: unknown DEFERS, known is still elig
   // This is the default state of every delta item now that headers are not selected.
   const unknown = norm(graphMsg({ from: rcpt(ALEX) }))
   assert.strictEqual(unknown.extra.automationFactsComplete, false)
-  assert.deepStrictEqual(
-    evaluateMessage({ message: unknown.message, extra: unknown.extra, selfSet, contactIndex }),
-    { outcome: 'deferred', code: 'automation_facts_incomplete' },
+  const u = evaluateMessage({
+    message: unknown.message, extra: unknown.extra, selfSet, contactIndex,
+  })
+  // THE INVARIANT, unchanged: an unknown sender is NEVER accepted on unassessed
+  // automation. What changed is that the deferral now carries the envelope facts it
+  // already knew, so the round accumulator can record the conversation and the
+  // content stage - which reads the headers in the same request as the body - has
+  // something to resolve the taint into. Before, the round stored no counterparty at
+  // all for such a conversation, so finalisation could only ever answer
+  // `no_eligible_messages` and no unknown person could be proposed however much was
+  // read. The DEFERRAL ITSELF still blocks every write until the headers are seen.
+  assert.strictEqual(u.outcome, 'deferred',
     'an unknown sender is never accepted on unassessed automation')
+  assert.strictEqual(u.code, 'automation_facts_incomplete')
+  assert.notStrictEqual(u.outcome, 'eligible')
+  // The facts, and ONLY facts the envelope already stated.
+  assert.strictEqual(u.counterparty, ALEX.toLowerCase())
+  assert.strictEqual(u.contactId, null, 'the sender is not a tracked contact')
+  assert.ok(['inbound', 'outbound'].includes(u.direction))
+  assert.deepStrictEqual(Object.keys(u).sort(),
+    ['code', 'contactId', 'counterparty', 'direction', 'displayName', 'outcome'],
+    'nothing beyond the envelope may ride along')
 
   const known = norm(graphMsg())
   const r = evaluateMessage({ message: known.message, extra: known.extra, selfSet, contactIndex })
@@ -362,9 +380,13 @@ test('a discovery item has incomplete facts: unknown DEFERS, known is still elig
 
 test('a missing `extra` fails CLOSED for an unknown sender', () => {
   const m = norm(graphMsg({ from: rcpt(ALEX) })).message
-  assert.deepStrictEqual(evaluateMessage({ message: m, selfSet, contactIndex }),
-    { outcome: 'deferred', code: 'automation_facts_incomplete' },
+  const r = evaluateMessage({ message: m, selfSet, contactIndex })
+  assert.strictEqual(r.outcome, 'deferred',
     'forgetting to thread the facts through must not accept a stranger')
+  assert.strictEqual(r.code, 'automation_facts_incomplete')
+  assert.strictEqual(r.contactId, null)
+  // With no `extra` there is no display-name map, so there is no name to carry.
+  assert.strictEqual(r.displayName, null)
 })
 
 test('an inconclusive header collection does not upgrade the state', () => {
@@ -372,8 +394,10 @@ test('an inconclusive header collection does not upgrade the state', () => {
   // Graph answered, but without the collection: still not assessed.
   const a = applyAutomationFacts(r.message, r.extra, automationFactsFromHeaders(undefined))
   assert.strictEqual(a.extra.automationFactsComplete, false)
-  assert.deepStrictEqual(evaluateMessage({ message: a.message, extra: a.extra, selfSet, contactIndex }),
-    { outcome: 'deferred', code: 'automation_facts_incomplete' })
+  const r2 = evaluateMessage({ message: a.message, extra: a.extra, selfSet, contactIndex })
+  assert.strictEqual(r2.outcome, 'deferred')
+  assert.strictEqual(r2.code, 'automation_facts_incomplete')
+  assert.strictEqual(r2.contactId, null)
 })
 
 test('applyAutomationFacts never accepts a raw header collection', () => {

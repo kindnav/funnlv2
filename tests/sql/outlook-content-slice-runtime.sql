@@ -169,7 +169,8 @@ BEGIN
   ASSERT c.draft_summary LIKE 'Email thread%', 'the note is stored';
   ASSERT c.draft_follow_up LIKE 'Reply to their last message%', 'the follow-up is stored';
   ASSERT c.retained_subject = 'Coffee chat follow-up', 'the bounded subject is retained';
-  ASSERT c.extraction_status = 'deterministic', 'this slice is deterministic';
+  ASSERT c.extraction_status = 'deterministic',
+    'the DEFAULT is deterministic, so a caller that drafts nothing records the truth';
   ASSERT c.proposed_type = 'Email', 'and proposes an Email interaction';
   ASSERT c.context_expires_at > now(), 'the context has a deadline';
 
@@ -185,6 +186,70 @@ BEGIN
     'only the pre-existing contact may exist';
   ASSERT (SELECT count(*) FROM public.interactions WHERE user_id = u) = 0,
     'NO interaction may exist before acceptance';
+END $$;
+
+-- == PROVENANCE IS RECORDED HONESTLY ========================================
+-- extraction_status was hard-coded 'deterministic' in this function. That was true
+-- while nothing could draft a summary, and became a FALSE PROVENANCE CLAIM the moment
+-- the content stage could: a row carrying an Anthropic-written summary said it had
+-- been derived deterministically, and the review surface had no way to tell a
+-- reviewer where a sentence came from. It is now a parameter, defaulted to
+-- 'deterministic', validated against the column's three values, and applied on BOTH
+-- the insert and the refresh path.
+DO $$
+DECLARE
+  conn uuid := '22222222-2222-2222-2222-222222222222';
+  run  uuid := '33333333-3333-3333-3333-333333333333';
+  efp  text := repeat('1a', 32);
+  pfp  text := repeat('2b', 32);
+  res  jsonb;
+  st   text;
+BEGIN
+  -- An AI-drafted proposal says so.
+  res := public.upsert_new_contact_candidate(
+    conn, run, efp, pfp, 1::smallint,
+    'drafted@firm.test', DATE '2026-09-28',
+    'Drafted Person', 'explicit_signature', 'high',
+    'She offered to review your application and asked for a CV by Friday.',
+    'Send the CV before Friday.',
+    'Summer analyst referral',
+    'ai_extracted');
+  ASSERT res->>'result' = 'created', res::text;
+  SELECT extraction_status INTO st FROM public.new_contact_candidates
+   WHERE id = (res->>'candidate_id')::uuid;
+  ASSERT st = 'ai_extracted',
+    'a model-drafted summary must not claim to be deterministic: ' || st;
+
+  -- And the REFRESH path applies it too, rather than silently resetting the claim.
+  res := public.upsert_new_contact_candidate(
+    conn, run, efp, pfp, 1::smallint,
+    'drafted@firm.test', DATE '2026-09-29',
+    NULL, NULL, NULL, NULL, NULL, NULL,
+    'ai_extracted');
+  ASSERT res->>'result' = 'refreshed', res::text;
+  SELECT extraction_status INTO st FROM public.new_contact_candidates
+   WHERE id = (res->>'candidate_id')::uuid;
+  ASSERT st = 'ai_extracted', 'the refresh must not downgrade the provenance: ' || st;
+  -- And the refresh did NOT blank the draft an earlier run wrote.
+  ASSERT (SELECT draft_summary IS NOT NULL FROM public.new_contact_candidates
+           WHERE id = (res->>'candidate_id')::uuid),
+    'a content-less refresh must not blank an existing note';
+
+  -- An invented status is refused BEFORE any write, not stored.
+  res := public.upsert_new_contact_candidate(
+    conn, run, repeat('3c', 32), repeat('4d', 32), 1::smallint,
+    'invented@firm.test', DATE '2026-09-28',
+    NULL, NULL, NULL, NULL, NULL, NULL,
+    'hand_written');
+  ASSERT res->>'result' = 'invalid_extraction_status', res::text;
+  ASSERT (SELECT count(*) FROM public.new_contact_candidates
+           WHERE proposed_email = 'invented@firm.test') = 0,
+    'a refused status must leave no row behind';
+
+  DELETE FROM public.outlook_candidate_refs
+   WHERE new_contact_candidate_id IN (SELECT id FROM public.new_contact_candidates
+     WHERE proposed_email = 'drafted@firm.test');
+  DELETE FROM public.new_contact_candidates WHERE proposed_email = 'drafted@firm.test';
 END $$;
 
 -- ══ 5. a name with no evidence is refused ═══════════════════════════════════

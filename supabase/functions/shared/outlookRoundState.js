@@ -93,6 +93,12 @@ export const ROUND_SKIP_CODES = Object.freeze([
   'invalid_timestamp',      // a stored timestamp could not be read as a local date
 ])
 
+/**
+ * The ONE taint the content stage can resolve, because it is the only one that is a
+ * missing ANSWER rather than a property of the exchange. See finalizeConversation.
+ */
+export const CONTENT_RESOLVABLE_TAINT = 'automation_facts_incomplete'
+
 const isPlainObject = (v) => typeof v === 'object' && v !== null && !Array.isArray(v)
 
 /**
@@ -235,15 +241,25 @@ export async function foldPage (p) {
     }
     slot.messages += 1
 
-    if (res.outcome === 'deferred') {
-      // A deferral anywhere in a conversation taints the whole episode: we must not
-      // quietly summarize the subset we happened to understand.
+    // A deferral anywhere in a conversation taints the whole episode: we must not
+    // quietly summarize the subset we happened to understand. The taint is set for
+    // EVERY deferral, including the resolvable one.
+    const deferred = res.outcome === 'deferred'
+    if (deferred) {
       counts.deferred += 1
       if (slot.taint === null) slot.taint = res.code
-      continue
+      // `automation_facts_incomplete` is the ONE deferral whose envelope facts are
+      // fully known - see evaluateMessage. Its counts and fingerprints are
+      // accumulated so the content stage has something to resolve the taint INTO;
+      // without them finalisation can only ever answer `no_eligible_messages`, and no
+      // unknown person could be proposed however much was read. Every other deferral
+      // still contributes nothing but the taint.
+      if (res.code !== CONTENT_RESOLVABLE_TAINT || typeof res.counterparty !== 'string') {
+        continue
+      }
+    } else {
+      counts.eligible += 1
     }
-
-    counts.eligible += 1
     const iso = canonicalIso(message.timestampIso)
     if (iso === null) {
       // A message whose timestamp cannot be read cannot be ordered, and the proposed
@@ -420,15 +436,35 @@ export function finalizeRound (p) {
  *
  * @param {object} r  one row from list_outlook_round_conversations
  * @param {(iso:string)=>string|null} localDateFor  bound to the user's time zone
+ * @param {{contentStageOn?: boolean}} [opts]
  * @returns {{entry: object, skip: null}|{entry: null, skip: string}}
  */
-export function finalizeConversation (r, localDateFor) {
+export function finalizeConversation (r, localDateFor, opts = {}) {
   if (typeof localDateFor !== 'function') throw new Error('local_date_required')
   const bump = (code) => ({ entry: null, skip: code })
   {
     if (!isPlainObject(r)) return bump('no_eligible_messages')
     const taint = typeof r.taint === 'string' && r.taint.length > 0 ? r.taint : null
-    if (taint !== null) return bump(ROUND_TAINT_CODES.includes(taint) ? taint : 'no_eligible_messages')
+    // ── ONE TAINT IS RESOLVABLE, AND ONLY ONE ────────────────────────────────
+    // `automation_facts_incomplete` is raised for an UNKNOWN counterparty because the
+    // discovery projection does not request headers, so the envelope pass cannot tell
+    // a person from a newsletter. It is therefore not a statement about the exchange -
+    // it is a statement that a question has not been asked yet.
+    //
+    // The content read asks it: CONTENT_SELECT requests internetMessageHeaders in the
+    // SAME request as the body, and the content pass refuses bulk or list mail from
+    // them. So when the content stage is on, this taint is carried forward as
+    // `requiresContent` instead of ending the conversation, and the stage must
+    // actually resolve it before anything is written. With the stage off it still
+    // skips, exactly as before.
+    //
+    // Every other taint stays terminal: they are about the exchange's own structure -
+    // two counterparties, two contacts, a thread longer than the bound - and no amount
+    // of body reading makes any of them true.
+    const resolvable = opts.contentStageOn === true && taint === 'automation_facts_incomplete'
+    if (taint !== null && !resolvable) {
+      return bump(ROUND_TAINT_CODES.includes(taint) ? taint : 'no_eligible_messages')
+    }
 
     const efp = typeof r.efp === 'string' ? r.efp : null
     const pfp = typeof r.pfp === 'string' ? r.pfp : null
@@ -451,6 +487,12 @@ export function finalizeConversation (r, localDateFor) {
       conversationFingerprint: typeof r.cfp === 'string' ? r.cfp : null,
       kind: contactId ? 'known_contact_interaction' : 'new_contact_suggestion',
       contactId,
+      // TRUE when this entry only exists because the content stage is expected to
+      // establish its eligibility. Nothing may be written for it unless the stage
+      // actually produces a draft: without the headers there is no evidence this was
+      // a person rather than a mailing list, and a metadata-only fallback would be a
+      // suggestion resting on a question nobody answered.
+      requiresContent: resolvable,
       // Not stored, and not needed: only a new-contact proposal would use them, and this
       // pass always defers those.
       counterparty: null,

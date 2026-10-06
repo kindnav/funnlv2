@@ -49,7 +49,7 @@
 --   -- expect exactly ONE row each; pronargs 10 and 13; prosecdef = t;
 --   --        proconfig = {search_path=""}
 --   SELECT has_function_privilege('authenticated',
---     'public.upsert_new_contact_candidate(uuid,uuid,text,text,smallint,text,date,text,text,text,text,text,text)',
+--     'public.upsert_new_contact_candidate(uuid,uuid,text,text,smallint,text,date,text,text,text,text,text,text,text)',
 --     'EXECUTE');
 --   -- expect false
 
@@ -297,7 +297,14 @@ CREATE FUNCTION public.upsert_new_contact_candidate(
   p_name_confidence     text   DEFAULT NULL,
   p_draft_summary       text   DEFAULT NULL,
   p_draft_follow_up     text   DEFAULT NULL,
-  p_retained_subject    text   DEFAULT NULL
+  p_retained_subject    text   DEFAULT NULL,
+  -- WHERE THE DRAFT CAME FROM, recorded honestly. This was hard-coded
+  -- 'deterministic', which was true while nothing could produce a summary and became
+  -- a false provenance claim the moment the content stage could: a row carrying an
+  -- Anthropic-written summary said it had been derived deterministically. The local
+  -- harness caught it. Defaults to 'deterministic' so a caller that drafts nothing
+  -- still records the truth, and is CHECK-constrained to the column's three values.
+  p_extraction_status   text   DEFAULT 'deterministic'
 )
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -329,6 +336,11 @@ BEGIN
   END IF;
   IF p_proposed_date IS NULL THEN
     RETURN jsonb_build_object('result', 'invalid_date');
+  END IF;
+
+  IF p_extraction_status IS NULL
+     OR p_extraction_status NOT IN ('deterministic', 'ai_extracted', 'ai_failed') THEN
+    RETURN jsonb_build_object('result', 'invalid_extraction_status');
   END IF;
 
   v_email := pg_catalog.lower(pg_catalog.btrim(COALESCE(p_proposed_email, '')));
@@ -425,7 +437,7 @@ BEGIN
            proposed_interaction_date = p_proposed_date,
            person_fingerprint        = p_person_fingerprint,
            key_version               = p_key_version,
-           extraction_status         = 'deterministic',
+           extraction_status         = p_extraction_status,
            context_expires_at        = now() + interval '30 days',
            updated_at                = now()
      WHERE id = v_cand;
@@ -441,7 +453,7 @@ BEGIN
     (v_uid, 'outlook', 'pending', p_person_fingerprint, p_episode_fingerprint,
      p_key_version, v_email, v_name, p_name_evidence, p_name_confidence,
      v_sum, v_follow, p_proposed_date, 'Email',
-     v_subj, 'deterministic', now() + interval '30 days')
+     v_subj, p_extraction_status, now() + interval '30 days')
   RETURNING id INTO v_cand;
 
   -- Provenance, the same row shape the interaction path writes: fingerprints and a
@@ -462,8 +474,8 @@ $$;
 -- Worker-only. The browser never PRODUCES a proposal; it only accepts, dismisses
 -- or defers one, through the already-applied user-facing RPCs.
 REVOKE ALL ON FUNCTION public.upsert_new_contact_candidate(
-  uuid, uuid, text, text, smallint, text, date, text, text, text, text, text, text
+  uuid, uuid, text, text, smallint, text, date, text, text, text, text, text, text, text
 ) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.upsert_new_contact_candidate(
-  uuid, uuid, text, text, smallint, text, date, text, text, text, text, text, text
+  uuid, uuid, text, text, smallint, text, date, text, text, text, text, text, text, text
 ) TO service_role;

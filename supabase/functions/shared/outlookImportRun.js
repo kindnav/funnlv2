@@ -360,7 +360,10 @@ export const ROUND_INCOMPLETE_REASONS = Object.freeze([
 
 /** Why a plan entry produced no suggestion. Controlled; safe to log. */
 export const ENTRY_SKIP_CODES = Object.freeze([
-  'new_contact_not_supported',   // out of this slice: needs the header/content pass
+  // KEPT, though it is no longer reached while the content stage is on. An entry for
+  // someone not yet in Funnl needs a body to propose anything about them, so with the
+  // content gate closed it is still unwritable - and that is what this code says.
+  'new_contact_not_supported',
   'missing_contact',             // defensive: an entry claiming a contact without one
 ])
 
@@ -400,12 +403,26 @@ export function writeAccepted (result) {
  * Which plan entries this slice can persist, and why the rest cannot.
  * Pure, so the decision is testable without a database.
  */
-export function partitionPlan (plan) {
+export function partitionPlan (plan, { contentStageOn = false } = {}) {
   const writable = []
   const skipped = Object.create(null)
   const bump = (c) => { skipped[c] = (skipped[c] || 0) + 1 }
   for (const e of Array.isArray(plan) ? plan : []) {
-    if (e?.kind === 'new_contact_suggestion') { bump('new_contact_not_supported'); continue }
+    if (e?.kind === 'new_contact_suggestion') {
+      // REPRODUCED BY THE LOCAL HARNESS. This used to drop every unknown-person entry
+      // unconditionally, which was right while nothing could propose a person - and
+      // wrong the moment the content stage could. With it dropped here the entry never
+      // reached the content stage at all: the demo summarized one conversation instead
+      // of two and wrote no proposal, while reporting a clean committed run.
+      //
+      // So the condition is now what it always meant: an unknown person needs a body
+      // to propose anything about them. With the content stage ON the entry is passed
+      // through and the stage decides; with it OFF this is still unwritable, and the
+      // code still says so.
+      if (!contentStageOn) { bump('new_contact_not_supported'); continue }
+      writable.push(e)
+      continue
+    }
     if (typeof e?.contactId !== 'string' || e.contactId.length === 0) { bump('missing_contact'); continue }
     writable.push(e)
   }
@@ -427,6 +444,13 @@ export function partitionPlan (plan) {
  *          accessToken: string, keyRing: object}>} p.loadRunContext
  *        everything the pass needs for ONE connection. Supplied by the caller so this
  *        module performs no query of its own and cannot widen its own scope.
+ * @param {object} [p.requiredConsent] INJECTED ONLY BY TESTS. Overrides which
+ *        disclosure version the two gates demand. Omitted - which is what the worker
+ *        does - both gates fall back to the module constants, and those are null, so
+ *        every connection fails closed. A harness that wants to exercise the content
+ *        path supplies its own invented version here rather than changing a shipped
+ *        constant, which is why those constants can stay null while the flow is
+ *        proven end to end.
  * @param {string|null} [p.anthropicApiKey] the key for the SUMMARY call, and only that.
  *        Absent means no draft is attempted and every conversation reports the
  *        deferral - never a placeholder note. Both consent gates are checked
@@ -449,7 +473,7 @@ export function partitionPlan (plan) {
 export async function runOutlookImport (p) {
   const {
     rpc, encryptCursor, decryptCursor, loadRunContext, requestEntryMs, pilotUserId, deps,
-    anthropicApiKey = null,
+    anthropicApiKey = null, requiredConsent = {},
   } = p || {}
   if (typeof rpc !== 'function') throw new Error('rpc_not_injected')
   if (typeof encryptCursor !== 'function') throw new Error('encrypt_cursor_not_injected')
@@ -793,6 +817,7 @@ export async function runOutlookImport (p) {
     const produceHandles = (selected) => buildMessageHandles({
       selected,
       consentVersion: context.consentVersion ?? null,
+      requiredConsent,
       seal: encryptCursor,
     })
 
@@ -978,13 +1003,16 @@ export async function runOutlookImport (p) {
   let slowestContentMs = 0
 
   // ── IS THE CONTENT STAGE ON AT ALL? Decided ONCE, before the loop ────────
+  // It has to be decided before partitionPlan runs, not just before the stage: an
+  // unknown-person entry is writable only when a body can be read for it, and that
+  // is the same question.
   // Both gates against the version the CONNECTION recorded, plus the presence of a
   // summary key. Checked here rather than per conversation so that the normal
   // answer - closed, for every connection that exists - costs nothing and the run
   // behaves exactly as the envelope-only run behaves today: every conversation gets
   // its metadata candidate, and ONE reason is reported for the absent notes rather
   // than four hundred identical ones.
-  const contentPerms = contentPermissions(context.consentVersion ?? null, {})
+  const contentPerms = contentPermissions(context.consentVersion ?? null, requiredConsent)
   const contentStageReason = !contentPerms.body
     ? 'content_consent_missing'
     : (!contentPerms.thirdParty
@@ -1054,14 +1082,15 @@ export async function runOutlookImport (p) {
       // silently become `how many we got round to`, which `accepted` already reports.
       const decisions = []
       for (const row of rows) {
-        const one = finalizeConversation(row, (iso) => localDateFor(iso, context.timeZone))
+        const one = finalizeConversation(row, (iso) => localDateFor(iso, context.timeZone),
+          { contentStageOn })
         const cfp = typeof row?.cfp === 'string' ? row.cfp : null
         if (one.entry === null) {
           bumpSkip(one.skip)
           decisions.push({ cfp, entry: null })
           continue
         }
-        const { writable, skipped: entrySkipped } = partitionPlan([one.entry])
+        const { writable, skipped: entrySkipped } = partitionPlan([one.entry], { contentStageOn })
         for (const [code, n] of Object.entries(entrySkipped)) {
           skipped[code] = (skipped[code] || 0) + n
         }
@@ -1129,6 +1158,7 @@ export async function runOutlookImport (p) {
               accessToken: context.accessToken,
               apiKey: anthropicApiKey,
               consentVersion: context.consentVersion ?? null,
+              requiredConsent,
               selfAddresses: [context.primaryEmail, ...(context.aliases ?? [])],
               // The pass's own admission checks, against the SAME invocation
               // deadline every other stage uses. Only the RELEASE is reserved here,

@@ -272,6 +272,8 @@ export async function summarizeOneConversation (p) {
     handles: read.handles,
     decryptHandle: ({ ciphertext, nonce }) => decryptCursor(ciphertext, nonce),
     fetchMessage: makeMessageFetcher({ accessToken, deps }),
+    // STRAIGHT THROUGH, with no reshaping: the pass's port contract is this
+    // function's own return shape, so there is nothing here to get wrong.
     callModel: ({ body }) => callDraftModel({
       body, apiKey, fetchImpl: deps?.fetchImpl, sleepImpl: deps?.sleepImpl,
     }),
@@ -332,6 +334,10 @@ export function planContentWrite (entry, pass) {
         p_draft_summary: pass.summary,
         p_draft_follow_up: pass.followUp ?? null,
         p_retained_subject: pass.retainedSubject ?? null,
+        // THE HONEST PROVENANCE. This summary was written by Anthropic from the
+        // message bodies, and the row says so - which is what lets the review surface
+        // tell a reviewer where a sentence came from.
+        p_extraction_status: pass.extractionStatus ?? 'ai_extracted',
         // company, role, how_met, linkedin_url and tags are deliberately absent:
         // the RPC accepts none of them, and storing an unreviewed company is how a
         // guess ends up looking authoritative on a contact card.
@@ -349,6 +355,19 @@ export function planContentWrite (entry, pass) {
   // A RETRYABLE deferral: write nothing, do not pass the conversation.
   if (RETRYABLE_DEFERRALS.includes(reason)) {
     return { write: 'none', rpc: null, args: null, deferral: reason, retryable: true }
+  }
+
+  // AN ENTRY WHOSE ELIGIBILITY THE CONTENT STAGE WAS SUPPOSED TO ESTABLISH.
+  // It exists only because `automation_facts_incomplete` was treated as resolvable,
+  // and the stage did not resolve it. There is no evidence this exchange was with a
+  // person rather than a mailing list, so NOTHING is written - a metadata fallback
+  // here would be a suggestion resting on a question nobody answered. Settled, not
+  // retryable: the deferral that got here is already a terminal one.
+  if (entry?.requiresContent === true) {
+    return {
+      write: 'none', rpc: null, args: null,
+      deferral: reason ?? 'no_usable_content', retryable: false,
+    }
   }
 
   // A TERMINAL deferral. The candidate is written exactly as the metadata-only

@@ -101,11 +101,18 @@ function handlesFor (count = 2) {
   return out
 }
 
-/** A fixture Anthropic reply, validated by the REAL validator. */
+/**
+ * A fixture Anthropic reply, in EXACTLY the shape callDraftModel returns - `parsed`,
+ * not `value`. An earlier version of these fixtures used `value`, which no real
+ * caller produces, and that difference HID A DEFECT: the pass read `called.value`
+ * and so validated `undefined` on every real call, reporting model_output_invalid.
+ * The local PostgREST harness caught it. The port contract is now callDraftModel's
+ * own return shape, so there is no translation step left to get wrong.
+ */
 function modelReply (over = {}) {
   return {
     ok: true,
-    value: {
+    parsed: {
       result: 'interaction_draft',
       summary: 'Priya confirmed the analyst programme lead will review your application '
         + 'for the summer cohort, and asked for an updated CV by Friday plus your '
@@ -121,7 +128,7 @@ function modelReply (over = {}) {
 function newContactReply (over = {}) {
   return {
     ok: true,
-    value: {
+    parsed: {
       result: 'new_contact_suggestion',
       name: 'Priya Sharma',
       name_evidence: 'explicit_signature',
@@ -531,7 +538,7 @@ test('a response the STRICT validator rejects DEFERS, not writes', async () => {
     { result: 'nonsense' },
     { result: 'interaction_draft', summary: 'x', interaction_date: '1999-01-01' },
   ]) {
-    const { params } = run({ callModel: async () => ({ ok: true, value: bad }) })
+    const { params } = run({ callModel: async () => ({ ok: true, parsed: bad }) })
     const r = await summarizeConversation(params)
     assert.strictEqual(r.outcome, 'defer', JSON.stringify(bad))
     assert.strictEqual(r.reason, 'model_output_invalid', JSON.stringify(bad))
@@ -578,7 +585,7 @@ test('every reason is drawn from the declared vocabularies', async () => {
     run({ fetchMessage: async () => ({ ok: false }) }),
     run({ fetchMessage: async () => fixtureMessage({ dir: 'inbound', text: ' ' }) }),
     run({ callModel: async () => ({ ok: false, code: 'x' }) }),
-    run({ callModel: async () => ({ ok: true, value: { result: 'nonsense' } }) }),
+    run({ callModel: async () => ({ ok: true, parsed: { result: 'nonsense' } }) }),
     run({ budgetAllows: () => false }),
   ]
   for (const c of cases) {

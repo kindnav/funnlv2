@@ -169,7 +169,13 @@ export function counterpartyFromEnvelopes (messages, selfAddresses) {
  *   readMessageContent deliberately surfaces only the body and the automation
  *   facts, so the caller supplies the envelope alongside it. CONTENT_SELECT
  *   already requests all of them, so this is one request, not two.
- * @param {Function} p.callModel     async (body) => { ok, value } | { ok:false, code }
+ * @param {Function} p.callModel     async ({body, apiKey}) => EXACTLY what
+ *   callDraftModel returns: { ok:true, parsed, stopReason } | { ok:false, code }.
+ *   The port contract is that function's own shape deliberately, so no caller has to
+ *   translate it. REPRODUCED: this used to read `called.value`, which callDraftModel
+ *   never returns, and the unit fixtures happened to supply `value` - so every real
+ *   call validated `undefined` and reported `model_output_invalid`. The local harness
+ *   caught it; the seam is now gone rather than papered over.
  * @param {string}   p.apiKey
  * @param {string[]} p.selfAddresses
  * @param {Function} p.budgetAllows  (marginMs) => boolean
@@ -335,7 +341,7 @@ export async function summarizeConversation (p) {
     return deferral('model_unavailable', { fetched, code: called?.code ?? null })
   }
 
-  const checked = validateDraftResponse(called.value, { mode, allowedDates })
+  const checked = validateDraftResponse(called.parsed, { mode, allowedDates })
   if (checked.ok !== true) {
     // A model that was fully talked into misbehaving still cannot produce a
     // stored value: the validator is independent of the schema it was asked for.
