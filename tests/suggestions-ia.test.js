@@ -47,7 +47,17 @@ test('entry: "Suggestions" title + connected-sources copy + /suggestions link', 
 })
 test('page: "Suggestions" title + connected-sources description', () => {
   assert.ok(/TopBar title="Suggestions"/.test(PAGE))
-  assert.ok(/Review people from your connected sources and add them as interactions/.test(PAGE))
+  // The description changed when the page gained a second kind of suggestion: a
+  // person who is not in Funnl yet. The old sentence said accepting creates "one
+  // interaction", which is no longer true of every row.
+  assert.ok(/Review what your connected sources found/.test(PAGE))
+  assert.ok(/Nothing is saved to your network until you/.test(PAGE),
+    'and the promise the whole review step rests on must be stated')
+  assert.ok(/Dismissing a suggestion creates nothing/.test(PAGE))
+  // It must still name no single source.
+  assert.ok(!/\bcalendar\b/i.test(
+    PAGE.slice(PAGE.indexOf('Review what your connected sources found'),
+      PAGE.indexOf('Dismissing a suggestion creates nothing'))))
 })
 test('user-facing copy is not calendar-centric', () => {
   const copy = stripJs(ENTRY) + '\n' + stripJs(PAGE)

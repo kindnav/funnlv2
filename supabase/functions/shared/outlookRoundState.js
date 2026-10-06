@@ -69,6 +69,16 @@ export const MAX_PAGES_PER_ROUND = 200
 export const MAX_MESSAGES_PER_ROUND = 10_000
 export const MAX_CONVERSATIONS_PER_ROUND = 2_000
 
+/**
+ * How many retrieval handles ONE page offers for one conversation PER FOLDER.
+ *
+ * The database retains six per conversation with two places reserved per folder, so
+ * the most it can ever draw from one folder is six. Offering the latest six per
+ * folder therefore cannot change its answer, and bounds a single page's handle
+ * payload at twelve entries per conversation however long the thread is.
+ */
+export const HANDLES_OFFERED_PER_FOLDER = 6
+
 /** Why a conversation can never become a suggestion in this round. Controlled set. */
 export const ROUND_TAINT_CODES = Object.freeze([
   'ambiguous_counterparties', 'ambiguous_contact', 'automation_facts_incomplete',
@@ -151,8 +161,14 @@ export function buildMessageFingerprintFields (p) {
  * @param {Map} p.contactIndex
  * @param {string} p.connectionId
  * @param {object} p.keyRing
- * @param {{computeFingerprintSet?:Function}} [p.deps]
- * @returns {Promise<{contributions:Array<object>, counts:object}>}
+ * @param {{computeFingerprintSet?:Function, produceHandles?:Function}} [p.deps]
+ *   `produceHandles` is OPTIONAL. Supplied, it is buildMessageHandles bound to the
+ *   connection's sealer and recorded consent version, and the fold additionally
+ *   returns `messages` - the protected retrieval handles for this page. Omitted,
+ *   the fold behaves exactly as it always has and `messages` is an empty array,
+ *   which is the envelope-only path.
+ * @returns {Promise<{contributions:Array<object>, counts:object, messages:Array<object>,
+ *                    handles:object|null}>}
  */
 export async function foldPage (p) {
   const { entries, selfSet, contactIndex, connectionId, keyRing, deps } = p || {}
@@ -162,6 +178,9 @@ export async function foldPage (p) {
   const fpSet = typeof deps?.computeFingerprintSet === 'function'
     ? deps.computeFingerprintSet
     : computeFingerprintSet
+  // No default. Without an injected producer this fold stores no retrieval handles
+  // at all, which is the behaviour every existing caller and test relies on.
+  const produceHandles = typeof deps?.produceHandles === 'function' ? deps.produceHandles : null
 
   const list = entries instanceof Map ? [...entries.values()] : (Array.isArray(entries) ? entries : [])
   const counts = { eligible: 0, deferred: 0, excluded: 0, unkeyed: 0 }
@@ -207,6 +226,10 @@ export async function foldPage (p) {
         lastIso: null,
         counterparties: new Set(),
         contactIds: new Set(),
+        // Plaintext Graph ids, in memory only, for the handle producer below. They
+        // are never put on a contribution and never leave this function except
+        // sealed.
+        candidates: [],
       }
       byConversation.set(conversationKey, slot)
     }
@@ -239,6 +262,18 @@ export async function foldPage (p) {
       buildMessageFingerprintFields({ connectionId, conversationKey, messageKey }), keyRing,
     )).writeFingerprint
 
+    // A RETRIEVAL CANDIDATE, recorded only for an ELIGIBLE message: a deferred or
+    // excluded one can never feed a summary, so keeping a key to it would store a
+    // reference with no purpose. The folder comes from the extra the normalizer
+    // attached, not from folderHint, because the column stores Graph's own folder
+    // name.
+    if (produceHandles !== null) {
+      const folderName = e?.extra?.folder
+      if (folderName === 'inbox' || folderName === 'sentitems') {
+        slot.candidates.push({ mfp: msgFp, messageId: messageKey, folder: folderName, sentAtIso: iso })
+      }
+    }
+
     // EARLIEST WINS, on exactly the pair the database merge compares.
     const isEarlier = slot.firstIso === null
       || iso < slot.firstIso
@@ -253,6 +288,7 @@ export async function foldPage (p) {
   }
 
   const contributions = []
+  const selected = []
   for (const slot of byConversation.values()) {
     // Within-page disagreement is decided here; across-page disagreement is decided by
     // the same two rules inside record_outlook_page_progress.
@@ -300,11 +336,45 @@ export async function foldPage (p) {
     }
 
     contributions.push(contribution)
+
+    // ── the page's OFFER for this conversation ──────────────────────────────
+    // The database makes the final six-message selection across everything the
+    // round has stored, with two places reserved per folder. This only decides
+    // what one page offers it, and it offers the LATEST few per folder: more than
+    // that cannot change the database's answer, and sending the lot would bloat
+    // the checkpoint payload on a long thread.
+    if (produceHandles !== null && slot.candidates.length > 0) {
+      const byFolder = new Map()
+      for (const c of slot.candidates.slice()
+        .sort((a, b) => (a.sentAtIso < b.sentAtIso ? 1 : a.sentAtIso > b.sentAtIso ? -1 : 0))) {
+        const list = byFolder.get(c.folder) ?? []
+        if (list.length >= HANDLES_OFFERED_PER_FOLDER) continue
+        list.push(c)
+        byFolder.set(c.folder, list)
+      }
+      for (const list of byFolder.values()) {
+        for (const c of list) selected.push({ ...c, cfp: conversationFingerprint })
+      }
+    }
   }
 
   // Deterministic order, so a fixture produces one payload and a diff is readable.
   contributions.sort((a, b) => a.cfp.localeCompare(b.cfp))
-  return { contributions, counts }
+
+  // ── the handles, produced ONCE for the whole page ──────────────────────────
+  // The producer checks the content consent gate itself and returns an empty array
+  // with a reason when it is closed, so this call is safe to make unconditionally:
+  // the envelope-only path simply ships no handles.
+  let handles = null
+  if (produceHandles !== null) {
+    handles = await produceHandles(selected)
+  }
+  return {
+    contributions,
+    counts,
+    messages: Array.isArray(handles?.handles) ? handles.handles : [],
+    handles,
+  }
 }
 
 /**

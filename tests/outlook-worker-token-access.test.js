@@ -645,15 +645,39 @@ test('the optional refresh pair is COALESCEd, so an omitted token is kept', () =
 
 console.log('\nnothing outside this slice was added')
 
-test('no message body, no Anthropic, no scheduler, no new-contact path', () => {
+test('neither the loader, the handler nor the endpoints reads a body or calls a provider', () => {
+  // The handler now PASSES an Anthropic key through to the run, so the old
+  // "the word must not appear" check no longer states the invariant. What must
+  // remain true is narrower and more useful: none of these three files reads a
+  // message body, builds a provider request, or holds a provider credential in a
+  // form it could log. The key is one opaque parameter, asserted separately below.
   for (const [name, src] of [['loader', CTX_SRC], ['handler', HANDLER_SRC], ['endpoints', ENDPOINTS_SRC]]) {
     const code = codeOnly(src)
-    for (const banned of ['anthropic', 'Anthropic', 'uniqueBody', 'buildMessageContentRequest',
+    for (const banned of ['api.anthropic.com', 'x-api-key', 'anthropic-version',
+      'callDraftModel', 'buildDraftRequest', 'buildDraftHeaders',
+      'uniqueBody', 'buildMessageContentRequest',
       'outlookDraftContract', 'outlookContentSanitizer', 'cron', 'setInterval',
       'new_contact_candidates', 'upsert_email_candidate']) {
       assert.ok(!code.includes(banned), `${name} must not reference ${banned}`)
     }
   }
+  // The key appears EXACTLY where it is passed on, and nowhere else - not in a
+  // log line, not in a response, not in a comparison.
+  const handler = codeOnly(HANDLER_SRC)
+  // TWO, both on the one forwarding line: the parameter name and `e.anthropicApiKey`.
+  // Anywhere else would be a log line, a response field or a comparison.
+  const uses = [...handler.matchAll(/anthropicApiKey/g)].length
+  assert.strictEqual(uses, 2, 'the key must appear only on the line that forwards it')
+  assert.ok(/anthropicApiKey: e\.anthropicApiKey \?\? null,/.test(handler),
+    'and forwarded verbatim, with an absent key becoming null')
+})
+
+test('the summary key is NOT required configuration', () => {
+  // Deliberate. Requiring it would turn "no summaries yet" into "the worker refuses
+  // to run", which is both a worse answer and a worse rollback story: the envelope
+  // import must keep working with no key configured at all.
+  assert.ok(!REQUIRED_CONFIG.includes('anthropicApiKey'),
+    'an absent summary key must not refuse the run')
 })
 
 test('the handler records what still blocks enablement', () => {

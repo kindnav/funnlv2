@@ -42,6 +42,11 @@ Deno.serve((req: Request) => {
     // before reading a row - the same fail-closed decision the run's own gate would take,
     // one step earlier and without reserving a lease to release it again.
     pilotUserId: Deno.env.get(PILOT_USER_ENV) ?? null,
+    // Shared with the existing AI features. Not configured for this function today,
+    // and not required: without it the run reports every conversation's deferral and
+    // writes the metadata candidate it writes now. It is read only AFTER both consent
+    // gates pass against the connection's own recorded disclosure version.
+    anthropicApiKey: Deno.env.get('ANTHROPIC_API_KEY') ?? null,
     keyVersion,
     scope: OUTLOOK_CANONICAL_SCOPES.join(' '),
   }, {

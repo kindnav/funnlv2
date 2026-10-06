@@ -13,6 +13,8 @@ import { SUGGESTION_EVENTS, suggestionEventProps } from '../lib/suggestionAnalyt
 
 import { dismissConfirmFocusTarget } from '../lib/dismissConfirmFocus'
 import InteractionSourceBadge from '../components/InteractionSourceBadge'
+import NewContactSuggestionCard from '../components/NewContactSuggestionCard'
+import { NCC_SELECT } from '../lib/newContactReview'
 
 const CARD = 'bg-card border border-line-1 rounded-2xl p-[18px]'
 const SECTION_LABEL = 'block mb-[10px] font-mono text-[8.5px] font-semibold tracking-[1.5px] text-muted uppercase'
@@ -201,6 +203,7 @@ function CandidateCard({ candidate, onResolved }) {
 export default function SuggestionsPage() {
   const [status, setStatus] = useState('loading')   // loading | error | ready
   const [items, setItems] = useState([])
+  const [proposals, setProposals] = useState([])   // people not yet in Funnl
   const [hasMore, setHasMore] = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
   const [banner, setBanner] = useState('')
@@ -227,7 +230,29 @@ export default function SuggestionsPage() {
     if (filter) q = q.or(filter)
     const { data, error } = await q
     if (error) throw error
-    return data || []
+    return (data || []).map((r) => ({ ...r, kind: 'interaction' }))
+  }, [])
+
+  // ── the PROPOSED-PEOPLE queue, read once ─────────────────────────────────
+  // Deliberately NOT keyset-paged alongside the interaction queue. The two live in
+  // different tables with independent id spaces, so one shared cursor cannot order
+  // them, and two cursors would make "Load more" ambiguous. Proposals are far rarer
+  // than interactions - one per previously-unknown person, bounded by the round's
+  // own conversation cap - so a single bounded read is honest and simple. If that
+  // ever stops being true the right fix is a second cursor, not a wider limit.
+  //
+  // READ-ONLY. Rendering the queue runs no mutation: nothing is created until the
+  // reviewer presses Save on a card.
+  const fetchProposals = useCallback(async () => {
+    const { data, error } = await supabase
+      .from('new_contact_candidates')
+      .select(NCC_SELECT)
+      .eq('status', 'pending')
+      .order('proposed_interaction_date', { ascending: false })
+      .order('id', { ascending: false })
+      .limit(REVIEW_PAGE_SIZE)
+    if (error) throw error
+    return (data || []).map((r) => ({ ...r, kind: 'new_contact' }))
   }, [])
 
   const loadInitial = useCallback(async () => {
@@ -235,17 +260,22 @@ export default function SuggestionsPage() {
     loadingMoreRef.current = false
     setStatus('loading')
     try {
-      const rows = await fetchPage(null)
+      // Both queues in parallel. A failure in EITHER is a failed load: showing an
+      // interaction queue while silently hiding every proposed person would make the
+      // "all caught up" state a lie.
+      const [rows, proposals] = await Promise.all([fetchPage(null), fetchProposals()])
       if (!aliveRef.current || gen !== initGenRef.current) return   // stale / unmounted
+      // The cursor tracks ONLY the interaction queue, which is the paged one.
       cursorRef.current = cursorFrom(rows)
       setItems(rows)
+      setProposals(proposals)
       setHasMore(computeHasMore(rows.length))
       setStatus('ready')
       if (!viewedRef.current) {
         viewedRef.current = true
-        // One event per distinct source in the first page. A queue holding both a
+        // One event per distinct source across BOTH queues. A queue holding both a
         // Calendar and an Outlook suggestion must not be recorded as calendar-only.
-        for (const s of [...new Set(rows.map((r) => r.source))]) {
+        for (const s of [...new Set([...rows, ...proposals].map((r) => r.source))]) {
           track(SUGGESTION_EVENTS.viewed, suggestionEventProps(s))
         }
       }
@@ -253,7 +283,7 @@ export default function SuggestionsPage() {
       if (!aliveRef.current || gen !== initGenRef.current) return
       setStatus('error')
     }
-  }, [fetchPage])
+  }, [fetchPage, fetchProposals])
 
   useEffect(() => {
     if (!SUGGESTION_REVIEW_ENABLED) return   // disabled → no query runs at all
@@ -287,10 +317,17 @@ export default function SuggestionsPage() {
     }
   }, [status, items.length, hasMore, loadMore])
 
+  // Nothing at all is left to review. Both queues, because an empty interaction queue
+  // with a proposed person still waiting is emphatically not "all caught up".
+  const queueEmpty = items.length === 0 && proposals.length === 0
+
   function handleResolved(id, message) {
     // Only the rendered list shrinks; cursorRef is untouched, so Load more still
-    // continues from the correct boundary (no skip, no duplicate).
+    // continues from the correct boundary (no skip, no duplicate). Both queues are
+    // filtered because the two tables have independent id spaces - a collision is
+    // effectively impossible, and filtering both costs nothing and cannot be wrong.
     setItems((prev) => prev.filter((c) => c.id !== id))
+    setProposals((prev) => prev.filter((c) => c.id !== id))
     setBanner(message)
   }
 
@@ -302,8 +339,9 @@ export default function SuggestionsPage() {
       <TopBar title="Suggestions" searchPlaceholder="Find, log, or ask anything…" onSearchClick={() => {}} />
       <div className="flex-1 px-4 py-5 md:px-6 md:py-6 max-w-3xl mx-auto w-full">
         <p className="text-[13px] text-muted mb-4">
-          Review people from your connected sources and add them as interactions. Accepting creates one
-          interaction; dismissing hides the suggestion.
+          Review what your connected sources found. Nothing is saved to your network until you
+          accept it: an existing contact gets one interaction, and someone new gets a contact you
+          can edit first. Dismissing a suggestion creates nothing.
         </p>
 
         {banner && (
@@ -326,11 +364,11 @@ export default function SuggestionsPage() {
           </div>
         )}
 
-        {status === 'ready' && items.length === 0 && hasMore && (
+        {status === 'ready' && queueEmpty && hasMore && (
           <div role="status" aria-live="polite" className="text-[13px] text-muted py-10 text-center">Loading more…</div>
         )}
 
-        {status === 'ready' && items.length === 0 && !hasMore && (
+        {status === 'ready' && queueEmpty && !hasMore && (
           <div className="text-center py-14">
             <span className={SECTION_LABEL}>Suggestions</span>
             <h2 className="font-display font-semibold text-[18px] text-hi mb-2">You’re all caught up</h2>
@@ -340,9 +378,15 @@ export default function SuggestionsPage() {
           </div>
         )}
 
-        {status === 'ready' && items.length > 0 && (
+        {status === 'ready' && !queueEmpty && (
           <>
             <div className="grid gap-3">
+              {/* People not yet in Funnl come FIRST: each one is a decision about
+                  whether someone enters the network at all, which is a bigger call
+                  than logging one more interaction against a contact that exists. */}
+              {proposals.map((c) => (
+                <NewContactSuggestionCard key={c.id} candidate={c} onResolved={handleResolved} />
+              ))}
               {items.map((c) => <CandidateCard key={c.id} candidate={c} onResolved={handleResolved} />)}
             </div>
             {hasMore && (

@@ -206,7 +206,7 @@ export function makeRunContextLoader ({ select, rpc, config, deps = {} }) {
     // ── the reserved connection, by id. Only the columns the run uses. ────────
     const conns = await read(
       `microsoft_connections?id=eq.${connectionId}` +
-      '&select=user_id,ms_email,scopes,token_expires_at&limit=1',
+      '&select=user_id,ms_email,scopes,token_expires_at,consent_policy_version&limit=1',
       'connection_unreadable')
     const conn = conns[0]
     if (!conn || !isNonEmpty(conn.user_id) || !isNonEmpty(conn.ms_email)) {
@@ -358,6 +358,12 @@ export function makeRunContextLoader ({ select, rpc, config, deps = {} }) {
       userId,
       primaryEmail: conn.ms_email,
       aliases: [],
+      // The disclosure version this connection actually agreed to, read from the row
+      // rather than from anything the caller supplied. It is copied out of the OAuth
+      // state at finalization and CANNOT be upgraded in place, so a connection made
+      // under the envelope-only disclosure stays closed until it reconnects. Both
+      // content gates are checked against it server-side.
+      consentVersion: isNonEmpty(conn.consent_policy_version) ? conn.consent_policy_version : null,
       // The connection carries no time zone, and guessing one would put a late-evening
       // exchange on the wrong day. UTC is the stated, deterministic choice until a
       // per-user zone exists to read.

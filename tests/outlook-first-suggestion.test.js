@@ -300,9 +300,16 @@ test('the cursor reaching the database is the ENCRYPTED value, never the link', 
   assert.strictEqual(rel.p_delta_key_version, 1)
 })
 
-test('the write carries the fingerprints and NO content field', async () => {
+test('with the consent gates CLOSED the write carries a NULL note, never a placeholder', async () => {
+  // This guard used to assert `p_proposed_notes` was absent entirely, which was the
+  // right statement while there was no content path at all. The content slice adds
+  // the parameter, so the invariant moves rather than relaxes: with the gates closed
+  // the argument must be present and NULL. Null is what the RPC coalesces against
+  // whatever note is already stored, so a run with no content can never blank one -
+  // and it is emphatically not a placeholder string, which is the defect the whole
+  // slice exists to avoid.
   const p = port()
-  await runOutlookImport({
+  const r = await runOutlookImport({
     rpc: withRounds(p.rpc, makeRoundStore()),
     pilotUserId: OWNER,
     encryptCursor,
@@ -315,13 +322,29 @@ test('the write carries the fingerprints and NO content field', async () => {
   assert.match(w.p_person_fingerprint, /^[0-9a-f]{64}$/)
   assert.strictEqual(w.p_proposed_type, 'Email')
   assert.strictEqual(w.p_contact_id, CONTACT)
-  for (const forbidden of ['p_proposed_notes', 'p_retained_subject', 'p_draft_summary',
-    'p_draft_follow_up', 'p_subject', 'p_body']) {
+  assert.strictEqual(w.p_proposed_notes, null, 'NULL, not a placeholder note')
+  // Nothing from a body or a draft may be carried while the gates are closed.
+  for (const forbidden of ['p_retained_subject', 'p_draft_summary',
+    'p_draft_follow_up', 'p_subject', 'p_body', 'p_proposed_email']) {
     assert.strictEqual(w[forbidden], undefined, `the write must not carry ${forbidden}`)
   }
   // Nor an address or a provider id, even as an argument name.
   assert.ok(!JSON.stringify(w).includes('ava@bank.test'))
   assert.ok(!JSON.stringify(w).includes('in-1'))
+  // AND THE ABSENCE IS EXPLAINED. A missing note must never be silent.
+  assert.strictEqual(r.content.deferred.content_consent_missing, 1, JSON.stringify(r.content))
+  assert.strictEqual(r.content.attempted, 0, 'and nothing was read to produce it')
+  assert.strictEqual(r.content.bodies_read, 0)
+  assert.strictEqual(r.content.model_calls, 0)
+  assert.strictEqual(r.content.notes_written, 0)
+  // No handle was stored either: the envelope-only consent does not authorize one.
+  assert.strictEqual(r.handleReason, 'content_consent_missing')
+  assert.strictEqual(r.handlesStored, 0)
+  // And the candidate write still happened, so the suggestion is not lost.
+  assert.strictEqual(r.content.metadata_only, 1)
+  assert.ok(!p.calls.some((c) => c.name === 'upsert_new_contact_candidate'))
+  assert.ok(!p.calls.some((c) => c.name === 'list_outlook_round_message_handles'),
+    'and not one handle read was attempted')
 })
 
 console.log('\nan incomplete pass writes nothing and advances nothing')
@@ -503,8 +526,23 @@ test('the migration fences on outlook_sync_state, never on the Gmail tables', ()
   }
 })
 
-test('the run module calls only the three permitted RPCs', () => {
-  const names = [...new Set([...codeOnly(RUN_SRC).matchAll(/rpc\('([a-z_]+)'/g)].map((m) => m[1]))]
+test('the run module calls only the permitted RPCs', () => {
+  // SCANNED ACROSS BOTH FILES, because the write is now dispatched by name:
+  // planContentWrite returns the RPC to call, so the run's own source does not
+  // contain either candidate-write literal. Scanning only the run would make this
+  // guard pass vacuously while the set of reachable functions had grown.
+  const STAGE_SRC = read('supabase/functions/shared/outlookContentStage.js')
+  const names = [...new Set([
+    ...[...codeOnly(RUN_SRC).matchAll(/rpc\('([a-z_]+)'/g)].map((m) => m[1]),
+    // The stage names its two writes through a frozen allowlist and its read
+    // through a constant, so those are read from the constants themselves.
+    ...[...codeOnly(STAGE_SRC).matchAll(/'(upsert_[a-z_]+|list_outlook_[a-z_]+)'/g)]
+      .map((m) => m[1]),
+  ])]
+  // And the dynamic call site must be fenced to that allowlist, or "dispatch by
+  // name" would mean "call any database function a planner returns".
+  assert.ok(/CONTENT_WRITE_RPCS\.includes\(plan\.rpc\)/.test(codeOnly(RUN_SRC)),
+    'the run must check the name against the allowlist before dispatching')
   // EIGHT now. Four were there before: reserve, renew (a long run must renew or lose
   // its claim), the candidate write, and release. Durable continuation added four, and
   // each is one narrow job:
@@ -519,13 +557,19 @@ test('the run module calls only the three permitted RPCs', () => {
   assert.deepStrictEqual(names.sort(), [
     'advance_outlook_round_write_cursor',
     'list_outlook_round_conversations',
+    // The content slice added two, and each is one narrow job:
+    //   list_outlook_round_message_handles  the stored handles for ONE conversation
+    //   upsert_new_contact_candidate        the proposal for someone not yet tracked
+    'list_outlook_round_message_handles',
     'read_outlook_round_progress',
     'record_outlook_page_progress',
     'release_outlook_sync_lease', 'renew_outlook_sync_lease',
     'reserve_due_outlook_connection', 'reset_outlook_round',
+    'upsert_new_contact_candidate',
     'upsert_outlook_interaction_candidate',
   ])
   assert.ok(!codeOnly(RUN_SRC).includes('upsert_email_candidate'))
+  assert.ok(!codeOnly(STAGE_SRC).includes('upsert_email_candidate'))
 })
 
 test('the write RPC is service_role only, so a user cannot manufacture a suggestion', () => {
@@ -692,7 +736,14 @@ console.log('\nno Anthropic, no body, no scheduling in this slice')
 
 test('the run module touches no body, no Anthropic and no scheduler', () => {
   const code = codeOnly(RUN_SRC)
-  for (const banned of ['anthropic', 'Anthropic', 'buildMessageContentRequest', 'uniqueBody',
+  // The run now reaches the provider THROUGH outlookContentStage, so the invariant
+  // is no longer "the word does not appear". It is that the run itself builds no
+  // provider request and holds no provider credential in any form it could leak:
+  // no URL, no header name, no request builder. The key passes through as one
+  // opaque parameter, and the grep below proves it is never interpolated anywhere.
+  for (const banned of ['api.anthropic.com', 'x-api-key', 'anthropic-version',
+    'buildDraftRequest', 'callDraftModel', 'buildDraftHeaders',
+    'buildMessageContentRequest', 'uniqueBody',
     'outlookDraftContract', 'outlookContentSanitizer', 'cron', 'setInterval']) {
     assert.ok(!code.includes(banned), `the run must not reference ${banned}`)
   }
@@ -1007,8 +1058,11 @@ test('STRUCTURAL: the page emits the source-neutral events with the ROW source',
     'the accept event must carry the row source and the edited flag')
   assert.ok(/track\(SUGGESTION_EVENTS\.viewed, suggestionEventProps\(s\)\)/.test(PAGE),
     'the viewed event must carry a source too')
-  assert.ok(/new Set\(rows\.map\(\(r\) => r\.source\)\)/.test(PAGE),
-    'a queue holding two sources must not be recorded as one')
+  // ACROSS BOTH QUEUES. The scan used to be `rows.map(...)`, which stopped being
+  // sufficient when the page gained the proposed-people queue: a view holding only a
+  // proposed Outlook contact would have recorded no source at all.
+  assert.ok(/new Set\(\[\.\.\.rows, \.\.\.proposals\]\.map\(\(r\) => r\.source\)\)/.test(PAGE),
+    'a queue holding two sources, in either table, must not be recorded as one')
 })
 
 console.log('')
