@@ -623,6 +623,65 @@ test('analytics carry booleans and a controlled source, never content', () => {
   assert.ok(props.includes('with_interaction'))
 })
 
+// ════════════════════════════════════════════════════════════════════════════
+console.log('')
+console.log('the source files are plain text, byte for byte')
+
+test('NO RAW CONTROL BYTE is present in any file this slice added', () => {
+  // REPRODUCED TWICE, including by this very test. src/lib/newContactReview.js was
+  // written with a Unicode-escape character class over the control range, and the
+  // editor materialized those escapes into three RAW CONTROL BYTES. The regex still worked - a literal control byte in a
+  // character class matches itself - so every test passed while git reported the file
+  // as binary and it appeared in no diff. Unreviewable code that passes its tests is
+  // the worst of both, so the bytes are checked directly.
+  //
+  // And then THIS FILE did the same thing: the comment above originally spelled the
+  // escape out, which materialized it here too, and this assertion caught its own
+  // source. Hence the rule the fix encodes - describe such an escape, never write it.
+  const FILES = [
+    'src/lib/newContactReview.js',
+    'src/components/NewContactSuggestionCard.jsx',
+    'src/pages/SuggestionsPage.jsx',
+    'supabase/functions/shared/outlookContentPass.js',
+    'supabase/functions/shared/outlookContentStage.js',
+    'supabase/functions/shared/outlookHandleProducer.js',
+  ]
+  for (const rel of FILES) {
+    const buf = readFileSync(new URL(`../${rel}`, import.meta.url))
+    const bad = []
+    for (let i = 0; i < buf.length; i++) {
+      const b = buf[i]
+      // Tab (9), LF (10) and CR (13) are legitimate; everything else below 32, plus
+      // DEL (127), is not.
+      if (b < 9 || (b >= 11 && b <= 12) || (b >= 14 && b <= 31) || b === 127) {
+        bad.push([i, b])
+      }
+    }
+    assert.deepStrictEqual(bad, [], `${rel} carries raw control bytes`)
+  }
+})
+
+test('and the control-character check still rejects every control character', () => {
+  // The point of building CONTROL_RE from char codes is that it behaves identically.
+  for (const cc of [0, 9, 10, 13, 27, 31, 127]) {
+    const r = validateProposal({
+      name: 'A' + String.fromCharCode(cc) + 'B', createInteraction: false,
+    })
+    assert.strictEqual(r.ok, false, `char code ${cc} was accepted`)
+    assert.strictEqual(r.code, 'invalid_name')
+  }
+  // Every field that uses it, not only the name.
+  for (const field of ['company', 'role', 'howMet', 'relationshipNote']) {
+    const r = validateProposal({
+      name: 'Ok', createInteraction: false,
+      [field]: 'A' + String.fromCharCode(0) + 'B',
+    })
+    assert.strictEqual(r.ok, false, `${field} accepted a NUL`)
+  }
+  assert.deepStrictEqual(
+    validateProposal({ name: 'Priya Nair-Shah', createInteraction: false }), { ok: true })
+})
+
 await Promise.all(pending)
 console.log('')
 console.log(`${passed + failed} tests: ${passed} passed, ${failed} failed`)
