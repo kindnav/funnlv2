@@ -265,12 +265,36 @@ test('the notice DOES describe Anthropic processing, with its retention terms', 
   assert.ok(/can contain names, employers/i.test(text),
     'and the body/signature must be acknowledged as potentially identifying')
   assert.ok(/Assume the extract can identify the people/i.test(text))
-  // The NARROWER guarantees are kept, because they are the ones the code enforces.
-  assert.ok(/email address, their email domain/i.test(text))
-  assert.ok(/authorisation tokens/i.test(text) && /raw headers are not included/i.test(text))
-  assert.ok(/checked for\s*each of them before it is sent/i.test(text.replace(/\s+/g, ' '))
-    || /the outgoing request is checked/i.test(text),
-  'and stated as a checked guarantee rather than an assurance')
+  // ── WHAT IS ACTUALLY CHECKED, AND WHAT IS NOT ─────────────────────────
+  // This block previously asserted the notice listed the domain among the checked
+  // exclusions, and that "the outgoing request is checked for each of them". Both
+  // were false. The content pass calls
+  //   assertRequestMinimization(body, { addresses: forbiddenAddresses })
+  // supplying ONLY addresses: the providerIds and tokens scans receive nothing, and
+  // there is no domain check at all. So the notice now claims only the address
+  // check - which is real, and refuses the request - plus the structural fact that
+  // the request template has no field for the rest.
+  assert.ok(/What Funnl does check for is email addresses/i.test(text),
+    'the address check is the guarantee, and must be named as such')
+  assert.ok(/the request is withheld/i.test(text),
+    'and a failing check must be stated as withholding the request')
+  assert.ok(/built from a fixed template with no field for/i.test(text),
+    'the absent request metadata must be stated as structural, not as a scan')
+  assert.ok(/Funnl does not scan the request for those/i.test(text),
+    'and the absence of a scan for them stated plainly')
+  assert.ok(/An email domain, a company name, a phone number/i.test(text)
+    && /can remain/i.test(text),
+  'what can remain in the text must be named, including the domain')
+  assert.ok(/adding a redaction step is not part of this release/i.test(text),
+    'and no redaction must be promised')
+
+  // THE OVERCLAIMS MUST NOT COME BACK.
+  for (const gone of [/the outgoing request is checked for each of them/i,
+    /their email domain[^.]{0,80}are not included/i]) {
+    assert.ok(!gone.test(text), `a superseded minimization claim is back: ${gone}`)
+  }
+  // And the narrower structural facts that ARE true.
+  assert.ok(/authorisation tokens/i.test(text))
   // The overclaim must not come back.
   assert.ok(!/nothing that identifies the people/i.test(text),
     'the "nothing identifying" overclaim must not return')
@@ -354,7 +378,9 @@ test('the disclosure is longer than before and still one paragraph per idea', ()
   // extract is not anonymous, and two separating what expiry does to ACCEPTANCE from
   // what DISMISSAL does. The count is pinned so a silent shrink cannot drop a
   // material fact.
-  assert.strictEqual(DISCLOSURE_PARAGRAPH_COUNT, 21,
+  // 21 -> 23: the Anthropic minimization paragraph split into three, separating what
+  // the check does from what it cannot do. The overclaim hid in the join.
+  assert.strictEqual(DISCLOSURE_PARAGRAPH_COUNT, 23,
     'the paragraph count is pinned; change it deliberately with the text')
   assert.strictEqual(DISCLOSURE_PARAGRAPH_COUNT, OUTLOOK_DISCLOSURE_PARAGRAPHS.length,
     'the rendered count is derived from the array, so the card shows all of them')

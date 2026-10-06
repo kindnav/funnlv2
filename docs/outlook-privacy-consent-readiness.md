@@ -1,8 +1,71 @@
 # Outlook privacy and consent — human-review readiness packet
 
-**Status: MIXED, and the distinction is the point of this section.** One artefact is
-already PUBLISHED; everything else in this packet is a draft, unapproved and not
-configured. Read the four-row table under "WHAT IS PUBLISHED AND WHAT IS NOT" before
+## 0. CURRENT STATE — this is the only section that describes today
+
+**Everything after this section is HISTORICAL**, including what used to be the
+opening. It was written for the envelope-only pilot and describes the state at that
+time. Several of its "not deployed", "zero rows", "not configured" and "never
+collected" statements are no longer true, and an earlier revision of this packet left
+them at the top where they read as current. This section is the accurate summary;
+where it disagrees with anything below, this section is right.
+
+### Three different values, and they are not interchangeable
+
+| What | Where | Current state |
+|---|---|---|
+| `OUTLOOK_DISCLOSURE_VERSION` | Supabase config, read by `outlook-oauth-start`, stamped into the OAuth state | **Was configured in Production** for the envelope-only text (`ol-disc-81fe8944fd2be59ac3c059c229b4d28e`). That is not an inference: the pilot account connected and completed a real mailbox import, and that function refuses with `config_missing` unless the configured value matches the text it shows. **Its value today has not been read from this branch and is not asserted here.** |
+| The version derived from the notice in this packet | `src/lib/outlookDisclosure.js`, computed from the paragraph array | **`ol-disc-f142258e3aa0fdc3c47a53af92a648f5`**. New, and configured nowhere. |
+| `REQUIRED_CONTENT_CONSENT_VERSION` and `REQUIRED_THIRD_PARTY_CONSENT_VERSION` | `supabase/functions/shared/outlookContentConsent.js` | **Both `null`.** These are the two gates that decide whether the server reads a body and whether anything goes to Anthropic. While they are null it does neither — whatever any connection recorded, and whatever the server disclosure version is set to. |
+
+### What that means in practice
+
+- **A consent notice has been published, and consent has been collected.** The
+  envelope-only disclosure was published and the pilot connection recorded its
+  version. Statements below that no Outlook disclosure has ever been published, or
+  that no consent has ever been collected, are historical and were true when written.
+- **The content release is not reachable.** The two worker constants are null, so the
+  body read and the Anthropic call are both closed for every connection. That is the
+  gate that matters, and it is independent of (1).
+- **The pilot cannot be upgraded in place.** `consent_policy_version` is copied out of
+  the OAuth state at finalization. The pilot recorded the envelope-only version, and
+  the two documents say opposite things about body reading, so it must disconnect and
+  reconnect. The old version is deliberately not accepted as an alternative.
+- **Whether `outlook-oauth-start` currently answers `config_missing` is unknown from
+  here.** It depends on the value of (1), which has not been read. Do not assume
+  either answer without a read-only check.
+
+---
+
+---
+
+# EVERYTHING BELOW THIS LINE IS HISTORICAL
+
+**Read section 0 above instead.** The material that follows was written for the
+envelope-only pilot, before the Outlook stack was merged, before its migrations were
+applied, and before the pilot account connected and completed a real mailbox import.
+It is kept for the record because the reasoning in it is still useful, and because
+deleting the trail would make it harder to see what changed and when.
+
+**Specific statements below that are NO LONGER TRUE:**
+
+- that no Outlook Edge Function is deployed, that no migration from the stack is
+  applied, and that every Outlook table in Production holds zero rows;
+- that the Outlook code exists in "Draft PRs #54-#59 only, unmerged";
+- that `OUTLOOK_DISCLOSURE_VERSION` is unset, that no Outlook disclosure has been
+  published, and that no consent has ever been collected;
+- the policy date of September 27, 2026 — the Outlook section was republished on
+  October 5, 2026;
+- any statement that the pilot has not run.
+
+Section 0 states the current position for each of those. Where the two disagree,
+section 0 is right.
+
+---
+
+
+**Status (HISTORICAL — written for the envelope-only pilot).** One artefact was
+already PUBLISHED; everything else in this packet was a draft, unapproved and not
+configured. Several of those states have since changed; see section 0. Read the four-row table under "WHAT IS PUBLISHED AND WHAT IS NOT" before
 quoting anything from here.
 
 Artefacts B, C and D in that table are **DRAFT FOR OWNER/LEGAL REVIEW**: unapproved,
@@ -152,41 +215,6 @@ all of which are **unmerged, unapplied and undeployed**.
 
 ---
 
-## 0. CURRENT STATE — read this before the inventories below
-
-**The inventories in sections 4 onwards are HISTORICAL.** They were written for the
-envelope-only pilot and describe the state at that time. Several of their "not
-configured" and "never collected" statements are no longer true, and one earlier
-revision of this packet repeated them as current. This section is the accurate
-summary; where it disagrees with anything below, this section is right.
-
-### Three different values, and they are not interchangeable
-
-| What | Where | Current state |
-|---|---|---|
-| `OUTLOOK_DISCLOSURE_VERSION` | Supabase config, read by `outlook-oauth-start`, stamped into the OAuth state | **Was configured in Production** for the envelope-only text (`ol-disc-81fe8944fd2be59ac3c059c229b4d28e`). That is not an inference: the pilot account connected and completed a real mailbox import, and that function refuses with `config_missing` unless the configured value matches the text it shows. **Its value today has not been read from this branch and is not asserted here.** |
-| The version derived from the notice in this packet | `src/lib/outlookDisclosure.js`, computed from the paragraph array | **`ol-disc-f142258e3aa0fdc3c47a53af92a648f5`**. New, and configured nowhere. |
-| `REQUIRED_CONTENT_CONSENT_VERSION` and `REQUIRED_THIRD_PARTY_CONSENT_VERSION` | `supabase/functions/shared/outlookContentConsent.js` | **Both `null`.** These are the two gates that decide whether the server reads a body and whether anything goes to Anthropic. While they are null it does neither — whatever any connection recorded, and whatever the server disclosure version is set to. |
-
-### What that means in practice
-
-- **A consent notice has been published, and consent has been collected.** The
-  envelope-only disclosure was published and the pilot connection recorded its
-  version. Statements below that no Outlook disclosure has ever been published, or
-  that no consent has ever been collected, are historical and were true when written.
-- **The content release is not reachable.** The two worker constants are null, so the
-  body read and the Anthropic call are both closed for every connection. That is the
-  gate that matters, and it is independent of (1).
-- **The pilot cannot be upgraded in place.** `consent_policy_version` is copied out of
-  the OAuth state at finalization. The pilot recorded the envelope-only version, and
-  the two documents say opposite things about body reading, so it must disconnect and
-  reconnect. The old version is deliberately not accepted as an alternative.
-- **Whether `outlook-oauth-start` currently answers `config_missing` is unknown from
-  here.** It depends on the value of (1), which has not been read. Do not assume
-  either answer without a read-only check.
-
----
-
 ## 1. What this packet covers
 
 1. The conditional Outlook section **already published** at `/privacy` (artefact A) — quoted
@@ -210,21 +238,17 @@ Shown **before** the Microsoft authorization redirect and before any OAuth state
 created. Affirmative action required; no pre-selected checkbox, no implied consent, no
 "continue means you agree".
 
-> **STATUS: NOT PUBLISHED — THIS text, this version.** The paragraphs below are a
-> draft for review and the version derived from them is configured nowhere.
->
-> That is narrower than the claim this box used to make. It said no Outlook disclosure
-> had ever been published, that `OUTLOOK_DISCLOSURE_VERSION` was not configured in any
-> environment, and that no consent had ever been collected. **All three were out of
-> date**: the envelope-only disclosure was published, the server version was
-> configured in Production, and the pilot connected under it. See section 0.
+> **STATUS: NOT PUBLISHED.** The text below is a draft for review. No Outlook
+> disclosure has been published to users, `OUTLOOK_DISCLOSURE_VERSION` is not
+> configured in any environment, and no consent has ever been collected.
+> `outlook-oauth-start` refuses to mint a state while that variable is unset.
 
 **THIS IS THE CONTENT RELEASE.** It replaces the eleven envelope-only paragraphs rather
 than adding to them: three of those eleven state the opposite of what this release does,
 and a notice that both promises and denies body reading is evidence of nothing. The
 replacements are tabulated in `docs/outlook-content-disclosure-draft.md` section A.
 
-The twenty-one paragraphs below are **quoted from `src/lib/outlookDisclosure.js` verbatim**,
+The twenty-three paragraphs below are **quoted from `src/lib/outlookDisclosure.js` verbatim**,
 character for character, because the version is derived from those exact strings. A test
 re-reads the array and fails if this section paraphrases any of them.
 
@@ -242,33 +266,37 @@ re-reads the array and fails if this section paraphrases any of them.
 
 > 7. To write the summary, Funnl sends that cleaned text to Anthropic, the company that provides Funnl’s AI. Anthropic receives the message text, the subject, the date, and a label saying which side wrote each message — you and the other person are labelled only as USER and CONTACT rather than by address. When Funnl is proposing someone who is not yet one of your contacts, it also sends the display name your mail provider shows for that person, because that name is what the proposal is for.
 
-> 8. This is not anonymous, and Funnl does not claim it is. The message text and the signature block are what the two of you wrote, so they can contain names, employers, phone numbers or anything else either of you put in an email, and Funnl does not try to strip that out. Assume the extract can identify the people in the exchange. What Funnl does guarantee is narrower and checkable: your email address, the other person’s email address, their email domain, your Microsoft account and tenant details, Microsoft message and conversation identifiers, authorisation tokens, attachments and raw headers are not included, and the outgoing request is checked for each of them before it is sent.
+> 8. This is not anonymous, and Funnl does not claim it is. The message text and the signature block are what the two of you wrote, so they can contain names, employers, phone numbers or anything else either of you put in an email. Assume the extract can identify the people in the exchange.
 
-> 9. Anthropic’s published policy for its API is to delete inputs and outputs from its systems within 30 days of receiving or generating them. Three things can extend that: where its automated systems flag something as violating its usage policy, the inputs and outputs may be kept for up to 2 years and the resulting trust-and-safety classification scores for up to 7 years; it may keep data where the law requires it, or as necessary to act on usage-policy violations; and a customer can negotiate different terms, including zero retention. Funnl has no zero-retention agreement with Anthropic, so this is not zero-retention processing.
+> 9. What Funnl does check for is email addresses. Before the request is sent it looks for your address, the other person’s address, and anything else in the request shaped like an email address or a credential; if it finds one the request is withheld and the exchange is set aside with no summary, rather than sent anyway. The request is also built from a fixed template with no field for your Microsoft account or tenant details, Microsoft message or conversation identifiers, authorisation tokens, attachments or raw headers, so none of those is added to it.
 
-> 10. A suggestion keeps the summary, the suggested next step, the subject line, the contact, the date, the type (Email) and one-way fingerprints of the exchange, so the same conversation is not suggested twice. The message text itself is discarded once the summary is written — it is not saved to Funnl’s database and not written to any log. The fingerprints are pseudonymous but are stored against your account, so they are personal data about you; they cannot be turned back into a message, an address or a subject line.
+> 10. What that check cannot do is clean up the message itself. An email domain, a company name, a phone number or anything else written in the message or the signature can remain in what Anthropic receives, and Funnl makes no attempt to strip it out. Funnl does not scan the request for those, and adding a redaction step is not part of this release.
 
-> 11. When the other person is not already one of your contacts, Funnl will propose adding them. The proposed email address comes from the message itself and the proposed name from the name your mail provider shows for the sender or from their signature. Funnl will not guess a company, a job title, how you met, a LinkedIn profile or a tag — those fields are left blank for you to fill in if you want them.
+> 11. Anthropic’s published policy for its API is to delete inputs and outputs from its systems within 30 days of receiving or generating them. Three things can extend that: where its automated systems flag something as violating its usage policy, the inputs and outputs may be kept for up to 2 years and the resulting trust-and-safety classification scores for up to 7 years; it may keep data where the law requires it, or as necessary to act on usage-policy violations; and a customer can negotiate different terms, including zero retention. Funnl has no zero-retention agreement with Anthropic, so this is not zero-retention processing.
 
-> 12. Nothing enters your network until you accept it. Funnl stores the suggestion so it is still waiting when you come back. Before accepting you can edit the name, the company, the role, how you met, the relationship, the tags, the summary, the interaction type, the date and the follow-up date. The email address is the one exception: it is taken from the message itself and shown read-only — it is the one part of the proposal Funnl did not infer, and it is what identifies the person.
+> 12. A suggestion keeps the summary, the suggested next step, the subject line, the contact, the date, the type (Email) and one-way fingerprints of the exchange, so the same conversation is not suggested twice. The message text itself is discarded once the summary is written — it is not saved to Funnl’s database and not written to any log. The fingerprints are pseudonymous but are stored against your account, so they are personal data about you; they cannot be turned back into a message, an address or a subject line.
 
-> 13. You accept, edit or dismiss a suggestion — there is no deferral option. Accepting creates the contact and the first interaction together. You can also choose to save the contact without logging the conversation — the interaction is a checkbox you can clear. Dismissing a suggestion creates neither and deletes the draft.
+> 13. When the other person is not already one of your contacts, Funnl will propose adding them. The proposed email address comes from the message itself and the proposed name from the name your mail provider shows for the sender or from their signature. Funnl will not guess a company, a job title, how you met, a LinkedIn profile or a tag — those fields are left blank for you to fill in if you want them.
 
-> 14. Where an exchange is unclear, Funnl sets it aside rather than guessing: more than one other person involved, a message Funnl could not read, a message whose headers your provider did not return, or a summary that did not come back usable. In those cases you get no suggestion for that exchange and nothing is written — never a suggestion with an empty note.
+> 14. Nothing enters your network until you accept it. Funnl stores the suggestion so it is still waiting when you come back. Before accepting you can edit the name, the company, the role, how you met, the relationship, the tags, the summary, the interaction type, the date and the follow-up date. The email address is the one exception: it is taken from the message itself and shown read-only — it is the one part of the proposal Funnl did not infer, and it is what identifies the person.
 
-> 15. While a read is in progress Funnl keeps working records, one per conversation it is part-way through, and — once you have agreed to body reading — an encrypted reference to each message it has selected, so it can read them once both folders have been examined. Those references are encrypted with the same key as the synchronisation state and hold no subject, address, name or body.
+> 15. You accept, edit or dismiss a suggestion — there is no deferral option. Accepting creates the contact and the first interaction together. You can also choose to save the contact without logging the conversation — the interaction is a checkbox you can clear. Dismissing a suggestion creates neither and deletes the draft.
 
-> 16. They belong to that single read, which becomes unusable 24 hours after it starts. Becoming unusable is not the same as being erased: they are actually removed when a later read starts, when a read completes, when a read is reset, or when you disconnect. Waiting, or looking at the progress of a read, removes nothing — so if a read is abandoned and none of those happens, its working records stay stored.
+> 16. Where an exchange is unclear, Funnl sets it aside rather than guessing: more than one other person involved, a message Funnl could not read, a message whose headers your provider did not return, or a summary that did not come back usable. In those cases you get no suggestion for that exchange and nothing is written — never a suggestion with an empty note.
 
-> 17. A suggestion you never act on carries a 30-day review window, and what that window does depends on which button you press. After it passes, Funnl will not let you accept the suggestion: it tells you the suggestion has expired and takes it off the list on screen. But it stays stored, still waiting, and comes back the next time the page loads — so accepting is not a way to clear an expired suggestion.
+> 17. While a read is in progress Funnl keeps working records, one per conversation it is part-way through, and — once you have agreed to body reading — an encrypted reference to each message it has selected, so it can read them once both folders have been examined. Those references are encrypted with the same key as the synchronisation state and hold no subject, address, name or body.
 
-> 18. Dismissing it does work, and is not refused by that window. Dismissing marks the suggestion dismissed and erases the drafted summary, the suggested next step and any proposed email address and name in the same step. Nothing acts on the deadline on its own, so an expired suggestion stays stored until you dismiss it, disconnect, delete the contact it refers to, or delete your Funnl account.
+> 18. They belong to that single read, which becomes unusable 24 hours after it starts. Becoming unusable is not the same as being erased: they are actually removed when a later read starts, when a read completes, when a read is reset, or when you disconnect. Waiting, or looking at the progress of a read, removes nothing — so if a read is abandoned and none of those happens, its working records stay stored.
 
-> 19. You can disconnect at any time from this screen. That deletes the connection, the stored Microsoft authorisation, the mailbox synchronisation state, the working records, the message references and the provenance records, and invalidates any suggestion you have not reviewed. An invalidated suggestion is not deleted: it keeps the contact, the date and its fingerprint so the same exchange is not suggested again, and it goes when you delete that contact or your Funnl account.
+> 19. A suggestion you never act on carries a 30-day review window, and what that window does depends on which button you press. After it passes, Funnl will not let you accept the suggestion: it tells you the suggestion has expired and takes it off the list on screen. But it stays stored, still waiting, and comes back the next time the page loads — so accepting is not a way to clear an expired suggestion.
 
-> 20. Disconnecting removes Funnl’s copy of the authorisation, so Funnl has nothing left to start a new read with. A read already under way may finish using access it had already obtained. Disconnecting does not withdraw the permission at Microsoft — to do that, remove Funnl from the permissions page of your Microsoft account.
+> 20. Dismissing it does work, and is not refused by that window. Dismissing marks the suggestion dismissed and erases the drafted summary, the suggested next step and any proposed email address and name in the same step. Nothing acts on the deadline on its own, so an expired suggestion stays stored until you dismiss it, disconnect, delete the contact it refers to, or delete your Funnl account.
 
-> 21. Funnl’s Privacy Policy sets all of this out in full, including what is kept and when it is deleted.
+> 21. You can disconnect at any time from this screen. That deletes the connection, the stored Microsoft authorisation, the mailbox synchronisation state, the working records, the message references and the provenance records, and invalidates any suggestion you have not reviewed. An invalidated suggestion is not deleted: it keeps the contact, the date and its fingerprint so the same exchange is not suggested again, and it goes when you delete that contact or your Funnl account.
+
+> 22. Disconnecting removes Funnl’s copy of the authorisation, so Funnl has nothing left to start a new read with. A read already under way may finish using access it had already obtained. Disconnecting does not withdraw the permission at Microsoft — to do that, remove Funnl from the permissions page of your Microsoft account.
+
+> 23. Funnl’s Privacy Policy sets all of this out in full, including what is kept and when it is deleted.
 
 These are the complete contents of `OUTLOOK_DISCLOSURE_PARAGRAPHS`. The card renders
 each as a paragraph and shows nothing else as disclosure.
@@ -277,13 +305,14 @@ each as a paragraph and shows nothing else as disclosure.
 `ol-disc-<first 32 hex of SHA-256 over the paragraphs joined by newline>`, so any edit
 produces a different version and the server's exact-string gate refuses the stale one.
 
-The derived version for this text is **`ol-disc-f142258e3aa0fdc3c47a53af92a648f5`**
-(fingerprint `f142258e3aa0fdc3c47a53af92a648f5`). **Not approved, and configured nowhere.**
-The server's `OUTLOOK_DISCLOSURE_VERSION` is not set to it; what that variable is set
-to today has not been read from this branch. Independently of it, both worker consent
-constants in `supabase/functions/shared/outlookContentConsent.js` are `null`, so the
-server performs no body read and no third-party call regardless of what any connection
-recorded. See section 0 for the three values kept apart.
+The derived version for this text is **`ol-disc-7a258d82788f6a21b18b954852e881bb`**
+(fingerprint `7a258d82788f6a21b18b954852e881bb`). **Not approved, and configured nowhere.**
+The server's `OUTLOOK_DISCLOSURE_VERSION` is not set to it. What that variable holds
+today has **not been read from this branch**, and is not asserted here either way -
+see section 0, which records that it WAS configured in Production for the
+envelope-only version. Independently of it, both worker consent constants in
+`supabase/functions/shared/outlookContentConsent.js` are `null`, so the server performs
+no body read and no third-party call regardless of what any connection recorded.
 
 The previous value, `ol-disc-81fe8944fd2be59ac3c059c229b4d28e`, identified the
 envelope-only text and is what the live pilot connection recorded. It is deliberately

@@ -92,7 +92,7 @@ a text would be worthless. So what follows replaces
 the card renders and the exact strings the version is derived from. Generated from the
 array rather than retyped, so the two cannot drift.
 
-Derived version: **`ol-disc-f142258e3aa0fdc3c47a53af92a648f5`**
+Derived version: **`ol-disc-7a258d82788f6a21b18b954852e881bb`**
 
 1. Connecting Outlook is optional. Funnl works fully without it.
 
@@ -108,33 +108,37 @@ Derived version: **`ol-disc-f142258e3aa0fdc3c47a53af92a648f5`**
 
 7. To write the summary, Funnl sends that cleaned text to Anthropic, the company that provides Funnl’s AI. Anthropic receives the message text, the subject, the date, and a label saying which side wrote each message — you and the other person are labelled only as USER and CONTACT rather than by address. When Funnl is proposing someone who is not yet one of your contacts, it also sends the display name your mail provider shows for that person, because that name is what the proposal is for.
 
-8. This is not anonymous, and Funnl does not claim it is. The message text and the signature block are what the two of you wrote, so they can contain names, employers, phone numbers or anything else either of you put in an email, and Funnl does not try to strip that out. Assume the extract can identify the people in the exchange. What Funnl does guarantee is narrower and checkable: your email address, the other person’s email address, their email domain, your Microsoft account and tenant details, Microsoft message and conversation identifiers, authorisation tokens, attachments and raw headers are not included, and the outgoing request is checked for each of them before it is sent.
+8. This is not anonymous, and Funnl does not claim it is. The message text and the signature block are what the two of you wrote, so they can contain names, employers, phone numbers or anything else either of you put in an email. Assume the extract can identify the people in the exchange.
 
-9. Anthropic’s published policy for its API is to delete inputs and outputs from its systems within 30 days of receiving or generating them. Three things can extend that: where its automated systems flag something as violating its usage policy, the inputs and outputs may be kept for up to 2 years and the resulting trust-and-safety classification scores for up to 7 years; it may keep data where the law requires it, or as necessary to act on usage-policy violations; and a customer can negotiate different terms, including zero retention. Funnl has no zero-retention agreement with Anthropic, so this is not zero-retention processing.
+9. What Funnl does check for is email addresses. Before the request is sent it looks for your address, the other person’s address, and anything else in the request shaped like an email address or a credential; if it finds one the request is withheld and the exchange is set aside with no summary, rather than sent anyway. The request is also built from a fixed template with no field for your Microsoft account or tenant details, Microsoft message or conversation identifiers, authorisation tokens, attachments or raw headers, so none of those is added to it.
 
-10. A suggestion keeps the summary, the suggested next step, the subject line, the contact, the date, the type (Email) and one-way fingerprints of the exchange, so the same conversation is not suggested twice. The message text itself is discarded once the summary is written — it is not saved to Funnl’s database and not written to any log. The fingerprints are pseudonymous but are stored against your account, so they are personal data about you; they cannot be turned back into a message, an address or a subject line.
+10. What that check cannot do is clean up the message itself. An email domain, a company name, a phone number or anything else written in the message or the signature can remain in what Anthropic receives, and Funnl makes no attempt to strip it out. Funnl does not scan the request for those, and adding a redaction step is not part of this release.
 
-11. When the other person is not already one of your contacts, Funnl will propose adding them. The proposed email address comes from the message itself and the proposed name from the name your mail provider shows for the sender or from their signature. Funnl will not guess a company, a job title, how you met, a LinkedIn profile or a tag — those fields are left blank for you to fill in if you want them.
+11. Anthropic’s published policy for its API is to delete inputs and outputs from its systems within 30 days of receiving or generating them. Three things can extend that: where its automated systems flag something as violating its usage policy, the inputs and outputs may be kept for up to 2 years and the resulting trust-and-safety classification scores for up to 7 years; it may keep data where the law requires it, or as necessary to act on usage-policy violations; and a customer can negotiate different terms, including zero retention. Funnl has no zero-retention agreement with Anthropic, so this is not zero-retention processing.
 
-12. Nothing enters your network until you accept it. Funnl stores the suggestion so it is still waiting when you come back. Before accepting you can edit the name, the company, the role, how you met, the relationship, the tags, the summary, the interaction type, the date and the follow-up date. The email address is the one exception: it is taken from the message itself and shown read-only — it is the one part of the proposal Funnl did not infer, and it is what identifies the person.
+12. A suggestion keeps the summary, the suggested next step, the subject line, the contact, the date, the type (Email) and one-way fingerprints of the exchange, so the same conversation is not suggested twice. The message text itself is discarded once the summary is written — it is not saved to Funnl’s database and not written to any log. The fingerprints are pseudonymous but are stored against your account, so they are personal data about you; they cannot be turned back into a message, an address or a subject line.
 
-13. You accept, edit or dismiss a suggestion — there is no deferral option. Accepting creates the contact and the first interaction together. You can also choose to save the contact without logging the conversation — the interaction is a checkbox you can clear. Dismissing a suggestion creates neither and deletes the draft.
+13. When the other person is not already one of your contacts, Funnl will propose adding them. The proposed email address comes from the message itself and the proposed name from the name your mail provider shows for the sender or from their signature. Funnl will not guess a company, a job title, how you met, a LinkedIn profile or a tag — those fields are left blank for you to fill in if you want them.
 
-14. Where an exchange is unclear, Funnl sets it aside rather than guessing: more than one other person involved, a message Funnl could not read, a message whose headers your provider did not return, or a summary that did not come back usable. In those cases you get no suggestion for that exchange and nothing is written — never a suggestion with an empty note.
+14. Nothing enters your network until you accept it. Funnl stores the suggestion so it is still waiting when you come back. Before accepting you can edit the name, the company, the role, how you met, the relationship, the tags, the summary, the interaction type, the date and the follow-up date. The email address is the one exception: it is taken from the message itself and shown read-only — it is the one part of the proposal Funnl did not infer, and it is what identifies the person.
 
-15. While a read is in progress Funnl keeps working records, one per conversation it is part-way through, and — once you have agreed to body reading — an encrypted reference to each message it has selected, so it can read them once both folders have been examined. Those references are encrypted with the same key as the synchronisation state and hold no subject, address, name or body.
+15. You accept, edit or dismiss a suggestion — there is no deferral option. Accepting creates the contact and the first interaction together. You can also choose to save the contact without logging the conversation — the interaction is a checkbox you can clear. Dismissing a suggestion creates neither and deletes the draft.
 
-16. They belong to that single read, which becomes unusable 24 hours after it starts. Becoming unusable is not the same as being erased: they are actually removed when a later read starts, when a read completes, when a read is reset, or when you disconnect. Waiting, or looking at the progress of a read, removes nothing — so if a read is abandoned and none of those happens, its working records stay stored.
+16. Where an exchange is unclear, Funnl sets it aside rather than guessing: more than one other person involved, a message Funnl could not read, a message whose headers your provider did not return, or a summary that did not come back usable. In those cases you get no suggestion for that exchange and nothing is written — never a suggestion with an empty note.
 
-17. A suggestion you never act on carries a 30-day review window, and what that window does depends on which button you press. After it passes, Funnl will not let you accept the suggestion: it tells you the suggestion has expired and takes it off the list on screen. But it stays stored, still waiting, and comes back the next time the page loads — so accepting is not a way to clear an expired suggestion.
+17. While a read is in progress Funnl keeps working records, one per conversation it is part-way through, and — once you have agreed to body reading — an encrypted reference to each message it has selected, so it can read them once both folders have been examined. Those references are encrypted with the same key as the synchronisation state and hold no subject, address, name or body.
 
-18. Dismissing it does work, and is not refused by that window. Dismissing marks the suggestion dismissed and erases the drafted summary, the suggested next step and any proposed email address and name in the same step. Nothing acts on the deadline on its own, so an expired suggestion stays stored until you dismiss it, disconnect, delete the contact it refers to, or delete your Funnl account.
+18. They belong to that single read, which becomes unusable 24 hours after it starts. Becoming unusable is not the same as being erased: they are actually removed when a later read starts, when a read completes, when a read is reset, or when you disconnect. Waiting, or looking at the progress of a read, removes nothing — so if a read is abandoned and none of those happens, its working records stay stored.
 
-19. You can disconnect at any time from this screen. That deletes the connection, the stored Microsoft authorisation, the mailbox synchronisation state, the working records, the message references and the provenance records, and invalidates any suggestion you have not reviewed. An invalidated suggestion is not deleted: it keeps the contact, the date and its fingerprint so the same exchange is not suggested again, and it goes when you delete that contact or your Funnl account.
+19. A suggestion you never act on carries a 30-day review window, and what that window does depends on which button you press. After it passes, Funnl will not let you accept the suggestion: it tells you the suggestion has expired and takes it off the list on screen. But it stays stored, still waiting, and comes back the next time the page loads — so accepting is not a way to clear an expired suggestion.
 
-20. Disconnecting removes Funnl’s copy of the authorisation, so Funnl has nothing left to start a new read with. A read already under way may finish using access it had already obtained. Disconnecting does not withdraw the permission at Microsoft — to do that, remove Funnl from the permissions page of your Microsoft account.
+20. Dismissing it does work, and is not refused by that window. Dismissing marks the suggestion dismissed and erases the drafted summary, the suggested next step and any proposed email address and name in the same step. Nothing acts on the deadline on its own, so an expired suggestion stays stored until you dismiss it, disconnect, delete the contact it refers to, or delete your Funnl account.
 
-21. Funnl’s Privacy Policy sets all of this out in full, including what is kept and when it is deleted.
+21. You can disconnect at any time from this screen. That deletes the connection, the stored Microsoft authorisation, the mailbox synchronisation state, the working records, the message references and the provenance records, and invalidates any suggestion you have not reviewed. An invalidated suggestion is not deleted: it keeps the contact, the date and its fingerprint so the same exchange is not suggested again, and it goes when you delete that contact or your Funnl account.
+
+22. Disconnecting removes Funnl’s copy of the authorisation, so Funnl has nothing left to start a new read with. A read already under way may finish using access it had already obtained. Disconnecting does not withdraw the permission at Microsoft — to do that, remove Funnl from the permissions page of your Microsoft account.
+
+23. Funnl’s Privacy Policy sets all of this out in full, including what is kept and when it is deleted.
 
 ### For the owner to confirm
 
@@ -187,12 +191,21 @@ rest — scopes, deletion, the pilot framing — stays as published on October 5
 >
 > **This is not anonymous, and Funnl does not claim it is.** The message text and the
 > signature block are what the two of you wrote, so they can contain names, employers,
-> phone numbers or anything else either of you put in an email, and Funnl does not try
-> to strip that out. Assume the extract can identify the people in the exchange. What
-> Funnl does guarantee is narrower and checkable: email addresses, the recipient's
-> email domain, Microsoft account and tenant details, message and conversation
-> identifiers, authorization tokens, attachments and raw headers are **not** included,
-> and the outgoing request is checked for each of them before it is sent.
+> phone numbers or anything else either of you put in an email. Assume the extract can
+> identify the people in the exchange.
+>
+> **What is checked, and what is not.** Before the request is sent, Funnl's code looks
+> for **email addresses**: your own, the other person's, and anything else in the
+> request shaped like an email address or a credential. If it finds one the request is
+> **withheld** — the exchange is set aside with no summary rather than sent anyway.
+> Separately, the request is built from a fixed template with **no field for** Microsoft
+> account, tenant, message or conversation identifiers, authorization tokens,
+> attachments or raw headers, so none of those is added as request metadata.
+>
+> **That check does not clean the message.** An email domain, a company name, a phone
+> number or anything else written in the message or the signature **can remain** in what
+> Anthropic receives. Funnl does not scan for those and makes no attempt to remove them,
+> and adding a redaction step is not part of this release.
 >
 > Anthropic's published policy for its API is to delete inputs and outputs within 30
 > days of receipt or generation. Where its automated systems flag something as

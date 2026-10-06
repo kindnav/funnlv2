@@ -146,13 +146,20 @@ export const OUTLOOK_DISCLOSURE_PARAGRAPHS = Object.freeze([
     + 'shows for that person, because that name is what the proposal is for.',
   'This is not anonymous, and Funnl does not claim it is. The message text and the '
     + 'signature block are what the two of you wrote, so they can contain names, employers, '
-    + 'phone numbers or anything else either of you put in an email, and Funnl does not try '
-    + 'to strip that out. Assume the extract can identify the people in the exchange. What '
-    + 'Funnl does guarantee is narrower and checkable: your email address, the other person’s '
-    + 'email address, their email domain, your Microsoft account and tenant details, '
-    + 'Microsoft message and conversation identifiers, authorisation tokens, attachments and '
-    + 'raw headers are not included, and the outgoing request is checked for each of them '
-    + 'before it is sent.',
+    + 'phone numbers or anything else either of you put in an email. Assume the extract can '
+    + 'identify the people in the exchange.',
+  'What Funnl does check for is email addresses. Before the request is sent it looks for '
+    + 'your address, the other person’s address, and anything else in the request shaped like '
+    + 'an email address or a credential; if it finds one the request is withheld and the '
+    + 'exchange is set aside with no summary, rather than sent anyway. The request is also '
+    + 'built from a fixed template with no field for your Microsoft account or tenant '
+    + 'details, Microsoft message or conversation identifiers, authorisation tokens, '
+    + 'attachments or raw headers, so none of those is added to it.',
+  'What that check cannot do is clean up the message itself. An email domain, a company '
+    + 'name, a phone number or anything else written in the message or the signature can '
+    + 'remain in what Anthropic receives, and Funnl makes no attempt to strip it out. Funnl '
+    + 'does not scan the request for those, and adding a redaction step is not part of this '
+    + 'release.',
   'Anthropic’s published policy for its API is to delete inputs and outputs from its '
     + 'systems within 30 days of receiving or generating them. Three things can extend that: '
     + 'where its automated systems flag something as violating its usage policy, the inputs '
@@ -262,7 +269,7 @@ export function disclosureFingerprint (paragraphs) {
 // text it shows. It is deliberately NOT kept as an accepted alternative here: the two
 // documents say opposite things about body reading, so that connection must disconnect
 // and reconnect rather than be treated as having agreed to this one.
-export const DISCLOSURE_FINGERPRINT = 'f142258e3aa0fdc3c47a53af92a648f5'
+export const DISCLOSURE_FINGERPRINT = '7a258d82788f6a21b18b954852e881bb'
 
 /**
  * True only when the paragraphs still match the fingerprint the version was
