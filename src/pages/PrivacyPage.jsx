@@ -36,7 +36,7 @@ function PrivacyPage() {
             <span className="font-display font-bold text-[20px] text-hi">Funnl</span>
           </div>
           <h1 className="font-display text-[32px] font-bold text-hi tracking-[-0.5px] mb-3">Privacy Policy</h1>
-          <p className="text-[14px] text-low">Last updated: October 5, 2026</p>
+          <p className="text-[14px] text-low">Last updated: October 6, 2026</p>
           <div className="mt-4 px-4 py-3 bg-elevated border border-line-1 rounded-xl">
             <p className="text-[13.5px] text-muted leading-relaxed">
               This policy explains, in plain language, what Funnl collects, how it is used, who processes it, and how to remove it.
@@ -170,14 +170,17 @@ function PrivacyPage() {
             its contact, date and fingerprint. Do not describe that row as empty or
             as deleted.
 
-            PUBLICATION DECISION: the owner approved this revised wording for
-            publication, dated October 5, 2026 - the actual New York date of the
-            commit that publishes it. The earlier September 27, 2026 approval covered
-            the superseded wording and is historical. Each is a product decision and
-            not legal advice, and is not evidence that outside
+            PUBLICATION DECISION: the owner approved the CONTENT-RELEASE wording for
+            publication, dated October 6, 2026 - the actual New York date of the
+            commit that publishes it. The approval covers selected message-body
+            processing and sending the disclosed minimized extract to Anthropic,
+            including the identifying information that may remain in message text and
+            signatures. The earlier October 5, 2026 and September 27, 2026 approvals
+            covered the superseded envelope-only wording and are historical. Each is a
+            product decision and not legal advice, and is not evidence that outside
             counsel reviewed or approved this policy.
 
-            MANDATORY AT PUBLICATION: the date above is October 5, 2026. If the merge
+            MANDATORY AT PUBLICATION: the date above is October 6, 2026. If the merge
             that publishes this section happens on any later day, the "Last updated"
             date MUST be changed again in that same commit.
             tests/privacy-policy-outlook.test.js pins the conditional framing and the

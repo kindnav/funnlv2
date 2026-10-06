@@ -31,7 +31,7 @@
 
 /** Codes this gate can return. Controlled, and safe to log. */
 export const CONTENT_CONSENT_CODES = Object.freeze([
-  'content_consent_not_configured',  // no approved content disclosure exists yet
+  'content_consent_not_configured',  // no required version is configured for this check
   'content_consent_missing',         // the connection records no version at all
   'content_consent_stale',           // the recorded version predates the content one
   // The third-party gate, which is SEPARATE on purpose - see below.
@@ -44,11 +44,20 @@ export const CONTENT_CONSENT_CODES = Object.freeze([
  * The disclosure version an account must have consented to before ANY message
  * body may be read.
  *
- * null = no approved content disclosure exists. Keep it null until the owner
- * approves the drafted wording; setting it to a guess would be asserting that
- * somebody agreed to text that was never shown to them.
+ * It stayed null until the owner approved the actual wording, because setting it
+ * to a guess would have asserted that somebody agreed to text never shown to
+ * them. It is now the version derived from the approved notice.
  */
-export const REQUIRED_CONTENT_CONSENT_VERSION = null
+// APPROVED AND SET. The owner approved the 23-paragraph notice and the Outlook
+// policy wording, and approved selected message-body processing. This is the
+// version derived from that exact text - see computeDisclosureVersion() in
+// src/lib/outlookDisclosure.js, which recomputes it from the paragraph array.
+//
+// A connection must match this EXACTLY. It is a content digest, so there is no
+// ordering and no near-enough: the envelope-only pilot recorded
+// ol-disc-81fe8944fd2be59ac3c059c229b4d28e and must disconnect and reconnect,
+// because the two documents say opposite things about body reading.
+export const REQUIRED_CONTENT_CONSENT_VERSION = 'ol-disc-e3e2b1714b453c2904e3ed08cb232097'
 
 /**
  * The disclosure version an account must have consented to before any part of a
@@ -66,9 +75,14 @@ export const REQUIRED_CONTENT_CONSENT_VERSION = null
  * the other, so the two are checked independently and the caller must pass BOTH
  * to use the model path.
  *
- * null, for the same reason as above: nothing is approved yet.
+ * Approved and set, for the same reason as above: the notice the owner approved
+ * discloses the third-party send explicitly, so this gate has a version to name.
  */
-export const REQUIRED_THIRD_PARTY_CONSENT_VERSION = null
+// APPROVED AND SET, separately from the body gate even though both now carry the
+// same value. They stay two constants because they answer two questions, and a
+// later decision to stop sending anything to Anthropic while still reading
+// bodies must remain expressible by changing one of them.
+export const REQUIRED_THIRD_PARTY_CONSENT_VERSION = 'ol-disc-e3e2b1714b453c2904e3ed08cb232097'
 
 /** The shape a disclosure version has: the derived `ol-disc-<32 hex>` form. */
 const VERSION_RE = /^ol-disc-[0-9a-f]{32}$/

@@ -574,12 +574,13 @@ test('human-access wording is precise and includes the Anthropic safety exceptio
 // ── Date guard and non-regression ────────────────────────────────────────────
 console.log('\npublication date guard')
 
-test('the public date is the approved October 5, 2026 publication date', () => {
-  // Owner/product decision: publish THIS revised wording dated 2026-10-05, the actual
-  // New York date of the publishing commit. September 27 covered the superseded text
-  // and is historical. If a later merge moves the day, this pin must move with it in
-  // that same commit - which is the point of pinning it rather than leaving it free.
-  assert.ok(POLICY.includes('Last updated: October 5, 2026'),
+test('the public date is the actual October 6, 2026 publication date', () => {
+  // Owner/product decision: publish THIS content-release wording dated 2026-10-06, the
+  // actual New York date of the publishing commit. October 5 and September 27 covered
+  // the superseded envelope-only text and are historical. If a later merge moves the
+  // day, this pin must move with it in that same commit - which is the point of pinning
+  // it rather than leaving it free.
+  assert.ok(POLICY.includes('Last updated: October 6, 2026'),
     'the approved publication date must be present')
   assert.ok(!/Last updated: September 2[07], 2026/.test(POLICY),
     'a superseded Last-updated date must be gone')
@@ -589,16 +590,25 @@ test('the public date is the approved October 5, 2026 publication date', () => {
     'exactly one public date line')
   // Once in the public line, twice in the source decision comment (the approval and
   // the recheck instruction). Pinned so a stray extra date cannot creep in unnoticed.
-  assert.strictEqual((POLICY.match(/October 5, 2026/g) || []).length, 3,
+  assert.strictEqual((POLICY.match(/October 6, 2026/g) || []).length, 3,
     'one public date line plus the two source-comment mentions')
-  assert.strictEqual((POLICY.match(/Last updated: October 5, 2026/g) || []).length, 1,
+  assert.strictEqual((POLICY.match(/Last updated: October 6, 2026/g) || []).length, 1,
     'exactly one public Last-updated line carries the date')
-  // September 27 survives ONCE, in the comment, recorded as historical - so the
-  // superseded approval stays auditable rather than being quietly erased.
+  // The two superseded approval dates survive ONCE EACH, in the comment, recorded as
+  // history - so a replaced approval stays auditable rather than being quietly erased.
+  // October 5 is the envelope-only wording this release replaces; September 27 is the
+  // one before that.
   assert.strictEqual((POLICY.match(/September 27, 2026/g) || []).length, 1,
-    'the superseded approval is recorded once, as history')
-  assert.ok(/September 27, 2026 approval covered/.test(POLICY),
-    'and is labelled as covering the superseded wording')
+    'the oldest superseded approval is recorded once, as history')
+  assert.strictEqual((POLICY.match(/October 5, 2026/g) || []).length, 1,
+    'and so is the envelope-only approval this release supersedes')
+  assert.ok(/October 5, 2026 and September 27, 2026 approvals\s+covered the superseded envelope-only wording/
+    .test(POLICY.replace(/\s+/g, ' ')),
+    'both are labelled as covering the superseded envelope-only wording')
+  // And the current approval says what it actually covers: body processing and the
+  // extract sent to Anthropic, not just a reworded disclosure.
+  assert.ok(/selected message-body\s+processing/.test(POLICY),
+    'the recorded approval names the body processing it authorizes')
 })
 
 test('the section still carries a mandatory date-recheck instruction and an approval that is not legal advice', () => {

@@ -27,6 +27,11 @@ import {
   thirdPartyProcessingAllowed, contentPermissions, summarizeContentConsent,
   summarizeContentPermissions,
 } from '../supabase/functions/shared/outlookContentConsent.js'
+// The configured constants must equal what the SHIPPED notice derives, or a recorded
+// consent would name a document nobody saw. Read from the module rather than retyped.
+import {
+  OUTLOOK_DISCLOSURE_VERSION, verifyDisclosureIntegrity,
+} from '../src/lib/outlookDisclosure.js'
 
 let passed = 0, failed = 0
 function test (name, fn) {
@@ -42,17 +47,46 @@ const ENVELOPE_ONLY = 'ol-disc-81fe8944fd2be59ac3c059c229b4d28e'   // the live p
 console.log('')
 console.log('the consent gate: closed today, and closed for the right reason')
 
-test('no content disclosure is approved yet, so content is off for EVERYONE', () => {
-  assert.strictEqual(REQUIRED_CONTENT_CONSENT_VERSION, null,
-    'the required version must stay null until the owner approves the wording')
-  // Including the version the live pilot account actually consented to.
+test('the APPROVED content version is configured, and only it is allowed', () => {
+  // THIS GUARD WAS INVERTED ON APPROVAL. It asserted the constant stayed null until
+  // the owner approved the wording. The owner approved the 23-paragraph notice and
+  // the Outlook policy at head 0096103, and approved selected body processing and
+  // the disclosed minimized extract, so the constant now carries the version derived
+  // from that exact text. What the guard protects has not changed: nothing but an
+  // exact match opens the gate.
+  assert.strictEqual(REQUIRED_CONTENT_CONSENT_VERSION,
+    'ol-disc-e3e2b1714b453c2904e3ed08cb232097',
+    'the configured version must be the one derived from the approved text')
+
+  // DERIVED, NOT TYPED. The constant must equal what the shipped paragraphs produce,
+  // or a recorded consent would name a document nobody saw.
+  assert.strictEqual(REQUIRED_CONTENT_CONSENT_VERSION, OUTLOOK_DISCLOSURE_VERSION,
+    'the configured version must match the notice the card actually renders')
+  assert.ok(verifyDisclosureIntegrity(), 'and the notice must pass its own integrity check')
+
+  // THE LIVE PILOT'S CONSENT IS STALE, not merely different: the envelope-only text
+  // says Funnl sends nothing to Anthropic. It must reconnect.
   const d = contentProcessingAllowed(ENVELOPE_ONLY)
   assert.strictEqual(d.allowed, false)
-  assert.strictEqual(d.reason, 'content_consent_not_configured')
-  // And for anything else anyone might present.
-  for (const v of [null, undefined, '', 'ol-disc-' + 'b'.repeat(32), 'anything']) {
+  assert.strictEqual(d.reason, 'content_consent_stale')
+
+  // And nothing else anyone might present opens it either.
+  for (const v of [null, undefined, '', 'ol-disc-' + 'b'.repeat(32), 'anything',
+    REQUIRED_CONTENT_CONSENT_VERSION.toUpperCase()]) {
     assert.strictEqual(contentProcessingAllowed(v).allowed, false, String(v))
   }
+  // THE COMPARISON IS TRIMMED BUT CASE-SENSITIVE, and both halves matter. Incidental
+  // whitespace in a stored column must not lock an account out of a consent it gave;
+  // a case fold must not let a near-miss through, since these are hex digests and a
+  // different case is a different string.
+  assert.strictEqual(contentProcessingAllowed(REQUIRED_CONTENT_CONSENT_VERSION).allowed,
+    true)
+  assert.strictEqual(
+    contentProcessingAllowed(' ' + REQUIRED_CONTENT_CONSENT_VERSION + ' ').allowed, true,
+    'surrounding whitespace is trimmed, not treated as a mismatch')
+  assert.strictEqual(
+    contentProcessingAllowed(REQUIRED_CONTENT_CONSENT_VERSION.toUpperCase()).allowed,
+    false, 'but the comparison is case-sensitive')
 })
 
 test('with an approved version, ONLY the exact match is allowed', () => {
@@ -109,13 +143,30 @@ test('the logged summary carries no version string', () => {
 console.log('')
 console.log('the THIRD-PARTY gate is separate, and both must pass to use the model')
 
-test('nothing is approved today, so both gates are closed', () => {
-  assert.strictEqual(REQUIRED_THIRD_PARTY_CONSENT_VERSION, null)
+test('both gates are configured, and the live pilot is STALE against both', () => {
+  // INVERTED ON APPROVAL, like its content twin. Both constants now carry the version
+  // derived from the approved 23-paragraph notice. The pilot's envelope-only consent
+  // is stale against both - 'stale' rather than 'not_configured' is the whole point:
+  // the gate is open in principle and that connection does not satisfy it.
+  assert.strictEqual(REQUIRED_THIRD_PARTY_CONSENT_VERSION,
+    'ol-disc-e3e2b1714b453c2904e3ed08cb232097')
+  assert.strictEqual(REQUIRED_THIRD_PARTY_CONSENT_VERSION, OUTLOOK_DISCLOSURE_VERSION)
+  // Two constants, deliberately, even carrying the same value: they answer two
+  // questions, and turning the model path off while keeping body reading must stay
+  // expressible by changing one of them.
+  assert.strictEqual(REQUIRED_CONTENT_CONSENT_VERSION,
+    REQUIRED_THIRD_PARTY_CONSENT_VERSION)
+
   const p = contentPermissions(ENVELOPE_ONLY)
   assert.strictEqual(p.body, false)
-  assert.strictEqual(p.bodyReason, 'content_consent_not_configured')
+  assert.strictEqual(p.bodyReason, 'content_consent_stale')
   assert.strictEqual(p.thirdParty, false)
-  assert.strictEqual(p.thirdPartyReason, 'third_party_consent_not_configured')
+  assert.strictEqual(p.thirdPartyReason, 'third_party_consent_stale')
+
+  // And the approved version opens both.
+  const ok = contentPermissions(REQUIRED_CONTENT_CONSENT_VERSION)
+  assert.strictEqual(ok.body, true)
+  assert.strictEqual(ok.thirdParty, true)
 })
 
 test('BODY-ONLY is a coherent state: read inside Funnl, send nothing out', () => {
@@ -123,7 +174,11 @@ test('BODY-ONLY is a coherent state: read inside Funnl, send nothing out', () =>
   // things to agree to, so an account must be able to have agreed to one and not
   // the other. This is the state that makes the model path skippable rather than
   // silently used.
-  const p = contentPermissions(APPROVED, { content: APPROVED })
+  // `thirdParty: null` is injected explicitly now. Before approval the constant was
+  // null and omitting it produced the same state by default; with a real version
+  // configured, omitting it would fall back to that version and the body-only case
+  // would no longer be exercised at all.
+  const p = contentPermissions(APPROVED, { content: APPROVED, thirdParty: null })
   assert.strictEqual(p.body, true)
   assert.strictEqual(p.bodyReason, null)
   assert.strictEqual(p.thirdParty, false, 'the third-party gate must NOT ride on the body one')
@@ -154,8 +209,15 @@ test('thirdPartyProcessingAllowed behaves exactly like its content twin', () => 
     assert.strictEqual(thirdPartyProcessingAllowed(v, APPROVED).reason,
       'third_party_consent_missing', String(v))
   }
+  // With a version now CONFIGURED, an unrelated approved-looking string is STALE
+  // rather than unconfigured. Both still refuse; the code says which it is, and that
+  // distinction is what an operator reads to tell a misconfiguration from a
+  // connection that simply needs to reconnect.
   assert.strictEqual(thirdPartyProcessingAllowed(APPROVED).reason,
-    'third_party_consent_not_configured', 'no approved version means closed')
+    'third_party_consent_stale', 'a non-matching version is stale, not unconfigured')
+  // Explicitly unconfigured still reports itself as such.
+  assert.strictEqual(thirdPartyProcessingAllowed(APPROVED, null).reason,
+    'third_party_consent_not_configured', 'and an absent required version still says so')
 })
 
 test('the logged permissions carry no version string', () => {

@@ -501,7 +501,7 @@ below has been done.** Each group's gate must hold before the next begins.
 |---|---|---|
 | 1 | Owner approves the section A paragraphs and the section B policy text | Sign-off on the exact text, not the summary of it |
 | 2 | Re-read Anthropic's retention article and confirm the figures in paragraph 7 still match | Anthropic can change it without Funnl knowing; the packet's figures were read once, while preparing it |
-| 3 | Replace `OUTLOOK_DISCLOSURE_PARAGRAPHS` in `src/lib/outlookDisclosure.js` with the approved fifteen, and the Outlook section of `src/pages/PrivacyPage.jsx` with the section B text | Published text byte-identical to what was approved. Three published paragraphs are **replaced**, not supplemented — see the table in section A |
+| 3 | Replace `OUTLOOK_DISCLOSURE_PARAGRAPHS` in `src/lib/outlookDisclosure.js` with the approved 23, and the Outlook section of `src/pages/PrivacyPage.jsx` with the section B text | Published text byte-identical to what was approved. Three published paragraphs are **replaced**, not supplemented — see the table in section A |
 | 4 | Set the policy `Last updated` date to the actual New York publication date | Same rule applied on 5 October |
 | 5 | **Merge the PR into `main`** | This is also the **frontend deployment**: `vercel.json` sets `git.deploymentEnabled` to `{ main: true, "*": false }`, so merging triggers a Production Vercel build automatically and no separate frontend step exists. Wait for READY before step 6 |
 | 6 | Read the derived version from the published paragraphs — `computeDisclosureVersion()`, not typed by hand | One `ol-disc-…` value, copied from its output |
