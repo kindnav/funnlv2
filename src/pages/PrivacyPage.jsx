@@ -190,16 +190,20 @@ function PrivacyPage() {
             Outlook-derived records will exist for it.
           </p>
           <p className="mt-3">
-            <strong className="text-hi font-semibold">What the first pilot will do, when it is enabled</strong> — read message
-            <strong className="text-hi font-semibold">envelopes only</strong> from Inbox and Sent Items, and propose interactions for
-            people already in that account’s contacts. It will not fetch message bodies or attachments, will send nothing to
-            Anthropic or any other AI service, and will produce no summaries or drafts.
+            <strong className="text-hi font-semibold">What Funnl reads from your Outlook mailbox</strong> — message
+            <strong className="text-hi font-semibold">envelopes</strong> from Inbox and Sent Items (the sender and recipients, the
+            date, the subject and the folder) and, for exchanges where both you and one other person have written, the
+            <strong className="text-hi font-semibold"> text of up to six of those messages</strong>. It chooses the six most recent,
+            keeping up to two from each side back so a reply from either of you is always among them. Each message is trimmed to
+            4,000 characters and the whole exchange to 12,000, so where messages are long fewer than six are used and the oldest are
+            left out. Funnl reads the current message rather than the quoted history below it. It keeps the other person’s signature
+            block, up to 600 characters, because that is where a name is reliably stated; your own is not sent. Funnl does not read
+            attachments, does not read one-sided exchanges, and does not act on newsletters, mailing lists, automated notifications or
+            automatic replies.
           </p>
           <p className="mt-3">
-            Everything else in this section describes what would happen <em>if, and only if,</em> you choose to connect Outlook
-            when this integration becomes available to you, so you can read it before deciding. The body reading and the AI
-            processing described below belong to a <strong className="text-hi font-semibold">later release</strong> and are not part
-            of the first pilot.
+            Everything in this section describes what happens <em>if, and only if,</em> you choose to connect Outlook when this
+            integration becomes available to you, so you can read it before deciding.
           </p>
           <ul className="list-disc pl-5 space-y-2 mt-3">
             <li><strong className="text-hi font-semibold">What Funnl would ask Microsoft for</strong> — six delegated scopes, which
@@ -246,9 +250,8 @@ function PrivacyPage() {
 
             <li><strong className="text-hi font-semibold">Raw email bodies would not be stored by Funnl</strong> — message text would be
               held only in server memory while a message is being processed, and never written to Funnl’s database. No message body,
-              HTML, raw MIME, attachment, preview snippet or header collection is persisted.
-              <strong className="text-hi font-semibold">In the first pilot Funnl does not fetch message bodies or attachments at all</strong>,
-              so there is nothing of that kind to hold.</li>
+              HTML, raw MIME, attachment, preview snippet or header collection is persisted. The message text is discarded once the
+              summary is written: what survives is the summary itself, not the mail it came from.</li>
 
             <li><strong className="text-hi font-semibold">Anthropic would see a minimized, pseudonymized extract</strong> — to turn an exchange
               into a draft you can edit, Funnl would send <strong className="text-hi font-semibold">Anthropic</strong> (Claude) a reduced copy of
@@ -313,13 +316,29 @@ function PrivacyPage() {
               each other, may become a suggested new contact. Both are <strong className="text-hi font-semibold">suggestions you review</strong>:
               you accept, dismiss, or defer them. Funnl never creates a contact or an interaction on its own.</li>
 
+            <li><strong className="text-hi font-semibold">A stored suggestion is not part of your network</strong> — Funnl does store the
+              suggestion, because that is how it is still waiting when you come back to it. But it sits in a review queue as a draft: it is not
+              among your contacts, your interactions or your follow-ups, and it is not visible to Funnl’s AI assistant.
+              <strong className="text-hi font-semibold">A contact and an interaction are created only when you accept them</strong>, and only with
+              the values you have approved. Dismissing a suggestion creates neither and deletes the draft.</li>
+
+            <li><strong className="text-hi font-semibold">What you can change before accepting</strong> — for a suggested new contact you can edit
+              the name, the company, the role, how you met, the relationship, the tags, the summary, the interaction type, the date and the
+              follow-up date. <strong className="text-hi font-semibold">The email address is the one exception</strong>: it is taken from the
+              message itself and shown read-only, because it is the one part of the proposal Funnl did not infer and it is what identifies the
+              person. You can also choose to <strong className="text-hi font-semibold">save the contact without logging the conversation</strong> —
+              the interaction is a checkbox you can clear. For a suggested interaction about someone you already track, you can edit the type, the
+              date and the note.</li>
+
             <li><strong className="text-hi font-semibold">The proposed email address comes from Microsoft, not from AI</strong> — it is taken from
               the message envelope Microsoft provides. The AI is never asked for an email address and its output is rejected if it contains one.
               When you accept a suggested contact, the address is fixed and cannot be changed in that step; afterwards it is an ordinary contact and
               you can edit its email like any other contact.</li>
 
             <li><strong className="text-hi font-semibold">Disconnecting</strong> — disconnecting Outlook deletes your Microsoft connection
-              and, with it, your stored authorization, the mailbox synchronization state, the working records above and the provenance records.
+              and, with it, your stored authorization, the mailbox synchronization state, the working records above, the encrypted message
+              references and the provenance records, so Funnl has nothing left to start a new read with.
+              <strong className="text-hi font-semibold">A read already under way may finish using access it had already obtained.</strong>{' '}
               Any unused sign-in attempt is discarded. Any pending or deferred Outlook suggestion is marked invalidated and every proposed value
               it held — email, name, company, role, how you met, LinkedIn URL, summary, next step and subject line — is erased in the same step.
               <strong className="text-hi font-semibold">The suggestion record itself is not deleted</strong>: it remains, marked
@@ -328,10 +347,15 @@ function PrivacyPage() {
 
             <li><strong className="text-hi font-semibold">When Outlook-derived records are deleted</strong> — removal is driven by
               <strong className="text-hi font-semibold">events, not by a timer</strong>. The invalidated record described above is deleted
-              when you delete the contact it refers to, or when you delete your Funnl account. A pending suggestion carries an internal context
-              deadline, but Funnl runs <strong className="text-hi font-semibold">no scheduled job</strong> that acts on it today, so a
-              suggestion past that deadline stays in your review queue until you act on it or disconnect. Deleting your account removes all of
-              your data.</li>
+              when you delete the contact it refers to, or when you delete your Funnl account. A pending suggestion carries a
+              <strong className="text-hi font-semibold"> 30-day review window</strong>. After that window
+              <strong className="text-hi font-semibold"> Funnl will not let you accept it</strong> — accepting or dismissing an expired
+              suggestion tells you it has expired and takes it off the list you are looking at. Taking it off that list is a change to what is
+              on your screen, not to what is stored: the suggestion is still in Funnl’s database and it
+              <strong className="text-hi font-semibold"> reappears the next time the page loads</strong>. Funnl runs
+              <strong className="text-hi font-semibold"> no scheduled job</strong> that acts on that deadline today, so an expired
+              suggestion’s summary and subject stay stored until you accept it, dismiss it, disconnect Outlook, delete the contact it refers
+              to, or delete your account. Deleting your account removes all of your data.</li>
           </ul>
           <p className="mt-3">
             Outlook data would be used only to produce the suggestions you can see in Funnl. It would not be sold, not shared with advertisers or

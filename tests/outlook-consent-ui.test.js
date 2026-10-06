@@ -192,45 +192,81 @@ test('the disclosure names every requested scope, and offline_access honestly', 
     'must not promise administrator-free consent')
 })
 
-test('the disclosure states what the PILOT processes, and claims nothing more', () => {
-  // The previous revision described a two-step read of message text and an Anthropic
-  // extract. No code on this branch does either: the worker issues DISCOVERY_SELECT
-  // only, and nothing in the Outlook path calls Anthropic. A notice that describes
-  // processing the implementation cannot perform is not informed consent either - it
-  // is consent to the wrong thing.
+test('the disclosure states what the CONTENT RELEASE processes, and claims nothing more', () => {
+  // THIS GUARD WAS INVERTED. It used to require 'reads message envelopes only',
+  // 'does not fetch message bodies or attachments' and 'sends nothing to Anthropic
+  // or any other AI service' - correct for the envelope-only pilot and the exact
+  // opposite of what this release does. A notice that denied body reading while the
+  // worker performed it would be consent to the wrong thing just as surely as the
+  // reverse was.
   const text = OUTLOOK_DISCLOSURE_PARAGRAPHS.join(' ')
-  assert.ok(/reads message envelopes only/i.test(text), 'the envelope-only read')
+  assert.ok(/reads message envelopes/i.test(text), 'the envelope read is still stated')
   assert.ok(/Inbox and Sent Items/.test(text), 'the two folders')
-  assert.ok(/does not fetch message bodies or attachments/i.test(text),
-    'the body/attachment limit must be a behavioural claim')
-  assert.ok(/sends nothing to Anthropic or any other AI service/i.test(text),
-    'the absence of AI processing must be stated, not left to inference')
-  // And it must NOT reinstate the superseded processing claims.
-  for (const gone of [/in two steps/i, /quoted reply history/i,
-    /minimized extract/i, /USER and CONTACT/]) {
-    assert.ok(!gone.test(text), `superseded processing claim is back: ${gone}`)
+  assert.ok(/also reads the text of those messages/i.test(text),
+    'the body read must be a behavioural claim, not left to inference')
+  assert.ok(/does not read attachments/i.test(text), 'the attachment limit')
+  assert.ok(/does not read one-sided exchanges/i.test(text), 'the two-sided condition')
+  assert.ok(/newsletters, mailing lists, automated notifications or automatic replies/i
+    .test(text), 'the automated-mail exclusion')
+
+  // THE SUPERSEDED CLAIMS MUST NOT COME BACK. Each of these was true of the
+  // envelope-only notice and is false now; reinstating one would contradict the
+  // paragraph above it in the same document.
+  for (const gone of [/envelopes only/i, /does not fetch message bodies/i,
+    /sends nothing to Anthropic/i, /proposes no new contacts/i,
+    /No subject line, summary or message text is kept/i]) {
+    assert.ok(!gone.test(text), `a superseded envelope-only claim is back: ${gone}`)
   }
+
+  // The bounds are stated, because "reads the text" without them says nothing about
+  // how much.
+  assert.ok(/at most six messages/i.test(text), 'the per-exchange message bound')
+  assert.ok(/4,000 characters/.test(text) && /12,000 characters/.test(text),
+    'both truncation bounds - per message AND across the exchange')
+  assert.ok(/the oldest are left out/i.test(text),
+    'which messages are dropped when the exchange bound binds')
+  assert.ok(/your own signature is not sent/i.test(text),
+    'the signature asymmetry must be stated')
+
   // The read-only behaviour and the untouched neighbours are still stated.
   assert.ok(/never send, reply, delete, move or change/i.test(text))
   assert.ok(/contacts, calendars, files or your organisation/i.test(text))
 })
 
-test('the pilot notice does NOT describe Anthropic processing', () => {
-  // Deliberate removal, not an omission. The pilot performs no AI processing, so a
-  // paragraph about what Anthropic receives would describe something that does not
-  // happen. The published policy still carries it, marked as a later release.
+test('the notice DOES describe Anthropic processing, with its retention terms', () => {
+  // ALSO INVERTED. It used to assert the notice mentioned no retention figure at
+  // all, because the pilot performed no AI processing. It does now, so the figures
+  // have to be in the notice rather than only in the policy: the consent decision is
+  // taken on this screen.
   const text = OUTLOOK_DISCLOSURE_PARAGRAPHS.join(' ')
-  for (const gone of [/Anthropic \(Claude\)/, /Claude/, /Zero Data Retention/,
-    /30 days/, /2 years/, /7 years/]) {
-    assert.ok(!gone.test(text),
-      `the pilot notice must not describe AI processing or its retention: ${gone}`)
+  assert.ok(/Anthropic/.test(text), 'the processor must be named')
+  assert.ok(/30 days/.test(text), 'the normal deletion window')
+  assert.ok(/up to 2 years/.test(text), 'the usage-policy exception')
+  assert.ok(/up to 7 years/.test(text), 'the classification-score exception')
+  assert.ok(/no zero-retention agreement/i.test(text),
+    'the absence of a zero-retention agreement must be stated, not implied')
+  assert.ok(/not zero-retention processing/i.test(text))
+  assert.ok(/where the law requires it/i.test(text),
+    'the legal-obligation exception must be stated too')
+
+  // And what it does NOT receive, which is the part a reader cannot infer.
+  assert.ok(/does not receive your email address/i.test(text))
+  assert.ok(/or any Funnl identifier/i.test(text))
+
+  // No accuracy or deletion promise Funnl cannot keep.
+  for (const overclaim of [/Anthropic will delete/i, /guaranteed/i,
+    /we can have it deleted/i, /on request/i]) {
+    assert.ok(!overclaim.test(text), `an unkeepable promise about Anthropic: ${overclaim}`)
   }
-  // The policy keeps it, as a later release.
+
+  // The policy carries the fuller account, and no longer calls it a later release.
   const policy = readFileSync(
     new URL('../src/pages/PrivacyPage.jsx', import.meta.url), 'utf8')
   assert.ok(policy.includes('Anthropic'), 'the policy still discloses it')
-  assert.ok(/later release/.test(policy),
-    'and marks the body/AI processing as belonging to a later release')
+  assert.ok(!/later release/.test(policy),
+    'the policy must no longer defer body/AI processing to a later release')
+  assert.ok(!/first pilot/.test(policy),
+    'nor describe the envelope-only first pilot as what will happen')
 })
 
 test("the POLICY still states Anthropic's actual retention terms and no ZDR", () => {
@@ -264,19 +300,36 @@ test('the short disclosure says no LESS than the published policy on the materia
   // 'Anthropic' itself is deliberately NOT in this list: the notice names it in order
   // to say nothing is sent to it, which is a fact the pilot needs to state. What must
   // not appear is the affirmative processing and its retention terms.
-  const laterOnly = ['30 days', 'Zero Data Retention', 'reduced copy']
-  for (const fact of laterOnly) {
+  // '30 days' HAS MOVED into the shared list: it is now a fact the notice must carry,
+  // because the processing it describes is what the user is consenting to on that
+  // screen. Asserted above rather than here.
+  assert.ok(short.includes('30 days') && policy.includes('30 days'),
+    'the retention window must appear in BOTH now')
+
+  // These two remain POLICY-ONLY, and deliberately: they are the policy's own
+  // phrasings of facts the notice states in plainer words. The notice says "no
+  // zero-retention agreement" where the policy says "Zero Data Retention", and
+  // "cleaned text" where the policy says "reduced copy". Keeping the check asserts
+  // that the policy still carries the formal terms, without forcing the consent
+  // screen into contractual language nobody reads.
+  const policyPhrasing = ['Zero Data Retention', 'reduced copy']
+  for (const fact of policyPhrasing) {
     assert.ok(policy.includes(fact), `the published policy no longer states: ${fact}`)
-    assert.ok(!short.includes(fact),
-      `the pilot notice claims a later-release fact: ${fact}`)
   }
+  // But the FACT behind each must be in the notice, in its own words.
+  assert.ok(/no zero-retention agreement/i.test(short),
+    'the notice must state the zero-retention fact in its own words')
+  assert.ok(/cleaned text/i.test(short),
+    'and that what is sent is a cleaned extract, not the raw message')
 })
 
 test('the disclosure is longer than before and still one paragraph per idea', () => {
-  // The pilot revision deliberately removed the body-processing and Anthropic
-  // paragraphs, so the floor moved down with a reason. It is still a floor: a silent
-  // shrink below this means a material fact was dropped.
-  assert.strictEqual(DISCLOSURE_PARAGRAPH_COUNT, 11,
+  // 11 -> 15. The content release replaces three envelope-only paragraphs and adds
+  // five: the selection and truncation bounds, the Anthropic processing and its
+  // retention, the stored-but-not-in-your-network distinction with the editable-field
+  // list, the set-aside rule, and the encrypted message references. The count is
+  // pinned so a silent shrink cannot drop a material fact.
+  assert.strictEqual(DISCLOSURE_PARAGRAPH_COUNT, 18,
     'the paragraph count is pinned; change it deliberately with the text')
   assert.strictEqual(DISCLOSURE_PARAGRAPH_COUNT, OUTLOOK_DISCLOSURE_PARAGRAPHS.length,
     'the rendered count is derived from the array, so the card shows all of them')
@@ -323,11 +376,41 @@ test('the packet does not call the published policy unpublished', () => {
 
 test('the disclosure states review-before-save, not automatic saving', () => {
   const text = OUTLOOK_DISCLOSURE_PARAGRAPHS.join(' ')
-  assert.ok(/Nothing is saved to your network until you approve it/i.test(text),
+  // The rule, asserted by its two halves rather than by one exact sentence - the
+  // wording moved from "Nothing is saved to your network until you approve it" to
+  // "Nothing enters your network until you accept it", which is the same rule stated
+  // against the distinction the release had to draw: the SUGGESTION is saved, and
+  // what acceptance creates is the network record.
+  assert.ok(/Nothing enters your network until you accept it/i.test(text),
     'the approval-before-save rule must be explicit')
-  assert.ok(/you accept, edit, dismiss or defer it/i.test(text),
+  assert.ok(/Accepting creates the contact and the first interaction together/i.test(text),
+    'and what acceptance actually creates must be named')
+  assert.ok(/Funnl stores the suggestion/i.test(text),
+    'while the suggestion itself is disclosed as stored, not implied to be transient')
+  assert.ok(/Dismissing a suggestion creates neither/i.test(text))
+  // The read-only email, which the card cannot change and the RPC ignores.
+  assert.ok(/shown read-only/i.test(text),
+    'the provider-derived email must be disclosed as read-only')
+  // And the optional interaction.
+  assert.ok(/save the contact without logging the conversation/i.test(text),
+    'the optional interaction must be disclosed')
+  // "accept, edit, dismiss or DEFER" is what the envelope-only notice promised, and
+  // NO CARD HAS A DEFER CONTROL - `defer_candidate` exists in the database and
+  // nothing in the UI calls it. A notice offering an option the screen does not have
+  // is a small lie in the same class as the big ones this file guards against, so the
+  // wording now states the three that exist and says the fourth does not.
+  assert.ok(/You accept, edit or dismiss a suggestion/i.test(text),
     'and what reviewing actually offers')
-  assert.ok(/accept, edit, dismiss or defer/i.test(text))
+  assert.ok(/there is no deferral option/i.test(text),
+    'the absent option must be stated, not silently dropped')
+  const page = readFileSync(
+    new URL('../src/pages/SuggestionsPage.jsx', import.meta.url), 'utf8')
+  const card = readFileSync(
+    new URL('../src/components/NewContactSuggestionCard.jsx', import.meta.url), 'utf8')
+  assert.ok(!/Defer/.test(page) && !/Defer/.test(card),
+    'if a Defer control is ever added, this wording must change with it')
+  assert.ok(!/accept, edit, dismiss or defer/i.test(text),
+    'the four-option phrasing must not come back while no Defer control exists')
   assert.ok(!/automatically (save|add|log)/i.test(text))
 })
 
@@ -698,7 +781,13 @@ test('the disclosure describes the suggestion row as KEPT, never as empty', () =
     'what it still carries must be named')
   assert.ok(/goes when you delete that contact or your Funnl account/i.test(text),
     'only the cascade-verified deletion paths may be claimed')
-  for (const gone of [/empt(y|ied|ies)/i, /minimal record/i]) {
+  // NARROWED from a bare /empt(y|ied|ies)/ to the actual false statements. The broad
+  // pattern also caught "never a suggestion with an empty note" in the set-aside
+  // paragraph, which is a true statement about a NOTE and the opposite of the claim
+  // this guard exists to prevent - so the broad pattern would have forced the notice
+  // to drop a fact in order to satisfy a guard about a different one.
+  for (const gone of [/row is empt/i, /record is empt/i, /suggestion is empt/i,
+    /emptied/i, /empties the/i, /minimal record/i]) {
     assert.ok(!gone.test(text), `the row must not be described as empty: ${gone}`)
   }
   // And the deadline must not be presented as deleting anything.

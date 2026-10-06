@@ -171,75 +171,82 @@ all of which are **unmerged, unapplied and undeployed**.
 
 ## 2. Proposed just-in-time consent copy
 
-Shown **before** the Microsoft authorization redirect and before any OAuth state row is created.
-Affirmative action required; no pre-selected checkbox, no implied consent, no "continue means
-you agree".
+Shown **before** the Microsoft authorization redirect and before any OAuth state row is
+created. Affirmative action required; no pre-selected checkbox, no implied consent, no
+"continue means you agree".
 
 > **STATUS: NOT PUBLISHED.** The text below is a draft for review. No Outlook
 > disclosure has been published to users, `OUTLOOK_DISCLOSURE_VERSION` is not
 > configured in any environment, and no consent has ever been collected.
 > `outlook-oauth-start` refuses to mint a state while that variable is unset.
 
-> ### Connect Outlook?
->
-> Connecting Outlook is optional. Funnl works fully without it.
->
-> Access is restricted to one designated Funnl-controlled test account. Funnl’s servers refuse a connection request from any other account.
->
-> You would grant six Microsoft scopes. Two of them read data, and both are read-only: Mail.Read ("Read user mail") and User.Read ("Sign in and read user profile"). Three are the standard sign-in scopes openid, profile and email. The sixth, offline_access, grants no new access of its own — it is what lets Funnl keep using those two read permissions while you are not using the app, so a read can run without asking you to sign in again.
->
-> Microsoft grants those two more broadly than Funnl uses them. Mail.Read is granted at the mailbox level: it would technically permit reading message bodies and attachments anywhere in your mailbox. User.Read permits your profile and basic company information; Funnl asks it for three fields and uses them only to record which mailbox is connected. Neither requires administrator consent by default, but a work or school tenant can be configured to require an administrator to approve the app, and then you may not be able to consent for yourself.
->
-> This first pilot reads message envelopes only — who sent each message, who it was addressed to, the subject, the times, which conversation it belongs to and whether it is a draft — from your Inbox and Sent Items. It does not fetch message bodies or attachments, and sends nothing to Anthropic or any other AI service. Funnl can never send, reply, delete, move or change anything in your mailbox, and does not read your Microsoft contacts, calendars, files or your organisation’s directory.
->
-> Nothing is saved to your network until you approve it. Funnl proposes an interaction for someone already in your contacts, and you accept, edit, dismiss or defer it. Funnl never creates a contact or logs an interaction on its own, and this pilot proposes no new contacts.
->
-> A suggestion keeps the contact, the date, the type (Email) and one-way fingerprints of the exchange, so the same conversation is not suggested twice. Those fingerprints are pseudonymous but are stored against your account, so they are personal data about you; they cannot be turned back into a message, an address or a subject line. No subject line, summary or message text is kept.
->
-> While a read is in progress Funnl keeps working records of the same kind, one per conversation it is part-way through. They belong to that single read, which becomes unusable 24 hours after it starts. Becoming unusable is not the same as being erased: they are actually removed when a later read starts, when a read completes, when a read is reset, or when you disconnect. Waiting, or looking at the progress of a read, removes nothing — so if a read is abandoned and none of those happens, its working records stay stored.
->
-> You can disconnect at any time from this screen. That deletes the connection, the stored Microsoft authorisation, the mailbox synchronisation state, the working records and the provenance records, and invalidates any suggestion you have not reviewed. An invalidated suggestion is not deleted: it keeps the contact, the date and its fingerprint so the same exchange is not suggested again, and it goes when you delete that contact or your Funnl account.
->
-> Disconnecting removes Funnl’s copy of the authorisation, so Funnl has nothing left to start a new read with. A read already under way may finish using access it had already obtained. Disconnecting does not withdraw the permission at Microsoft — to do that, remove Funnl from the permissions page of your Microsoft account.
->
-> Funnl’s Privacy Policy sets all of this out in full, including what is kept and when it is deleted.
->
-> [Read the Privacy Policy](/privacy)
->
-> `[ I have read this ]` (unchecked)   `[ Connect Outlook ]`   `[ Cancel ]`
+**THIS IS THE CONTENT RELEASE.** It replaces the eleven envelope-only paragraphs rather
+than adding to them: three of those eleven state the opposite of what this release does,
+and a notice that both promises and denies body reading is evidence of nothing. The
+replacements are tabulated in `docs/outlook-content-disclosure-draft.md` section A.
 
-**These are the exact strings, not a paraphrase.** They are copied from
-`OUTLOOK_DISCLOSURE_PARAGRAPHS` in `src/lib/outlookDisclosure.js`, and
-`tests/outlook-consent-ui.test.js` fails if this document and that array ever diverge, so a
-reviewer approving the text here is approving the text a user would see.
+The eighteen paragraphs below are **quoted from `src/lib/outlookDisclosure.js` verbatim**,
+character for character, because the version is derived from those exact strings. A test
+re-reads the array and fails if this section paraphrases any of them.
 
-**WHY IT IS THIS SHORT, AND WHAT CAME OUT.** The previous revision had twelve
-paragraphs describing a two-step read of message text and a minimized extract sent to
-Anthropic. **No code on this branch does either**: the worker issues the envelope
-projection (`DISCOVERY_SELECT`) only, `CONTENT_SELECT` has no caller in the run path,
-and nothing in the Outlook path calls Anthropic. Those paragraphs were removed rather
-than kept as promises the implementation cannot keep - consenting to processing that
-does not happen is consent to the wrong thing. The published policy still carries the
-body reading and the Anthropic extract, marked as a **later release**.
+> 1. Connecting Outlook is optional. Funnl works fully without it.
 
-What stayed, because each is material at the moment of the decision: all **six**
-requested scopes with `offline_access` described as continuing access rather than as a
-third thing to read; the mailbox-wide reach of `Mail.Read`; what `User.Read` permits;
-that a work or school tenant may require an administrator even though none of these
-scopes requires admin consent by default; the envelope-only pilot read; the
-approval-before-save rule; that the fingerprints are pseudonymous **but stored against
-the account**; and the limits of disconnect. Everything else points at the policy.
+> 2. Access is restricted to one designated Funnl-controlled test account. Funnl’s servers refuse a connection request from any other account.
 
-The derived version for this text is **`ol-disc-81fe8944fd2be59ac3c059c229b4d28e`**. It is not
-configured anywhere; `outlook-oauth-start` still refuses to mint a state.
+> 3. You would grant six Microsoft scopes. Two of them read data, and both are read-only: Mail.Read (“Read user mail”) and User.Read (“Sign in and read user profile”). Three are the standard sign-in scopes openid, profile and email. The sixth, offline_access, grants no new access of its own — it is what lets Funnl keep using those two read permissions while you are not using the app, so a read can run without asking you to sign in again.
 
-**Consent version:** derived, not declared. Draft PR #56 computes it from the
-disclosure text (`ol-disc-<32 hex of SHA-256>`), so any edit to the wording produces a
-different version and the server's exact-string gate refuses the stale one. The current
-draft value is `ol-disc-81fe8944fd2be59ac3c059c229b4d28e`. **Not approved.** The server's
+> 4. Microsoft grants those two more broadly than Funnl uses them. Mail.Read is granted at the mailbox level: it would technically permit reading message bodies and attachments anywhere in your mailbox. User.Read permits your profile and basic company information; Funnl asks it for three fields and uses them only to record which mailbox is connected. Neither requires administrator consent by default, but a work or school tenant can be configured to require an administrator to approve the app, and then you may not be able to consent for yourself.
+
+> 5. Funnl reads message envelopes — who sent each message, who it was addressed to, the subject, the times, which conversation it belongs to and whether it is a draft — from your Inbox and Sent Items. Where you and one other person have both written in the same exchange, Funnl also reads the text of those messages, so it can draft a short summary of what was discussed. It does not read one-sided exchanges, does not read attachments, and does not act on newsletters, mailing lists, automated notifications or automatic replies. Funnl can never send, reply, delete, move or change anything in your mailbox, and does not read your Microsoft contacts, calendars, files or your organisation’s directory.
+
+> 6. For one exchange Funnl reads at most six messages: the most recent ones, with up to two from each side kept back so a reply from either of you is always included. Each message is trimmed to 4,000 characters and at most 12,000 characters are used across the whole exchange, so where messages are long fewer than six are used and the oldest are left out. Funnl reads the current message rather than the quoted history below it, and removes tracking markup and hidden characters first. The other person’s signature block is kept, up to 600 characters, because it is the only place a name is reliably stated; your own signature is not sent anywhere. The subject line is trimmed to 160 characters.
+
+> 7. To write the summary, Funnl sends that cleaned text to Anthropic, the company that provides Funnl’s AI. Anthropic receives the message text, the subject, the date, and a label saying which side wrote each message. It does not receive your email address, the other person’s email address, your Microsoft account details, or any Funnl identifier.
+
+> 8. Anthropic’s published policy for its API is to delete inputs and outputs from its systems within 30 days of receiving or generating them. Three things can extend that: where its automated systems flag something as violating its usage policy, the inputs and outputs may be kept for up to 2 years and the resulting trust-and-safety classification scores for up to 7 years; it may keep data where the law requires it, or as necessary to act on usage-policy violations; and a customer can negotiate different terms, including zero retention. Funnl has no zero-retention agreement with Anthropic, so this is not zero-retention processing.
+
+> 9. A suggestion keeps the summary, the suggested next step, the subject line, the contact, the date, the type (Email) and one-way fingerprints of the exchange, so the same conversation is not suggested twice. The message text itself is discarded once the summary is written — it is not saved to Funnl’s database and not written to any log. The fingerprints are pseudonymous but are stored against your account, so they are personal data about you; they cannot be turned back into a message, an address or a subject line.
+
+> 10. When the other person is not already one of your contacts, Funnl will propose adding them. The proposed email address comes from the message itself and the proposed name from the name your mail provider shows for the sender or from their signature. Funnl will not guess a company, a job title, how you met, a LinkedIn profile or a tag — those fields are left blank for you to fill in if you want them.
+
+> 11. Nothing enters your network until you accept it. Funnl stores the suggestion so it is still waiting when you come back. Before accepting you can edit the name, the company, the role, how you met, the relationship, the tags, the summary, the interaction type, the date and the follow-up date. The email address is the one exception: it is taken from the message itself and shown read-only — it is the one part of the proposal Funnl did not infer, and it is what identifies the person.
+
+> 12. You accept, edit or dismiss a suggestion — there is no deferral option. Accepting creates the contact and the first interaction together. You can also choose to save the contact without logging the conversation — the interaction is a checkbox you can clear. Dismissing a suggestion creates neither and deletes the draft.
+
+> 13. Where an exchange is unclear, Funnl sets it aside rather than guessing: more than one other person involved, a message Funnl could not read, a message whose headers your provider did not return, or a summary that did not come back usable. In those cases you get no suggestion for that exchange and nothing is written — never a suggestion with an empty note.
+
+> 14. While a read is in progress Funnl keeps working records, one per conversation it is part-way through, and — once you have agreed to body reading — an encrypted reference to each message it has selected, so it can read them once both folders have been examined. Those references are encrypted with the same key as the synchronisation state and hold no subject, address, name or body.
+
+> 15. They belong to that single read, which becomes unusable 24 hours after it starts. Becoming unusable is not the same as being erased: they are actually removed when a later read starts, when a read completes, when a read is reset, or when you disconnect. Waiting, or looking at the progress of a read, removes nothing — so if a read is abandoned and none of those happens, its working records stay stored.
+
+> 16. You can disconnect at any time from this screen. That deletes the connection, the stored Microsoft authorisation, the mailbox synchronisation state, the working records, the message references and the provenance records, and invalidates any suggestion you have not reviewed. An invalidated suggestion is not deleted: it keeps the contact, the date and its fingerprint so the same exchange is not suggested again, and it goes when you delete that contact or your Funnl account.
+
+> 17. Disconnecting removes Funnl’s copy of the authorisation, so Funnl has nothing left to start a new read with. A read already under way may finish using access it had already obtained. Disconnecting does not withdraw the permission at Microsoft — to do that, remove Funnl from the permissions page of your Microsoft account.
+
+> 18. Funnl’s Privacy Policy sets all of this out in full, including what is kept and when it is deleted.
+
+These are the complete contents of `OUTLOOK_DISCLOSURE_PARAGRAPHS`. The card renders
+each as a paragraph and shows nothing else as disclosure.
+
+**Consent version:** derived, not declared. It is computed from the text above as
+`ol-disc-<first 32 hex of SHA-256 over the paragraphs joined by newline>`, so any edit
+produces a different version and the server's exact-string gate refuses the stale one.
+
+The derived version for this text is **`ol-disc-544d70f25797530bc953c6ed9cd95574`**
+(fingerprint `544d70f25797530bc953c6ed9cd95574`). **Not approved, and configured nowhere.**
 `OUTLOOK_DISCLOSURE_VERSION` is unset in every environment, so `outlook-oauth-start`
-refuses with `config_missing`. The wording and the server value must be approved together —
-approving one without the other is self-defeating, since the version moves with the text.
+refuses with `config_missing`, and both worker consent constants in
+`supabase/functions/shared/outlookContentConsent.js` are `null`, so the server performs
+no body read and no third-party call regardless of what any connection recorded.
+
+The previous value, `ol-disc-81fe8944fd2be59ac3c059c229b4d28e`, identified the
+envelope-only text and is what the live pilot connection recorded. It is deliberately
+**not** accepted as an alternative: the two documents say opposite things about body
+reading, so that connection must disconnect and reconnect rather than be treated as
+having agreed to this one.
+
+The wording and the three server values must be approved together — approving one
+without the others is self-defeating, since the version moves with the text.
 
 ---
 
