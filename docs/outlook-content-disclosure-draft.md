@@ -150,9 +150,13 @@ rest — scopes, deletion, the pilot framing — stays as published on October 5
 > contacts, and one-way fingerprints that let Funnl recognise the same exchange
 > again. While a sync round is in progress Funnl also stores encrypted references
 > to the specific messages it has selected, so it can read them once both folders
-> have been examined; those references are deleted with the round, and when you
-> disconnect. All of this is pseudonymous data associated with your connected
-> account, not anonymous data.
+> have been examined. Those references are deleted when the sync finishes, when it
+> is restarted, when a later sync replaces it, or when you disconnect Outlook. A
+> sync stops being usable 24 hours after it starts, but **that deadline on its own
+> does not delete anything**: if a sync is abandoned part-way and never runs
+> again, its references stay until one of those four things happens. All of this
+> is pseudonymous data associated with your connected account, not anonymous
+> data.
 >
 > **Nothing is saved automatically.** Every suggestion is a draft you review. A
 > contact and an interaction are created only when you press Accept, and only with
@@ -187,11 +191,23 @@ be findable again afterwards.
   the worker holding the key.
 - They carry **no subject, no address, no name and no body** — nothing describing
   what a message said or who it was with.
-- They are **bounded**: six per exchange, 4,000 per round.
+- They are **bounded**: six per exchange and 4,000 per round. Which six is chosen
+  deliberately - the most recent, with at least two from each side reserved, so
+  the latest reply is always included and a two-sided exchange still reads as
+  two-sided. Going over the round limit **refuses the page** rather than quietly
+  dropping references, so a sync never advances past mail it cannot summarize.
 - They are **worker-only**: row-level security on, every role but the service role
   revoked, and no user-facing read path.
-- They **die with the round** and cascade away on disconnect and on account
-  deletion, both proven in `tests/sql/outlook-round-retrieval-runtime.sql`.
+- They are removed by **every round-lifecycle delete** - a completed round's
+  release, a reset, and either path that supersedes a round - and cascade away on
+  **disconnect** and on **account deletion**, through a narrow cascading foreign
+  key to the accumulator row they belong to. All of those are proven in
+  `tests/sql/outlook-round-retrieval-runtime.sql`.
+- **Reaching the 24-hour round deadline deletes nothing.** An expired round is
+  refused rather than erased, and no sweep is scheduled, so an abandoned
+  connection's references persist until the next run supersedes the round, a
+  reset runs, or the account disconnects. Asserted in the same test, and the
+  policy paragraph above says so rather than implying the deadline cleans up.
 
 Why immutable identifiers specifically: Graph's default ids change when a message
 is moved, so an id recorded on page one can be dead by the time the round
