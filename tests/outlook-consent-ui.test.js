@@ -280,11 +280,20 @@ test('the notice DOES describe Anthropic processing, with its retention terms', 
     'and a failing check must be stated as withholding the request')
   assert.ok(/built from a fixed template with no field for/i.test(text),
     'the absent request metadata must be stated as structural, not as a scan')
-  assert.ok(/Funnl does not scan the request for those/i.test(text),
-    'and the absence of a scan for them stated plainly')
-  assert.ok(/An email domain, a company name, a phone number/i.test(text)
-    && /can remain/i.test(text),
-  'what can remain in the text must be named, including the domain')
+  // THE THREE SHAPES, named rather than called "a credential". These are exactly what
+  // assertRequestMinimization tests for: an address-shaped string, a leading
+  // "Bearer ", and a JWT-like "eyJ..." run.
+  assert.ok(/shaped like an email address, a Bearer token or a JWT-like string/i
+    .test(text), 'the three shapes the check looks for must be named')
+  // And the scan covers the WHOLE request, so an address inside the message body is
+  // caught too - which the earlier wording implied it was not.
+  assert.ok(/whole request/i.test(text) && /message text included/i.test(text),
+    'the check must be stated as covering the message text as well')
+  assert.ok(/not shapes Funnl looks for/i.test(text),
+    'and what it does not look for stated plainly')
+  assert.ok(/email domain on its own/i.test(text)
+    && /a company name, a phone number/i.test(text) && /can remain/i.test(text),
+  'what can remain must be named, including the bare domain')
   assert.ok(/adding a redaction step is not part of this release/i.test(text),
     'and no redaction must be promised')
 

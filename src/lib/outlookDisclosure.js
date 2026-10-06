@@ -148,18 +148,19 @@ export const OUTLOOK_DISCLOSURE_PARAGRAPHS = Object.freeze([
     + 'signature block are what the two of you wrote, so they can contain names, employers, '
     + 'phone numbers or anything else either of you put in an email. Assume the extract can '
     + 'identify the people in the exchange.',
-  'What Funnl does check for is email addresses. Before the request is sent it looks for '
-    + 'your address, the other person’s address, and anything else in the request shaped like '
-    + 'an email address or a credential; if it finds one the request is withheld and the '
-    + 'exchange is set aside with no summary, rather than sent anyway. The request is also '
-    + 'built from a fixed template with no field for your Microsoft account or tenant '
-    + 'details, Microsoft message or conversation identifiers, authorisation tokens, '
-    + 'attachments or raw headers, so none of those is added to it.',
-  'What that check cannot do is clean up the message itself. An email domain, a company '
-    + 'name, a phone number or anything else written in the message or the signature can '
-    + 'remain in what Anthropic receives, and Funnl makes no attempt to strip it out. Funnl '
-    + 'does not scan the request for those, and adding a redaction step is not part of this '
-    + 'release.',
+  'What Funnl does check for is email addresses. Before the request is sent it looks over '
+    + 'the whole request — the message text included — for your address, the other person’s '
+    + 'address, and anything else shaped like an email address, a Bearer token or a JWT-like '
+    + 'string. If it finds one the request is withheld and the exchange is set aside with no '
+    + 'summary, rather than sent anyway. The request is also built from a fixed template with '
+    + 'no field for your Microsoft account or tenant details, Microsoft message or '
+    + 'conversation identifiers, authorisation tokens, attachments or raw headers, so none of '
+    + 'those is added to it.',
+  'What that check cannot do is recognise everything that identifies a person. An email '
+    + 'domain on its own, a company name, a phone number or anything else written in the '
+    + 'message or the signature can remain in what Anthropic receives: those are not shapes '
+    + 'Funnl looks for, and it makes no attempt to strip them out. Adding a redaction step is '
+    + 'not part of this release.',
   'Anthropic’s published policy for its API is to delete inputs and outputs from its '
     + 'systems within 30 days of receiving or generating them. Three things can extend that: '
     + 'where its automated systems flag something as violating its usage policy, the inputs '
@@ -269,7 +270,7 @@ export function disclosureFingerprint (paragraphs) {
 // text it shows. It is deliberately NOT kept as an accepted alternative here: the two
 // documents say opposite things about body reading, so that connection must disconnect
 // and reconnect rather than be treated as having agreed to this one.
-export const DISCLOSURE_FINGERPRINT = '7a258d82788f6a21b18b954852e881bb'
+export const DISCLOSURE_FINGERPRINT = 'e3e2b1714b453c2904e3ed08cb232097'
 
 /**
  * True only when the paragraphs still match the fingerprint the version was

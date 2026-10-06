@@ -370,7 +370,29 @@ console.log('\nAnthropic disclosures')
 test('Anthropic is named and the extract is described as minimized and pseudonymized', () => {
   assert.ok(/Anthropic/.test(OUTLOOK), 'Anthropic is named')
   assert.ok(/USER<\/em> and <em>CONTACT/.test(OUTLOOK), 'pseudonymous labels disclosed')
-  assert.ok(/Email addresses, the recipient's email domain/.test(OUTLOOK), 'exclusions disclosed')
+  // THIS PINNED THE WRONG SENTENCE. "Email addresses, the recipient's email domain ...
+  // are not included" described an exclusion list that was never checked as a list:
+  // the code supplies only addresses to assertRequestMinimization, and there is no
+  // domain check at all. Worse, the replacement wording briefly opened the "can
+  // remain" paragraph with that same phrase, which read as though an address became
+  // exempt once it appeared in message text - it does not, since the scan covers the
+  // whole serialized request.
+  //
+  // So the guard now pins the two halves separately: addresses ARE checked across the
+  // whole request, and the bare DOMAIN is named as something that can remain.
+  assert.ok(/whole outgoing request, the message text included/.test(OUTLOOK_PROSE),
+    'the address check must be stated as covering the message text')
+  assert.ok(/An address written in the body of a message is therefore caught/
+    .test(OUTLOOK_PROSE), 'and an address in the body must not read as exempt')
+  assert.ok(/shaped\s*like an email address, a Bearer token or a JWT-like string/
+    .test(OUTLOOK_PROSE.replace(/\s+/g, ' ')), 'the three shapes must be named')
+  assert.ok(/email domain on its own/.test(OUTLOOK_PROSE)
+    && /can remain/.test(OUTLOOK_PROSE),
+  'and the bare domain named as something that can remain')
+  // The overclaim must not come back.
+  assert.ok(!/checks\s*the outgoing request for each of them/
+    .test(OUTLOOK_PROSE.replace(/\s+/g, ' ')),
+  'the per-category check overclaim must not return')
   assert.ok(DRAFT.includes('assertRequestMinimization'), 'the code enforces minimization')
 })
 

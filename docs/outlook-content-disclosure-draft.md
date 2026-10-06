@@ -92,7 +92,7 @@ a text would be worthless. So what follows replaces
 the card renders and the exact strings the version is derived from. Generated from the
 array rather than retyped, so the two cannot drift.
 
-Derived version: **`ol-disc-7a258d82788f6a21b18b954852e881bb`**
+Derived version: **`ol-disc-e3e2b1714b453c2904e3ed08cb232097`**
 
 1. Connecting Outlook is optional. Funnl works fully without it.
 
@@ -110,9 +110,9 @@ Derived version: **`ol-disc-7a258d82788f6a21b18b954852e881bb`**
 
 8. This is not anonymous, and Funnl does not claim it is. The message text and the signature block are what the two of you wrote, so they can contain names, employers, phone numbers or anything else either of you put in an email. Assume the extract can identify the people in the exchange.
 
-9. What Funnl does check for is email addresses. Before the request is sent it looks for your address, the other person’s address, and anything else in the request shaped like an email address or a credential; if it finds one the request is withheld and the exchange is set aside with no summary, rather than sent anyway. The request is also built from a fixed template with no field for your Microsoft account or tenant details, Microsoft message or conversation identifiers, authorisation tokens, attachments or raw headers, so none of those is added to it.
+9. What Funnl does check for is email addresses. Before the request is sent it looks over the whole request — the message text included — for your address, the other person’s address, and anything else shaped like an email address, a Bearer token or a JWT-like string. If it finds one the request is withheld and the exchange is set aside with no summary, rather than sent anyway. The request is also built from a fixed template with no field for your Microsoft account or tenant details, Microsoft message or conversation identifiers, authorisation tokens, attachments or raw headers, so none of those is added to it.
 
-10. What that check cannot do is clean up the message itself. An email domain, a company name, a phone number or anything else written in the message or the signature can remain in what Anthropic receives, and Funnl makes no attempt to strip it out. Funnl does not scan the request for those, and adding a redaction step is not part of this release.
+10. What that check cannot do is recognise everything that identifies a person. An email domain on its own, a company name, a phone number or anything else written in the message or the signature can remain in what Anthropic receives: those are not shapes Funnl looks for, and it makes no attempt to strip them out. Adding a redaction step is not part of this release.
 
 11. Anthropic’s published policy for its API is to delete inputs and outputs from its systems within 30 days of receiving or generating them. Three things can extend that: where its automated systems flag something as violating its usage policy, the inputs and outputs may be kept for up to 2 years and the resulting trust-and-safety classification scores for up to 7 years; it may keep data where the law requires it, or as necessary to act on usage-policy violations; and a customer can negotiate different terms, including zero retention. Funnl has no zero-retention agreement with Anthropic, so this is not zero-retention processing.
 
@@ -195,17 +195,21 @@ rest — scopes, deletion, the pilot framing — stays as published on October 5
 > identify the people in the exchange.
 >
 > **What is checked, and what is not.** Before the request is sent, Funnl's code looks
-> for **email addresses**: your own, the other person's, and anything else in the
-> request shaped like an email address or a credential. If it finds one the request is
-> **withheld** — the exchange is set aside with no summary rather than sent anyway.
-> Separately, the request is built from a fixed template with **no field for** Microsoft
-> account, tenant, message or conversation identifiers, authorization tokens,
+> over the **whole outgoing request, the message text included**, for **email
+> addresses**: your own, the other person's, and anything else shaped like an email
+> address, a Bearer token or a JWT-like string. An address written in the body of a
+> message is therefore caught the same way as one in a header field. If it finds one the
+> request is **withheld** — the exchange is set aside with no summary rather than sent
+> anyway. Separately, the request is built from a fixed template with **no field for**
+> Microsoft account, tenant, message or conversation identifiers, authorization tokens,
 > attachments or raw headers, so none of those is added as request metadata.
 >
-> **That check does not clean the message.** An email domain, a company name, a phone
-> number or anything else written in the message or the signature **can remain** in what
-> Anthropic receives. Funnl does not scan for those and makes no attempt to remove them,
-> and adding a redaction step is not part of this release.
+> **What that check cannot recognize.** It looks for those three shapes and nothing
+> else. An **email domain on its own** (a company's web address with no "@" in it), a
+> company name, a phone number, a job title or anything else written in the message or
+> the signature **can remain** in what Anthropic receives. Funnl does not look for those
+> and makes no attempt to remove them, and adding a redaction step is not part of this
+> release.
 >
 > Anthropic's published policy for its API is to delete inputs and outputs within 30
 > days of receipt or generation. Where its automated systems flag something as

@@ -265,19 +265,20 @@ function PrivacyPage() {
               the extract can identify the people in the exchange.</li>
 
             <li><strong className="text-hi font-semibold">What is checked, and what is not</strong> — the guarantee is narrower than
-              "nothing identifying", and it is worth stating exactly. Before the request is sent, Funnl's code looks for
-              <strong className="text-hi font-semibold"> email addresses</strong>: your own, the other person's, and anything else in the
-              request shaped like an email address or a credential. If it finds one the request is
+              "nothing identifying", and it is worth stating exactly. Before the request is sent, Funnl's code looks over the
+              <strong className="text-hi font-semibold"> whole outgoing request, the message text included</strong>, for
+              <strong className="text-hi font-semibold"> email addresses</strong>: your own, the other person's, and anything else shaped
+              like an email address, a Bearer token or a JWT-like string. An address written in the body of a message is therefore caught
+              the same way as one in a header field. If it finds one the request is
               <strong className="text-hi font-semibold"> withheld</strong> — the exchange is set aside with no summary rather than sent
               anyway. Separately, the request is built from a fixed template that has
               <strong className="text-hi font-semibold"> no field for</strong> Microsoft account, tenant, message or conversation
               identifiers, authorization tokens, attachments or raw headers, so none of those is added to it as request metadata.</li>
 
-            <li><strong className="text-hi font-semibold">That check does not clean the message</strong> —
-              Email addresses, the recipient's email domain and other identifying details are a different matter once they appear
-              <em>inside</em> the text. An email domain, a
-              company name, a phone number or anything else either of you wrote in the message or the signature
-              <strong className="text-hi font-semibold"> can remain</strong> in what Anthropic receives. Funnl does not scan for those and
+            <li><strong className="text-hi font-semibold">What that check cannot recognize</strong> — it looks for those three shapes and
+              nothing else. An <strong className="text-hi font-semibold">email domain on its own</strong> (a company's web address with no
+              "@" in it), a company name, a phone number, a job title or anything else either of you wrote in the message or the signature
+              <strong className="text-hi font-semibold"> can remain</strong> in what Anthropic receives. Funnl does not look for those and
               makes no attempt to remove them, and adding a redaction step is not part of this release.</li>
 
             <li><strong className="text-hi font-semibold">Anthropic's retention — 30 days, and not Zero Data Retention</strong> — Funnl uses
