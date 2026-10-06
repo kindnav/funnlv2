@@ -52,105 +52,152 @@ Four things must happen, in order, before either gate opens:
 
 ---
 
-## A. Just-in-time consent text (the Settings card, before Connect)
+## A. The complete just-in-time notice (the Settings card, before Connect)
 
-Paragraphs to **add** to the existing eleven. The existing eleven are unchanged;
-adding paragraphs changes the derived version, which is the mechanism that makes
-the old consent stale. That is intended.
+**This is the WHOLE list, not an addition to it.** The earlier revision proposed
+"paragraphs to add to the existing eleven", which would have left the published
+text self-contradictory: three of those eleven state the opposite of what the
+content release does. A reader of a notice that both promises and denies body
+reading has not been informed of anything, and a consent version derived from such
+a text would be worthless. So what follows replaces
+`OUTLOOK_DISCLOSURE_PARAGRAPHS` in full, and the digest is derived from it.
 
-> Funnl will read the text of messages in exchanges where you and one other
-> person have both written, so it can draft a short summary of what was
-> discussed. Funnl does not read exchanges where only one side has written, and
-> does not read attachments.
+### What the published text says today that can no longer stand
 
-> For one exchange Funnl reads at most six messages: the most recent ones, with up
-> to two from each side kept back so a reply from either of you is always included.
-> Each message is trimmed to 4,000 characters, and at most 12,000 characters are
-> used across the whole exchange - so where messages are long, fewer than six are
-> used and the oldest are left out. Funnl reads the current message rather than the
-> quoted history below it, and removes tracking markup and hidden characters first.
+| Published paragraph | What it says | Why it must change |
+|---|---|---|
+| 5 | "reads message envelopes only ... does not fetch message bodies or attachments, and sends nothing to Anthropic or any other AI service" | **Directly contradicted.** The content release reads bodies and sends a minimized fragment to Anthropic. |
+| 6 | "this pilot proposes no new contacts" | **Directly contradicted.** Proposing a contact for someone not yet tracked is the point of the release. |
+| 7 | "No subject line, summary or message text is kept" | **Directly contradicted.** The summary and a bounded subject are kept; the message text is not. |
+| 8 | the 24-hour working records | **Extended, not contradicted.** Still true; the encrypted message references are a new kind of working record and must be named. |
+| 9 | disconnect deletes the working records | **Extended.** The message references go with them. |
+| 10 | "A read already under way may finish using access it had already obtained" | **Already correct and kept verbatim.** This is the in-flight acknowledgement; it was right before the content release and is right after it. |
+| 1-4, 11 | optional, single test account, the six scopes, Microsoft's broader grant, the policy pointer | **Unchanged.** No scope changes: `Mail.Read` already permitted body reading, which is exactly why paragraph 4 says so. |
 
-> A signature block is separated from the message text. The other person's
-> signature is kept, up to 600 characters, because it is the only place a name is
-> reliably stated; your own signature is not sent anywhere. The subject line is
-> trimmed to 160 characters.
+### The proposed paragraphs
 
-> To write the summary, Funnl sends that cleaned text to Anthropic, the company
-> that provides Funnl's AI. Anthropic receives the message text, the subject, the
-> date, and a label saying which side wrote each message. It does not receive
-> your email address, the other person's email address, your Microsoft account
-> details, or any Funnl identifier. Under Anthropic's standard commercial terms
-> this data is deleted within 30 days. There is an exception: material that
-> Anthropic's automated policy enforcement flags may be kept for up to two years,
-> and safety classification scores for up to seven years. This is not
-> zero-retention processing.
+1. Connecting Outlook is optional. Funnl works fully without it.
 
-> Funnl saves the summary, the subject line, the date, and a one-way fingerprint
-> that lets it recognise the same exchange again. **The message text itself is
-> discarded once the summary is written** — it is not saved to Funnl's database
-> and not written to any log.
+2. Access is restricted to one designated Funnl-controlled test account. Funnl's
+   servers refuse a connection request from any other account.
 
-> Be clear about what that means: **the suggestion itself is stored**, because
-> that is how it is still there when you come back to review it. What it is not
-> is part of your network. It sits in a review queue as a draft, it expires after
-> 30 days if you never act on it, and it does not appear among your contacts,
-> your interactions, your follow-ups or anything Funnl's AI can see.
+3. *(unchanged — the six scopes)*
 
-> When the other person is not already one of your contacts, Funnl will propose
-> adding them. The proposed email address comes from the message itself and the
-> proposed name from the name your mail provider shows for the sender. Funnl will
-> not guess a company or a job title.
+4. *(unchanged — Microsoft grants those two more broadly than Funnl uses them)*
 
-> **Nothing enters your network until you press Accept.** You can edit every
-> proposed field first, including the name, the summary and the suggested next
-> step. Pressing Accept on a proposed contact creates the contact and the first
-> interaction together, with the values you approved; dismissing it creates
-> neither, and deletes the draft.
+5. **(replaces the envelope-only paragraph)** Funnl reads message envelopes — who
+   sent each message, who it was addressed to, the subject, the times, which
+   conversation it belongs to and whether it is a draft — from your Inbox and Sent
+   Items. Where you and one other person have both written in the same exchange,
+   Funnl also reads the text of those messages, so it can draft a short summary of
+   what was discussed. It does not read one-sided exchanges, does not read
+   attachments, and does not act on newsletters, mailing lists, automated
+   notifications or automatic replies. Funnl can never send, reply, delete, move or
+   change anything in your mailbox, and does not read your Microsoft contacts,
+   calendars, files or your organisation's directory.
 
-> Funnl will not act on newsletters, mailing lists, automated notifications, or
-> messages from no-reply addresses. Where an exchange is unclear — more than one
-> other person involved, or Funnl could not read all of it — Funnl sets it aside
-> rather than guessing.
+6. **(new)** For one exchange Funnl reads at most six messages: the most recent
+   ones, with up to two from each side kept back so a reply from either of you is
+   always included. Each message is trimmed to 4,000 characters and at most 12,000
+   characters are used across the whole exchange, so where messages are long fewer
+   than six are used and the oldest are left out. Funnl reads the current message
+   rather than the quoted history below it, and removes tracking markup and hidden
+   characters first. The other person's signature block is kept, up to 600
+   characters, because it is the only place a name is reliably stated; your own
+   signature is not sent anywhere. The subject line is trimmed to 160 characters.
 
-> You can disconnect Outlook at any time. Disconnecting deletes the stored
-> credentials, the sync state and the working records — including the stored
-> references Funnl uses to find the messages — and no new reading can start
-> afterwards. **If a sync happens to be running at that moment it may finish the
-> message it has already requested**, because the request is already with
-> Microsoft; that text stays in memory for the rest of that run and is not saved,
-> and the run cannot write anything once the connection is gone. A suggestion you
-> have already accepted stays, because it is now your own contact and
-> interaction.
+7. **(new)** To write the summary, Funnl sends that cleaned text to Anthropic, the
+   company that provides Funnl's AI. Anthropic receives the message text, the
+   subject, the date, and a label saying which side wrote each message. It does not
+   receive your email address, the other person's email address, your Microsoft
+   account details, or any Funnl identifier. Under Anthropic's standard commercial
+   terms this data is deleted within 30 days. There is an exception: material that
+   Anthropic's automated policy enforcement flags may be kept for up to two years,
+   and safety classification scores for up to seven years. This is not
+   zero-retention processing.
+
+8. **(replaces "no subject line, summary or message text is kept")** A suggestion
+   keeps the summary, the suggested next step, the subject line, the contact, the
+   date, the type (Email) and one-way fingerprints of the exchange, so the same
+   conversation is not suggested twice. **The message text itself is discarded once
+   the summary is written** — it is not saved to Funnl's database and not written to
+   any log. The fingerprints are pseudonymous but are stored against your account,
+   so they are personal data about you; they cannot be turned back into a message,
+   an address or a subject line.
+
+9. **(replaces "this pilot proposes no new contacts")** When the other person is not
+   already one of your contacts, Funnl will propose adding them. The proposed email
+   address comes from the message itself and the proposed name from the name your
+   mail provider shows for the sender or from their signature. Funnl will not guess
+   a company, a job title, how you met, a LinkedIn profile or a tag — those fields
+   are left blank for you to fill in if you want them.
+
+10. **(new)** Nothing enters your network until you accept it. Funnl stores the
+    suggestion so it is still waiting when you come back, and you can edit every
+    proposed field first, including the name and the summary. Accepting a proposed
+    contact creates the contact and the first interaction together. **You can also
+    choose to save the contact without logging the conversation** — the interaction
+    is a checkbox you can clear. Dismissing a suggestion creates neither and deletes
+    the draft.
+
+11. **(new)** Where an exchange is unclear, Funnl sets it aside rather than guessing:
+    more than one other person involved, a message Funnl could not read, a message
+    whose headers your provider did not return, or a summary that did not come back
+    usable. In those cases you get no suggestion for that exchange and nothing is
+    written — never a suggestion with an empty note.
+
+12. **(extends the 24-hour working records)** While a read is in progress Funnl keeps
+    working records, one per conversation it is part-way through, and — once you have
+    agreed to body reading — an encrypted reference to each message it has selected,
+    so it can read them once both folders have been examined. Those references are
+    encrypted with the same key as the synchronisation state and hold no subject,
+    address, name or body. They belong to that single read, which becomes unusable 24
+    hours after it starts. Becoming unusable is not the same as being erased: they are
+    actually removed when a later read starts, when a read completes, when a read is
+    reset, or when you disconnect. Waiting, or looking at the progress of a read,
+    removes nothing — so if a read is abandoned and none of those happens, its working
+    records stay stored.
+
+13. **(extends disconnect)** You can disconnect at any time from this screen. That
+    deletes the connection, the stored Microsoft authorisation, the mailbox
+    synchronisation state, the working records, the message references and the
+    provenance records, and invalidates any suggestion you have not reviewed. An
+    invalidated suggestion is not deleted: it keeps the contact, the date and its
+    fingerprint so the same exchange is not suggested again, and it goes when you
+    delete that contact or your Funnl account.
+
+14. *(unchanged — and this is the in-flight acknowledgement, already correct)*
+    Disconnecting removes Funnl's copy of the authorisation, so Funnl has nothing
+    left to start a new read with. A read already under way may finish using access
+    it had already obtained. Disconnecting does not withdraw the permission at
+    Microsoft — to do that, remove Funnl from the permissions page of your Microsoft
+    account.
+
+15. *(unchanged)* Funnl's Privacy Policy sets all of this out in full, including what
+    is kept and when it is deleted.
 
 ### For the owner to confirm
 
-- **Anthropic is named.** The earlier draft deliberately avoided this because the
-  model path was not being built. It is being built now, so it must be disclosed,
-  and the 30-day window and its exception must be stated plainly. It must never
-  be described as zero-retention.
-- **What Anthropic does and does not receive** is stated specifically, because
-  `shared/outlookDraftContract.js` enforces it at runtime
-  (`assertRequestMinimization`): no token, no Microsoft account/tenant/message/
-  conversation id, no raw address, no attachment, no raw header — participants
-  are pseudonymous labels, and even the recipient domain is withheld.
+- **Anthropic is named**, with the 30-day window and its exception stated plainly. It
+  must never be described as zero-retention.
+- **What Anthropic does and does not receive** is stated specifically because
+  `assertRequestMinimization` enforces it at runtime: no token, no Microsoft
+  account/tenant/message/conversation id, no raw address, no attachment, no raw
+  header — participants are pseudonymous labels, and even the recipient domain is
+  withheld.
+- **No scope change.** `Mail.Read` already permitted body reading; paragraph 4 has
+  always said so. What changes is what Funnl *does* with a permission it already had,
+  which is precisely why fresh consent is required rather than a new scope.
 - **No accuracy claim.** It is "a short summary", editable.
-- **No upstream revocation claim.** Disconnect is local; it does not withdraw the
-  grant at Microsoft. That limit is already in the live wording and is kept.
-- **The in-flight read is acknowledged rather than glossed.** `disconnect_my_outlook`
-  deletes the connection row immediately; it does not wait for, or cancel, a
-  worker invocation that already holds a lease. A Graph request already issued
-  completes, and the body sits in that invocation's memory until it ends. Nothing
-  is written - every subsequent RPC finds no connection and refuses, and the
-  release answers false - but "disconnecting stops any further reading" on its own
-  overstated it, so the sentence now says what actually happens.
-- **The suggestion is stored before acceptance, and the wording now says so.** The
-  earlier "nothing is saved until you press Accept" was read as covering the
-  suggestion as well, which is wrong: `interaction_candidates` and
-  `new_contact_candidates` rows are written by the worker. The distinction that
-  matters to a reader is network membership, not storage, so that is what the
-  sentence now draws.
-
----
+- **The in-flight read is acknowledged**, and the sentence that does it is one that
+  was already published. `disconnect_my_outlook` deletes the connection row
+  immediately; it does not wait for or cancel a worker invocation that already holds
+  a lease. Nothing can be written afterwards — every later RPC finds no connection —
+  but a Graph request already issued completes.
+- **The optional interaction is disclosed** (paragraph 10). The review card offers it
+  as a checkbox, and `accept_new_contact_candidate` takes `p_create_interaction`.
+- **Three paragraphs are replaced, not supplemented.** See the table above. Adding
+  without replacing would publish a notice that contradicts itself.
 
 ## B. Privacy policy section (the Outlook subsection of `/privacy`)
 
@@ -198,20 +245,25 @@ rest — scopes, deletion, the pilot framing — stays as published on October 5
 > **A stored suggestion is not part of your network.** This is the distinction
 > that matters, and it is worth being exact about. Funnl does store the
 > suggestion — that is how it is still waiting when you come back to it. But it
-> sits in a review queue as a draft: it expires after 30 days if you never act on
-> it, and it is not among your contacts, your interactions or your follow-ups, and
-> is not visible to Funnl's AI assistant. **A contact and an interaction are
-> created only when you press Accept**, and only with the values you have
-> approved. Dismissing a suggestion creates neither and deletes the draft.
+> sits in a review queue as a draft: it is not among your contacts, your
+> interactions or your follow-ups, and is not visible to Funnl's AI assistant.
+> **A contact and an interaction are created only when you accept them**, and only
+> with the values you have approved — and for someone new you may save the contact
+> **without** logging the conversation, by clearing the interaction checkbox.
+> Dismissing a suggestion creates neither and deletes the draft.
 >
-> **How long proposals last.** A pending proposal expires 30 days after it is
-> created and is then no longer offered. Accepting it turns it into your own
-> contact and interaction, which stay until you delete them or delete your
-> account. Disconnecting Outlook deletes the credentials, the sync state, the
-> working records and the message references, and stops any new reading; a sync
-> already running may finish the one message it has already requested, which is
-> not saved. A proposal you already accepted stays, because it is now your own
-> data.
+> **How long proposals last.** A suggestion carries a 30-day review window.
+> **After that window Funnl will not let you accept it** — accepting or dismissing
+> an expired suggestion tells you it has expired and removes it from your queue.
+> Being expired is not the same as being erased: the summary and subject stay stored
+> until the suggestion is removed, and they are removed when you accept it, dismiss
+> it, disconnect Outlook, delete the contact it belongs to, or delete your account.
+> Accepting turns a suggestion into your own contact and interaction, which stay
+> until you delete them or delete your account. Disconnecting Outlook deletes the
+> credentials, the sync state, the working records and the message references, and
+> stops any new reading; a sync already running may finish the one message it has
+> already requested, which is not saved. A suggestion you already accepted stays,
+> because it is now your own data.
 
 **The `Last updated` date must be set to the actual New York publication date**,
 the same rule applied on October 5.
@@ -276,6 +328,43 @@ fails and Funnl sets the exchange aside rather than guessing.
 
 ---
 
+## C2. What the 30-day window actually does, and what it does not
+
+The earlier draft said a pending proposal "expires 30 days after it is created and
+is then no longer offered". **The first half is enforced; the second half was not
+true**, and the wording above now says only the part that is.
+
+WHAT IS ENFORCED, in the database, today:
+
+- `accept_new_contact_candidate` and `accept_interaction_candidate` both read
+  `context_expires_at` and return `expired` once it has passed. An expired draft
+  **cannot be turned into a contact or an interaction** by any path.
+- The review surface now treats that answer as terminal and removes the row from the
+  queue with "This suggestion has expired." Before this change the interaction card
+  had no entry for `expired` at all, so the answer fell through to a generic
+  "Something went wrong — please try again": the row could never be accepted,
+  retrying could not help, and it sat in the queue indefinitely. That is fixed, and
+  it is the reason the wording promises a refusal rather than a disappearance.
+
+WHAT IS **NOT** ENFORCED, and must be said plainly:
+
+- **Nothing is scheduled.** `expire_pending_outlook_context` exists, is bounded, and
+  erases the drafted text of expired candidates — but no cron job, no worker and no
+  request calls it. Grepped: its only mentions outside its own definition are in a
+  revoke-list comment. So an expired suggestion's summary and subject **remain
+  stored** until one of the removal events above happens.
+- **The queue does not filter on expiry.** Neither read adds a
+  `context_expires_at > now()` predicate, and it could not easily: that column is
+  deliberately excluded from the columns `authenticated` may select. So an expired
+  suggestion is still listed; it simply cannot be accepted.
+
+This is why the policy paragraph says "Funnl will not let you accept it" and
+"expired is not the same as erased", rather than "no longer offered". **A scheduled
+sweep is a prerequisite for claiming automatic deletion, and it is listed as a
+blocker in the PR rather than described here as though it existed.**
+
+---
+
 ## D. Every factual claim above, and where it was checked
 
 The wording was revised AFTER the path was built, and each number in it was read
@@ -301,6 +390,17 @@ can check the prose against the code without reading the code.
 | the 24-hour deadline deletes nothing by itself | two different deadlines, and only one has a sweep: the 30-day CANDIDATE expiry (`expire_pending_outlook_context`) updates `interaction_candidates` and `new_contact_candidates` and touches `outlook_round_messages` nowhere, and nothing at all is scheduled against the 24-hour `round_expires_at` | asserted in the retrieval SQL suite |
 | a page is refused only on genuine growth | the projected-retained-set computation, before any write | the two no-growth cases and the growth control in the retrieval SQL suite |
 | disconnect may leave one read in flight | `disconnect_my_outlook` deletes the connection row and neither waits for nor cancels a held lease | read directly from the function; the consequence (no write lands) follows from every RPC refusing an absent connection |
+| at most six messages, two reserved per side | `c_handles_per_conv` / `c_handles_reserved_per_folder` | the 7-message and one-sided-volume cases in the retrieval SQL suite |
+| automated mail is screened out before any proposal | `bulkListReason` + `nonHumanReason`, on the headers the content read returns | `outlook-content-corrections.test.js` — Auto-Submitted, X-Auto-Response-Suppress, no-reply senders, delivery failures, out-of-office, calendar notifications, List-Id, List-Unsubscribe, Precedence, plus the positive control |
+| a message whose headers were not returned yields no proposal | `requiresScreening` + `automation_unverified` | same suite: zero model calls, no proposal |
+| never a suggestion with an empty note on the content release | `planContentWrite` keys on `consentOpen` | same suite: the three codes that used to write one now write nothing |
+| the interaction is optional | `p_create_interaction` on the accept RPC; a checkbox on the card | `outlook-new-contact-review.test.js`; the browser harness renders and uses the checkbox |
+| an expired suggestion cannot be accepted | `context_expires_at` checked in both accept RPCs | `outlook-content-slice-runtime.sql` |
+| an expired suggestion is REMOVED from the queue, not retried | the `expired` outcome in both review maps | `outlook-new-contact-review.test.js` (exhaustive code-map check) |
+| nothing is scheduled to erase an expired draft | `expire_pending_outlook_context` has no caller | grepped; stated as a blocker, not as behaviour |
+| the provider calls are bounded in time and size, and refuse redirects | one AbortController across headers and body, `readJsonBounded`, `redirect: 'manual'` | `outlook-content-corrections.test.js` — headers-then-stall, oversized streamed bodies, redirects, and budget-admitted retries, on both the Anthropic and the Graph path |
+| a failed required handle does not advance the page | `HANDLE_FAILURES` → `handle_production_failed`, checked before the checkpoint | same suite: the second of two encryptions failing writes nothing, and the retry retains both |
+| every proposal is reachable | the proposals queue's own keyset cursor and refill | the browser harness reaches proposal 21 |
 | Anthropic's retention window | Anthropic's published commercial terms | not a code claim; owner to re-check against the current terms at publication |
 
 The one item on that list that is **not** verifiable from this repository is
