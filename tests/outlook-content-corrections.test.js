@@ -495,21 +495,6 @@ test('an entry that NEEDED content still gets no fallback on either disclosure',
 console.log('')
 console.log('4. the provider bounds are real')
 
-/** A response whose HEADERS arrive at once and whose BODY never does. */
-function stallingBody (status = 200) {
-  return {
-    status,
-    headers: { get: () => null },
-    body: {
-      getReader: () => ({
-        read: () => new Promise(() => {}),       // never resolves
-        cancel: async () => {},
-      }),
-    },
-    json: () => new Promise(() => {}),
-  }
-}
-
 /** A response that streams more bytes than the ceiling allows. */
 function oversizedBody (perChunk, chunks, status = 200) {
   let sent = 0

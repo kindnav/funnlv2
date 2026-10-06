@@ -733,6 +733,257 @@ SELECT '${PILOT_USER}', c.id, 'outlook', repeat('e',64), 'Email',
         AND status='dismissed';`) === '1')
 
   // ══ 5. the disconnect confirmation ═══════════════════════════════════════
+  // ══ 4b. THE NEW-CONTACT CARD, in the browser ══════════════════════════════
+  // The card that proposes someone not yet in Funnl, driven with real clicks and
+  // real keystrokes: edit then accept, the dismiss confirmation and its cancel, and
+  // reaching a proposal past the first page.
+  console.log('\n4b. the new-contact card: edit+accept, cancel, dismiss, and proposal 21')
+
+  // 21 proposals, so the LAST one is unreachable without continuation. Each carries a
+  // distinct address so the 21st can be recognised on screen; all invented.
+  psql(`
+DELETE FROM public.outlook_candidate_refs WHERE user_id = '${PILOT_USER}';
+DELETE FROM public.new_contact_candidates WHERE user_id = '${PILOT_USER}';
+INSERT INTO public.new_contact_candidates
+  (user_id, source, status, person_fingerprint, episode_fingerprint, key_version,
+   proposed_email, proposed_name, proposed_name_evidence, proposed_name_confidence,
+   draft_summary, draft_follow_up, proposed_interaction_date, proposed_type,
+   retained_subject, extraction_status, context_expires_at)
+SELECT '${PILOT_USER}', 'outlook', 'pending',
+       lpad(g::text, 64, 'a'), lpad(g::text, 64, 'b'), 1,
+       'person' || lpad(g::text, 2, '0') || '@fund.test',
+       'Proposed Person ' || lpad(g::text, 2, '0'),
+       'explicit_signature', 'high',
+       'She offered to review your application and asked for a CV by Friday.',
+       'Send the CV before Friday.',
+       current_date - g, 'Email', 'Summer analyst referral', 'ai_extracted',
+       now() + interval '30 days'
+  FROM generate_series(1, 21) AS gs(g);`, { tuplesOnly: false })
+  console.log('  seeded: 21 PENDING new-contact proposals')
+
+  const nccBefore = {
+    contacts: one(`SELECT count(*) FROM public.contacts WHERE user_id='${PILOT_USER}';`),
+    interactions: one(`SELECT count(*) FROM public.interactions WHERE user_id='${PILOT_USER}';`),
+  }
+
+  await page.goto(`${ORIGIN}/suggestions`)
+  try {
+    await page.waitFor('/new person/i.test(document.body.innerText)', 20000,
+      'the new-contact card')
+  } catch (e) {
+    // Say what the page ACTUALLY shows rather than only that it timed out: a
+    // refused column, a render crash and an empty queue look identical otherwise.
+    const body = await page.eval('return document.body.innerText.slice(0, 600)')
+    const errs = await page.eval(
+      'return (window.__restErrors || []).slice(0, 4)')
+    throw new Error(`${e.message}
+    BODY: ${String(body).replace(/\s+/g, ' ')}`
+      + `
+    REST: ${JSON.stringify(errs)}`)
+  }
+
+  // ── opening the queue creates nothing ────────────────────────────────────
+  check('opening the proposals queue created NO contact',
+    one(`SELECT count(*) FROM public.contacts WHERE user_id='${PILOT_USER}';`) === nccBefore.contacts,
+    `before=${nccBefore.contacts}`)
+  check('and NO interaction',
+    one(`SELECT count(*) FROM public.interactions WHERE user_id='${PILOT_USER}';`)
+      === nccBefore.interactions)
+
+  // ── only ONE PAGE renders, and the 21st is NOT on it ─────────────────────
+  const proposalCards = await page.eval(
+    'return (document.body.innerText.match(/new person/gi) || []).length')
+  check('exactly one page of proposals renders', proposalCards === 20,
+    `rendered=${proposalCards}`)
+  // Ordered by date DESC, so g=1 (yesterday) is first and g=21 (21 days ago) is last.
+  const has21Initially = await page.eval(
+    'return document.body.innerText.includes("Proposed Person 21")')
+  check('proposal 21 is NOT on the first page', has21Initially === false)
+  const loadMoreShown = await page.eval(
+    'return [...document.querySelectorAll("button")].some(b => /Load more/.test(b.innerText))')
+  check('and a Load more control is offered', loadMoreShown === true)
+
+  // ── EDIT THEN ACCEPT the first card ──────────────────────────────────────
+  // The fields are always visible on this card - a proposal is a draft, so there is
+  // no "Edit details" toggle to find first.
+  const NEW_NAME = 'Priya Nair-Shah'
+  const NEW_COMPANY = 'Northfield Capital'
+  const NEW_NOTE = 'Typed in the browser before accepting.'
+  const nameSel = 'input[type="text"]'
+  await page.eval(`const i=document.querySelector(${JSON.stringify(nameSel)});
+    i.focus(); i.setSelectionRange(0, i.value.length); return true;`)
+  // Clear by selecting all and typing over it, the way a person would.
+  await page.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Backspace',
+    code: 'Backspace', windowsVirtualKeyCode: 8, nativeVirtualKeyCode: 8 })
+  await page.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Backspace',
+    code: 'Backspace', windowsVirtualKeyCode: 8, nativeVirtualKeyCode: 8 })
+  await page.type(nameSel, NEW_NAME)
+  const typedName = await page.eval(
+    `return document.querySelector(${JSON.stringify(nameSel)}).value`)
+  check('the name field accepted browser keystrokes', typedName.includes(NEW_NAME),
+    `name=${JSON.stringify(typedName)}`)
+
+  // The company field is the SECOND text input on the card.
+  await page.eval(`const all=[...document.querySelectorAll('input[type="text"]')];
+    all[1].focus(); return true;`)
+  const companySel = 'input[type="text"]:nth-of-type(1)'
+  await page.eval(`const all=[...document.querySelectorAll('input[type="text"]')];
+    const i=all[1]; const r=i.getBoundingClientRect();
+    window.__companyBox={x:r.x+r.width/2,y:r.y+r.height/2}; return true;`)
+  const cBox = await page.eval('return window.__companyBox')
+  await page.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: cBox.x, y: cBox.y, button: 'left', clickCount: 1 })
+  await page.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: cBox.x, y: cBox.y, button: 'left', clickCount: 1 })
+  for (const ch of NEW_COMPANY) {
+    await page.send('Input.dispatchKeyEvent', { type: 'keyDown', text: ch })
+    await page.send('Input.dispatchKeyEvent', { type: 'keyUp', text: ch })
+  }
+  void companySel
+
+  // The note is the card's only textarea.
+  await page.click('textarea')
+  await page.eval(`const t=document.querySelector('textarea');
+    t.focus(); t.setSelectionRange(0, t.value.length); return true;`)
+  await page.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Backspace',
+    code: 'Backspace', windowsVirtualKeyCode: 8, nativeVirtualKeyCode: 8 })
+  await page.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Backspace',
+    code: 'Backspace', windowsVirtualKeyCode: 8, nativeVirtualKeyCode: 8 })
+  for (const ch of NEW_NOTE) {
+    await page.send('Input.dispatchKeyEvent', { type: 'keyDown', text: ch })
+    await page.send('Input.dispatchKeyEvent', { type: 'keyUp', text: ch })
+  }
+  const typedNote = await page.eval("return document.querySelector('textarea').value")
+  check('the note field accepted browser keystrokes', typedNote.includes(NEW_NOTE),
+    `note=${JSON.stringify(typedNote)}`)
+
+  // STILL nothing created, after every edit.
+  check('EDITING created no contact and no interaction',
+    one(`SELECT count(*) FROM public.contacts WHERE user_id='${PILOT_USER}';`) === nccBefore.contacts
+    && one(`SELECT count(*) FROM public.interactions WHERE user_id='${PILOT_USER}';`)
+       === nccBefore.interactions)
+
+  await page.click('Save contact & interaction', { byText: true })
+  await sleep(1800)
+
+  const savedContact = psql(`SELECT name, coalesce(company,'NULL'), email
+    FROM public.contacts WHERE user_id='${PILOT_USER}' AND email LIKE 'person%@fund.test';`)
+    .trim().split('|')
+  check('ONE contact was created', savedContact.length === 3, `row=${savedContact.join('|')}`)
+  check('with the name typed IN THE BROWSER', savedContact[0] === NEW_NAME,
+    `name=${savedContact[0]}`)
+  check('and the company typed in the browser', savedContact[1] === NEW_COMPANY,
+    `company=${savedContact[1]}`)
+  check('and the address from the proposal, which the UI cannot edit',
+    savedContact[2] === 'person01@fund.test', `email=${savedContact[2]}`)
+
+  const savedInteraction = psql(`SELECT i.type, i.notes, i.source
+    FROM public.interactions i JOIN public.contacts c ON c.id = i.contact_id
+    WHERE i.user_id='${PILOT_USER}' AND c.email='person01@fund.test';`).trim().split('|')
+  check('and the interaction was created WITH it', savedInteraction.length === 3,
+    `row=${savedInteraction.join('|')}`)
+  check('carrying the note typed in the browser', savedInteraction[1] === NEW_NOTE,
+    `notes=${JSON.stringify(savedInteraction[1])}`)
+  check('and attributed to outlook', savedInteraction[2] === 'outlook')
+  check('the accepted proposal is no longer pending',
+    one(`SELECT status FROM public.new_contact_candidates
+         WHERE person_fingerprint=lpad('1',64,'a');`) === 'accepted')
+  check('and its draft was erased on acceptance',
+    one(`SELECT coalesce(draft_summary,'NULL') FROM public.new_contact_candidates
+         WHERE person_fingerprint=lpad('1',64,'a');`) === 'NULL')
+
+  // ── THE DISMISS CONFIRMATION, AND ITS CANCEL ─────────────────────────────
+  await page.waitFor('/new person/i.test(document.body.innerText)', 15000)
+  const beforeCancel = one(`SELECT count(*) FROM public.new_contact_candidates
+    WHERE user_id='${PILOT_USER}' AND status='pending';`)
+  await page.click('Dismiss', { byText: true })
+  await sleep(400)
+  const confirmText = await page.eval(
+    'return /No contact or interaction will be created/.test(document.body.innerText)')
+  check('the first Dismiss click opens a confirmation that promises nothing is created',
+    confirmText === true)
+  check('and dismisses nothing yet',
+    one(`SELECT count(*) FROM public.new_contact_candidates
+         WHERE user_id='${PILOT_USER}' AND status='pending';`) === beforeCancel,
+    `pending=${beforeCancel}`)
+
+  // CANCEL: the card returns, and nothing at all has happened.
+  await page.click('Cancel', { byText: true })
+  await sleep(400)
+  const cancelled = await page.eval(
+    'return !/No contact or interaction will be created/.test(document.body.innerText)'
+    + ' && [...document.querySelectorAll("button")].some(b => /^Dismiss$/.test(b.innerText.trim()))')
+  check('Cancel closes the confirmation and restores the card', cancelled === true)
+  check('and cancelling dismissed nothing',
+    one(`SELECT count(*) FROM public.new_contact_candidates
+         WHERE user_id='${PILOT_USER}' AND status='pending';`) === beforeCancel)
+
+  // Now actually dismiss it.
+  const contactsBeforeDismiss = one(
+    `SELECT count(*) FROM public.contacts WHERE user_id='${PILOT_USER}';`)
+  await page.click('Dismiss', { byText: true })
+  await sleep(300)
+  await page.click('Yes, dismiss', { byText: true })
+  await sleep(1500)
+  check('dismissing created NO contact',
+    one(`SELECT count(*) FROM public.contacts WHERE user_id='${PILOT_USER}';`)
+      === contactsBeforeDismiss, `before=${contactsBeforeDismiss}`)
+  check('and the proposal is terminal',
+    one(`SELECT count(*) FROM public.new_contact_candidates
+         WHERE user_id='${PILOT_USER}' AND status='dismissed';`) === '1')
+
+  // ── REACHING PROPOSAL 21 ─────────────────────────────────────────────────
+  // 19 proposals remain on the rendered page and 1 sits past the cursor. Draining the
+  // visible page through the UI must REFILL it, not say "all caught up" - which is
+  // exactly what happened when this queue had a bare limit of 20 and no continuation.
+  let guard = 0
+  for (;;) {
+    guard += 1
+    if (guard > 40) throw new Error('the proposals queue never drained')
+    const stillThere = await page.eval(
+      'return [...document.querySelectorAll("button")].some(b => /^Dismiss$/.test(b.innerText.trim()))')
+    if (!stillThere) break
+    const reached21 = await page.eval(
+      'return document.body.innerText.includes("Proposed Person 21")')
+    if (reached21) break
+    await page.click('Dismiss', { byText: true })
+    await sleep(200)
+    await page.click('Yes, dismiss', { byText: true })
+    await sleep(700)
+  }
+
+  const saw21 = await page.eval(
+    'return document.body.innerText.includes("Proposed Person 21")')
+  check('PROPOSAL 21 BECAME REACHABLE after the visible page drained', saw21 === true,
+    `dismissals=${guard}, body=${(await page.eval(
+      'return document.body.innerText.slice(0, 300)')).replace(/\s+/g, ' ')}`)
+  const caughtUpWrongly = await page.eval(
+    'return /You.{0,3}re all caught up/.test(document.body.innerText)')
+  check('and the page did NOT claim "all caught up" while it remained',
+    caughtUpWrongly === false)
+
+  // The explicit approval boundary, measured across the whole section: exactly ONE
+  // contact and ONE interaction exist, from the single Save that was pressed.
+  check('across every edit, cancel and dismissal, exactly ONE contact was created',
+    one(`SELECT count(*) FROM public.contacts WHERE user_id='${PILOT_USER}'
+          AND email LIKE 'person%@fund.test';`) === '1')
+  check('and exactly ONE interaction, from the single Save pressed',
+    one(`SELECT count(*) FROM public.interactions i JOIN public.contacts c
+          ON c.id = i.contact_id
+         WHERE i.user_id='${PILOT_USER}' AND c.email LIKE 'person%@fund.test';`) === '1')
+
+  // ── LEAVE THE STATE THIS SECTION FOUND ───────────────────────────────────
+  // Section 5 asserts that the ONE interaction accepted in section 4 survives the
+  // disconnect, by exact count. The contact and interaction this section created are
+  // therefore removed - every claim about them has already been checked above, and a
+  // section that leaves state behind makes a later one's count a moving target. The
+  // contact delete cascades to its interaction.
+  psql(`DELETE FROM public.outlook_candidate_refs WHERE user_id = '${PILOT_USER}';
+        DELETE FROM public.new_contact_candidates WHERE user_id = '${PILOT_USER}';
+        DELETE FROM public.contacts
+         WHERE user_id = '${PILOT_USER}' AND email LIKE 'person%@fund.test';`,
+  { tuplesOnly: false })
+  check('this section left exactly the interaction count it found',
+    one(`SELECT count(*) FROM public.interactions WHERE user_id='${PILOT_USER}';`) === '1')
+
   console.log('\n5. the disconnect confirmation, as rendered')
   psql(`
 INSERT INTO public.microsoft_connections
