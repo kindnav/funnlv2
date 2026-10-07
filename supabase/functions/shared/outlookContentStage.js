@@ -38,7 +38,7 @@
 import {
   buildMessageContentRequest, executeGraphRequest, readMessageContent, isUsableGraphId,
 } from './outlookGraphTransport.js'
-import { callDraftModel } from './outlookDraftContract.js'
+import { callDraftModel, MINIMIZATION_CATEGORIES } from './outlookDraftContract.js'
 import { summarizeConversation, summarizePassResult, MAX_FETCH_PER_CONVERSATION } from './outlookContentPass.js'
 import { contentPermissions } from './outlookContentConsent.js'
 
@@ -76,41 +76,72 @@ export const STAGE_WRITES = Object.freeze([
 const isPlainObject = (v) => typeof v === 'object' && v !== null && !Array.isArray(v)
 
 /**
- * Deferrals that are SETTLED for this round. The conversation gets the
- * metadata-only candidate it would have had anyway, the reason is reported, and
- * finalisation moves past it - retrying would read the same mail to the same end.
+ * EVERY deferral code, classified EXACTLY ONCE as terminal or retryable.
+ *
+ * WHY A MAP AND NOT TWO LISTS. `minimization_failed` used to appear in both, and
+ * planContentWrite tested the retryable list first - so a DETERMINISTIC privacy
+ * refusal was treated as work worth retrying. The run stopped the finalisation loop
+ * without passing the conversation, no cursor moved, and the next invocation re-read
+ * the same mail and refused again for the same reason. Measured on the pilot: the same
+ * two bodies re-fetched every invocation, zero model calls, zero candidates, no cursor,
+ * and every later conversation in the round unreachable - in about two seconds.
+ *
+ * A map cannot express that overlap, because a key has one value. The two lists below
+ * are DERIVED from it, so they cannot drift apart from each other or from this.
+ *
+ *   terminal   the same inputs would produce the same answer. Nothing is written, the
+ *              reason is reported, and the conversation is PASSED so the round can
+ *              finish. Deterministic refusal is not the same thing as lost work.
+ *   retryable  another invocation could genuinely answer differently - a transient
+ *              provider or database failure, a budget that ran out, or configuration
+ *              that an operator can supply. The conversation is NOT passed, so the
+ *              resume position preserves it.
  */
-export const TERMINAL_DEFERRALS = Object.freeze([
-  'content_consent_missing',       // the gate is closed; it will not open mid-round
-  'third_party_consent_missing',
+export const DEFERRAL_CLASS = Object.freeze({
+  // ── terminal ──────────────────────────────────────────────────────────────
+  content_consent_missing: 'terminal',      // the gate is closed; it will not open mid-round
+  third_party_consent_missing: 'terminal',
   // The provider returned no header collection, so the exchange could not be
   // screened. Terminal for this round: the same fetch would answer the same way.
-  'automation_unverified',
-  'no_handles',                    // nothing was stored to fetch with
-  'no_usable_content',             // the bodies sanitized to nothing
-  'minimization_failed',           // the request would have carried something forbidden
-  'ambiguous_counterparty',        // more than one external person
-  'counterparty_unusable',
-  'model_output_invalid',          // the response failed the strict validator
-  'model_deferred',                // the model itself declined
-])
+  automation_unverified: 'terminal',
+  no_handles: 'terminal',                   // nothing was stored to fetch with
+  no_usable_content: 'terminal',            // the bodies sanitized to nothing
+  // THE PRIVACY GUARD REFUSED, and that refusal is a property of the MAIL, not of the
+  // configuration: the forbidden value is in the message text or signature, so reading
+  // it again produces the same request and the same refusal. Terminal, therefore -
+  // and this is the correction. The guard itself is unchanged.
+  minimization_failed: 'terminal',
+  // THE REQUEST COULD NOT BE BUILT AT ALL - a bad mode, no allowed dates, or a payload
+  // over MAX_REQUEST_CHARS. Distinct from the refusal above on purpose: both are
+  // terminal, but one means "Funnl withheld a request that would have leaked" and the
+  // other means "Funnl could not construct a request", and reporting the second as the
+  // first made a construction bug look like a privacy event.
+  request_build_failed: 'terminal',
+  ambiguous_counterparty: 'terminal',       // more than one external person
+  counterparty_unusable: 'terminal',
+  model_output_invalid: 'terminal',         // the response failed the strict validator
+  model_deferred: 'terminal',               // the model itself declined
 
-/**
- * Deferrals worth another invocation. NOTHING is written and the write cursor does
- * not pass the conversation, so the next invocation redoes it from the start.
- */
-export const RETRYABLE_DEFERRALS = Object.freeze([
-  'budget_exhausted',
-  'fetch_failed',          // a transient Graph failure, or a moved message
-  'model_unavailable',     // the provider failed after its own retries
-  'handles_unreadable',    // the handle RPC itself failed
-  // A CONFIGURATION fact, not a property of the mail: the key is absent or the
-  // request could not be built. Configuring the key makes the same conversation
-  // summarizable, so the work is preserved for a retry rather than settled - which
-  // is the whole difference between "come back" and "there was nothing to say".
-  'summary_key_absent',
-  'minimization_failed',
-])
+  // ── retryable ─────────────────────────────────────────────────────────────
+  budget_exhausted: 'retryable',
+  fetch_failed: 'retryable',                // a transient Graph failure, or a moved message
+  model_unavailable: 'retryable',            // the provider failed after its own retries
+  handles_unreadable: 'retryable',           // the handle RPC itself failed
+  // A CONFIGURATION fact, not a property of the mail: the key is absent. Configuring
+  // it makes the same conversation summarizable, so the work is preserved for a retry
+  // rather than settled - the difference between "come back" and "nothing to say".
+  summary_key_absent: 'retryable',
+})
+
+/** Derived, so it cannot overlap RETRYABLE_DEFERRALS. */
+export const TERMINAL_DEFERRALS = Object.freeze(
+  Object.keys(DEFERRAL_CLASS).filter((c) => DEFERRAL_CLASS[c] === 'terminal'),
+)
+
+/** Derived, so it cannot overlap TERMINAL_DEFERRALS. */
+export const RETRYABLE_DEFERRALS = Object.freeze(
+  Object.keys(DEFERRAL_CLASS).filter((c) => DEFERRAL_CLASS[c] === 'retryable'),
+)
 
 /**
  * The two reasons a conversation is SETTLED WITHOUT A NOTE rather than deferred.
@@ -423,7 +454,13 @@ export function planContentWrite (entry, pass, opts = {}) {
   }
 
   // A RETRYABLE deferral: write nothing, do not pass the conversation.
-  if (RETRYABLE_DEFERRALS.includes(reason)) {
+  //
+  // KEYED ON THE MAP, not on which list happens to be tested first. The order used to
+  // decide the answer for any code that was in both lists, and `minimization_failed`
+  // was - so a deterministic privacy refusal came back retryable and stalled the round
+  // for good. The classes are disjoint now, which makes the order irrelevant; reading
+  // the map says so in the code rather than relying on it.
+  if (DEFERRAL_CLASS[reason] === 'retryable') {
     return { write: 'none', rpc: null, args: null, deferral: reason, retryable: true }
   }
 
@@ -505,6 +542,13 @@ export function summarizeContentStage (counts) {
     // explained rather than silent.
     deferred: clean(c.deferred, CONTENT_DEFERRAL_CODES),
     ignored: clean(c.ignored, CONTENT_IGNORE_CODES),
+    // WHICH CATEGORY the privacy guard objected to, counted. These are the controlled
+    // labels assertRequestMinimization returns - 'address', 'provider_id', 'token',
+    // 'unserializable' - and never the offending value, which the guard does not
+    // return and this never reads. It is the difference between "a request was
+    // withheld" and "a request was withheld because an address was in it", which is
+    // what an operator needs to tell a signature block from a leaking identifier.
+    refusal_categories: clean(c.refusedCategories, MINIMIZATION_CATEGORIES),
   }
 }
 
@@ -549,6 +593,7 @@ export function sanitizeContentReport (report) {
     // reach a response body through this field.
     deferred: codes(report.deferred, CONTENT_DEFERRAL_CODES),
     ignored: codes(report.ignored, CONTENT_IGNORE_CODES),
+    refusal_categories: codes(report.refusal_categories, MINIMIZATION_CATEGORIES),
   }
 }
 

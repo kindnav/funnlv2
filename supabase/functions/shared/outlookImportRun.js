@@ -1006,6 +1006,9 @@ export async function runOutlookImport (p) {
     attempted: 0, notesWritten: 0, proposalsWritten: 0, metadataOnly: 0,
     bodiesRead: 0, modelCalls: 0,
     deferred: Object.create(null), ignored: Object.create(null),
+    // WHICH CATEGORY the privacy guard objected to, when it did. Controlled labels
+    // only; the offending value is never returned by the guard and is never read here.
+    refusedCategories: Object.create(null),
   }
   const bumpDeferral = (c) => { content.deferred[c] = (content.deferred[c] || 0) + 1 }
   // The observed cost of the slowest content stage so far, for the admission check.
@@ -1231,6 +1234,17 @@ export async function runOutlookImport (p) {
 
         const plan = planContentWrite(entry, pass, { consentOpen })
         if (plan.deferral !== null) bumpDeferral(plan.deferral)
+        // THE SAFE DIAGNOSTIC for a withheld request. Keyed on the PASS's own reason
+        // rather than the plan's, because planContentWrite substitutes a default when
+        // the reason is absent and that default never carries categories. Filtered to
+        // the guard's controlled vocabulary on the way into the report, and again on
+        // the way out of summarizeRun.
+        if (pass.reason === 'minimization_failed' && Array.isArray(pass.categories)) {
+          for (const cat of pass.categories) {
+            if (typeof cat !== 'string') continue
+            content.refusedCategories[cat] = (content.refusedCategories[cat] || 0) + 1
+          }
+        }
         if (typeof plan.ignored === 'string') {
           content.ignored[plan.ignored] = (content.ignored[plan.ignored] || 0) + 1
         }

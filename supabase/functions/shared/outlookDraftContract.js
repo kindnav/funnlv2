@@ -291,6 +291,21 @@ export function buildDraftHeaders(apiKey) {
 }
 
 /**
+ * The CATEGORIES assertRequestMinimization can report, and the only vocabulary any
+ * caller may forward.
+ *
+ * Exported so the worker's content report can filter against the same list the guard
+ * labels with, rather than a second copy of it. A category names a KIND of forbidden
+ * value; the value itself is never returned by the guard and must never be logged.
+ */
+export const MINIMIZATION_CATEGORIES = Object.freeze([
+  'address',          // a forbidden address, or any bare email address anywhere
+  'provider_id',      // a Microsoft account, tenant, message or conversation id
+  'token',            // a bearer token or JWT-shaped string
+  'unserializable',   // the request could not even be serialized to be checked
+])
+
+/**
  * Runtime minimization guard. Scans the SERIALIZED request for any value that must
  * never leave Funnl. Returns a controlled list of which CATEGORIES were found — never
  * the offending value itself.

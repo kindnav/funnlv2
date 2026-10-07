@@ -445,15 +445,52 @@ test('REPRODUCED: three codes used to become a noteless suggestion', () => {
 })
 
 test('a CONFIGURATION or TRANSIENT failure preserves the work for retry', () => {
-  for (const reason of ['summary_key_absent', 'minimization_failed', 'budget_exhausted',
+  // CORRECTED. `minimization_failed` was in this list, and that was the stall: the
+  // privacy guard's refusal is a property of the MAIL, not of the configuration, so
+  // another invocation reads the same bodies and refuses again. It kept the
+  // conversation unprocessed for ever and no cursor could move. It is terminal now,
+  // and the case below covers it. What this test protects is unchanged: a failure that
+  // another invocation really could answer differently must not be settled.
+  for (const reason of ['summary_key_absent', 'budget_exhausted',
     'fetch_failed', 'model_unavailable', 'handles_unreadable']) {
     assert.ok(RETRYABLE_DEFERRALS.includes(reason), `${reason} must be retryable`)
+    assert.ok(!TERMINAL_DEFERRALS.includes(reason),
+      `${reason} must not ALSO be terminal - that overlap is what stalled the round`)
     const plan = planContentWrite(planEntry(), { outcome: 'defer', reason },
       { consentOpen: true })
     assert.strictEqual(plan.write, 'none', reason)
     assert.strictEqual(plan.retryable, true,
       `${reason} must not let the cursor pass the conversation`)
   }
+})
+
+test('A DETERMINISTIC PRIVACY REFUSAL IS SETTLED, not retried for ever', () => {
+  // THE STALL, at the planner. `minimization_failed` was in both classification lists
+  // and planContentWrite tested the retryable one first, so it answered retryable:true.
+  // The run then stopped the finalisation loop without passing the conversation - no
+  // cursor, nothing written, and the same two bodies re-read on every invocation.
+  //
+  // Settled does NOT mean accepted: no suggestion is written, and the reason is still
+  // reported. It means the round may finish.
+  for (const reason of ['minimization_failed', 'request_build_failed']) {
+    assert.ok(TERMINAL_DEFERRALS.includes(reason), `${reason} must be terminal`)
+    assert.ok(!RETRYABLE_DEFERRALS.includes(reason), `${reason} must not also be retryable`)
+    const plan = planWrite(planEntry(), { outcome: 'defer', reason }, { consentOpen: true })
+    assert.strictEqual(plan.write, 'none', `${reason} must write nothing`)
+    assert.strictEqual(plan.rpc, null, reason)
+    assert.strictEqual(plan.retryable, false,
+      `${reason} must let finalisation pass the conversation`)
+    assert.strictEqual(plan.deferral, reason, 'and the reason must still be reported')
+  }
+})
+
+test('THE CLASSIFICATION IS A PARTITION: every code terminal or retryable, never both', () => {
+  const overlap = TERMINAL_DEFERRALS.filter((c) => RETRYABLE_DEFERRALS.includes(c))
+  assert.deepStrictEqual(overlap, [], 'a code in both lists is a stall waiting to happen')
+  assert.strictEqual(
+    TERMINAL_DEFERRALS.length + RETRYABLE_DEFERRALS.length,
+    new Set([...TERMINAL_DEFERRALS, ...RETRYABLE_DEFERRALS]).size,
+    'the two lists must partition the vocabulary, not merely cover it')
 })
 
 test('a TERMINAL deferral is reported and settled, with no row', () => {
@@ -1136,12 +1173,100 @@ test('RETRY BUDGET EXHAUSTION through the stage defers, and reads no more', asyn
   assert.ok(['fetch_failed', 'budget_exhausted'].includes(r.reason), JSON.stringify(r))
 })
 
+test('A REQUEST THAT CANNOT BE BUILT is its own code, not a privacy refusal', async () => {
+  // THE DISTINCTION THE LIVE REPORT COULD NOT MAKE. buildDraftRequest throwing used to
+  // be reported as `minimization_failed` - the same code the privacy guard returns
+  // when it withholds a request. One means "Funnl refused to send something"; the
+  // other means "Funnl could not build anything to send". An operator reading
+  // `minimization_failed` had no way to tell a signature block from a construction bug.
+  //
+  // DRIVEN THROUGH THE REAL PASS, not asserted on the planner: the ceiling is reached
+  // the way it is actually reachable, with an UNKNOWN person (whose schema is the
+  // larger of the two) and bodies carrying full-length signature blocks. Signatures are
+  // kept on top of the episode character budget rather than inside it, which is why
+  // 20,000 is reachable at all - see the note in the suite that covers that limit.
+  // CALIBRATED AGAINST THE REAL SANITIZER, not guessed: six messages each carrying
+  // 2,000 characters of text is exactly MAX_EPISODE_CHARS, and the four inbound ones
+  // each keep a full 600-character signature on top of that budget. Measured through
+  // sanitizeMessageContent and boundEpisodeContent: 12,000 text + 2,400 signature in
+  // new-contact mode serializes past MAX_REQUEST_CHARS. A shorter body (1,950 each)
+  // comes to 19,923 and builds fine, so this is the boundary and not a wild overshoot.
+  //
+  // The filler is varied prose on purpose. A long run of one character is rejected
+  // earlier as `binary_like`, which would have tested the wrong thing.
+  const NL = String.fromCharCode(10)
+  const SIGFILL = 'Ventures Partners LLP, Level 12, Harbour Exchange, London. '
+  const long = 'The programme covers markets and coverage rotations. '
+    .repeat(Math.ceil(2000 / 52)).slice(0, 2000)
+  const sig = ['--', 'Cleo Adeyemi', 'Analyst Programme Lead',
+    SIGFILL.repeat(Math.ceil(620 / SIGFILL.length))].join(NL)
+  const inbound = long + NL + NL + sig
+
+  const seenModel = { n: 0 }
+  const handles = []
+  for (let i = 1; i <= 6; i++) {
+    handles.push({
+      cfp: CFP, mfp: String(i).repeat(64).slice(0, 64),
+      folder: i <= 4 ? 'inbox' : 'sentitems',
+      sent_at: '2026-09-' + (14 + i) + 'T10:00:00Z',
+      mid_ct: 'SEAL:AAkALgAAbig' + i, mid_nonce: 'N1', key_version: 1,
+    })
+  }
+  const { params } = stageParams({
+    // An UNKNOWN person: no contactId, so the larger new-contact schema is used.
+    conversation: { cfp: CFP, contactId: null, messageCount: 6, lastLocalDate: '2026-09-20' },
+    rpc: async (name) => {
+      if (name !== 'list_outlook_round_message_handles') return { data: { result: 'ok' }, error: null }
+      return { error: null, data: { result: 'ok', next_cursor: null, handles } }
+    },
+    deps: {
+      sleepImpl: async () => {},
+      fetchImpl: async (url) => {
+        if (String(url).includes('api.anthropic.com')) {
+          seenModel.n += 1
+          return jsonBody({ content: [{ type: 'text', text: '{}' }], stop_reason: 'end_turn' })
+        }
+        const u = String(url)
+        const pre = u.indexOf('/me/messages/') + '/me/messages/'.length
+        const id = decodeURIComponent(u.slice(pre, u.indexOf('?', pre)))
+        const isIn = Number(id.slice(-1)) <= 4
+        return jsonBody({
+          id,
+          body: { contentType: 'text', content: isIn ? inbound : long },
+          uniqueBody: { contentType: 'text', content: isIn ? inbound : long },
+          uniqueBodyContentType: 'text',
+          subject: 'Summer analyst referral',
+          from: isIn
+            ? { emailAddress: { address: THEM, name: 'Cleo Adeyemi' } }
+            : { emailAddress: { address: ME, name: 'Pilot' } },
+          toRecipients: [{ emailAddress: { address: isIn ? ME : THEM } }],
+          internetMessageHeaders: [{ name: 'Received', value: 'by fixture' }],
+        })
+      },
+    },
+  })
+  const r = await summarizeOneConversation(params)
+  assert.strictEqual(r.outcome, 'defer', JSON.stringify(r))
+  assert.strictEqual(r.reason, 'request_build_failed',
+    'a construction failure must not be reported as the privacy guard refusing')
+  assert.notStrictEqual(r.reason, 'minimization_failed')
+  assert.strictEqual(seenModel.n, 0, 'and nothing was sent to the provider')
+  // Terminal, so the round can still finish, and no suggestion is written.
+  const plan = planWrite(planEntry(), r, { consentOpen: true })
+  assert.strictEqual(plan.write, 'none')
+  assert.strictEqual(plan.retryable, false)
+  assert.strictEqual(plan.deferral, 'request_build_failed')
+})
+
 test('A DEFERRED CONVERSATION STAYS RESUMABLE: no write, no cursor advance', () => {
   // The chain that matters: a retryable deferral must plan NO write and must NOT let
   // the finalisation cursor pass the conversation. Asserted on the planner, which is
   // what the run consults, for every reason this round can produce.
+  // `minimization_failed` was in this list too. It belonged in neither: a refusal the
+  // same mail reproduces every time is not unfinished work, and treating it as such is
+  // what made the round unfinishable.
   for (const reason of ['fetch_failed', 'budget_exhausted', 'model_unavailable',
-    'handles_unreadable', 'summary_key_absent', 'minimization_failed']) {
+    'handles_unreadable', 'summary_key_absent']) {
     const plan = planWrite(planEntry(), { outcome: 'defer', reason }, { consentOpen: true })
     assert.strictEqual(plan.write, 'none', `${reason} wrote something`)
     assert.strictEqual(plan.rpc, null, reason)
