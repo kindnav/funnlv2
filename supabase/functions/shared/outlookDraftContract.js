@@ -69,6 +69,99 @@ export const THINKING_DISABLED = Object.freeze({ type: 'disabled' })
  * a LOCAL exception escaping the call - a programming fault, not a provider verdict.
  * The thrown value is never read: it can carry a URL, a key or a response body.
  */
+/**
+ * The CATEGORIES a 400 can be classified into, and the only vocabulary a caller may
+ * forward. A category is a fixed string; the provider's message is never returned.
+ *
+ * WHY THIS EXISTS. A 400 is the one provider refusal whose cause is genuinely
+ * ambiguous: Anthropic documents `invalid_request_error` as covering "an issue with the
+ * format or content of your request" AND returns a 400 "when usage reaches an
+ * organization or workspace spend limit you set". A schema the compiler rejects, an
+ * unsupported parameter, an exhausted spend limit and an empty balance therefore arrive
+ * identically as far as the status line is concerned - and `provider_bad_request` alone
+ * tells an operator nothing about which of them to go and fix.
+ *
+ * `unknown` is not a fallback to be embarrassed about: it is the honest answer whenever
+ * the message does not match a documented marker, and it is what keeps a guess out of
+ * the report.
+ */
+export const DRAFT_BAD_REQUEST_CATEGORIES = Object.freeze([
+  'spend_limit',            // an organization or workspace spend limit was reached
+  'insufficient_credits',   // a billing or credit-balance problem
+  'schema_complexity',      // the schema was rejected as too complex to compile
+  'unsupported_parameter',  // a parameter or schema feature this model does not accept
+  'unknown',                // no documented marker matched, or the body was unreadable
+])
+
+/**
+ * Classify a 400 body into exactly one controlled category.
+ *
+ * READS the documented error shape - `{ type: 'error', error: { type, message } }` -
+ * and matches the message against markers taken from Anthropic's own documentation.
+ * RETURNS a category and nothing else. The message is not returned, not logged, and
+ * not retained; only the matched/not-matched outcome leaves this function, so a message
+ * that happens to quote the user's mail cannot escape through it.
+ *
+ * @param {unknown} body the parsed error response
+ * @returns {string} one of DRAFT_BAD_REQUEST_CATEGORIES
+ */
+export function classifyBadRequest(body) {
+  const err = isPlainObject(body) && isPlainObject(body.error) ? body.error : null
+  const message = err !== null && typeof err.message === 'string' ? err.message.toLowerCase() : ''
+  if (message.length === 0) return 'unknown'
+  const has = (...needles) => needles.some((n) => message.includes(n))
+
+  // ── EVERY CATEGORY REQUIRES ITS OWN EXPLICIT EVIDENCE ────────────────────
+  //
+  // A category is a DIAGNOSIS an operator will act on, so a near-miss must become
+  // `unknown` rather than a confident wrong answer. Four ways the first version of this
+  // function turned ambiguous evidence into a specific diagnosis, all four reproduced:
+  //
+  //   billing_error + "Your payment card has expired."   -> insufficient_credits
+  //   billing_error + "See the console for billing..."    -> insufficient_credits
+  //   "The billing address is missing."                   -> insufficient_credits
+  //   "anyOf is not supported in this position."          -> schema_complexity
+  //
+  // An expired card, a missing billing address and a bare pointer to the console are
+  // billing problems, and NONE of them says the balance is too low to pay - which is
+  // the only thing `insufficient_credits` is supposed to mean. And an unsupported
+  // schema keyword is not a complexity ceiling; it is a parameter the request should
+  // not have sent.
+
+  // A LIMIT THE ORGANIZATION SET. Documented: the API "returns a 400 when usage reaches
+  // an organization or workspace spend limit you set".
+  if (has('spend limit', 'spending limit', 'usage limit')) return 'spend_limit'
+
+  // THE ACCOUNT CANNOT PAY. Requires EXPLICIT low-balance, insufficient-credit or
+  // insufficient-funds wording. The `billing_error` TYPE is deliberately NOT sufficient
+  // on its own, and neither is the word "billing": both cover every payment problem
+  // there is, and naming one of them `insufficient_credits` would send an operator to
+  // top up an account whose card had simply expired.
+  if (has('credit balance', 'insufficient credit', 'insufficient funds',
+    'insufficient balance', 'balance is too low', 'low balance', 'out of credits',
+    'no credits remaining')) return 'insufficient_credits'
+
+  // A PARAMETER OR SCHEMA FEATURE THIS MODEL DOES NOT ACCEPT. Checked BEFORE the
+  // complexity rule, because "anyOf is not supported in this position" names a union
+  // keyword and is nonetheless an unsupported-feature refusal, not a ceiling. Documented
+  // messages: "... is not supported for this model.", "Extra inputs are not permitted",
+  // and "If you use an unsupported feature, you'll receive a 400 error with details."
+  if (has('not supported', 'not permitted', 'unsupported', 'unexpected keyword',
+    'extra inputs', 'is not allowed')) return 'unsupported_parameter'
+
+  // THE SCHEMA WAS TOO BIG TO COMPILE. Requires EXPLICIT complexity wording - the
+  // documented message is "Schema is too complex for compilation." - or a union/anyOf
+  // mention TOGETHER WITH count-limit wording, which is how the explicit ceiling of 16
+  // "Parameters with union types" would be reported. A bare mention of anyOf or union
+  // types is not evidence of a ceiling: it is just the subject of some other complaint.
+  const unionMentioned = has('union type', 'union types', 'anyof')
+  const countLimited = has('maximum', 'limit', 'too many', 'exceed', 'at most')
+  if (has('too complex', 'schema is too large', 'compilation timeout')) return 'schema_complexity'
+  if (unionMentioned && countLimited) return 'schema_complexity'
+
+  return 'unknown'
+}
+
 export const DRAFT_FAILURE_CODES = Object.freeze([
   // the provider answered, with a status
   'provider_unauthorized',    // 401 or 403 - the key is wrong, revoked or unentitled
@@ -92,6 +185,20 @@ export const DRAFT_FAILURE_CODES = Object.freeze([
   // the pass's own fixed code for a thrown exception. NOT from callDraftModel.
   'model_call_threw',
 ])
+
+/**
+ * Anthropic's documented ceiling on "Parameters with union types": "Total parameters
+ * that use `anyOf` or type arrays (for example, `"type": ["string", "null"]`) across
+ * all strict schemas. These are especially expensive because they create exponential
+ * compilation cost." The limit applies to the combined total in one request.
+ *
+ * Named here so the schemas can be pinned under it by a test rather than by eye. The
+ * new-contact schema declared NINETEEN until this release.
+ */
+export const MAX_UNION_TYPE_PARAMETERS = 16
+
+/** Anthropic's documented ceiling on optional (non-required) parameters. */
+export const MAX_OPTIONAL_PARAMETERS = 24
 
 export const DRAFT_TIMEOUT_MS = 30_000
 export const DRAFT_MAX_RETRIES = 2
@@ -201,31 +308,43 @@ export function interactionDraftSchema(allowedDates) {
   }
 }
 
+/**
+ * THE NEW-CONTACT SCHEMA, cut to what the write path actually stores.
+ *
+ * WHY IT CHANGED. Anthropic documents a hard ceiling of 16 "Parameters with union
+ * types" - "Total parameters that use `anyOf` or type arrays (for example,
+ * `"type": ["string", "null"]`) across all strict schemas" - and notes that these
+ * "are especially expensive because they create exponential compilation cost". This
+ * schema declared NINETEEN, so every request built from it exceeded a documented limit.
+ * (Structured outputs, JSON schema limits. The known-contact schema declares four.)
+ *
+ * WHAT WAS REMOVED, and why it costs nothing. The company, role, how_met and
+ * linkedin_url evidence triples and the tags array were asked for, validated, returned
+ * in `suggestion` - and then dropped. upsert_new_contact_candidate accepts none of
+ * them, and summarizeConversation reads only name, name_evidence, name_confidence,
+ * summary, follow_up and interaction_date out of the validated result. Twelve of the
+ * nineteen unions were spent on fields nothing stored.
+ *
+ * SO THOSE CONTACT FIELDS STAY BLANK, which is what they already were: the reviewer
+ * fills in company, role, how-you-met, LinkedIn and tags while accepting. Nothing that
+ * reached the database before reaches less of it now.
+ *
+ * Seven unions remain: the name triple, summary and its evidence, follow_up and
+ * interaction_date. `result` is a plain string enum and is not a union.
+ */
 export function newContactSchema(allowedDates) {
-  const evidencePair = (name, evidenceEnum) => ({
-    [name]: nullableString(`Explicitly stated ${name}. At most ${BOUNDS[name] ?? 120} characters. No URLs. Null if not stated.`),
-    [`${name}_evidence`]: { type: ['string', 'null'], enum: [...evidenceEnum, null], description: `Where ${name} was stated. Required exactly when ${name} is non-null.` },
-    [`${name}_confidence`]: { type: ['string', 'null'], enum: [...CONFIDENCE, null], description: `Required exactly when ${name} is non-null.` },
-  })
   return {
     type: 'object',
     additionalProperties: false,
     required: [
       'result', 'name', 'name_evidence', 'name_confidence',
-      'company', 'company_evidence', 'company_confidence',
-      'role', 'role_evidence', 'role_confidence',
-      'how_met', 'how_met_evidence', 'how_met_confidence',
-      'linkedin_url', 'linkedin_url_evidence', 'linkedin_url_confidence',
-      'tags', 'summary', 'summary_evidence', 'follow_up', 'interaction_date',
+      'summary', 'summary_evidence', 'follow_up', 'interaction_date',
     ],
     properties: {
       result: { type: 'string', enum: ['new_contact_suggestion', 'ignore', 'defer'] },
-      ...evidencePair('name', NAME_EVIDENCE),
-      ...evidencePair('company', FIELD_EVIDENCE),
-      ...evidencePair('role', FIELD_EVIDENCE),
-      ...evidencePair('how_met', FIELD_EVIDENCE),
-      ...evidencePair('linkedin_url', FIELD_EVIDENCE),
-      tags: { type: 'array', items: { type: 'string' }, description: `At most ${BOUNDS.maxTags} short lowercase labels, each at most ${BOUNDS.tag} characters.` },
+      name: nullableString(`Explicitly stated name. At most ${BOUNDS.name} characters. No URLs. Null if not stated.`),
+      name_evidence: { type: ['string', 'null'], enum: [...NAME_EVIDENCE, null], description: 'Where the name was stated. Required exactly when name is non-null.' },
+      name_confidence: { type: ['string', 'null'], enum: [...CONFIDENCE, null], description: 'Required exactly when name is non-null.' },
       summary: nullableString(`Neutral paraphrase of the exchange. At most ${BOUNDS.summary} characters. No URLs.`),
       summary_evidence: { type: ['string', 'null'], enum: [...SUMMARY_EVIDENCE, null] },
       follow_up: nullableString(`A concrete next step, at most ${BOUNDS.followUp} characters, only if stated. Otherwise null.`),
@@ -499,24 +618,13 @@ export function validateDraftResponse(raw, ctx) {
     }
   }
 
-  for (const [base, evidenceEnum, max] of [
-    ['name', NAME_EVIDENCE, BOUNDS.name],
-    ['company', FIELD_EVIDENCE, BOUNDS.company],
-    ['role', FIELD_EVIDENCE, BOUNDS.role],
-    ['how_met', FIELD_EVIDENCE, BOUNDS.howMet],
-    ['linkedin_url', FIELD_EVIDENCE, BOUNDS.linkedin],
-  ]) {
-    const bad = checkEvidenceTriple(raw, base, evidenceEnum, max)
-    if (bad) return fail(bad)
-  }
-
-  if (!Array.isArray(raw.tags)) return fail('bad_tags')
-  if (raw.tags.length > BOUNDS.maxTags) return fail('bad_tags')
-  for (const t of raw.tags) {
-    if (typeof t !== 'string' || t.length === 0 || t.length > BOUNDS.tag) return fail('bad_tags')
-    if (CONTROL_RE.test(t) || URL_RE.test(t)) return fail('bad_tags')
-    if (containsSensitiveInference(t)) return fail('sensitive_inference')
-  }
+  // STRICTNESS IS UNCHANGED for the triple that remains: a name still needs its
+  // evidence and its confidence, within the same bound, with the same URL, control
+  // character and sensitive-inference checks. Only the four triples nothing stored and
+  // the tags array are gone, and `extra_keys` above now REJECTS them if a model sends
+  // them anyway - so the removal narrows what can arrive rather than ignoring it.
+  const bad = checkEvidenceTriple(raw, 'name', NAME_EVIDENCE, BOUNDS.name)
+  if (bad) return fail(bad)
 
   return {
     ok: true,
@@ -525,12 +633,6 @@ export function validateDraftResponse(raw, ctx) {
     // metadata and is never round-tripped through the model or the client.
     suggestion: {
       name: raw.name, name_evidence: raw.name_evidence, name_confidence: raw.name_confidence,
-      company: raw.company, company_evidence: raw.company_evidence, company_confidence: raw.company_confidence,
-      role: raw.role, role_evidence: raw.role_evidence, role_confidence: raw.role_confidence,
-      how_met: raw.how_met, how_met_evidence: raw.how_met_evidence, how_met_confidence: raw.how_met_confidence,
-      linkedin_url: raw.linkedin_url, linkedin_url_evidence: raw.linkedin_url_evidence,
-      linkedin_url_confidence: raw.linkedin_url_confidence,
-      tags: raw.tags.slice(),
       summary: raw.summary, summary_evidence: raw.summary_evidence,
       follow_up: raw.follow_up,
       interaction_date: raw.interaction_date,
@@ -670,6 +772,23 @@ export async function callDraftModel(p) {
       return parsed.ok === true ? parsed : { ...parsed, status }
     }
 
+    if (status === 400) {
+      // READ INSIDE THE LIVE DEADLINE, and under the SAME byte ceiling as a success.
+      // This branch sits above clearTimer() deliberately: below it the controller is
+      // already cancelled and the read would be bounded by nothing. A body that is
+      // oversized, malformed or stalls is simply unclassifiable - it becomes `unknown`
+      // rather than an error of its own, because the status is the fact that matters
+      // and the category is a best effort on top of it.
+      const read = await readJsonBounded(res, MAX_DRAFT_RESPONSE_BYTES)
+      clearTimer()
+      return {
+        ok: false,
+        code: 'provider_bad_request',
+        status,
+        category: read.ok === true ? classifyBadRequest(read.value) : 'unknown',
+      }
+    }
+
     clearTimer()
     if (status === 429 || status === 529 || status >= 500) {
       if (attempt >= DRAFT_MAX_RETRIES) {
@@ -691,7 +810,7 @@ export async function callDraftModel(p) {
     // provider message, and it is the one fact that separates "the key is wrong" from
     // "the key is not entitled to this model" - both of which arrive as a refusal.
     if (status === 401 || status === 403) return { ok: false, code: 'provider_unauthorized', status }
-    if (status === 400) return { ok: false, code: 'provider_bad_request', status }
+    // 400 is handled above, inside the deadline, so it can be classified.
     return { ok: false, code: 'provider_error', status }
   }
   return { ok: false, code: 'retry_exhausted' }

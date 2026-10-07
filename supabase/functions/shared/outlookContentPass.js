@@ -487,6 +487,10 @@ export async function summarizeConversation (p) {
       fetched,
       code: called?.code ?? null,
       status: Number.isInteger(called?.status) ? called.status : null,
+      // THE 400 CATEGORY, and only for a 400. callDraftModel reads the error body
+      // inside its own deadline and returns a fixed category; the provider's message
+      // is never returned by it and is never read here either.
+      category: typeof called?.category === 'string' ? called.category : null,
     })
   }
 

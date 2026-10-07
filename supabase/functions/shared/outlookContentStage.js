@@ -40,6 +40,7 @@ import {
 } from './outlookGraphTransport.js'
 import {
   callDraftModel, MINIMIZATION_CATEGORIES, DRAFT_FAILURE_CODES,
+  DRAFT_BAD_REQUEST_CATEGORIES,
 } from './outlookDraftContract.js'
 import { summarizeConversation, summarizePassResult, MAX_FETCH_PER_CONVERSATION } from './outlookContentPass.js'
 import { contentPermissions } from './outlookContentConsent.js'
@@ -198,6 +199,7 @@ export const CONTENT_REPORT_COUNTS = Object.freeze([
 export const CONTENT_REPORT_MAPS = Object.freeze([
   'deferred', 'ignored', 'refusal_categories',
   'model_failures', 'model_http_status', 'missing_headers',
+  'model_bad_request',
 ])
 
 /**
@@ -615,6 +617,12 @@ export function summarizeContentStage (counts) {
     // on every outcome, including success: a conversation that succeeded with an absent
     // collection on one side is exactly the case the old screening rule got wrong.
     missing_headers: clean(c.missingHeaders, CONTENT_FOLDERS),
+    // WHY a 400 was returned, as far as the error body could be classified. A 400 is
+    // the one refusal whose cause is genuinely ambiguous - a rejected schema, an
+    // unsupported parameter, an exhausted spend limit and an empty balance all arrive
+    // as one status - so the category is what says which to go and fix. Controlled
+    // strings only; the provider's message never reaches this map.
+    model_bad_request: clean(c.badRequestCategories, DRAFT_BAD_REQUEST_CATEGORIES),
   }
 }
 
@@ -663,6 +671,7 @@ export function sanitizeContentReport (report) {
     model_failures: codes(report.model_failures, DRAFT_FAILURE_CODES),
     model_http_status: numericKeys(report.model_http_status),
     missing_headers: codes(report.missing_headers, CONTENT_FOLDERS),
+    model_bad_request: codes(report.model_bad_request, DRAFT_BAD_REQUEST_CATEGORIES),
   }
 }
 

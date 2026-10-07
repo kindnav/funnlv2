@@ -18,6 +18,8 @@ import {
   assertRequestMinimization, containsSensitiveInference,
   validateDraftResponse, parseDraftPayload, callDraftModel,
   interactionDraftSchema, newContactSchema,
+  MAX_UNION_TYPE_PARAMETERS, MAX_OPTIONAL_PARAMETERS,
+  DRAFT_BAD_REQUEST_CATEGORIES, classifyBadRequest,
 } from '../supabase/functions/shared/outlookDraftContract.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -57,14 +59,13 @@ const okDraft = (over = {}) => ({
   ...over,
 })
 
+// THE TRIMMED NEW-CONTACT SHAPE. company, role, how_met, linkedin_url and tags are
+// gone from the schema - Anthropic documents a ceiling of 16 parameters with union
+// types and this schema declared 19 - and the validator now rejects them as extra keys.
+// They were never stored: upsert_new_contact_candidate accepts none of them.
 const okSuggestion = (over = {}) => ({
   result: 'new_contact_suggestion',
   name: 'Dana Swope', name_evidence: 'provider_metadata', name_confidence: 'high',
-  company: 'Contoso Capital', company_evidence: 'explicit_signature', company_confidence: 'high',
-  role: 'Vice President', role_evidence: 'explicit_signature', role_confidence: 'high',
-  how_met: null, how_met_evidence: null, how_met_confidence: null,
-  linkedin_url: null, linkedin_url_evidence: null, linkedin_url_confidence: null,
-  tags: ['finance'],
   summary: 'Introductory exchange about the analyst programme.',
   summary_evidence: 'explicit_body',
   follow_up: null,
@@ -389,33 +390,101 @@ test('control characters and URLs in text fields are rejected, mirroring the DB 
 })
 
 test('evidence and confidence must be present exactly when the value is', () => {
-  const orphanEvidence = validateDraftResponse(okSuggestion({ how_met: null, how_met_evidence: 'explicit_body', how_met_confidence: 'high' }),
+  // THE SAME RULE, now exercised through the NAME triple - the only one the schema
+  // still carries. checkEvidenceTriple is unchanged; what changed is how many fields
+  // it is applied to.
+  const orphanEvidence = validateDraftResponse(
+    okSuggestion({ name: null, name_evidence: 'explicit_body', name_confidence: 'high' }),
     { mode: 'new_contact', allowedDates: DATES })
-  assert.ok(!orphanEvidence.ok && orphanEvidence.code === 'evidence_mismatch')
+  assert.ok(!orphanEvidence.ok && orphanEvidence.code === 'evidence_mismatch',
+    'evidence without a value is still a mismatch')
 
-  const missingEvidence = validateDraftResponse(okSuggestion({ company: 'ACME', company_evidence: null, company_confidence: null }),
+  const missingEvidence = validateDraftResponse(
+    okSuggestion({ name: 'Dana Swope', name_evidence: null, name_confidence: null }),
     { mode: 'new_contact', allowedDates: DATES })
-  assert.ok(!missingEvidence.ok && missingEvidence.code === 'bad_enum')
+  assert.ok(!missingEvidence.ok && missingEvidence.code === 'bad_enum',
+    'a value without evidence is still rejected')
+
+  const missingConfidence = validateDraftResponse(
+    okSuggestion({ name: 'Dana Swope', name_evidence: 'explicit_body', name_confidence: null }),
+    { mode: 'new_contact', allowedDates: DATES })
+  assert.ok(!missingConfidence.ok && missingConfidence.code === 'bad_enum',
+    'a value without confidence is still rejected')
 
   const orphanSummary = validateDraftResponse(okDraft({ summary: null, summary_evidence: 'explicit_body' }),
     { mode: 'known_contact', allowedDates: DATES })
   assert.ok(!orphanSummary.ok && orphanSummary.code === 'evidence_mismatch')
 })
 
-test('evidence enums match the applied constraints, and company/role reject provider_metadata', () => {
+test('THE REMOVED CONTACT FIELDS ARE NOW REJECTED, not merely unrequested', () => {
+  // Trimming the schema makes these extra keys, and `extra_keys` is checked before any
+  // field rule - so a model that sends them anyway is refused rather than having its
+  // values silently dropped. That is strictly narrower than before, when they were
+  // accepted, validated and then discarded.
+  for (const extra of [
+    { company: 'Contoso Capital', company_evidence: 'explicit_signature', company_confidence: 'high' },
+    { role: 'Vice President', role_evidence: 'explicit_signature', role_confidence: 'high' },
+    { how_met: 'Conference', how_met_evidence: 'explicit_body', how_met_confidence: 'high' },
+    { linkedin_url: 'https://www.linkedin.com/in/dana-swope', linkedin_url_evidence: 'explicit_signature', linkedin_url_confidence: 'high' },
+    { tags: ['finance'] },
+  ]) {
+    const r = validateDraftResponse(okSuggestion(extra), { mode: 'new_contact', allowedDates: DATES })
+    assert.ok(!r.ok, Object.keys(extra).join(',') + ' must be refused')
+    assert.strictEqual(r.code, 'extra_keys', Object.keys(extra).join(',') + ' -> ' + r.code)
+  }
+})
+
+test('THE DOCUMENTED UNION-TYPE CEILING is respected by both schemas', () => {
+  // Anthropic documents a maximum of 16 "Parameters with union types" - "Total
+  // parameters that use `anyOf` or type arrays (for example, `"type": ["string",
+  // "null"]`) across all strict schemas" - and notes these "create exponential
+  // compilation cost". The new-contact schema declared NINETEEN, so every new-contact
+  // request exceeded a documented limit. This pins both schemas under it.
+  const unions = (schema) => Object.values(schema.properties)
+    .filter((v) => Array.isArray(v.type) || Object.prototype.hasOwnProperty.call(v, 'anyOf')).length
+  const nc = newContactSchema(DATES)
+  const id = interactionDraftSchema(DATES)
+  assert.ok(unions(nc) <= MAX_UNION_TYPE_PARAMETERS,
+    `new-contact declares ${unions(nc)} union-type parameters, over the documented ${MAX_UNION_TYPE_PARAMETERS}`)
+  assert.ok(unions(id) <= MAX_UNION_TYPE_PARAMETERS,
+    `known-contact declares ${unions(id)} union-type parameters`)
+  assert.strictEqual(unions(nc), 7, 'the trimmed new-contact contract: name triple, summary pair, follow_up, date')
+  assert.strictEqual(unions(id), 4, 'the known-contact contract is unchanged')
+  // A SINGLE request carries one schema, and the documented limit is the combined
+  // total across all strict schemas in a request - so the larger of the two is what
+  // has to fit.
+  assert.ok(Math.max(unions(nc), unions(id)) <= MAX_UNION_TYPE_PARAMETERS)
+
+  // The OTHER documented ceilings, while we are here: 24 optional parameters, and
+  // `additionalProperties` false on every object.
+  for (const [label, schema] of [['new_contact', nc], ['known_contact', id]]) {
+    const optional = Object.keys(schema.properties).filter((k) => !schema.required.includes(k))
+    assert.ok(optional.length <= MAX_OPTIONAL_PARAMETERS, label)
+    assert.strictEqual(optional.length, 0, label + ' declares optional parameters: ' + optional)
+    assert.strictEqual(schema.additionalProperties, false, label)
+  }
+})
+
+test('evidence enums match the applied constraints', () => {
   assert.deepStrictEqual([...NAME_EVIDENCE], ['provider_metadata', 'explicit_signature', 'explicit_body'])
-  assert.deepStrictEqual([...FIELD_EVIDENCE], ['explicit_signature', 'explicit_body'])
   assert.deepStrictEqual([...SUMMARY_EVIDENCE], ['explicit_body', 'subject_only'])
   assert.deepStrictEqual([...CONFIDENCE], ['high', 'medium'])
+  // FIELD_EVIDENCE and the company/role/how_met/linkedin BOUNDS outlive the schema on
+  // purpose: they document the APPLIED database CHECKs, which a REVIEWER's own values
+  // still have to satisfy when they fill those fields in while accepting a suggestion.
+  // The model is simply no longer asked for them.
+  assert.deepStrictEqual([...FIELD_EVIDENCE], ['explicit_signature', 'explicit_body'])
   assert.ok(MIGRATION.includes("proposed_company_evidence IN ('explicit_signature', 'explicit_body')"))
 
-  // A company "derived" from provider metadata (i.e. the domain) is exactly the
-  // inference the product forbids.
-  const r = validateDraftResponse(okSuggestion({ company: 'Contoso', company_evidence: 'provider_metadata', company_confidence: 'high' }),
+  // A NAME "derived" from provider metadata is allowed - that is the display name, and
+  // its provenance is recorded. Anything outside the enum is not.
+  assert.ok(validateDraftResponse(okSuggestion({ name: 'Dana Swope', name_evidence: 'provider_metadata', name_confidence: 'high' }),
+    { mode: 'new_contact', allowedDates: DATES }).ok)
+  const badEv = validateDraftResponse(okSuggestion({ name: 'Dana', name_evidence: 'guessed', name_confidence: 'high' }),
     { mode: 'new_contact', allowedDates: DATES })
-  assert.ok(!r.ok && r.code === 'bad_enum', 'no company from a domain')
+  assert.ok(!badEv.ok && badEv.code === 'bad_enum', 'an invented evidence value is rejected')
 
-  const lowConf = validateDraftResponse(okSuggestion({ role: 'VP', role_evidence: 'explicit_body', role_confidence: 'low' }),
+  const lowConf = validateDraftResponse(okSuggestion({ name: 'Dana', name_evidence: 'explicit_body', name_confidence: 'low' }),
     { mode: 'new_contact', allowedDates: DATES })
   assert.ok(!lowConf.ok && lowConf.code === 'bad_enum', 'low confidence is not an accepted value')
 })
@@ -425,26 +494,147 @@ test('a date outside the envelope-derived allowlist is rejected', () => {
   assert.ok(!r.ok && r.code === 'bad_date')
 })
 
-test('linkedin urls must match the exact stored pattern, and nothing else is a URL', () => {
-  assert.ok(validateDraftResponse(okSuggestion({
-    linkedin_url: 'https://www.linkedin.com/in/dana-swope', linkedin_url_evidence: 'explicit_signature', linkedin_url_confidence: 'high',
-  }), { mode: 'new_contact', allowedDates: DATES }).ok)
-  for (const bad of ['http://linkedin.com/in/x', 'https://evil.example.invalid/in/x', 'https://linkedin.com/company/x']) {
-    const r = validateDraftResponse(okSuggestion({
-      linkedin_url: bad, linkedin_url_evidence: 'explicit_signature', linkedin_url_confidence: 'high',
-    }), { mode: 'new_contact', allowedDates: DATES })
-    assert.ok(!r.ok, bad)
+test('THE REVIEWER-FACING CONTACT COLUMNS SURVIVE, and the database is now their only guard', () => {
+  // The model is no longer asked for company, role, how_met or linkedin_url, so the
+  // validator no longer has a code path for them - it refuses them as extra keys,
+  // asserted above. Their COLUMNS and CHECKs remain, because a reviewer still fills
+  // them in while accepting a suggestion, and the database is now the only thing
+  // enforcing what they may contain. Pinned here rather than left implicit.
+  for (const col of ['proposed_company', 'proposed_role', 'proposed_how_met',
+    'proposed_linkedin_url']) {
+    assert.ok(MIGRATION.includes(col), col + ' must still exist for the reviewer')
+    assert.ok(MIGRATION.includes(col + '_evidence'), col + '_evidence must still exist')
+  }
+  // TAGS ARE DIFFERENT, and worth stating: there is no proposed_tags column. They were
+  // only ever in the model schema and the validator, never in the database, so dropping
+  // them from the schema removes the last place they existed.
+  assert.ok(!MIGRATION.includes('proposed_tags'),
+    'tags were never a stored column; nothing should have added one')
+  // The code bounds that mirror the surviving columns stay declared, so a future
+  // reviewer-facing path has one set of numbers to agree with.
+  for (const b of ['company', 'role', 'howMet', 'linkedin']) {
+    assert.ok(Number.isInteger(BOUNDS[b]) && BOUNDS[b] > 0, 'BOUNDS.' + b)
   }
 })
 
-test('tags are bounded in count, length and content', () => {
-  const many = validateDraftResponse(okSuggestion({ tags: ['a', 'b', 'c', 'd', 'e', 'f'] }), { mode: 'new_contact', allowedDates: DATES })
-  assert.ok(!many.ok && many.code === 'bad_tags')
-  const longTag = validateDraftResponse(okSuggestion({ tags: ['x'.repeat(BOUNDS.tag + 1)] }), { mode: 'new_contact', allowedDates: DATES })
-  assert.ok(!longTag.ok && longTag.code === 'bad_tags')
-  const urlTag = validateDraftResponse(okSuggestion({ tags: ['https://x.invalid'] }), { mode: 'new_contact', allowedDates: DATES })
-  assert.ok(!urlTag.ok && urlTag.code === 'bad_tags')
-  assert.ok(validateDraftResponse(okSuggestion({ tags: [] }), { mode: 'new_contact', allowedDates: DATES }).ok)
+test('control characters, URLs and sensitive inference are still rejected in every text field the model CAN send', () => {
+  // checkText is unchanged; what changed is the set of fields it runs on. These are
+  // the three fields that remain, and all three rules are exercised on them.
+  for (const [label, over, code] of [
+    ['a URL in the name', { name: 'https://x.invalid', name_evidence: 'explicit_body', name_confidence: 'high' }, 'url_in_text'],
+    ['a URL in the summary', { summary: 'See https://x.invalid for details' }, 'url_in_text'],
+    ['a URL in the follow-up', { follow_up: 'Visit https://x.invalid' }, 'url_in_text'],
+    ['a control character in the name', { name: 'Dana' + String.fromCharCode(7), name_evidence: 'explicit_body', name_confidence: 'high' }, 'control_characters'],
+    ['sensitive inference in the name', { name: 'Dana, who has a disability', name_evidence: 'explicit_body', name_confidence: 'high' }, 'sensitive_inference'],
+    ['sensitive inference in the summary', { summary: 'He mentioned his medical condition during the call.' }, 'sensitive_inference'],
+    ['sensitive inference in the follow-up', { follow_up: 'Ask about his immigration status' }, 'sensitive_inference'],
+  ]) {
+    const r = validateDraftResponse(okSuggestion(over), { mode: 'new_contact', allowedDates: DATES })
+    assert.ok(!r.ok, label + ' must be rejected')
+    assert.strictEqual(r.code, code, label + ' -> ' + r.code)
+  }
+  // And the same rules on the known-contact path, which this release did not touch.
+  const known = validateDraftResponse(okDraft({ summary: 'Noted his criminal record.' }),
+    { mode: 'known_contact', allowedDates: DATES })
+  assert.ok(!known.ok && known.code === 'sensitive_inference')
+})
+
+test('A 400 IS CLASSIFIED into one controlled category, and the message never escapes', () => {
+  // A 400 is the one provider refusal whose cause is genuinely ambiguous. Anthropic
+  // documents `invalid_request_error` as "an issue with the format or content of your
+  // request" AND returns a 400 "when usage reaches an organization or workspace spend
+  // limit you set" - so a rejected schema, an unsupported parameter, an exhausted spend
+  // limit and an empty balance all arrive as the same status. The category is what tells
+  // an operator which one to go and fix.
+  //
+  // The markers below are taken from Anthropic's own documented messages. The live
+  // pilot's 400 message was never captured, so NOTHING here claims to reproduce it.
+  const err = (message, type = 'invalid_request_error') => ({
+    type: 'error', error: { type, message }, request_id: 'req_fixture',
+  })
+  for (const [category, message] of [
+    ['spend_limit', 'Your organization has reached its monthly spend limit.'],
+    ['spend_limit', 'workspace spending limit exceeded'],
+    ['insufficient_credits', 'Your credit balance is too low to access the Claude API.'],
+    ['insufficient_credits', 'insufficient credits remaining'],
+    ['schema_complexity', 'Schema is too complex for compilation.'],
+    ['schema_complexity', 'Too many parameters use a union type; the maximum is 16.'],
+    ['unsupported_parameter', '"thinking.type.disabled" is not supported for this model.'],
+    ['unsupported_parameter', 'block_binding: Extra inputs are not permitted'],
+    ['unsupported_parameter', 'unsupported schema feature: minLength'],
+  ]) {
+    assert.strictEqual(classifyBadRequest(err(message)), category, message)
+  }
+  // CORRECTED. This used to assert that a generic `billing_error` TYPE classified as
+  // insufficient_credits even "when the message says little" - which was the bug. The
+  // type covers every payment problem there is, so naming one of them "out of credits"
+  // would send an operator to top up an account whose card had simply expired.
+  assert.strictEqual(classifyBadRequest(err('see console', 'billing_error')), 'unknown',
+    'a billing_error type alone is not evidence of a low balance')
+
+  // ── NEGATIVE CONTROLS: ambiguous evidence must NOT become a diagnosis ────
+  // Each of these was reproduced against the first version of this classifier.
+  for (const [label, body] of [
+    ['an expired card is a billing problem, not an empty balance',
+      err('Your payment card has expired.', 'billing_error')],
+    ['a bare pointer to the console says nothing about the balance',
+      err('See the console for billing details.', 'billing_error')],
+    ['a missing billing address is not a low balance',
+      err('The billing address is missing.')],
+    ['the word "billing" alone is not evidence',
+      err('A billing problem occurred.')],
+    ['a bare union-type mention is not a complexity ceiling',
+      err('The union type at properties.name is odd.')],
+    ['a bare anyOf mention is not a complexity ceiling',
+      err('anyOf appears at properties.summary.')],
+  ]) {
+    assert.strictEqual(classifyBadRequest(body), 'unknown', label)
+  }
+
+  // AND THE ONE THAT WAS MISFILED: an unsupported union keyword is an unsupported
+  // PARAMETER, not a ceiling. This is why the unsupported rule is tested before the
+  // complexity rule rather than after it.
+  assert.strictEqual(classifyBadRequest(err('anyOf is not supported in this position.')),
+    'unsupported_parameter', 'an unsupported keyword is not a complexity ceiling')
+
+  // ── POSITIVE CONTROLS, retained: explicit evidence still classifies ──────
+  for (const [category, message] of [
+    ['insufficient_credits', 'insufficient funds'],
+    ['insufficient_credits', 'Your balance is too low; please add credits.'],
+    ['spend_limit', 'workspace spending limit exceeded'],
+    ['schema_complexity', 'Schema is too complex for compilation.'],
+    ['schema_complexity', 'anyOf count exceeds the limit of 16.'],
+    ['unsupported_parameter', 'unsupported schema feature: minLength'],
+  ]) {
+    assert.strictEqual(classifyBadRequest(err(message)), category, message)
+  }
+
+  // UNKNOWN IS THE HONEST ANSWER whenever no documented marker matches, and it is what
+  // keeps a guess out of the report.
+  for (const body of [
+    err('A refusal nobody has documented yet.'),
+    err(''), err('', 'billing_error'),
+    { type: 'error', error: {} }, { type: 'error' }, {}, [], 'a string', 42, null, undefined,
+  ]) {
+    assert.strictEqual(classifyBadRequest(body), 'unknown', JSON.stringify(body))
+  }
+
+  // EVERY ANSWER IS ON THE ALLOWLIST, and the allowlist is exactly the five categories.
+  assert.deepStrictEqual([...DRAFT_BAD_REQUEST_CATEGORIES], [
+    'spend_limit', 'insufficient_credits', 'schema_complexity',
+    'unsupported_parameter', 'unknown'])
+
+  // THE MESSAGE NEVER ESCAPES. A provider message can quote the request, and the
+  // request carries the user's mail - so the classifier is handed one containing a
+  // distinctive sentence and an address, and its entire output is checked for both.
+  const AT = String.fromCharCode(64)
+  const poison = 'rejected near "SECRET SENTENCE from the body" for dana' + AT + 'contoso.invalid'
+  const out = classifyBadRequest(err(poison))
+  assert.strictEqual(typeof out, 'string')
+  assert.ok(DRAFT_BAD_REQUEST_CATEGORIES.includes(out))
+  assert.ok(!out.includes('SECRET SENTENCE'), 'the message must not be echoed')
+  assert.ok(!out.includes(AT), 'no address may appear in the category')
+  assert.ok(JSON.stringify(out).length < 40, 'the output is a category, not a payload')
 })
 
 test('mode confusion is rejected in both directions', () => {
@@ -501,12 +691,16 @@ test('ordinary recruiting language is NOT blocked', () => {
   }
 })
 
-test('the sensitive rule also applies to proposed contact fields and tags', () => {
-  const inRole = validateDraftResponse(okSuggestion({ role: 'Analyst with a disability', role_evidence: 'explicit_body', role_confidence: 'high' }),
-    { mode: 'new_contact', allowedDates: DATES })
-  assert.ok(!inRole.ok && inRole.code === 'sensitive_inference')
-  const inTag = validateDraftResponse(okSuggestion({ tags: ['criminal record'] }), { mode: 'new_contact', allowedDates: DATES })
-  assert.ok(!inTag.ok && inTag.code === 'sensitive_inference')
+test('containsSensitiveInference itself still recognises the protected categories', () => {
+  // The predicate is unchanged and is kept under direct test: the fields it is applied
+  // to shrank with the schema, the rule did not.
+  for (const phrase of ['medical condition', 'criminal record', 'immigration status',
+    'credit score', 'sexual orientation', 'ethnic background', 'pregnancy']) {
+    assert.ok(containsSensitiveInference('note about ' + phrase + ' here'), phrase)
+  }
+  for (const ordinary of ['analyst programme', 'credit desk coverage', 'summer internship']) {
+    assert.ok(!containsSensitiveInference(ordinary), ordinary)
+  }
 })
 
 // ── Payload parsing + transport ──────────────────────────────────────────────

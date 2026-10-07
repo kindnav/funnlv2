@@ -133,11 +133,6 @@ function newContactReply (over = {}) {
       name: 'Priya Sharma',
       name_evidence: 'explicit_signature',
       name_confidence: 'high',
-      company: null, company_evidence: null, company_confidence: null,
-      role: null, role_evidence: null, role_confidence: null,
-      how_met: null, how_met_evidence: null, how_met_confidence: null,
-      linkedin_url: null, linkedin_url_evidence: null, linkedin_url_confidence: null,
-      tags: [],
       summary: 'Priya offered to put your application in front of the analyst programme '
         + 'lead and asked for an updated CV by Friday.',
       summary_evidence: 'explicit_body',
@@ -426,10 +421,6 @@ test('UNSUPPORTED contact fields are left blank, not stored unreviewed', async (
   const { calls, params } = run({
     conversation: { cfp: CFP, contactId: null, messageCount: 2, lastLocalDate: '2026-09-22' },
     callModel: async () => newContactReply({
-      company: 'Goldman Sachs', company_evidence: 'explicit_signature',
-      company_confidence: 'high',
-      role: 'Analyst', role_evidence: 'explicit_signature', role_confidence: 'high',
-      tags: ['recruiter'],
     }),
   })
   const r = await summarizeConversation(params)

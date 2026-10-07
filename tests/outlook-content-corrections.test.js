@@ -20,6 +20,10 @@ import {
 } from '../supabase/functions/shared/outlookHandleProducer.js'
 import { foldPage } from '../supabase/functions/shared/outlookRoundState.js'
 import {
+  sanitizeMessageContent, boundEpisodeContent,
+  MAX_EPISODE_CHARS, MAX_EPISODE_MESSAGES,
+} from '../supabase/functions/shared/outlookContentSanitizer.js'
+import {
   summarizeConversation, DEFER_REASONS, IGNORE_REASONS,
 } from '../supabase/functions/shared/outlookContentPass.js'
 import {
@@ -27,6 +31,7 @@ import {
 } from '../supabase/functions/shared/outlookContentStage.js'
 import {
   callDraftModel, DRAFT_TIMEOUT_MS, MAX_DRAFT_RESPONSE_BYTES, buildDraftRequest,
+  MAX_REQUEST_CHARS,
 } from '../supabase/functions/shared/outlookDraftContract.js'
 import {
   executeGraphRequest, buildMessageContentRequest, MAX_RESPONSE_BYTES,
@@ -116,11 +121,6 @@ const nccReply = (over = {}) => ({
   parsed: {
     result: 'new_contact_suggestion',
     name: 'Priya Nair', name_evidence: 'explicit_signature', name_confidence: 'high',
-    company: null, company_evidence: null, company_confidence: null,
-    role: null, role_evidence: null, role_confidence: null,
-    how_met: null, how_met_evidence: null, how_met_confidence: null,
-    linkedin_url: null, linkedin_url_evidence: null, linkedin_url_confidence: null,
-    tags: [],
     summary: 'She put your name forward for the spring insight week.',
     summary_evidence: 'explicit_body',
     follow_up: 'Send your availability.',
@@ -1173,89 +1173,76 @@ test('RETRY BUDGET EXHAUSTION through the stage defers, and reads no more', asyn
   assert.ok(['fetch_failed', 'budget_exhausted'].includes(r.reason), JSON.stringify(r))
 })
 
-test('A REQUEST THAT CANNOT BE BUILT is its own code, not a privacy refusal', async () => {
+test('A REQUEST THAT CANNOT BE BUILT is its own code, not a privacy refusal', () => {
   // THE DISTINCTION THE LIVE REPORT COULD NOT MAKE. buildDraftRequest throwing used to
-  // be reported as `minimization_failed` - the same code the privacy guard returns
-  // when it withholds a request. One means "Funnl refused to send something"; the
-  // other means "Funnl could not build anything to send". An operator reading
-  // `minimization_failed` had no way to tell a signature block from a construction bug.
+  // be reported as `minimization_failed` - the same code the privacy guard returns when
+  // it withholds a request. One means "Funnl refused to send something"; the other means
+  // "Funnl could not build anything to send".
   //
-  // DRIVEN THROUGH THE REAL PASS, not asserted on the planner: the ceiling is reached
-  // the way it is actually reachable, with an UNKNOWN person (whose schema is the
-  // larger of the two) and bodies carrying full-length signature blocks. Signatures are
-  // kept on top of the episode character budget rather than inside it, which is why
-  // 20,000 is reachable at all - see the note in the suite that covers that limit.
-  // CALIBRATED AGAINST THE REAL SANITIZER, not guessed: six messages each carrying
-  // 2,000 characters of text is exactly MAX_EPISODE_CHARS, and the four inbound ones
-  // each keep a full 600-character signature on top of that budget. Measured through
-  // sanitizeMessageContent and boundEpisodeContent: 12,000 text + 2,400 signature in
-  // new-contact mode serializes past MAX_REQUEST_CHARS. A shorter body (1,950 each)
-  // comes to 19,923 and builds fine, so this is the boundary and not a wild overshoot.
+  // THIS TEST CHANGED SHAPE when the new-contact schema was trimmed to the documented
+  // union-type ceiling. It used to drive the pass end to end at the sanitizer's worst
+  // case, because that case serialized past MAX_REQUEST_CHARS. The trimmed schema is
+  // about 1,270 characters smaller, and the worst case now FITS - so
+  // `request_too_large` is no longer reachable from bounded content, and with it the
+  // only route to the pass's catch. That is an improvement, and it is asserted below
+  // rather than left to be discovered. The catch remains as defence in depth.
   //
-  // The filler is varied prose on purpose. A long run of one character is rejected
-  // earlier as `binary_like`, which would have tested the wrong thing.
+  // So the three things that can still be checked are checked: the builder's own
+  // refusals, the margin that makes them unreachable from real content, and the
+  // classification of the code if it ever is reached.
+
+  // 1. THE BUILDER STILL REFUSES what it documents.
+  for (const [label, params, message] of [
+    ['a non-object', null, 'invalid_draft_input'],
+    ['an unknown mode', { mode: 'nonsense', messages: [], allowedDates: ['2026-09-20'] }, 'invalid_mode'],
+    ['no allowed dates', { mode: 'known_contact', subject: 's', allowedDates: [],
+      messages: [{ direction: 'inbound', dateIso: '2026-09-20T09:00:00Z', text: 'hello there', signature: null }] }, 'no_allowed_dates'],
+  ]) {
+    let threw = null
+    try { buildDraftRequest(params) } catch (e) { threw = e.message }
+    assert.strictEqual(threw, message, label + ' -> ' + threw)
+  }
+
+  // 2. THE WORST CASE THE SANITIZER PERMITS NOW FITS, on both paths. If either schema
+  //    grows back toward the ceiling this fails, which is the point.
   const NL = String.fromCharCode(10)
   const SIGFILL = 'Ventures Partners LLP, Level 12, Harbour Exchange, London. '
+  const per = Math.floor(MAX_EPISODE_CHARS / MAX_EPISODE_MESSAGES)
   const long = 'The programme covers markets and coverage rotations. '
-    .repeat(Math.ceil(2000 / 52)).slice(0, 2000)
+    .repeat(Math.ceil(per / 52)).slice(0, per)
   const sig = ['--', 'Cleo Adeyemi', 'Analyst Programme Lead',
     SIGFILL.repeat(Math.ceil(620 / SIGFILL.length))].join(NL)
-  const inbound = long + NL + NL + sig
-
-  const seenModel = { n: 0 }
-  const handles = []
-  for (let i = 1; i <= 6; i++) {
-    handles.push({
-      cfp: CFP, mfp: String(i).repeat(64).slice(0, 64),
-      folder: i <= 4 ? 'inbox' : 'sentitems',
-      sent_at: '2026-09-' + (14 + i) + 'T10:00:00Z',
-      mid_ct: 'SEAL:AAkALgAAbig' + i, mid_nonce: 'N1', key_version: 1,
-    })
+  const parts = []
+  for (let i = 0; i < MAX_EPISODE_MESSAGES; i++) {
+    // EVERY message inbound, so every one keeps a signature: signatures are not
+    // counted against the episode character budget, which is what made the ceiling
+    // reachable at all.
+    const c = sanitizeMessageContent({ uniqueBodyContent: long + NL + NL + sig, uniqueBodyContentType: 'text' })
+    assert.ok(c.ok, 'the fixture must sanitize: ' + c.code)
+    parts.push({ direction: 'inbound', timestampIso: '2026-09-1' + i + 'T10:00:00Z',
+      sanitized: c.sanitized ?? c })
   }
-  const { params } = stageParams({
-    // An UNKNOWN person: no contactId, so the larger new-contact schema is used.
-    conversation: { cfp: CFP, contactId: null, messageCount: 6, lastLocalDate: '2026-09-20' },
-    rpc: async (name) => {
-      if (name !== 'list_outlook_round_message_handles') return { data: { result: 'ok' }, error: null }
-      return { error: null, data: { result: 'ok', next_cursor: null, handles } }
-    },
-    deps: {
-      sleepImpl: async () => {},
-      fetchImpl: async (url) => {
-        if (String(url).includes('api.anthropic.com')) {
-          seenModel.n += 1
-          return jsonBody({ content: [{ type: 'text', text: '{}' }], stop_reason: 'end_turn' })
-        }
-        const u = String(url)
-        const pre = u.indexOf('/me/messages/') + '/me/messages/'.length
-        const id = decodeURIComponent(u.slice(pre, u.indexOf('?', pre)))
-        const isIn = Number(id.slice(-1)) <= 4
-        return jsonBody({
-          id,
-          body: { contentType: 'text', content: isIn ? inbound : long },
-          uniqueBody: { contentType: 'text', content: isIn ? inbound : long },
-          uniqueBodyContentType: 'text',
-          subject: 'Summer analyst referral',
-          from: isIn
-            ? { emailAddress: { address: THEM, name: 'Cleo Adeyemi' } }
-            : { emailAddress: { address: ME, name: 'Pilot' } },
-          toRecipients: [{ emailAddress: { address: isIn ? ME : THEM } }],
-          internetMessageHeaders: [{ name: 'Received', value: 'by fixture' }],
-        })
-      },
-    },
-  })
-  const r = await summarizeOneConversation(params)
-  assert.strictEqual(r.outcome, 'defer', JSON.stringify(r))
-  assert.strictEqual(r.reason, 'request_build_failed',
-    'a construction failure must not be reported as the privacy guard refusing')
-  assert.notStrictEqual(r.reason, 'minimization_failed')
-  assert.strictEqual(seenModel.n, 0, 'and nothing was sent to the provider')
-  // Terminal, so the round can still finish, and no suggestion is written.
-  const plan = planWrite(planEntry(), r, { consentOpen: true })
+  const bounded = boundEpisodeContent(parts)
+  assert.strictEqual(bounded.kept.length, MAX_EPISODE_MESSAGES, 'all six messages kept')
+  const msgs = bounded.kept.map((k) => ({ direction: k.direction, dateIso: k.timestampIso,
+    text: k.sanitized.text, signature: k.sanitized.signature }))
+  for (const mode of ['new_contact', 'known_contact']) {
+    const built = buildDraftRequest({ mode, displayName: 'Cleo',
+      subject: 'Summer analyst referral', messages: msgs, allowedDates: ['2026-09-20'] })
+    const size = JSON.stringify(built).length
+    assert.ok(size <= MAX_REQUEST_CHARS,
+      mode + ' serializes to ' + size + ', over the ' + MAX_REQUEST_CHARS + ' ceiling')
+  }
+
+  // 3. AND IF IT IS EVER REACHED, the code is its own and it is terminal: no write, no
+  //    suggestion, the reason reported, and the conversation passed so the round ends.
+  const plan = planWrite(planEntry(), { outcome: 'defer', reason: 'request_build_failed' },
+    { consentOpen: true })
   assert.strictEqual(plan.write, 'none')
+  assert.strictEqual(plan.rpc, null)
   assert.strictEqual(plan.retryable, false)
   assert.strictEqual(plan.deferral, 'request_build_failed')
+  assert.notStrictEqual(plan.deferral, 'minimization_failed')
 })
 
 test('A DEFERRED CONVERSATION STAYS RESUMABLE: no write, no cursor advance', () => {
