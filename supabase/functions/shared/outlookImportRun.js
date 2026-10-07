@@ -101,6 +101,7 @@ import { checkPilotUser, designatedPilotUser } from './outlookPilotGate.js'
 import { buildMessageHandles } from './outlookHandleProducer.js'
 import {
   summarizeOneConversation, planContentWrite, summarizeContentStage, CONTENT_WRITE_RPCS,
+  sanitizeContentReport,
 } from './outlookContentStage.js'
 import { contentPermissions } from './outlookContentConsent.js'
 
@@ -1546,5 +1547,20 @@ export function summarizeRun (result) {
     // How much of a finished round's finalisation is done. Counts and flags only - never a
     // fingerprint, so the write cursor itself is not reported.
     finalize: result.finalize ?? null,
+    // THE CONTENT REPORT, which this function used to drop.
+    //
+    // REPRODUCED IN PRODUCTION, on the first live content pilot at main 948c0a9: both
+    // folders finished, finalisation processed four of six conversations, and no
+    // candidate row was created - with nothing in the response to say why. runOutlookImport
+    // had built the explanation all along (`content: summarizeContentStage(content)` in
+    // its `partial`), and the field simply was not selected here, so the one answer the
+    // pilot needed never left the worker. Every deferral the stage records is a
+    // controlled code, and a code is the whole point: 'content_consent_missing' across
+    // the board and 'summary_key_absent' across the board are the same empty result in
+    // the database and completely different problems to fix.
+    //
+    // Re-checked rather than spread, because this function is the last boundary before
+    // a response body and its contract above is that it names what it emits.
+    content: sanitizeContentReport(result.content),
   }
 }
