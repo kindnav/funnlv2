@@ -56,7 +56,7 @@ import {
   REQUIRED_CONTENT_CONSENT_VERSION,
 } from '../supabase/functions/shared/outlookContentConsent.js'
 import {
-  CONTENT_DEFERRAL_CODES, CONTENT_IGNORE_CODES, CONTENT_REPORT_COUNTS,
+  CONTENT_DEFERRAL_CODES, CONTENT_IGNORE_CODES, CONTENT_REPORT_COUNTS, CONTENT_REPORT_MAPS,
 } from '../supabase/functions/shared/outlookContentStage.js'
 import { makeRoundStore } from './harness/outlookRoundStore.js'
 
@@ -418,10 +418,9 @@ for (const pair of forbidden) {
   check('the response body does not contain ' + pair[0], !serialized.includes(pair[1]),
     serialized.slice(0, 200))
 }
-check('the report holds only the declared counters and the three code maps',
+check('the report holds only the declared counters and the controlled maps',
   Object.keys(report).every(
-    (k) => CONTENT_REPORT_COUNTS.includes(k)
-      || k === 'deferred' || k === 'ignored' || k === 'refusal_categories'),
+    (k) => CONTENT_REPORT_COUNTS.includes(k) || CONTENT_REPORT_MAPS.includes(k)),
   JSON.stringify(Object.keys(report)))
 // `refusal_categories` arrived with the finalisation-stall fix: which CATEGORY the
 // privacy guard objected to, counted, from the guard's own controlled vocabulary.

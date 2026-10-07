@@ -372,10 +372,20 @@ test('NO RAW OR SANITIZED BODY COMES BACK in the result', async () => {
   assert.ok(!s.includes('Could you send'), 'the raw body leaked into the result')
   assert.ok(!s.includes('modelling work I did last summer'), 'the outbound body leaked')
   assert.ok(!s.includes(THEM), 'the address leaked into a known-contact result')
+  // PINNED, so a new field has to be justified here before it can ship. `missingHeaders`
+  // joined this list with the screening fix: it is a map from Graph FOLDER NAME to an
+  // integer - two possible keys, counts as values - and carries no header name, no
+  // header value, no address and no message id. Asserted as such below rather than
+  // merely allowed.
   assert.deepStrictEqual(Object.keys(r).sort(), [
     'contactId', 'extractionStatus', 'fetched', 'followUp', 'interactionDate',
-    'messagesInExchange', 'messagesSummarized', 'outcome', 'retainedSubject', 'summary',
+    'messagesInExchange', 'messagesSummarized', 'missingHeaders', 'outcome',
+    'retainedSubject', 'summary',
   ])
+  for (const [k, v] of Object.entries(r.missingHeaders)) {
+    assert.ok(['inbox', 'sentitems'].includes(k), `missingHeaders key ${k} is not a folder`)
+    assert.ok(Number.isInteger(v), 'missingHeaders values are counts')
+  }
 })
 
 test('the logged pass summary is counts and codes only', async () => {

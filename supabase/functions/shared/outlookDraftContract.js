@@ -56,6 +56,43 @@ export const DRAFT_MAX_TOKENS = 1024
 // visible response. NOT the legacy extended-thinking form: `type: "enabled"` with
 // `budget_tokens` is not accepted on this model generation, and no `effort` is sent.
 export const THINKING_DISABLED = Object.freeze({ type: 'disabled' })
+/**
+ * EVERY failure code callDraftModel can return, and the only ones a caller may forward.
+ *
+ * WHY THIS EXISTS. callDraftModel already distinguished an authentication refusal from
+ * a rate limit from a timeout - and the content pass collapsed all of them into one
+ * `model_unavailable` deferral, so the worker's answer said a model call failed and
+ * nothing about why. On the live pilot that was the whole diagnosis available for a
+ * conversation that read a body, spent a provider call and produced nothing.
+ *
+ * `model_call_threw` is not returned by callDraftModel. It is the pass's fixed code for
+ * a LOCAL exception escaping the call - a programming fault, not a provider verdict.
+ * The thrown value is never read: it can carry a URL, a key or a response body.
+ */
+export const DRAFT_FAILURE_CODES = Object.freeze([
+  // the provider answered, with a status
+  'provider_unauthorized',    // 401 or 403 - the key is wrong, revoked or unentitled
+  'provider_bad_request',     // 400 - the request itself was rejected
+  'provider_rate_limited',    // 429, after the retries were spent
+  'provider_unavailable',     // 529 or 5xx, after the retries were spent
+  'provider_error',           // any other non-2xx
+  'provider_redirected',      // a 3xx, refused rather than followed
+  // the provider did not answer usefully
+  'provider_timeout',         // the per-attempt deadline fired, headers or body
+  'transport_failure',        // fetch itself failed, without a status
+  'response_too_large',       // the body exceeded the read ceiling
+  'malformed_response',       // a 200 whose body could not be used
+  'unparseable_json',         // text blocks that were not JSON
+  'empty_provider_response',  // a 200 with no text block at all
+  // the call was never made, or not completed, for a local reason
+  'request_too_large',        // the serialized request exceeded its ceiling
+  'budget_exhausted',         // no room for a first attempt
+  'retry_budget_exhausted',   // no room for a further attempt
+  'retry_exhausted',          // the attempt loop ended without a verdict
+  // the pass's own fixed code for a thrown exception. NOT from callDraftModel.
+  'model_call_threw',
+])
+
 export const DRAFT_TIMEOUT_MS = 30_000
 export const DRAFT_MAX_RETRIES = 2
 
@@ -604,7 +641,7 @@ export async function callDraftModel(p) {
     // 3xx is handed back, and following it by hand would be the same leak.
     if (status >= 300 && status < 400) {
       clearTimer()
-      return { ok: false, code: 'provider_redirected' }
+      return { ok: false, code: 'provider_redirected', status }
     }
 
     if (status === 200) {
@@ -617,15 +654,26 @@ export async function callDraftModel(p) {
           code: read.reason === 'response_too_large'
             ? 'response_too_large'
             : (read.reason === 'response_body_timeout' ? 'provider_timeout' : 'malformed_response'),
+          status,
         }
       }
-      return parseDraftPayload(read.value)
+      // THE RECEIVED STATUS SURVIVES A PARSE FAILURE. parseDraftPayload is pure and
+      // knows nothing about transport, so empty_provider_response, unparseable_json
+      // and malformed_response came back with no status at all - indistinguishable in
+      // the report from a failure that never reached a response. A 200 whose body
+      // could not be used is a very different problem from a timeout, and the status
+      // is what says so.
+      //
+      // THE SUCCESS SHAPE IS UNTOUCHED, deliberately: callers destructure `parsed` and
+      // `stopReason` from it, and a success has no failure to attribute to a status.
+      const parsed = parseDraftPayload(read.value)
+      return parsed.ok === true ? parsed : { ...parsed, status }
     }
 
     clearTimer()
     if (status === 429 || status === 529 || status >= 500) {
       if (attempt >= DRAFT_MAX_RETRIES) {
-        return { ok: false, code: status === 429 ? 'provider_rate_limited' : 'provider_unavailable' }
+        return { ok: false, code: status === 429 ? 'provider_rate_limited' : 'provider_unavailable', status }
       }
       let waitMs = 1000 * Math.pow(2, attempt)
       try {
@@ -634,14 +682,17 @@ export async function callDraftModel(p) {
       } catch { /* keep backoff */ }
       // The backoff AND the attempt it precedes must both fit what is left.
       if (!affordable(timeoutMs + waitMs)) {
-        return { ok: false, code: status === 429 ? 'provider_rate_limited' : 'provider_unavailable' }
+        return { ok: false, code: status === 429 ? 'provider_rate_limited' : 'provider_unavailable', status }
       }
       await sleep(waitMs)
       continue
     }
-    if (status === 401 || status === 403) return { ok: false, code: 'provider_unauthorized' }
-    if (status === 400) return { ok: false, code: 'provider_bad_request' }
-    return { ok: false, code: 'provider_error' }
+    // THE NUMERIC STATUS TRAVELS WITH THE CODE. A status line is a number, not a
+    // provider message, and it is the one fact that separates "the key is wrong" from
+    // "the key is not entitled to this model" - both of which arrive as a refusal.
+    if (status === 401 || status === 403) return { ok: false, code: 'provider_unauthorized', status }
+    if (status === 400) return { ok: false, code: 'provider_bad_request', status }
+    return { ok: false, code: 'provider_error', status }
   }
   return { ok: false, code: 'retry_exhausted' }
 }

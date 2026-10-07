@@ -209,26 +209,50 @@ export function counterpartyFromEnvelopes (messages, selfAddresses) {
  *   whose eligibility the envelope pass established without headers.
  */
 export async function summarizeConversation (p) {
-  if (!isPlainObject(p)) return deferral('no_handles')
+  // THE MODULE HELPER, NOT THE WRAPPER BELOW. This guard runs before the accumulators
+  // exist, so calling `defer` here reached it inside its own temporal dead zone and
+  // threw a ReferenceError instead of deferring - for null, undefined and [] alike.
+  // The map is empty and explicit, because nothing has been read at this point.
+  if (!isPlainObject(p)) return deferral('no_handles', { missingHeaders: {} })
   const conv = isPlainObject(p.conversation) ? p.conversation : {}
   const requiresScreening = p.requiresScreening === true
+  // Controlled counts only: one integer per Graph folder, so an operator can see WHICH
+  // side of the exchange lacked a header collection. No header name, no value, no id.
+  const missingHeaders = Object.create(null)
+  // EVERY deferral from this function reports those counts beside its reason. The live
+  // pilot deferred one conversation on the model and settled another on screening in
+  // the SAME invocation, and an operator reading either one wants to know whether a
+  // header collection was missing - so the counts are not reserved for the screening
+  // verdict. Empty when nothing was missing, and always present.
+  const defer = (reason, extra = {}) =>
+    deferral(reason, { ...extra, missingHeaders: { ...missingHeaders } })
+  // SCREENING EVIDENCE, COUNTED ON BOTH SIDES OF THE LEDGER.
+  //
+  // `inboundSeen` is every inbound message this pass fetched; `inboundScreened` is how
+  // many of them carried a complete header collection that screened clean. Requiring
+  // only that SOME inbound message was screened was not enough: a conversation with one
+  // clean inbound message and another inbound message with no collection passed the
+  // gate, and the unscreened message's text went into the summary that was sent on. Two
+  // counts and an equality is the check that cannot be satisfied by partial evidence.
+  let inboundSeen = 0
+  let inboundScreened = 0
 
   // ── 1. CONSENT, before anything is read ──────────────────────────────────
   const perms = contentPermissions(p.consentVersion, p.requiredConsent ?? {})
   if (!perms.body) {
-    return deferral('content_consent_missing', { consent: perms })
+    return defer('content_consent_missing', { consent: perms })
   }
   // A body may be read but nothing may leave. There is no local summary worth
   // writing - that was the rejected subject-and-counts note - so this defers
   // WITHOUT fetching anything, rather than reading mail it cannot use.
   if (!perms.thirdParty) {
-    return deferral('third_party_consent_missing', { consent: perms })
+    return defer('third_party_consent_missing', { consent: perms })
   }
 
   const handles = (Array.isArray(p.handles) ? p.handles : [])
     .filter((h) => isPlainObject(h) && typeof h.midCt === 'string' && h.midCt.length > 0)
     .slice(0, MAX_FETCH_PER_CONVERSATION)
-  if (handles.length === 0) return deferral('no_handles')
+  if (handles.length === 0) return defer('no_handles')
 
   // ── 2. fetch, sanitize, and drop the raw body immediately ────────────────
   const parts = []
@@ -237,16 +261,16 @@ export async function summarizeConversation (p) {
   for (const h of handles) {
     if (typeof p.budgetAllows === 'function' && !p.budgetAllows(FETCH_ADMIT_MS)) {
       // Retryable: the handles are still stored and the round is untouched.
-      return deferral('budget_exhausted', { fetched })
+      return defer('budget_exhausted', { fetched })
     }
     let messageId
     try {
       messageId = await p.decryptHandle({ ciphertext: h.midCt, nonce: h.midNonce })
     } catch {
-      return deferral('fetch_failed', { fetched })
+      return defer('fetch_failed', { fetched })
     }
     if (typeof messageId !== 'string' || messageId.length === 0) {
-      return deferral('fetch_failed', { fetched })
+      return defer('fetch_failed', { fetched })
     }
 
     let got
@@ -255,16 +279,17 @@ export async function summarizeConversation (p) {
     } catch {
       // The thrown value is deliberately not read: it can carry a URL, an
       // address or a provider message.
-      return deferral('fetch_failed', { fetched })
+      return defer('fetch_failed', { fetched })
     }
     // A MOVED-TO-ARCHIVE or EXPORTED message is exactly this: the immutable id
     // no longer resolves. Deferring is the documented answer.
     if (!got || got.ok !== true || !isPlainObject(got.message)) {
-      return deferral('fetch_failed', { fetched })
+      return defer('fetch_failed', { fetched })
     }
     fetched += 1
 
     const msg = got.message
+    if (directionFor(h.folder) === 'inbound') inboundSeen += 1
     // readMessageContent already returns exactly the shape the sanitizer takes,
     // including BOTH projections: `uniqueBodyContent` is Graph's own "this
     // message without the quoted history below it", which is what a summary
@@ -297,25 +322,52 @@ export async function summarizeConversation (p) {
     }
 
     if (msg.automationComplete !== true) {
-      // THE COLLECTION IS ABSENT, so nothing has been screened. An absent header
-      // collection must never be read as "no automation found".
+      // THE COLLECTION IS ABSENT, so THIS message has not been screened. An absent
+      // header collection must never be read as "no automation found" - and it is not
+      // read that way here: the message simply contributes no screening evidence.
       //
-      // REPRODUCED: automationComplete=false reached Anthropic and came back as a
-      // new_contact_suggestion. The taint that put the conversation here exists
-      // precisely because these headers had not been seen, and if they still have
-      // not been seen it is unresolved - reading the body answers a different
-      // question. So for a conversation that NEEDS screening this is terminal.
-      if (requiresScreening) {
-        return deferral('automation_unverified', { fetched })
-      }
+      // RECORDED, NOT RETURNED ON. This used to return automation_unverified
+      // immediately, from inside the loop over EVERY selected message - including the
+      // user's own outbound ones. Reproduced both ways round: with the outbound
+      // message first the counterparty's reply was never even fetched, and with the
+      // inbound first its clean headers were read and then discarded. Either way a
+      // conversation whose counterparty had complete, clean headers came back
+      // unscreenable.
+      //
+      // WHY AN OUTBOUND MESSAGE CANNOT ANSWER THIS QUESTION. The question is whether
+      // the COUNTERPARTY is a person or a mailing list. Every signal the classifiers
+      // read is set by the sending side: List-Id, List-Unsubscribe and Precedence
+      // identify the list that sent a message, Auto-Submitted and
+      // X-Auto-Response-Suppress identify an auto-generated one, and the remaining
+      // rules screen the sender address and subject. On an outbound message the
+      // sender is the mailbox owner, so its headers describe the user's own mail.
+      //
+      // Microsoft documents the collection as "message headers indicating the network
+      // path taken by a message from the sender to the recipient" (message resource,
+      // internetMessageHeaders, which also "Requires $select to retrieve"). That is
+      // evidence about the sending side of that particular message. The documentation
+      // does NOT say whether the collection is present on sent mail, so nothing here
+      // assumes it is absent there - the counters below measure it instead.
+      missingHeaders[h.folder] = (missingHeaders[h.folder] || 0) + 1
       // For a contact the user already tracks, the envelope pass accepted the
       // exchange on its own no-reply, bounce, system and subject rules, and chose
       // not to require headers. That decision is not revisited here.
     } else {
+      // SCREENING IS UNCHANGED, and still runs in both directions: a complete
+      // collection is screened wherever it came from, and a hit is still an immediate
+      // ignore. Only the COMPLETENESS REQUIREMENT changed, not what a present
+      // collection means.
+      if (directionFor(h.folder) === 'inbound') inboundScreened += 1
       const bulk = bulkListReason(screened)
-      if (bulk !== null) return { outcome: 'ignore', reason: 'bulk_or_list_mail', fetched }
+      if (bulk !== null) {
+        return { outcome: 'ignore', reason: 'bulk_or_list_mail', fetched,
+                 missingHeaders: { ...missingHeaders } }
+      }
       const nonHuman = nonHumanReason(screened)
-      if (nonHuman !== null) return { outcome: 'ignore', reason: 'automated_message', fetched }
+      if (nonHuman !== null) {
+        return { outcome: 'ignore', reason: 'automated_message', fetched,
+                 missingHeaders: { ...missingHeaders } }
+      }
     }
     envelopes.push({
       direction: directionFor(h.folder),
@@ -325,11 +377,39 @@ export async function summarizeConversation (p) {
     })
   }
 
-  if (parts.length === 0) return deferral('no_usable_content', { fetched })
+  if (parts.length === 0) {
+    return defer('no_usable_content', { fetched })
+  }
+
+  // -- THE SCREENING VERDICT, for the WHOLE conversation --------------------
+  // FAILS CLOSED, and on the right evidence: EVERY inbound message this pass read must
+  // have carried a complete header collection that screened clean. An inbound message
+  // is one the COUNTERPARTY sent, and the counterparty is who the question is about.
+  //
+  // WHY EVERY ONE, and not merely one of them. The text of each inbound message goes
+  // into the summary that is sent on, so an unscreened inbound message is unscreened
+  // text in the request - and a mailing-list message sitting beside a clean personal
+  // one is exactly the case the screening exists to catch. Reproduced in both inbound
+  // orderings: with one clean and one collection-less inbound message the conversation
+  // was proposed, and the unscreened text reached the model.
+  //
+  // Any collection that screened DIRTY already returned an `ignore` above, so reaching
+  // here with inboundScreened === inboundSeen means every inbound message was screened
+  // AND every one came back clean.
+  //
+  // `inboundSeen === 0` is tested separately and deliberately: an exchange with no
+  // inbound message at all would otherwise satisfy 0 === 0 and pass a gate it has no
+  // evidence for. Absent headers are never treated as clean.
+  //
+  // MISSING OUTBOUND HEADERS REMAIN ALLOWED. They say nothing about the counterparty,
+  // for the reasons set out at the recording site above.
+  if (requiresScreening && (inboundSeen === 0 || inboundScreened !== inboundSeen)) {
+    return defer('automation_unverified', { fetched })
+  }
 
   // ── 3. bound the episode, then build the MINIMIZED request ───────────────
   const bounded = boundEpisodeContent(parts)
-  if (bounded.kept.length === 0) return deferral('no_usable_content', { fetched })
+  if (bounded.kept.length === 0) return defer('no_usable_content', { fetched })
 
   const subject = sanitizeSubject(envelopes.map((e) => e.subject).find((s) => s.length > 0) ?? '')
   const known = typeof conv.contactId === 'string' && conv.contactId.length > 0
@@ -337,14 +417,14 @@ export async function summarizeConversation (p) {
   // The counterparty, from the ENVELOPE. Needed for an unknown person's proposal,
   // and needed either way to prove no address reaches the request.
   const party = counterpartyFromEnvelopes(envelopes, p.selfAddresses)
-  if (!known && party.ok !== true) return deferral(party.reason, { fetched })
+  if (!known && party.ok !== true) return defer(party.reason, { fetched })
 
   const lastLocalDate = typeof conv.lastLocalDate === 'string' ? conv.lastLocalDate : null
   const allowedDates = [...new Set(bounded.kept
     .map((k) => String(k.timestampIso).slice(0, 10))
     .filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d))
     .concat(lastLocalDate ? [lastLocalDate] : []))]
-  if (allowedDates.length === 0) return deferral('no_usable_content', { fetched })
+  if (allowedDates.length === 0) return defer('no_usable_content', { fetched })
 
   const mode = known ? 'known_contact' : 'new_contact'
   let body
@@ -367,7 +447,7 @@ export async function summarizeConversation (p) {
     // CONSTRUCTION, not refusal. Nothing was sent and nothing was checked; the guard
     // below never ran. Deterministic for the same inputs, so terminal - but reported
     // as its own code so a bug here is never mistaken for a privacy event.
-    return deferral('request_build_failed', { fetched })
+    return defer('request_build_failed', { fetched })
   }
 
   // RUNTIME MINIMIZATION, not just a test. Every address seen on the envelope,
@@ -380,31 +460,47 @@ export async function summarizeConversation (p) {
   if (min.ok !== true) {
     // The categories found are controlled strings; the offending value is never
     // returned by assertRequestMinimization and is not read here either.
-    return deferral('minimization_failed', { fetched, categories: min.found })
+    return defer('minimization_failed', { fetched, categories: min.found })
   }
 
   // ── 4. the model, then the STRICT validator ──────────────────────────────
   if (typeof p.budgetAllows === 'function' && !p.budgetAllows(DRAFT_ADMIT_MS)) {
-    return deferral('budget_exhausted', { fetched })
+    return defer('budget_exhausted', { fetched })
   }
   let called
   try {
     called = await p.callModel({ body, apiKey: p.apiKey })
   } catch {
-    return deferral('model_unavailable', { fetched })
+    // A LOCAL EXCEPTION, not a provider verdict. The thrown value is deliberately not
+    // read - it can carry the request URL, the key or a response body - so it is
+    // reported as one FIXED code and nothing else. Previously this was
+    // indistinguishable from a provider failure, which meant a programming fault in
+    // the call path read as "the model is down".
+    return defer('model_unavailable', { fetched, code: 'model_call_threw' })
   }
   if (!called || called.ok !== true) {
-    return deferral('model_unavailable', { fetched, code: called?.code ?? null })
+    // THE CODE AND THE STATUS BOTH TRAVEL. callDraftModel already separated an
+    // authentication refusal from a rate limit from a timeout; the deferral reason
+    // stays `model_unavailable` so classification and retryability are unchanged, and
+    // the specific code rides alongside it for the report.
+    return defer('model_unavailable', {
+      fetched,
+      code: called?.code ?? null,
+      status: Number.isInteger(called?.status) ? called.status : null,
+    })
   }
 
   const checked = validateDraftResponse(called.parsed, { mode, allowedDates })
   if (checked.ok !== true) {
     // A model that was fully talked into misbehaving still cannot produce a
     // stored value: the validator is independent of the schema it was asked for.
-    return deferral('model_output_invalid', { fetched, code: checked.code ?? null })
+    return defer('model_output_invalid', { fetched, code: checked.code ?? null })
   }
-  if (checked.kind === 'ignore') return { outcome: 'ignore', reason: 'model_ignored', fetched }
-  if (checked.kind === 'defer') return deferral('model_deferred', { fetched })
+  if (checked.kind === 'ignore') {
+    return { outcome: 'ignore', reason: 'model_ignored', fetched,
+             missingHeaders: { ...missingHeaders } }
+  }
+  if (checked.kind === 'defer') return defer('model_deferred', { fetched })
 
   // ── 5. the routing decision ──────────────────────────────────────────────
   // validateDraftResponse returns the known-contact shape under `draft` and the
@@ -415,11 +511,16 @@ export async function summarizeConversation (p) {
   // NEVER an empty note. If the validator let a blank summary through, this is
   // a deferral, not a suggestion - that blank note is the original complaint.
   if (summary === null || summary.trim().length === 0) {
-    return deferral('no_usable_content', { fetched })
+    return defer('no_usable_content', { fetched })
   }
 
   const shared = {
     fetched,
+    // CARRIED ON SUCCESS TOO. The live-shaped case - an absent collection on the user's
+    // own outbound message, a complete clean one on the counterparty's reply - now
+    // SUCCEEDS, and reporting the absence only on failures would hide exactly the fact
+    // that explains why the old code deferred.
+    missingHeaders: { ...missingHeaders },
     messagesSummarized: bounded.kept.length,
     messagesInExchange: Number.isInteger(conv.messageCount) ? conv.messageCount : bounded.kept.length,
     summary,
