@@ -209,11 +209,169 @@ test('schemas use only the SUPPORTED JSON Schema subset', () => {
   walk(newContactSchema(DATES))
 })
 
+// ── the nullable-enum encoding ───────────────────────────────────────────────
+//
+// Read a nullable enum's permitted values and nullability out of whichever encoding
+// the property uses, so the tests below talk about MEANING, and the shape is pinned
+// separately and deliberately.
+const permitted = (prop) => {
+  if (Array.isArray(prop.anyOf)) {
+    const strBranch = prop.anyOf.find((b) => b && b.type === 'string')
+    return strBranch && Array.isArray(strBranch.enum) ? [...strBranch.enum] : null
+  }
+  return Array.isArray(prop.enum) ? prop.enum.filter((v) => v !== null) : null
+}
+const acceptsNull = (prop) => {
+  if (Array.isArray(prop.anyOf)) return prop.anyOf.some((b) => b && b.type === 'null')
+  if (Array.isArray(prop.type)) return prop.type.includes('null')
+  return Array.isArray(prop.enum) && prop.enum.includes(null)
+}
+/** Every nullable enum in either schema, as [schemaLabel, propertyName, permittedValues]. */
+const NULLABLE_ENUMS = (dates) => [
+  ['known_contact', 'summary_evidence', [...SUMMARY_EVIDENCE], interactionDraftSchema(dates)],
+  ['known_contact', 'interaction_date', [...dates], interactionDraftSchema(dates)],
+  ['new_contact', 'name_evidence', [...NAME_EVIDENCE], newContactSchema(dates)],
+  ['new_contact', 'name_confidence', [...CONFIDENCE], newContactSchema(dates)],
+  ['new_contact', 'summary_evidence', [...SUMMARY_EVIDENCE], newContactSchema(dates)],
+  ['new_contact', 'interaction_date', [...dates], newContactSchema(dates)],
+]
+
 test('the date allowlist is baked into the schema so a date cannot be invented', () => {
+  // CORRECTED FOR THE NEW ENCODING. This used to read
+  // `properties.interaction_date.enum` directly; the allowlist now lives in the
+  // anyOf string branch. What it protects is unchanged: the dates the envelope
+  // supplied, and only those.
   const s = interactionDraftSchema(DATES)
-  assert.deepStrictEqual(s.properties.interaction_date.enum, [...DATES, null])
+  assert.deepStrictEqual(permitted(s.properties.interaction_date), [...DATES])
+  assert.ok(acceptsNull(s.properties.interaction_date), 'and null is still permitted')
   assert.throws(() => buildDraftRequest(baseInput({ allowedDates: [] })), /no_allowed_dates/)
   assert.throws(() => buildDraftRequest(baseInput({ allowedDates: ['not-a-date'] })), /no_allowed_dates/)
+})
+
+test('NO NULLABLE ENUM declares a type array - the encoding the API rejected', () => {
+  // THE EVIDENCE. The owner's synthetic probe, built with these builders from
+  // a6639b9, sent the KNOWN-CONTACT request to the real endpoint with a newly
+  // created key and got:
+  //
+  //   HTTP 400  invalid_request_error
+  //   output_config.format.schema: Invalid schema: Enum value 'explicit_body' does
+  //   not match declared type '['string', 'null']'
+  //
+  // So an enum value is validated against the DECLARED TYPE, and a type array is not
+  // a type an enum value can match. Every nullable enum is now anyOf, and this fails
+  // if one regresses - in either schema, including a property added later.
+  for (const [, schema] of [['known_contact', interactionDraftSchema(DATES)],
+    ['new_contact', newContactSchema(DATES)]]) {
+    for (const [name, prop] of Object.entries(schema.properties)) {
+      const typeArrayWithEnum = Array.isArray(prop.type)
+        && Object.prototype.hasOwnProperty.call(prop, 'enum')
+      assert.ok(!typeArrayWithEnum,
+        name + ' declares an enum beside a type array, which the API refuses')
+    }
+  }
+})
+
+test('every nullable enum is anyOf(string+enum, null) and keeps its exact values', () => {
+  for (const [label, name, values, schema] of NULLABLE_ENUMS(DATES)) {
+    const prop = schema.properties[name]
+    const where = label + '.' + name
+    // THE SHAPE: exactly two branches, one string carrying the enum, one null.
+    assert.ok(Array.isArray(prop.anyOf), where + ' must use anyOf')
+    assert.strictEqual(prop.anyOf.length, 2, where + ' must have exactly two branches')
+    const strBranch = prop.anyOf.find((b) => b.type === 'string')
+    const nullBranch = prop.anyOf.find((b) => b.type === 'null')
+    assert.ok(strBranch, where + ' needs a string branch')
+    assert.ok(nullBranch, where + ' needs a null branch')
+    // THE VALUES: exactly what was permitted before, and NULL IS NOT AMONG THEM -
+    // it is the other branch now, which is the whole point.
+    assert.deepStrictEqual(strBranch.enum, values, where + ' permitted values changed')
+    assert.ok(!strBranch.enum.includes(null), where + ' must not keep null in the enum')
+    assert.deepStrictEqual(Object.keys(nullBranch), ['type'], where + ' null branch is bare')
+    // NULLABILITY survives.
+    assert.ok(acceptsNull(prop), where + ' must still accept null')
+  }
+})
+
+test('the non-nullable result enum is untouched, and plain nullable strings keep their type array', () => {
+  // `result` was never nullable, so it needs no branches and keeps a single declared
+  // type - which is exactly why it never tripped the API.
+  for (const [label, schema, values] of [
+    ['known_contact', interactionDraftSchema(DATES), ['interaction_draft', 'ignore', 'defer']],
+    ['new_contact', newContactSchema(DATES), ['new_contact_suggestion', 'ignore', 'defer']],
+  ]) {
+    const r = schema.properties.result
+    assert.strictEqual(r.type, 'string', label + '.result keeps one declared type')
+    assert.deepStrictEqual(r.enum, values, label + '.result values changed')
+    assert.ok(!('anyOf' in r), label + '.result needs no branches')
+  }
+  // The plain nullable strings carry NO enum, so the rejected combination never
+  // applied to them. They are documented as supported and are left alone: the fix is
+  // scoped to what the evidence names.
+  for (const [label, schema, names] of [
+    ['known_contact', interactionDraftSchema(DATES), ['summary', 'follow_up']],
+    ['new_contact', newContactSchema(DATES), ['name', 'summary', 'follow_up']],
+  ]) {
+    for (const n of names) {
+      const p = schema.properties[n]
+      assert.deepStrictEqual(p.type, ['string', 'null'], label + '.' + n)
+      assert.ok(!('enum' in p), label + '.' + n + ' must carry no enum')
+    }
+  }
+})
+
+test('the VALIDATOR still accepts every permitted value and null, and refuses the rest', () => {
+  // The response validator is independent of these schemas and this change did not
+  // touch it. Asserted here anyway, value by value, because the schema is what asks
+  // for them: if the two ever disagree the model is asked for something that is then
+  // refused, which is the worst of both.
+  const okDraftFor = (over) => validateDraftResponse(okDraft(over),
+    { mode: 'known_contact', allowedDates: DATES })
+  const okSuggestionFor = (over) => validateDraftResponse(okSuggestion(over),
+    { mode: 'new_contact', allowedDates: DATES })
+
+  for (const v of SUMMARY_EVIDENCE) {
+    assert.ok(okDraftFor({ summary: 'A short call was agreed.', summary_evidence: v }).ok, 'known ' + v)
+    assert.ok(okSuggestionFor({ summary: 'A short call was agreed.', summary_evidence: v }).ok, 'new ' + v)
+  }
+  for (const v of NAME_EVIDENCE) {
+    assert.ok(okSuggestionFor({ name: 'Dana', name_evidence: v, name_confidence: 'high' }).ok, 'name ' + v)
+  }
+  for (const v of CONFIDENCE) {
+    assert.ok(okSuggestionFor({ name: 'Dana', name_evidence: 'explicit_body', name_confidence: v }).ok, 'conf ' + v)
+  }
+  for (const d of DATES) {
+    assert.ok(okDraftFor({ interaction_date: d }).ok, 'date ' + d)
+    assert.ok(okSuggestionFor({ interaction_date: d }).ok, 'date ' + d)
+  }
+  // THE NULL CASES, which are now a separate branch in the schema.
+  assert.ok(okDraftFor({ follow_up: null, interaction_date: null }).ok, 'nulls on the known path')
+  assert.ok(okSuggestionFor({ name: null, name_evidence: null, name_confidence: null,
+    follow_up: null, interaction_date: null }).ok, 'nulls on the new path')
+  // AND THE REJECTIONS. Removing the enum restriction is not how this was fixed.
+  assert.strictEqual(okDraftFor({ summary_evidence: 'guessed' }).code, 'bad_enum')
+  assert.strictEqual(okSuggestionFor({ name: 'Dana', name_evidence: 'guessed', name_confidence: 'high' }).code, 'bad_enum')
+  assert.strictEqual(okSuggestionFor({ name: 'Dana', name_evidence: 'explicit_body', name_confidence: 'low' }).code, 'bad_enum')
+  assert.strictEqual(okDraftFor({ interaction_date: '2020-01-01' }).code, 'bad_date')
+  assert.strictEqual(okSuggestionFor({ interaction_date: '2020-01-01' }).code, 'bad_date')
+})
+
+test('the union-type count is UNCHANGED by the re-encoding, and still within the ceiling', () => {
+  // The documented ceiling counts "parameters that use `anyOf` OR type arrays", so
+  // moving between the two forms costs nothing. Both counts are pinned so a future
+  // property cannot quietly push the request over the limit.
+  const unions = (schema) => Object.values(schema.properties)
+    .filter((v) => Array.isArray(v.type) || Object.prototype.hasOwnProperty.call(v, 'anyOf')).length
+  assert.strictEqual(unions(interactionDraftSchema(DATES)), 4, 'known-contact union count')
+  assert.strictEqual(unions(newContactSchema(DATES)), 7, 'new-contact union count')
+  assert.ok(unions(interactionDraftSchema(DATES)) <= MAX_UNION_TYPE_PARAMETERS)
+  assert.ok(unions(newContactSchema(DATES)) <= MAX_UNION_TYPE_PARAMETERS)
+  // The other documented ceilings, unchanged.
+  for (const schema of [interactionDraftSchema(DATES), newContactSchema(DATES)]) {
+    const optional = Object.keys(schema.properties).filter((k) => !schema.required.includes(k))
+    assert.strictEqual(optional.length, 0)
+    assert.ok(optional.length <= MAX_OPTIONAL_PARAMETERS)
+    assert.strictEqual(schema.additionalProperties, false)
+  }
 })
 
 test('an oversized request is refused rather than sent', () => {

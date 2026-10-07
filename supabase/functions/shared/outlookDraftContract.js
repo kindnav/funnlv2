@@ -293,6 +293,44 @@ export const SYSTEM_CONTRACT = [
 
 const nullableString = (desc) => ({ type: ['string', 'null'], description: desc })
 
+/**
+ * A nullable ENUM, as anyOf(string-with-enum, null).
+ *
+ * WHY NOT `{ type: ['string','null'], enum: [...values, null] }`, which is what this
+ * schema used until now. The API rejects it. Measured, not guessed: the owner ran the
+ * synthetic probe built with these exact builders from a6639b9 against the real
+ * endpoint with a newly created key, and the KNOWN-CONTACT request came back
+ *
+ *   HTTP 400  invalid_request_error
+ *   output_config.format.schema: Invalid schema: Enum value 'explicit_body' does not
+ *   match declared type '['string', 'null']'
+ *
+ * So the enum values are validated against the DECLARED TYPE, and a type array is not
+ * a type an enum value can match. Splitting the union into branches gives each enum a
+ * single declared type to match, which is what anyOf is for.
+ *
+ * NOTE ON THE DOCUMENTATION. Anthropic's structured-outputs page lists BOTH `enum` and
+ * type arrays as supported features and even recommends "simple type arrays with enum"
+ * - it shows no nullable-enum example. The live API contradicts that reading, and the
+ * API is the authority. The message above is the whole basis for this change.
+ *
+ * THE UNION COUNT IS UNCHANGED. The documented ceiling of 16 counts "parameters that
+ * use `anyOf` OR type arrays", so moving between the two forms costs nothing: the
+ * known-contact schema stays at 4 and the new-contact schema at 7.
+ *
+ * NOTHING ELSE MOVES. The permitted values, the nullability, the dates, the required
+ * list and additionalProperties:false are all exactly as they were - and the
+ * independent response validator does not read these schemas for its rules, so its
+ * strictness is untouched.
+ *
+ * @param {readonly string[]} values the permitted strings, unchanged
+ * @param {string} [desc] the existing description, where the property had one
+ */
+const nullableEnum = (values, desc) => {
+  const shape = { anyOf: [{ type: 'string', enum: [...values] }, { type: 'null' }] }
+  return typeof desc === 'string' && desc.length > 0 ? { ...shape, description: desc } : shape
+}
+
 export function interactionDraftSchema(allowedDates) {
   return {
     type: 'object',
@@ -301,9 +339,9 @@ export function interactionDraftSchema(allowedDates) {
     properties: {
       result: { type: 'string', enum: ['interaction_draft', 'ignore', 'defer'] },
       summary: nullableString(`Neutral paraphrase of what this exchange was about. At most ${BOUNDS.summary} characters. No URLs. Null unless result is interaction_draft.`),
-      summary_evidence: { type: ['string', 'null'], enum: [...SUMMARY_EVIDENCE, null], description: 'explicit_body when the summary comes from the message text; subject_only when only the subject supported it.' },
+      summary_evidence: nullableEnum(SUMMARY_EVIDENCE, 'explicit_body when the summary comes from the message text; subject_only when only the subject supported it.'),
       follow_up: nullableString(`A concrete next step the user could take, at most ${BOUNDS.followUp} characters, only if the text states one. Otherwise null.`),
-      interaction_date: { type: ['string', 'null'], enum: [...allowedDates, null], description: 'The date of the exchange. Must be one of the supplied values.' },
+      interaction_date: nullableEnum(allowedDates, 'The date of the exchange. Must be one of the supplied values.'),
     },
   }
 }
@@ -343,12 +381,12 @@ export function newContactSchema(allowedDates) {
     properties: {
       result: { type: 'string', enum: ['new_contact_suggestion', 'ignore', 'defer'] },
       name: nullableString(`Explicitly stated name. At most ${BOUNDS.name} characters. No URLs. Null if not stated.`),
-      name_evidence: { type: ['string', 'null'], enum: [...NAME_EVIDENCE, null], description: 'Where the name was stated. Required exactly when name is non-null.' },
-      name_confidence: { type: ['string', 'null'], enum: [...CONFIDENCE, null], description: 'Required exactly when name is non-null.' },
+      name_evidence: nullableEnum(NAME_EVIDENCE, 'Where the name was stated. Required exactly when name is non-null.'),
+      name_confidence: nullableEnum(CONFIDENCE, 'Required exactly when name is non-null.'),
       summary: nullableString(`Neutral paraphrase of the exchange. At most ${BOUNDS.summary} characters. No URLs.`),
-      summary_evidence: { type: ['string', 'null'], enum: [...SUMMARY_EVIDENCE, null] },
+      summary_evidence: nullableEnum(SUMMARY_EVIDENCE),
       follow_up: nullableString(`A concrete next step, at most ${BOUNDS.followUp} characters, only if stated. Otherwise null.`),
-      interaction_date: { type: ['string', 'null'], enum: [...allowedDates, null] },
+      interaction_date: nullableEnum(allowedDates),
     },
   }
 }
