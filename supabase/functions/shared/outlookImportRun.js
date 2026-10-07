@@ -1014,6 +1014,8 @@ export async function runOutlookImport (p) {
     // on the way into the report and again on the way out of summarizeRun.
     modelFailures: Object.create(null),
     modelStatuses: Object.create(null),
+    // The classified cause of a 400, when the error body could be classified.
+    badRequestCategories: Object.create(null),
     // WHICH side of an exchange had no header collection, by folder.
     missingHeaders: Object.create(null),
   }
@@ -1263,6 +1265,12 @@ export async function runOutlookImport (p) {
         if (pass.reason === 'model_unavailable' && Number.isInteger(pass.status)) {
           const k = String(pass.status)
           content.modelStatuses[k] = (content.modelStatuses[k] || 0) + 1
+        }
+        // ONLY a 400 carries a category, and only a controlled one. Filtered against
+        // the allowlist in the stage summary and again at the boundary.
+        if (pass.reason === 'model_unavailable' && typeof pass.category === 'string') {
+          const c = pass.category
+          content.badRequestCategories[c] = (content.badRequestCategories[c] || 0) + 1
         }
         // THE MISSING HEADER COLLECTIONS, by folder, from EVERY outcome - a success
         // included, because a conversation that succeeded with one side missing is the

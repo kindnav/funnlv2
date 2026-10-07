@@ -90,6 +90,8 @@ import { GRAPH_BASE } from '../supabase/functions/shared/outlookGraphTransport.j
 import {
   ANTHROPIC_MESSAGES_URL, callDraftModel, buildDraftRequest,
   DRAFT_FAILURE_CODES, DRAFT_MAX_RETRIES, DRAFT_TIMEOUT_MS,
+  DRAFT_BAD_REQUEST_CATEGORIES, MAX_DRAFT_RESPONSE_BYTES,
+  MAX_UNION_TYPE_PARAMETERS, newContactSchema, interactionDraftSchema,
 } from '../supabase/functions/shared/outlookDraftContract.js'
 import {
   REQUIRED_CONTENT_CONSENT_VERSION, REQUIRED_THIRD_PARTY_CONSENT_VERSION,
@@ -353,12 +355,7 @@ async function screen (spec) {
       state.models += 1
       return { ok: true, parsed: {
         result: 'new_contact_suggestion',
-        name: 'Cleo Adeyemi', name_evidence: 'explicit_signature', name_confidence: 'high',
-        company: null, company_evidence: null, company_confidence: null,
-        role: null, role_evidence: null, role_confidence: null,
-        how_met: null, how_met_evidence: null, how_met_confidence: null,
-        linkedin_url: null, linkedin_url_evidence: null, linkedin_url_confidence: null,
-        tags: [], summary: 'She offered to put the application forward.',
+        name: 'Cleo Adeyemi', name_evidence: 'explicit_signature', name_confidence: 'high', summary: 'She offered to put the application forward.',
         summary_evidence: 'explicit_body', follow_up: null, interaction_date: null,
       } }
     },
@@ -664,12 +661,7 @@ console.log('   A. mixed inbound evidence: partial screening is not screening')
         state.sent.push(JSON.stringify(body))
         return { ok: true, parsed: {
           result: 'new_contact_suggestion',
-          name: 'Cleo Adeyemi', name_evidence: 'explicit_signature', name_confidence: 'high',
-          company: null, company_evidence: null, company_confidence: null,
-          role: null, role_evidence: null, role_confidence: null,
-          how_met: null, how_met_evidence: null, how_met_confidence: null,
-          linkedin_url: null, linkedin_url_evidence: null, linkedin_url_confidence: null,
-          tags: [], summary: 'She offered to review the application.',
+          name: 'Cleo Adeyemi', name_evidence: 'explicit_signature', name_confidence: 'high', summary: 'She offered to review the application.',
           summary_evidence: 'explicit_body', follow_up: null, interaction_date: null,
         } }
       },
@@ -817,6 +809,150 @@ console.log('   C. a 200 whose body could not be used keeps its status')
   const s = JSON.stringify(C.body)
   check('and nothing else rode along',
     s.indexOf(API_KEY) < 0 && s.indexOf(AT) < 0 && s.indexOf(CONN) < 0)
+}
+
+// ===========================================================================
+console.log('')
+console.log('6. the live 400: read, bounded, classified - and never echoed')
+
+console.log('')
+console.log('   the live report shape, reproduced end to end')
+
+{
+  // LIVE EVIDENCE, for comparison only: resumed finalisation, processed 0,
+  // bodies_read 2, model_calls 1, model_failures { provider_bad_request: 1 },
+  // model_http_status { "400": 1 }, missing_headers { sentitems: 1 }, zero candidates.
+  //
+  // FIXTURE EVIDENCE below. The live rejection message was never captured, so the
+  // category this fixture produces is the FIXTURE's, chosen to exercise the path - it
+  // is not a claim about what Anthropic said to the pilot.
+  const L = await runWorker(() => ok({
+    type: 'error',
+    error: { type: 'invalid_request_error', message: 'Schema is too complex for compilation.' },
+    request_id: 'req_fixture',
+  }, 400))
+  const rep = L.body && L.body.run && L.body.run.content
+  check('the failure code is still provider_bad_request',
+    rep && rep.model_failures && rep.model_failures.provider_bad_request === 1,
+    JSON.stringify(rep && rep.model_failures))
+  check('the status is still 400',
+    rep && rep.model_http_status && rep.model_http_status['400'] === 1,
+    JSON.stringify(rep && rep.model_http_status))
+  check('the absent outbound collection is still reported',
+    rep && rep.missing_headers && rep.missing_headers.sentitems === 1,
+    JSON.stringify(rep && rep.missing_headers))
+  check('bodies were read and one model call was spent, as live',
+    rep && rep.bodies_read === 2 && rep.model_calls === 1, JSON.stringify(rep))
+  check('zero candidates, as live', L.ports.candidates.length === 0)
+  check('NEW: the HTTP report now names a CATEGORY for the 400',
+    rep && rep.model_bad_request && rep.model_bad_request.schema_complexity === 1,
+    JSON.stringify(rep && rep.model_bad_request))
+  check('the deferral is still the retryable model_unavailable',
+    rep && rep.deferred && rep.deferred.model_unavailable === 1,
+    JSON.stringify(rep && rep.deferred))
+  check('the round is still unfinished, so the position is preserved',
+    L.body.run.finalize.complete === false && L.body.run.cursors_advanced === 0,
+    JSON.stringify(L.body.run.finalize))
+}
+
+console.log('')
+console.log('   each category, through the real transport')
+
+for (const [label, body, category] of [
+  ['a spend limit', { type: 'error', error: { type: 'invalid_request_error', message: 'Your organization has reached its monthly spend limit.' } }, 'spend_limit'],
+  ['a credit balance', { type: 'error', error: { type: 'invalid_request_error', message: 'Your credit balance is too low.' } }, 'insufficient_credits'],
+  ['schema complexity', { type: 'error', error: { type: 'invalid_request_error', message: 'Schema is too complex for compilation.' } }, 'schema_complexity'],
+  ['an unsupported parameter', { type: 'error', error: { type: 'invalid_request_error', message: '"thinking.type.disabled" is not supported for this model.' } }, 'unsupported_parameter'],
+  ['an undocumented refusal', { type: 'error', error: { type: 'invalid_request_error', message: 'Something new.' } }, 'unknown'],
+]) {
+  const { r, calls } = await callWith(async () => ok(body, 400))
+  check(label + ' -> ' + category,
+    r.ok === false && r.code === 'provider_bad_request' && r.status === 400
+    && r.category === category, JSON.stringify(r))
+  check('  and it is NOT retried (' + label + ')', calls === 1, 'calls=' + calls)
+}
+
+console.log('')
+console.log('   an unreadable error body is `unknown`, not a failure of its own')
+
+{
+  // MALFORMED: a 400 whose body is not JSON at all.
+  const { r } = await callWith(async () => ({
+    status: 400, headers: { get: () => null },
+    json: async () => { throw new SyntaxError('Unexpected token') },
+  }))
+  check('a malformed body still reports provider_bad_request / 400 / unknown',
+    r.code === 'provider_bad_request' && r.status === 400 && r.category === 'unknown',
+    JSON.stringify(r))
+}
+{
+  // OVERSIZED: a declared length over the ceiling is refused before a byte is buffered.
+  const { r } = await callWith(async () => ({
+    status: 400,
+    headers: { get: (k) => (String(k).toLowerCase() === 'content-length'
+      ? String(MAX_DRAFT_RESPONSE_BYTES + 1) : null) },
+    json: async () => { throw new Error('must not be read') },
+  }))
+  check('an oversized body is refused and reports unknown',
+    r.code === 'provider_bad_request' && r.status === 400 && r.category === 'unknown',
+    JSON.stringify(r))
+}
+{
+  // STALLED: the body never arrives. The read is inside the live controller, so the
+  // deadline - not this fixture - ends it.
+  let aborted = false
+  const { r } = await callWith(async (_url, init) => ({
+    status: 400, headers: { get: () => null },
+    json: () => new Promise((_resolve, reject) => {
+      const sig = init && init.signal
+      if (sig) {
+        sig.addEventListener('abort', () => {
+          aborted = true
+          const e = new Error('aborted'); e.name = 'AbortError'; reject(e)
+        })
+      }
+    }),
+  }), { timeoutMs: 20 })
+  check('a stalled body is ended by the deadline, not left hanging',
+    r.code === 'provider_bad_request' && r.status === 400 && r.category === 'unknown',
+    JSON.stringify(r))
+  check('  and the abort really fired', aborted === true)
+}
+{
+  // SENSITIVE CONTENT: a provider message that quotes the mail. The ONLY thing that may
+  // leave is the category.
+  const AT = String.fromCharCode(64)
+  const poison = 'rejected near "SECRET SENTENCE from the body" for dana' + AT + 'contoso.invalid'
+  const { r } = await callWith(async () => ok({
+    type: 'error', error: { type: 'invalid_request_error', message: poison },
+    request_id: 'req_fixture',
+  }, 400))
+  const serialized = JSON.stringify(r)
+  check('a sensitive error message is classified without being carried',
+    r.code === 'provider_bad_request' && r.status === 400
+    && DRAFT_BAD_REQUEST_CATEGORIES.includes(r.category), serialized)
+  check('  the distinctive sentence does not appear in the result',
+    serialized.indexOf('SECRET SENTENCE') < 0, serialized)
+  check('  no address appears in the result', serialized.indexOf(AT) < 0, serialized)
+  check('  no request_id is carried either', serialized.indexOf('req_fixture') < 0, serialized)
+  check('  the result is counts and codes only',
+    JSON.stringify(Object.keys(r).sort()) === JSON.stringify(['category', 'code', 'ok', 'status']),
+    JSON.stringify(Object.keys(r)))
+}
+
+console.log('')
+console.log('   the documented union-type ceiling')
+
+{
+  const unions = (schema) => Object.values(schema.properties)
+    .filter((v) => Array.isArray(v.type)
+      || Object.prototype.hasOwnProperty.call(v, 'anyOf')).length
+  const nc = unions(newContactSchema(['2026-09-20']))
+  const id = unions(interactionDraftSchema(['2026-09-20']))
+  check('the documented maximum is 16', MAX_UNION_TYPE_PARAMETERS === 16)
+  check('the new-contact schema is within it (was 19, now ' + nc + ')',
+    nc <= MAX_UNION_TYPE_PARAMETERS && nc === 7, 'unions=' + nc)
+  check('the known-contact schema is unchanged at 4', id === 4, 'unions=' + id)
 }
 
 console.log('')
