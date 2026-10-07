@@ -58,6 +58,25 @@
 // Fixed by recording the absence per folder and deciding ONCE for the conversation, on
 // INBOUND evidence. Absent counterparty evidence still fails closed.
 //
+// ---------------------------------------------------------------------------
+// AMENDED after three gaps were reproduced independently in the first attempt at the
+// two fixes above. All three are covered in section 5.
+//
+//   A  MIXED INBOUND EVIDENCE. The first screening fix asked whether SOME inbound
+//      message had been screened. A conversation with one clean inbound message and
+//      another inbound message carrying no collection therefore passed the gate, and
+//      the unscreened message's text went into the summary that was sent on. The check
+//      is now an equality over two counts: every inbound message read must have been
+//      screened, and screened clean.
+//   B  INVALID INPUT. Converting the deferral call sites to the counting wrapper caught
+//      the `!isPlainObject(p)` guard, which runs BEFORE the wrapper is initialised - so
+//      summarizeConversation(null), (undefined) and ([]) threw a ReferenceError out of
+//      the temporal dead zone instead of deferring.
+//   C  A LOST 200. callDraftModel returned parseDraftPayload's result directly, so
+//      empty_provider_response, unparseable_json and malformed_response arrived with no
+//      status - indistinguishable in the report from a failure that never reached a
+//      response at all.
+//
 // Run with: node tests/outlook-model-and-screening.test.js
 
 import { webcrypto } from 'node:crypto'
@@ -623,6 +642,181 @@ async function runWorker (modelReply) {
   check('  the report holds only counters and the controlled maps',
     Object.keys(rep).every((k) => CONTENT_REPORT_COUNTS.includes(k)
       || CONTENT_REPORT_MAPS.includes(k)), JSON.stringify(Object.keys(rep)))
+}
+
+// ===========================================================================
+console.log('')
+console.log('5. the three gaps reproduced at 7dea147')
+
+console.log('')
+console.log('   A. mixed inbound evidence: partial screening is not screening')
+
+{
+  // THE UNSCREENED TEXT IS MADE IDENTIFIABLE, so the assertion is about what actually
+  // reached the request rather than about the outcome alone.
+  const UNSCREENED = 'UNSCREENED SENTENCE: this message carried no header collection.'
+  async function mixed (spec) {
+    const state = { models: 0, sent: [] }
+    const { params } = passParams({
+      spec, knownContact: false, requiresScreening: true,
+      callModel: async ({ body }) => {
+        state.models += 1
+        state.sent.push(JSON.stringify(body))
+        return { ok: true, parsed: {
+          result: 'new_contact_suggestion',
+          name: 'Cleo Adeyemi', name_evidence: 'explicit_signature', name_confidence: 'high',
+          company: null, company_evidence: null, company_confidence: null,
+          role: null, role_evidence: null, role_confidence: null,
+          how_met: null, how_met_evidence: null, how_met_confidence: null,
+          linkedin_url: null, linkedin_url_evidence: null, linkedin_url_confidence: null,
+          tags: [], summary: 'She offered to review the application.',
+          summary_evidence: 'explicit_body', follow_up: null, interaction_date: null,
+        } }
+      },
+    })
+    // The collection-less inbound message gets the distinctive body.
+    const inner = params.fetchMessage
+    const r = await summarizeConversation({
+      ...params,
+      fetchMessage: async (id) => {
+        const got = await inner(id)
+        if (spec[Number(id)].folder === 'inbox' && spec[Number(id)].complete !== true) {
+          got.message.uniqueBodyContent = UNSCREENED
+        }
+        return got
+      },
+    })
+    return { r, state, leaked: state.sent.some((b) => b.indexOf('UNSCREENED SENTENCE') >= 0) }
+  }
+
+  for (const [label, spec] of [
+    ['clean inbound FIRST', [IN_OK, IN_NO, OUT_OK]],
+    ['unscreened inbound FIRST', [IN_NO, IN_OK, OUT_OK]],
+  ]) {
+    const { r, state, leaked } = await mixed(spec)
+    check('mixed inbound evidence defers as automation_unverified (' + label + ')',
+      r.outcome === 'defer' && r.reason === 'automation_unverified',
+      JSON.stringify({ o: r.outcome, re: r.reason }))
+    check('  zero model calls (' + label + ')', state.models === 0, 'models=' + state.models)
+    check('  no proposal is produced (' + label + ')',
+      r.outcome !== 'new_contact_suggestion')
+    check('  and the unscreened text never reached a request (' + label + ')', !leaked)
+    check('  the absent INBOUND collection is reported (' + label + ')',
+      r.missingHeaders && r.missingHeaders.inbox === 1, JSON.stringify(r.missingHeaders))
+  }
+
+  // THE POSITIVE CONTROL IS PRESERVED: clean inbound evidence with a missing OUTBOUND
+  // collection still succeeds. Missing outbound headers say nothing about the
+  // counterparty, and tightening the inbound rule must not have changed that.
+  const { r, state } = await screen([IN_OK, OUT_NO])
+  check('clean inbound + missing outbound still succeeds',
+    r.outcome === 'new_contact_suggestion' && state.models === 1,
+    JSON.stringify({ o: r.outcome, re: r.reason }))
+  check('  and still reports only the outbound absence',
+    r.missingHeaders.sentitems === 1 && !('inbox' in r.missingHeaders),
+    JSON.stringify(r.missingHeaders))
+
+  // TWO clean inbound messages are fine - the rule is "all of them", not "one of them".
+  const two = await screen([IN_OK, { folder: 'inbox', complete: true }, OUT_OK])
+  check('two clean inbound messages are proposed',
+    two.r.outcome === 'new_contact_suggestion' && two.state.models === 1,
+    JSON.stringify({ o: two.r.outcome, re: two.r.reason }))
+
+  // And a DIRTY inbound message beside a clean one is still an ignore, not a deferral:
+  // the classifiers are unchanged and a hit still wins immediately.
+  const dirty = await screen([IN_OK, { folder: 'inbox', complete: true,
+    automation: { hasListId: true } }, OUT_OK])
+  check('a mailing-list inbound beside a clean one is still ignored',
+    dirty.r.outcome === 'ignore' && dirty.r.reason === 'bulk_or_list_mail',
+    JSON.stringify({ o: dirty.r.outcome, re: dirty.r.reason }))
+
+  // A TRACKED CONTACT is unaffected by the stricter inbound rule.
+  const known = passParams({ spec: [IN_OK, IN_NO, OUT_NO], requiresScreening: false })
+  const kr = await summarizeConversation(known.params)
+  check('a tracked contact still summarizes with a collection-less inbound message',
+    kr.outcome === 'interaction_draft' && known.state.models === 1,
+    JSON.stringify({ o: kr.outcome, re: kr.reason }))
+}
+
+console.log('')
+console.log('   B. invalid input defers instead of throwing')
+
+for (const [label, input] of [['null', null], ['undefined', undefined], ['[]', []]]) {
+  let r = null
+  let threw = null
+  try { r = await summarizeConversation(input) } catch (e) { threw = e }
+  check('summarizeConversation(' + label + ') does not throw',
+    threw === null, threw ? threw.name + ': ' + threw.message : '')
+  check('  it defers as no_handles',
+    r !== null && r.outcome === 'defer' && r.reason === 'no_handles', JSON.stringify(r))
+  check('  with an empty missingHeaders map',
+    r !== null && r.missingHeaders !== undefined
+    && JSON.stringify(r.missingHeaders) === '{}', JSON.stringify(r && r.missingHeaders))
+}
+
+console.log('')
+console.log('   C. a 200 whose body could not be used keeps its status')
+
+{
+  for (const [label, body, code] of [
+    ['no text block at all', { content: [], stop_reason: 'end_turn' },
+      'empty_provider_response'],
+    ['text that is not JSON', { content: [{ type: 'text', text: 'not json at all' }],
+      stop_reason: 'end_turn' }, 'unparseable_json'],
+    ['text that joins to nothing', { content: [{ type: 'text', text: '   ' }],
+      stop_reason: 'end_turn' }, 'malformed_response'],
+  ]) {
+    const { r } = await callWith(async () => ok(body))
+    check('a 200 with ' + label + ' is ' + code, r.ok === false && r.code === code,
+      JSON.stringify(r))
+    check('  and carries status 200', r.status === 200, JSON.stringify(r.status))
+  }
+
+  // THE SUCCESS SHAPE IS UNCHANGED. Callers destructure `parsed` and `stopReason`; a
+  // success has no failure to attribute to a status, and adding one here would change
+  // a contract this fix has no business touching.
+  const payload = { result: 'interaction_draft', summary: 'A short call was agreed.',
+    summary_evidence: 'explicit_body', follow_up: null, interaction_date: null }
+  const { r: good } = await callWith(async () => ok({
+    content: [{ type: 'text', text: JSON.stringify(payload) }], stop_reason: 'end_turn' }))
+  check('a successful parse still returns exactly ok, parsed and stopReason',
+    good.ok === true
+    && JSON.stringify(Object.keys(good).sort()) === JSON.stringify(['ok', 'parsed', 'stopReason']),
+    JSON.stringify(Object.keys(good)))
+
+  // A FAILURE BEFORE ANY HEADERS ARRIVE still has no status, because no response line
+  // existed to report.
+  const { r: aborted } = await callWith(async () => { throw abortError() }, { timeoutMs: 5 })
+  check('an aborted attempt still has no status',
+    aborted.code === 'provider_timeout' && aborted.status === undefined,
+    JSON.stringify(aborted))
+  const { r: dropped } = await callWith(async () => { throw new Error('socket hang up') })
+  check('a transport failure still has no status',
+    dropped.code === 'transport_failure' && dropped.status === undefined,
+    JSON.stringify(dropped))
+  const { r: broke } = await callWith(async () => ok({}, 200), { budgetAllows: () => false })
+  check('a refused-before-request failure still has no status',
+    broke.code === 'budget_exhausted' && broke.status === undefined, JSON.stringify(broke))
+}
+
+{
+  // AND IT SURVIVES INTO THE HANDLER'S HTTP REPORT, which is the point: a 200 that
+  // could not be used must be distinguishable there from a timeout.
+  const C = await runWorker(() => ok({ content: [], stop_reason: 'end_turn' }))
+  const rep = C.body && C.body.run && C.body.run.content
+  check('the HTTP report names the parse failure',
+    rep && rep.model_failures && rep.model_failures.empty_provider_response === 1,
+    JSON.stringify(rep && rep.model_failures))
+  check('and carries status 200 for it',
+    rep && rep.model_http_status && rep.model_http_status['200'] === 1,
+    JSON.stringify(rep && rep.model_http_status))
+  check('the deferral is still the retryable model_unavailable',
+    rep && rep.deferred && rep.deferred.model_unavailable === 1,
+    JSON.stringify(rep && rep.deferred))
+  check('no candidate was written', C.ports.candidates.length === 0)
+  const s = JSON.stringify(C.body)
+  check('and nothing else rode along',
+    s.indexOf(API_KEY) < 0 && s.indexOf(AT) < 0 && s.indexOf(CONN) < 0)
 }
 
 console.log('')

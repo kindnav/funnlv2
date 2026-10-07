@@ -657,7 +657,17 @@ export async function callDraftModel(p) {
           status,
         }
       }
-      return parseDraftPayload(read.value)
+      // THE RECEIVED STATUS SURVIVES A PARSE FAILURE. parseDraftPayload is pure and
+      // knows nothing about transport, so empty_provider_response, unparseable_json
+      // and malformed_response came back with no status at all - indistinguishable in
+      // the report from a failure that never reached a response. A 200 whose body
+      // could not be used is a very different problem from a timeout, and the status
+      // is what says so.
+      //
+      // THE SUCCESS SHAPE IS UNTOUCHED, deliberately: callers destructure `parsed` and
+      // `stopReason` from it, and a success has no failure to attribute to a status.
+      const parsed = parseDraftPayload(read.value)
+      return parsed.ok === true ? parsed : { ...parsed, status }
     }
 
     clearTimer()

@@ -209,7 +209,11 @@ export function counterpartyFromEnvelopes (messages, selfAddresses) {
  *   whose eligibility the envelope pass established without headers.
  */
 export async function summarizeConversation (p) {
-  if (!isPlainObject(p)) return defer('no_handles')
+  // THE MODULE HELPER, NOT THE WRAPPER BELOW. This guard runs before the accumulators
+  // exist, so calling `defer` here reached it inside its own temporal dead zone and
+  // threw a ReferenceError instead of deferring - for null, undefined and [] alike.
+  // The map is empty and explicit, because nothing has been read at this point.
+  if (!isPlainObject(p)) return deferral('no_handles', { missingHeaders: {} })
   const conv = isPlainObject(p.conversation) ? p.conversation : {}
   const requiresScreening = p.requiresScreening === true
   // Controlled counts only: one integer per Graph folder, so an operator can see WHICH
@@ -222,8 +226,15 @@ export async function summarizeConversation (p) {
   // verdict. Empty when nothing was missing, and always present.
   const defer = (reason, extra = {}) =>
     deferral(reason, { ...extra, missingHeaders: { ...missingHeaders } })
-  // How many INBOUND messages actually carried a complete collection. This, and not
-  // the absence of a failure, is what makes the counterparty screened.
+  // SCREENING EVIDENCE, COUNTED ON BOTH SIDES OF THE LEDGER.
+  //
+  // `inboundSeen` is every inbound message this pass fetched; `inboundScreened` is how
+  // many of them carried a complete header collection that screened clean. Requiring
+  // only that SOME inbound message was screened was not enough: a conversation with one
+  // clean inbound message and another inbound message with no collection passed the
+  // gate, and the unscreened message's text went into the summary that was sent on. Two
+  // counts and an equality is the check that cannot be satisfied by partial evidence.
+  let inboundSeen = 0
   let inboundScreened = 0
 
   // ── 1. CONSENT, before anything is read ──────────────────────────────────
@@ -278,6 +289,7 @@ export async function summarizeConversation (p) {
     fetched += 1
 
     const msg = got.message
+    if (directionFor(h.folder) === 'inbound') inboundSeen += 1
     // readMessageContent already returns exactly the shape the sanitizer takes,
     // including BOTH projections: `uniqueBodyContent` is Graph's own "this
     // message without the quoted history below it", which is what a summary
@@ -370,17 +382,28 @@ export async function summarizeConversation (p) {
   }
 
   // -- THE SCREENING VERDICT, for the WHOLE conversation --------------------
-  // FAILS CLOSED, and on the right evidence. A conversation that needs screening may
-  // only proceed when at least one INBOUND message carried a complete header
-  // collection, because an inbound message is one the COUNTERPARTY sent and the
-  // counterparty is who the question is about. Any such collection that screened dirty
-  // already returned an `ignore` above, so reaching here with inboundScreened > 0 means
-  // the counterparty was screened AND came back clean.
+  // FAILS CLOSED, and on the right evidence: EVERY inbound message this pass read must
+  // have carried a complete header collection that screened clean. An inbound message
+  // is one the COUNTERPARTY sent, and the counterparty is who the question is about.
   //
-  // No inbound evidence at all is still terminal: absent headers are never treated as
-  // clean, and a missing collection on the user's own outbound message no longer stands
-  // in for the counterparty's.
-  if (requiresScreening && inboundScreened === 0) {
+  // WHY EVERY ONE, and not merely one of them. The text of each inbound message goes
+  // into the summary that is sent on, so an unscreened inbound message is unscreened
+  // text in the request - and a mailing-list message sitting beside a clean personal
+  // one is exactly the case the screening exists to catch. Reproduced in both inbound
+  // orderings: with one clean and one collection-less inbound message the conversation
+  // was proposed, and the unscreened text reached the model.
+  //
+  // Any collection that screened DIRTY already returned an `ignore` above, so reaching
+  // here with inboundScreened === inboundSeen means every inbound message was screened
+  // AND every one came back clean.
+  //
+  // `inboundSeen === 0` is tested separately and deliberately: an exchange with no
+  // inbound message at all would otherwise satisfy 0 === 0 and pass a gate it has no
+  // evidence for. Absent headers are never treated as clean.
+  //
+  // MISSING OUTBOUND HEADERS REMAIN ALLOWED. They say nothing about the counterparty,
+  // for the reasons set out at the recording site above.
+  if (requiresScreening && (inboundSeen === 0 || inboundScreened !== inboundSeen)) {
     return defer('automation_unverified', { fetched })
   }
 
