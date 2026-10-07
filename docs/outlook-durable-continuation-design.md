@@ -401,6 +401,42 @@ should make quietly, so the minimal one is implemented and this is written down 
 
 ---
 
+### D2 — outcome (2026-10-07): resolved without a recognition store
+
+The gap below was demonstrated through the real worker handler before it was closed
+(`tests/outlook-two-sided-rounds.test.js`, section 3): round 1 reads the first half,
+completes and erases its records; round 2 reads the reply alone and nothing is suggested,
+for an unknown person and for an existing contact, in both orders.
+
+It is closed by **conversation recovery**, not by the retained row proposed in the sheet
+(`supabase/functions/shared/outlookConversationRecovery.js`). For exactly the one-sided
+conversations a round is about to give up on, and only while the content stage is on,
+the round asks **Outlook** for the rest of the thread: one envelope GET by a handle the
+round already holds (to learn the conversation id, which is still never persisted), then
+one filtered listing per folder — `$filter=conversationId eq '…'`, `$select` to the
+envelope, `$top` bounded, **no `$orderby`** (Microsoft documents that a `$filter`/`$orderby`
+combination on messages fails `InefficientFilter` unless the ordered properties lead the
+filter), `Prefer: IdType="ImmutableId"` on every request. The recovered envelopes go
+through the **same fold** as a delta page, so direction, counterparty, contact match,
+taint and the episode fingerprint come out as they would have in one round — which is
+what keeps a replay a refresh rather than a second suggestion. Bodies are read only after
+the merged exchange has qualified as two-sided, through the unchanged content pass.
+
+**Why not the sheet's row.** Fingerprints and direction booleans cannot retrieve the
+earlier message *text*, and both halves have to feed the draft; Outlook already holds the
+earlier half. And the live notice and `/privacy` say the working records are removed when
+a read completes, so retaining them is a disclosure change. Recovery stores **nothing
+new**: recovered handles live in memory for the invocation; if it stops before the write,
+the conversation is not passed and the next invocation recovers it again.
+
+**What is still open — one provider fact.** The reference pages list the OData parameters
+as supported and bound `$top` to 1–1000, but do not state per-property filterability. Whether
+`conversationId eq` is accepted on this tenant is established by the owner-run check in
+PR #75, not assumed: a 400 from the lookup is reported as `recovery_unsupported` and settles
+the conversation rather than retrying it.
+
+The sheet below is kept as the record of the alternative that was considered and not taken.
+
 ### D2 as a decision sheet — the concrete proposal to approve or reject
 
 Nothing below is implemented. `outlook_conversation_progress` is round-scoped today and

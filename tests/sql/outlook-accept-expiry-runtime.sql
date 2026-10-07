@@ -300,7 +300,9 @@ END $$;
 -- than trusting: a DROP and CREATE would silently hand EXECUTE back to PUBLIC.
 DO $$
 DECLARE
-  sig text := 'public.accept_interaction_candidate(uuid, text, date, text)';
+  -- The six-type signature: 20261008000000 adds p_follow_up and p_follow_up_date (both
+  -- DEFAULT NULL), so every four-argument call above still resolves to this one function.
+  sig text := 'public.accept_interaction_candidate(uuid, text, date, text, text, date)';
   pr  pg_proc%ROWTYPE;
 BEGIN
   SELECT * INTO pr FROM pg_proc p

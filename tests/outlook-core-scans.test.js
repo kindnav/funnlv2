@@ -120,10 +120,14 @@ test('internetMessageHeaders is requested ONLY in CONTENT_SELECT, never in disco
   const content = /CONTENT_SELECT = Object\.freeze\(\[([\s\S]*?)\]\)/.exec(t)[1]
   assert.ok(!discovery.includes('internetMessageHeaders'), 'discovery must not request headers')
   assert.ok(content.includes("'internetMessageHeaders',"), 'the content read is where they are requested')
-  // And no OTHER select/query anywhere asks for them.
+  // And no OTHER select/query anywhere asks for them. ENVELOPE_SELECT is the same
+  // projection as DISCOVERY_SELECT under its other name (the conversation-recovery
+  // requests use it), asserted as such so a third projection cannot creep in.
   const selects = [...t.matchAll(/\$select=\$\{(\w+)\.join/g)].map((m) => m[1])
-  assert.deepStrictEqual([...new Set(selects)].sort(), ['CONTENT_SELECT', 'DISCOVERY_SELECT'],
-    'only these two projections exist')
+  assert.deepStrictEqual([...new Set(selects)].sort(), ['CONTENT_SELECT', 'DISCOVERY_SELECT', 'ENVELOPE_SELECT'],
+    'only these projections exist')
+  assert.ok(/export const ENVELOPE_SELECT = DISCOVERY_SELECT/.test(t),
+    'ENVELOPE_SELECT must be the discovery projection itself, so it cannot carry headers')
 })
 
 test('the raw header collection is consumed only by the transport classifier call', () => {

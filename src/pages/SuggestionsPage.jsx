@@ -4,7 +4,7 @@ import { getAvatarColor, getInitials } from '../lib/avatarUtils'
 import { track } from '../lib/analytics'
 import TopBar from '../components/TopBar'
 import {
-  CANDIDATE_SELECT, INTERACTION_TYPES, REVIEW_PAGE_SIZE, REVIEW_NOTES_MAX,
+  CANDIDATE_SELECT, INTERACTION_TYPES, REVIEW_PAGE_SIZE, REVIEW_NOTES_MAX, REVIEW_FOLLOW_UP_MAX,
   validateOverrides, acceptResultOutcome, dismissResultOutcome, resultCode,
   keysetFilter, cursorFrom, dedupeById, computeHasMore,
 } from '../lib/calendarReview'
@@ -35,6 +35,11 @@ function CandidateCard({ candidate, onResolved }) {
   const [type, setType] = useState(candidate.proposed_type)
   const [date, setDate] = useState(candidate.proposed_interaction_date)
   const [notes, setNotes] = useState(candidate.proposed_notes || '')
+  // The suggested next step is REVIEWABLE, not decorative: kept as drafted, edited, or
+  // cleared, and whatever is approved is saved with the interaction. The follow-up date is
+  // the reviewer's own choice and starts empty - a date is never derived from the step.
+  const [nextStep, setNextStep] = useState(candidate.draft_follow_up || '')
+  const [followUpDate, setFollowUpDate] = useState('')
   const [busy, setBusy] = useState(false)              // single-flight guard for Accept/Dismiss
   const [confirmDismiss, setConfirmDismiss] = useState(false)
   const [error, setError] = useState('')
@@ -67,13 +72,15 @@ function CandidateCard({ candidate, onResolved }) {
   const edited = editing && (
     type !== candidate.proposed_type ||
     date !== candidate.proposed_interaction_date ||
-    (notes || '') !== (candidate.proposed_notes || '')
+    (notes || '') !== (candidate.proposed_notes || '') ||
+    (nextStep || '') !== (candidate.draft_follow_up || '') ||
+    followUpDate !== ''
   )
 
   async function handleAccept() {
     if (busy) return                                   // prevent double submission
     setError('')
-    const v = validateOverrides({ type, date, notes })
+    const v = validateOverrides({ type, date, notes, followUp: nextStep, followUpDate })
     if (!v.ok) { setError(acceptResultOutcome(v.code).message); return }
     setBusy(true)
     try {
@@ -82,6 +89,10 @@ function CandidateCard({ candidate, onResolved }) {
         p_override_type: type,
         p_override_date: date,
         p_override_notes: notes || null,
+        // The approved next step (null when the reviewer cleared it) and the date the
+        // reviewer chose (null when they did not). Both survive acceptance server-side.
+        p_follow_up: nextStep.trim() || null,
+        p_follow_up_date: followUpDate || null,
       })
       if (rpcErr) { setError(acceptResultOutcome('unknown').message); setBusy(false); return }
       const outcome = acceptResultOutcome(resultCode(data))
@@ -145,10 +156,13 @@ function CandidateCard({ candidate, onResolved }) {
               shows them. Both come from the same draft as the note; neither is editable here,
               and accepting records the note alone - the next step is for the reviewer to act
               on or fold into the note. */}
-          {!editing && candidate.draft_follow_up && (
+          {!editing && nextStep && (
             <p className="mt-1 text-[12px] text-accent leading-relaxed">
-              Suggested next step: {candidate.draft_follow_up}
+              Suggested next step: {nextStep}
             </p>
+          )}
+          {!editing && followUpDate && (
+            <p className="mt-1 text-[12px] text-muted">Follow-up on {formatDate(followUpDate)}</p>
           )}
           {!editing && candidate.extraction_status === 'ai_extracted' && (
             <p className="mt-1 text-[11px] text-lower">
@@ -171,6 +185,17 @@ function CandidateCard({ candidate, onResolved }) {
               <label className="text-[11px] text-muted">Note
                 <textarea value={notes} onChange={(e) => setNotes(e.target.value)} disabled={busy} rows={2} maxLength={REVIEW_NOTES_MAX}
                           className="mt-1 w-full bg-input border border-line-2 rounded-lg px-2 py-[7px] text-[13px] text-hi resize-none" />
+              </label>
+              {/* The next step is saved as part of the interaction note when kept; clearing it
+                  drops it. The follow-up date is optional and is the reviewer's choice. */}
+              <label className="text-[11px] text-muted">Next step (optional)
+                <input type="text" name="nextStep" value={nextStep} onChange={(e) => setNextStep(e.target.value)} disabled={busy}
+                       maxLength={REVIEW_FOLLOW_UP_MAX} placeholder="Leave blank to drop the suggested step"
+                       className="mt-1 w-full bg-input border border-line-2 rounded-lg px-2 py-[7px] text-[13px] text-hi" />
+              </label>
+              <label className="text-[11px] text-muted">Follow-up date (optional)
+                <input type="date" name="followUpDate" value={followUpDate} onChange={(e) => setFollowUpDate(e.target.value)} disabled={busy}
+                       className="mt-1 w-full bg-input border border-line-2 rounded-lg px-2 py-[7px] text-[13px] text-hi" />
               </label>
             </div>
           )}

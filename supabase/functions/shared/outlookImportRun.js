@@ -101,9 +101,13 @@ import { checkPilotUser, designatedPilotUser } from './outlookPilotGate.js'
 import { buildMessageHandles } from './outlookHandleProducer.js'
 import {
   summarizeOneConversation, planContentWrite, summarizeContentStage, CONTENT_WRITE_RPCS,
-  sanitizeContentReport,
+  sanitizeContentReport, readConversationHandles,
 } from './outlookContentStage.js'
 import { contentPermissions } from './outlookContentConsent.js'
+import {
+  recoverConversation, MAX_RECOVERIES_PER_INVOCATION, RECOVERY_ADMIT_MS,
+} from './outlookConversationRecovery.js'
+import { buildSelfIdentitySet, indexContactsByEmail } from './outlookParticipants.js'
 
 /**
  * Lease length and due interval for one run. Bounded by the RPC's own checks, which
@@ -1005,6 +1009,9 @@ export async function runOutlookImport (p) {
   const content = {
     attempted: 0, notesWritten: 0, proposalsWritten: 0, metadataOnly: 0,
     bodiesRead: 0, modelCalls: 0,
+    // CONVERSATION RECOVERY: one-sided threads asked about, how many came back two-sided,
+    // and the envelopes it took. Counts only; the outcomes map below carries the codes.
+    recoveriesAttempted: 0, recoveriesTwoSided: 0, recoveredMessages: 0,
     deferred: Object.create(null), ignored: Object.create(null),
     // WHICH CATEGORY the privacy guard objected to, when it did. Controlled labels
     // only; the offending value is never returned by the guard and is never read here.
@@ -1018,6 +1025,8 @@ export async function runOutlookImport (p) {
     badRequestCategories: Object.create(null),
     // WHICH side of an exchange had no header collection, by folder.
     missingHeaders: Object.create(null),
+    // HOW each conversation recovery ended, by controlled code (RECOVERY_OUTCOME_CODES).
+    recoveryOutcomes: Object.create(null),
   }
   const bumpDeferral = (c) => { content.deferred[c] = (content.deferred[c] || 0) + 1 }
   // The observed cost of the slowest content stage so far, for the admission check.
@@ -1055,6 +1064,21 @@ export async function runOutlookImport (p) {
             ? 'summary_key_absent'
             : null))
   const contentStageOn = contentStageReason === null
+  // ── CONVERSATION RECOVERY, prerequisites built once ───────────────────────
+  // A one-sided conversation may be the second half of an exchange whose first half a
+  // PREVIOUS round read and then erased when it completed. With the content stage on, the
+  // round asks Outlook for the rest of that thread before giving up on it - see
+  // outlookConversationRecovery.js. The same identity set, contact index and handle
+  // producer the delta pages use, so the recovered half folds exactly as a same-round read
+  // would have. Nothing here runs on the envelope-only path.
+  const selfSet = contentStageOn ? buildSelfIdentitySet(context.primaryEmail, context.aliases) : null
+  const contactIndex = contentStageOn ? indexContactsByEmail(context.contacts, context.userId) : null
+  const produceRecoveryHandles = (selected) => buildMessageHandles({
+    selected,
+    consentVersion: context.consentVersion ?? null,
+    requiredConsent,
+    seal: encryptCursor,
+  })
   // The round's deadline passed while this run was working on it. Nothing of it may be
   // committed: its records are about to be discarded as a unit, so a cursor would be
   // claiming mail that no longer has a suggestion behind it.
@@ -1120,6 +1144,14 @@ export async function runOutlookImport (p) {
           { contentStageOn })
         const cfp = typeof row?.cfp === 'string' ? row.cfp : null
         if (one.entry === null) {
+          // NOT A DECISION YET when the thread is merely one-sided and bodies may be read:
+          // the other half may sit in Outlook, read by an earlier round that completed and
+          // erased its records. The row is carried into the write loop to be asked about.
+          // Every other skip - a taint, no eligible message - is settled here as before.
+          if (one.skip === 'not_two_sided' && contentStageOn) {
+            decisions.push({ cfp, entry: null, recover: row })
+            continue
+          }
           bumpSkip(one.skip)
           decisions.push({ cfp, entry: null })
           continue
@@ -1132,7 +1164,76 @@ export async function runOutlookImport (p) {
       }
       intended += decisions.filter((x) => x.entry !== null).length
 
-      for (const { cfp, entry } of decisions) {
+      for (const decision of decisions) {
+        const cfp = decision.cfp
+        let entry = decision.entry
+        // Handles recovered from Outlook for this conversation, in memory only.
+        let extraHandles = []
+        if (entry === null && decision.recover) {
+          // ── CONVERSATION RECOVERY, for ONE one-sided thread ──────────────────
+          // Asked about rather than given up on. Capped per invocation and admitted on
+          // budget like a content attempt, because it is followed by one; past either cap
+          // the answer is "come back", not "no", so the conversation is NOT passed.
+          if (content.recoveriesAttempted >= MAX_RECOVERIES_PER_INVOCATION
+              || !budgetAllows(RECOVERY_ADMIT_MS + WRITE_STEP_RESERVE_MS)) {
+            bumpDeferral('budget_exhausted')
+            outOfBudget = true
+            break
+          }
+          content.recoveriesAttempted += 1
+          await ensureLease(PROGRESS_STEP_MS + RECOVERY_ADMIT_MS)
+          // The handles this round stored for the half it did see: one of them is how the
+          // conversation is identified to Outlook. Read the same way the content pass reads them.
+          const stored = await readConversationHandles({ rpc, connectionId, runId, roundId, cfp })
+          let rec
+          if (stored.ok !== true) {
+            rec = { outcome: 'retry', reason: 'recovery_fetch_failed', stats: {} }
+          } else {
+            try {
+              rec = await recoverConversation({
+                row: decision.recover,
+                handles: stored.handles,
+                decryptHandle: ({ ciphertext, nonce }) => decryptCursor(ciphertext, nonce),
+                accessToken: context.accessToken,
+                deps,
+                budgetAllows,
+                selfSet,
+                contactIndex,
+                connectionId,
+                keyRing: context.keyRing,
+                produceHandles: produceRecoveryHandles,
+                localDateFor: (iso) => localDateFor(iso, context.timeZone),
+              })
+            } catch {
+              // Nothing from the thrown value is read: it can carry a URL, an address or a
+              // provider message. Retryable, so nothing is settled for it.
+              rec = { outcome: 'retry', reason: 'recovery_fetch_failed', stats: {} }
+            }
+          }
+          const code = rec.outcome === 'recovered' ? 'recovered' : rec.reason
+          content.recoveryOutcomes[code] = (content.recoveryOutcomes[code] || 0) + 1
+          content.recoveredMessages += Number.isInteger(rec.stats?.recoveredMessages)
+            ? rec.stats.recoveredMessages : 0
+          if (rec.outcome === 'retry') {
+            // Transient, or out of budget: preserve the work by stopping WITHOUT passing it.
+            outOfBudget = true
+            break
+          }
+          if (rec.outcome === 'settled') {
+            // Outlook was asked and the exchange is still not a two-sided one Funnl can act
+            // on. That IS a decision - reported under its code - so finalisation passes it,
+            // exactly as a same-round one-sided thread is passed.
+            bumpSkip('not_two_sided')
+            rowsProcessed += 1
+            if (cfp !== null) processedThrough = cfp
+            continue
+          }
+          // Two-sided after all: from here on it is an ordinary entry with extra handles.
+          content.recoveriesTwoSided += 1
+          entry = rec.entry
+          extraHandles = rec.extraHandles
+          intended += 1
+        }
         if (entry === null) {
           // Skipped on purpose - a one-sided or unsupported conversation. A skip is a
           // decision, not unfinished work, so finalisation may pass it.
@@ -1184,6 +1285,8 @@ export async function runOutlookImport (p) {
                 messageCount: entry.messageCount,
                 lastLocalDate: entry.proposedDate,
               },
+              // Recovered from Outlook for a thread this round only half saw; empty otherwise.
+              extraHandles,
               rpc,
               connectionId,
               runId,

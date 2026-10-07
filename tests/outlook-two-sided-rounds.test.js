@@ -1,4 +1,4 @@
-// TWO-WAY COMMUNICATION, WHICHEVER SIDE STARTED, AND WHAT HAPPENS ACROSS ROUNDS.
+// TWO-WAY COMMUNICATION, WHICHEVER SIDE STARTED, ACROSS ROUNDS - THROUGH THE REAL WORKER.
 //
 // THE REQUIREMENT, stated once. A NEW-CONTACT suggestion needs two-way communication
 // with the same person, regardless of who opened the thread:
@@ -6,21 +6,25 @@
 //   1. user sends -> person replies;
 //   2. person sends -> user replies.
 //
-// A single unanswered message must never produce one. Both halves - what was sent and
-// what was received - feed the drafted interaction. Acceptance creates the contact and
-// the interaction together, after review.
+// A single unanswered message must never produce one. Both halves feed the drafted
+// interaction. The two halves MAY arrive in different, separately completed import
+// rounds. The same two-way rule applies to an existing contact. Acceptance creates the
+// contact and the interaction together, after review.
 //
 // WHAT IS EXECUTED: the REAL worker handler (handleOutlookImportWorker) over the real
-// run, the real accumulator, the real content pass with the real screening, the real
-// write planner and the real provider transports - driven by one fixture fetch that
-// answers the three surfaces the run touches (Graph delta, Graph message content, the
-// Anthropic endpoint) and throws on anything else. No network, no database, no browser.
+// run, the real accumulator, conversation recovery, the real content pass with the real
+// screening, the real write planner and the real provider transports - driven by one
+// fixture fetch that answers every surface the run touches (Graph delta, Graph message
+// envelope, Graph conversation lookup, Graph message content, the Anthropic endpoint)
+// and throws on anything else. No network, no database, no browser.
 //
-// THE ROUND STORE is the shared in-memory stand-in for the SQL round state, and it
-// mirrors the applied schema's one relevant property exactly: a confirmed complete
-// release ERASES the accumulator (release_outlook_sync_lease, 20261002000000:1164;
-// commitRelease in tests/harness/outlookRoundStore.js). That property is what the
-// cross-round section below is about.
+// THE ROUND STORE is the shared in-memory stand-in for the SQL round state and mirrors
+// the applied schema's two lifecycle facts exactly: a confirmed complete release ERASES
+// the accumulator (release_outlook_sync_lease, 20261002000000:1164) AND the message
+// handles (20261007000000, orm_round_conv_fk cascade). So nothing a previous round stored
+// is available to a later one here, and cross-round recovery can only pass by asking the
+// fixture's "Outlook" - which models arrival: a message exists there from the round in
+// which the delta delivered it.
 //
 // NO REAL IDENTIFIER, ADDRESS, BODY OR KEY APPEARS IN THIS FILE.
 //
@@ -31,11 +35,11 @@ import { readFileSync } from 'node:fs'
 import { webcrypto } from 'node:crypto'
 import { handleOutlookImportWorker } from '../supabase/functions/outlook-import-worker/handler.js'
 import { importKeyFromBase64, encryptToken } from '../supabase/functions/shared/googleTokenCrypto.js'
-import { GRAPH_BASE } from '../supabase/functions/shared/outlookGraphTransport.js'
+import { GRAPH_BASE, ENVELOPE_SELECT, MAX_RECOVERY_MESSAGES_PER_FOLDER } from '../supabase/functions/shared/outlookGraphTransport.js'
 import { ANTHROPIC_MESSAGES_URL } from '../supabase/functions/shared/outlookDraftContract.js'
 import { REQUIRED_CONTENT_CONSENT_VERSION } from '../supabase/functions/shared/outlookContentConsent.js'
 import { planContentWrite } from '../supabase/functions/shared/outlookContentStage.js'
-import { CANDIDATE_SELECT } from '../src/lib/calendarReview.js'
+import { CANDIDATE_SELECT, validateOverrides, REVIEW_FOLLOW_UP_MAX } from '../src/lib/calendarReview.js'
 import { makeRoundStore } from './harness/outlookRoundStore.js'
 
 let passed = 0
@@ -79,6 +83,7 @@ const ME_FIRST = 'Thanks for your talk on the growth-fund panel today. I would v
   + 'fifteen minutes on how you think about seed diligence.'
 const THEM_REPLY = 'Happy to. I am free Thursday afternoon; send a couple of times and '
   + 'I will confirm one.'
+const THEM_THIRD = 'Thursday at three is confirmed then; the dial-in is in the calendar invite.'
 
 const envelope = (id, conv, from, to, sent, subject) => ({
   id, conversationId: conv, receivedDateTime: sent, sentDateTime: sent, isDraft: false,
@@ -89,22 +94,24 @@ const envelope = (id, conv, from, to, sent, subject) => ({
 })
 
 /**
- * A two-sided exchange with `party`, in one of the two orders. Returns the two
- * envelopes and the bodies keyed by id. Ids and conversation ids are invented.
+ * One exchange with `party`: who wrote first, the two (optionally three) envelopes, their
+ * folders and bodies. Ids and conversation ids are invented.
  */
 function exchange ({ party, order, conv }) {
   const themFirst = order === 'them_first'
   const inId = 'AAkALgAA' + conv + '-in'
   const outId = 'AAkALgAA' + conv + '-out'
-  const inbound = envelope(inId, conv, party, [ME],
-    themFirst ? '2026-09-21T14:00:00Z' : '2026-09-21T11:00:00Z', 'Following up')
-  const outbound = envelope(outId, conv, ME, [party],
-    themFirst ? '2026-09-21T16:00:00Z' : '2026-09-21T08:00:00Z', 'RE: Following up')
+  const thirdId = 'AAkALgAA' + conv + '-in2'
+  const inbound = envelope(inId, conv, party, [ME], themFirst ? '2026-09-21T14:00:00Z' : '2026-09-21T11:00:00Z', 'Following up')
+  const outbound = envelope(outId, conv, ME, [party], themFirst ? '2026-09-21T16:00:00Z' : '2026-09-21T08:00:00Z', 'RE: Following up')
+  const third = envelope(thirdId, conv, party, [ME], '2026-09-22T09:00:00Z', 'RE: Following up')
   return {
-    inbound, outbound,
+    inbound, outbound, third,
+    folderOf: { [inId]: 'inbox', [outId]: 'sentitems', [thirdId]: 'inbox' },
     bodies: {
       [inId]: themFirst ? THEM_FIRST : THEM_REPLY,
       [outId]: themFirst ? ME_REPLY : ME_FIRST,
+      [thirdId]: THEM_THIRD,
     },
   }
 }
@@ -122,22 +129,23 @@ const env = () => ({
   anthropicApiKey: API_KEY,
 })
 const okRes = (body) => ({ status: 200, headers: { get: () => null }, json: async () => body })
+const errRes = (status) => ({ status, headers: { get: () => null }, json: async () => ({ error: { code: 'ErrorInvalidUrlQueryFilter', message: 'x' } }) })
 
 /**
  * The PostgREST + RPC pair for ONE connection across as many invocations as the test
- * makes. The store persists between invocations, exactly as the table would, and a
- * confirmed complete release erases the accumulator exactly as the SQL does.
+ * makes. The round store persists between invocations exactly as the tables would -
+ * including erasing the accumulator AND the handles on a complete release - and the
+ * committed cursors are served back from it the way the real loader reads them.
  *
  * Candidate writes are deduplicated by episode fingerprint the way the two write RPCs
- * do - a repeat answers 'refreshed' - so a re-read of the same exchange can be shown
- * to produce no second proposal.
+ * do - a repeat answers 'refreshed' - so a re-read of the same exchange can be shown to
+ * produce no second proposal.
  */
 async function makePorts ({ contacts }) {
   const key = await importKeyFromBase64(KEY_B64, subtle)
   const sealed = await encryptToken(ACCESS_TOKEN, key, { subtle })
   const expires = new Date(Date.now() + 3600000).toISOString()
   const store = makeRoundStore()
-  const handles = []
   const candidates = []
   const releases = []
   const episodes = new Set()
@@ -153,12 +161,7 @@ async function makePorts ({ contacts }) {
       return { data: path.includes('offset=0') ? contacts : [], error: null }
     }
     if (path.startsWith('outlook_sync_state?')) {
-      // THE COMMITTED CURSORS, exactly where the real loader reads them: the table rows
-      // release_outlook_sync_lease promoted the pending deltaLink into. The store
-      // performs that same promotion in commitRelease(), and the ciphertext it holds is
-      // the one the run sealed with the configured key, so the loader decrypts it for
-      // real and round 2 follows the link round 1 committed. Returning [] here is what a
-      // FIRST read looks like; returning these is what every later read looks like.
+      // THE COMMITTED CURSORS, exactly where the real loader reads them.
       const rows = []
       for (const folder of ['inbox', 'sentitems']) {
         const f = store.folders[folder]
@@ -197,46 +200,51 @@ async function makePorts ({ contacts }) {
     if (name === 'rotate_microsoft_access_token') {
       throw new Error('no refresh may be attempted: the fixture token is fresh')
     }
-    if (name === 'record_outlook_page_progress') {
-      for (const m of (args && args.p_messages) || []) handles.push(m)
-    }
-    if (name === 'list_outlook_round_message_handles') {
-      const want = new Set((args && args.p_cfps) || [])
-      const mine = handles.filter((h) => want.has(h.cfp))
-        .sort((a, b) => String(a.sent_at).localeCompare(String(b.sent_at)))
-      return { data: { result: 'ok', handles: mine, next_cursor: null }, error: null }
-    }
+    // Everything else - the round state AND the handles, with their real lifecycle.
     const s = await store.handle(name, args)
     if (s !== null) return s
     throw new Error('unexpected rpc: ' + name)
   }
-  return { select, rpc, store, handles, candidates, releases }
+  return { select, rpc, store, candidates, releases }
 }
 
 const MESSAGES_PREFIX = GRAPH_BASE + '/me/messages/'
-function contentMessageId (u) {
+function messageIdOf (u) {
   if (!u.startsWith(MESSAGES_PREFIX)) return null
   const q = u.indexOf('?', MESSAGES_PREFIX.length)
   if (q < 0) return null
   return decodeURIComponent(u.slice(MESSAGES_PREFIX.length, q))
 }
+function queryParam (u, name) {
+  const q = u.indexOf('?')
+  if (q < 0) return null
+  for (const part of u.slice(q + 1).split('&')) {
+    const eq = part.indexOf('=')
+    const k = eq < 0 ? part : part.slice(0, eq)
+    if (k === name) return decodeURIComponent(eq < 0 ? '' : part.slice(eq + 1))
+  }
+  return null
+}
 function deltaToken (u) {
-  const i = u.indexOf('$deltatoken=')
-  if (i < 0) return null
-  const rest = u.slice(i + '$deltatoken='.length)
-  const amp = rest.indexOf('&')
-  return amp < 0 ? rest : rest.slice(0, amp)
+  const t = queryParam(u, '$deltatoken')
+  return t === null || t.length === 0 ? null : t
 }
 
 /**
- * A MAILBOX SERVED IN ROUNDS. `rounds[folder][k]` is the page the folder answers in
- * its (k+1)th round. A request with no $deltatoken is the first round; a request
- * carrying `Rk` - the deltaLink the previous round committed - is round k+1. Every page
- * is final (it ends in a deltaLink), so one invocation completes one round.
+ * A MAILBOX SERVED IN ROUNDS, that also answers as "Outlook" when asked about a thread.
+ *
+ * `rounds[folder][k]` is the page the folder answers in its (k+1)th round. A request with
+ * no $deltatoken is the first round; `Rk` - the deltaLink the previous round committed -
+ * is round k+1. Every page is final, so one invocation completes one round.
+ *
+ * ARRIVAL IS MODELLED: a message exists in Outlook from the round whose delta page carried
+ * it. So in round 1 a lookup cannot find a reply that only arrives in round 2.
  */
-function makeFetch ({ rounds, envelopes, bodies, counts, model }) {
+function makeFetch ({ rounds, envelopes, folderOf, bodies, counts, model, faults = {}, clock }) {
+  const visible = new Set()
   return async (url, init) => {
     const u = String(url)
+    const prefer = init && init.headers && (init.headers.Prefer || init.headers.prefer)
     if (u === ANTHROPIC_MESSAGES_URL) {
       counts.model += 1
       const sent = String((init && init.body) || '')
@@ -260,82 +268,131 @@ function makeFetch ({ rounds, envelopes, bodies, counts, model }) {
         usage: { input_tokens: 10, output_tokens: 5 },
       })
     }
-    const id = contentMessageId(u)
+    const id = messageIdOf(u)
     if (id !== null) {
-      counts.bodies += 1
+      const select = queryParam(u, '$select') || ''
       const env_ = envelopes[id]
+      if (select.indexOf('uniqueBody') < 0) {
+        // THE ENVELOPE GET of conversation recovery: no body, no headers.
+        counts.envelopeGets.push({ id, select, prefer })
+        if (faults.envelope === 'not_found' || !env_) return { status: 404, headers: { get: () => null }, json: async () => ({ error: { code: 'ErrorItemNotFound' } }) }
+        return okRes(Object.assign({}, env_))
+      }
+      counts.bodies += 1
       const text = bodies[id]
       if (!env_ || !text) return { status: 404, headers: { get: () => null }, json: async () => ({}) }
+      const headersMissing = faults.headersMissingFor && faults.headersMissingFor.has(id)
       return okRes(Object.assign({}, env_, {
         body: { contentType: 'text', content: text },
         uniqueBody: { contentType: 'text', content: text },
-        // Present and clean on EVERY message, so screening passes and only the
-        // two-sidedness rules decide the outcome.
-        internetMessageHeaders: [{ name: 'Received', value: 'by fixture' }],
-      }))
+      }, headersMissing ? {} : { internetMessageHeaders: [{ name: 'Received', value: 'by fixture' }] }))
     }
     if (!u.startsWith(GRAPH_BASE)) throw new Error('the fixture refuses a non-Graph URL: ' + u.slice(0, 60))
     const folder = u.indexOf('/mailFolders/inbox/') >= 0 ? 'inbox' : 'sentitems'
+    const filter = queryParam(u, '$filter')
+    if (filter !== null) {
+      // THE CONVERSATION LOOKUP: what "Outlook" holds for this thread in this folder.
+      const m = filter.startsWith("conversationId eq '") && filter.endsWith("'") ? filter.slice("conversationId eq '".length, -1) : null
+      counts.lookups.push({ folder, conv: m, select: queryParam(u, '$select'), top: queryParam(u, '$top'),
+        hasOrderBy: queryParam(u, '$orderby') !== null, prefer })
+      if (typeof clock === 'object' && clock.trapOnLookup) { clock.ms += clock.trapOnLookup; clock.trapOnLookup = 0 }
+      if (faults.lookup === 'bad_request') return errRes(400)
+      const items = Object.values(envelopes)
+        .filter((e) => e.conversationId === m && folderOf[e.id] === folder && visible.has(e.id))
+        .filter((e) => !(faults.lookup === 'only_current' && !counts.currentIds.has(e.id)))
+      const page = { value: items }
+      if (faults.lookup === 'truncated') page['@odata.nextLink'] = GRAPH_BASE + '/me/mailFolders/' + folder + '/messages?$skip=25'
+      return okRes(page)
+    }
     const token = deltaToken(u)
     const k = token === null ? 1 : Number(token.slice(1)) + 1
     counts.delta.push({ folder, token })
     const seq = rounds[folder] || []
+    const page = seq[k - 1] || []
+    for (const e of page) { visible.add(e.id); counts.currentIds.add(e.id) }
     return okRes({
-      value: seq[k - 1] || [],
+      value: page,
       '@odata.deltaLink': GRAPH_BASE + '/me/mailFolders/' + folder + '/messages/delta?$deltatoken=R' + k,
     })
   }
 }
 
-const newCounts = () => ({ delta: [], bodies: 0, model: 0, modelBodies: [] })
+const newCounts = () => ({ delta: [], bodies: 0, model: 0, modelBodies: [], envelopeGets: [], lookups: [], currentIds: new Set() })
 const FIXED = 1780000000000
 const MODEL = {
   summary: 'They offered a short call next week about the credit desk after putting your name forward.',
   followUp: 'Send your availability for next week.',
 }
 
-/** One invocation of the real handler against the given ports and fixture. */
-async function invoke (ports, fetchImpl) {
+async function invoke (ports, fetchImpl, clock) {
   const res = await handleOutlookImportWorker(workerReq(), env(), {
     tokenUrl: 'https://login.invalid/token',
     select: ports.select,
     rpc: ports.rpc,
     graphFetchImpl: fetchImpl,
-    now: () => FIXED,
+    now: () => (clock ? clock.ms : FIXED),
     subtle,
   })
   const body = await res.json()
   return { status: res.status, run: body && body.run }
 }
 
-/** Build a scenario: who the party is, which side wrote first, and how the halves are spread over rounds. */
+/** Build a scenario: who the party is, which side wrote first, and how the messages are spread over rounds. */
 function scenario ({ party, order, inboxRounds, sentRounds }) {
-  const ex = exchange({ party, order, conv: 'conv-' + order + '-' + (party === KNOWN ? 'known' : 'new') })
-  const pick = (spec) => spec.map((which) => (which === 'in' ? [ex.inbound] : which === 'out' ? [ex.outbound] : []))
+  const ex = exchange({ party, order, conv: 'AAQkAD-' + order + '-' + (party === KNOWN ? 'known' : 'new') })
+  const pick = (spec) => spec.map((which) => (which === 'in' ? [ex.inbound] : which === 'out' ? [ex.outbound]
+    : which === 'in2' ? [ex.third] : []))
   const rounds = { inbox: pick(inboxRounds), sentitems: pick(sentRounds) }
-  const envelopes = { [ex.inbound.id]: ex.inbound, [ex.outbound.id]: ex.outbound }
-  return { ex, rounds, envelopes, bodies: ex.bodies }
+  const envelopes = { [ex.inbound.id]: ex.inbound, [ex.outbound.id]: ex.outbound, [ex.third.id]: ex.third }
+  return { ex, rounds, envelopes, folderOf: ex.folderOf, bodies: ex.bodies }
 }
 
-async function runScenario ({ party, order, inboxRounds, sentRounds, invocations = 1, contacts }) {
+async function runScenario ({ party, order, inboxRounds, sentRounds, invocations = 1, faults, clock, beforeInvocation }) {
   const s = scenario({ party, order, inboxRounds, sentRounds })
-  const ports = await makePorts({ contacts: contacts ?? (party === KNOWN
-    ? [{ id: KNOWN_CONTACT, user_id: PILOT, email: KNOWN }]
-    : [{ id: KNOWN_CONTACT, user_id: PILOT, email: KNOWN }]) })   // the stranger is never a contact
+  const ports = await makePorts({ contacts: [{ id: KNOWN_CONTACT, user_id: PILOT, email: KNOWN }] })  // the stranger is never a contact
   const counts = newCounts()
-  const fetchImpl = makeFetch({ rounds: s.rounds, envelopes: s.envelopes, bodies: s.bodies, counts, model: MODEL })
+  const fetchImpl = makeFetch({ rounds: s.rounds, envelopes: s.envelopes, folderOf: s.folderOf, bodies: s.bodies, counts, model: MODEL, faults, clock })
   const runs = []
-  for (let i = 0; i < invocations; i += 1) runs.push(await invoke(ports, fetchImpl))
-  return { runs, ports, counts, s }
+  // What the world looked like AFTER each invocation, so a claim about round 1 is checked
+  // against round 1 and not against the state a later round left behind.
+  const after = []
+  for (let i = 0; i < invocations; i += 1) {
+    counts.currentIds = new Set()
+    if (typeof beforeInvocation === 'function') beforeInvocation(i, counts)
+    runs.push(await invoke(ports, fetchImpl, clock))
+    after.push({
+      candidates: ports.candidates.length,
+      conversations: ports.store.conversations.size,
+      messages: ports.store.messages.length,
+      envelopeGets: counts.envelopeGets.length,
+      lookups: counts.lookups.length,
+      bodies: counts.bodies,
+      model: counts.model,
+    })
+  }
+  return { runs, ports, counts, s, after }
 }
 
 const summarize = (r) => JSON.stringify({ outcome: r.run && r.run.outcome, content: r.run && r.run.content,
-  skipped: r.run && r.run.entry_skipped, finalize: r.run && r.run.finalize })
+  skipped: r.run && r.run.entry_skipped, finalize: r.run && r.run.finalize, cursors: r.run && r.run.cursors_advanced })
+
+function assertLookupShape (lookups, conv) {
+  assert.strictEqual(lookups.length, 2, 'one lookup per folder: ' + JSON.stringify(lookups))
+  assert.deepStrictEqual(lookups.map((l) => l.folder).sort(), ['inbox', 'sentitems'])
+  for (const l of lookups) {
+    assert.strictEqual(l.conv, conv, 'filtered to THIS conversation')
+    assert.strictEqual(l.select, ENVELOPE_SELECT.join(','), 'envelope fields only')
+    assert.strictEqual(l.top, String(MAX_RECOVERY_MESSAGES_PER_FOLDER))
+    assert.strictEqual(l.hasOrderBy, false, 'no $orderby with $filter on messages')
+    assert.ok(String(l.prefer).indexOf('IdType="ImmutableId"') >= 0, 'immutable ids on every request: ' + l.prefer)
+  }
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 console.log('')
 console.log('1. an unknown person is proposed WHICHEVER SIDE STARTED, when both halves are in one round')
 // ═══════════════════════════════════════════════════════════════════════════════
+const controlFingerprints = {}
 for (const [label, order, inboxRounds, sentRounds, mine, theirs] of [
   ['person sends, user replies', 'them_first', ['in'], ['out'], 'credit desk', 'insight week'],
   ['user sends, person replies', 'me_first', ['in'], ['out'], 'seed diligence', 'Thursday afternoon'],
@@ -350,6 +407,7 @@ for (const [label, order, inboxRounds, sentRounds, mine, theirs] of [
     assert.strictEqual(r.run.content.attempted, 1)
     assert.strictEqual(r.run.content.bodies_read, 2, 'both halves were read')
     assert.strictEqual(r.run.content.model_calls, 1)
+    assert.strictEqual(r.run.content.recoveries_attempted, 0, 'nothing to recover when both halves are in the round')
     assert.deepStrictEqual(r.run.content.deferred, {}, 'nothing deferred')
     assert.strictEqual(ports.candidates.length, 1)
     const w = ports.candidates[0]
@@ -360,18 +418,17 @@ for (const [label, order, inboxRounds, sentRounds, mine, theirs] of [
     assert.strictEqual(w.args.p_draft_summary, MODEL.summary)
     assert.strictEqual(w.args.p_draft_follow_up, MODEL.followUp, 'the next step travels with the proposal')
     assert.strictEqual(w.args.p_extraction_status, 'ai_extracted')
-    // BOTH SIDES REACHED THE MODEL: the sent half and the received half are each in the
-    // one request, which is what "describing the discussion" rests on.
+    controlFingerprints[order] = w.args.p_episode_fingerprint
+    // BOTH SIDES REACHED THE MODEL in the one request.
     assert.strictEqual(counts.modelBodies.length, 1)
     assert.ok(counts.modelBodies[0].indexOf(mine) >= 0, 'the user side is missing from the request')
     assert.ok(counts.modelBodies[0].indexOf(theirs) >= 0, 'the other side is missing from the request')
-    // And nothing the request must not carry.
     assert.ok(counts.modelBodies[0].indexOf(STRANGER) < 0, 'no address in the model request')
     assert.ok(counts.modelBodies[0].indexOf(ME) < 0, 'no self address in the model request')
   })
 }
 
-await test('an EXISTING contact in either order -> one note, now WITH its next step and provenance', async () => {
+await test('an EXISTING contact in either order -> one note WITH its next step and provenance', async () => {
   for (const order of ['them_first', 'me_first']) {
     const { runs, ports } = await runScenario({ party: KNOWN, order, inboxRounds: ['in'], sentRounds: ['out'] })
     const [r] = runs
@@ -382,11 +439,11 @@ await test('an EXISTING contact in either order -> one note, now WITH its next s
     assert.strictEqual(w.rpc, 'upsert_outlook_interaction_candidate', order)
     assert.strictEqual(w.args.p_contact_id, KNOWN_CONTACT, order)
     assert.strictEqual(w.args.p_proposed_notes, MODEL.summary, order)
-    // THE FIX, through the real run: these three were never sent before.
     assert.strictEqual(w.args.p_draft_follow_up, MODEL.followUp, order + ': the next step used to be dropped here')
     assert.strictEqual(w.args.p_summary_evidence, 'explicit_body', order)
     assert.strictEqual(w.args.p_extraction_status, 'ai_extracted', order)
     assert.strictEqual(w.args.p_retained_subject, undefined, order + ': still no subject on the known-contact row')
+    controlFingerprints['known-' + order] = w.args.p_episode_fingerprint
   }
 })
 
@@ -398,109 +455,235 @@ for (const [label, inboxRounds, sentRounds] of [
   ['the person wrote and the user never replied', ['in'], ['none']],
   ['the user wrote and the person never replied', ['none'], ['out']],
 ]) {
-  await test(label + ' -> no proposal, no body read, no model call', async () => {
+  await test(label + ' -> Outlook is asked, the thread is still one-sided: no body read, no model call, nothing written', async () => {
     const { runs, ports, counts } = await runScenario({ party: STRANGER, order: 'them_first', inboxRounds, sentRounds })
     const [r] = runs
     assert.strictEqual(r.run.outcome, 'committed', summarize(r))
     assert.strictEqual(r.run.entry_skipped.not_two_sided, 1, summarize(r))
+    // The round could not know whether the other half is in Outlook, so it asked -
+    // three envelope-only requests - and the answer was that there is none.
+    assert.strictEqual(r.run.content.recoveries_attempted, 1, summarize(r))
+    assert.deepStrictEqual(r.run.content.recovery_outcomes, { not_two_sided: 1 }, summarize(r))
+    assert.strictEqual(counts.envelopeGets.length, 1)
+    assert.strictEqual(counts.lookups.length, 2)
     assert.strictEqual(r.run.content.attempted, 0, 'the content stage is never reached')
-    assert.strictEqual(counts.bodies, 0, 'no body is read for a one-sided thread')
-    assert.strictEqual(counts.model, 0)
+    assert.strictEqual(counts.bodies, 0, 'NO body is read for a one-sided thread')
+    assert.strictEqual(counts.model, 0, 'and the model is never called')
     assert.strictEqual(ports.candidates.length, 0)
   })
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
 console.log('')
-console.log('3. REPRODUCED: the two halves in DIFFERENT ROUNDS are never recognised as one exchange')
+console.log('3. the two halves in DIFFERENT, SEPARATELY COMPLETED rounds are recognised as one exchange')
 // ═══════════════════════════════════════════════════════════════════════════════
 //
-// THE GAP, demonstrated rather than described. Round 1 reads the first half alone: the
-// thread is one-sided, nothing is written, the round completes, both cursors commit and
-// the accumulator is ERASED (release_outlook_sync_lease: "Only a confirmed, complete
-// release erases the accumulator"). Round 2 follows the committed deltaLink and reads
-// the reply alone. It is a thread the worker no longer remembers, so it is one-sided
-// again, and no suggestion is ever made - for an unknown person AND for an existing
-// contact, in both orders.
-//
-// This is docs/outlook-durable-continuation-design.md "D2 as a decision sheet": the
-// accumulator is ROUND-SCOPED by design, the live notice and /privacy both promise the
-// working records are removed when a read completes, and keeping them across rounds is
-// a retention decision with published wording, not a code fix. These tests pin the
-// CURRENT behaviour so that decision is made on evidence; when D2 is approved they are
-// the tests that flip.
-for (const [label, party, order, inboxRounds, sentRounds] of [
-  ['unknown person: person writes in round 1, user replies in round 2', STRANGER, 'them_first', ['in', 'none'], ['none', 'out']],
-  ['unknown person: user writes in round 1, person replies in round 2', STRANGER, 'me_first', ['none', 'in'], ['out', 'none']],
-  ['existing contact: person writes in round 1, user replies in round 2', KNOWN, 'them_first', ['in', 'none'], ['none', 'out']],
-  ['existing contact: user writes in round 1, person replies in round 2', KNOWN, 'me_first', ['none', 'in'], ['out', 'none']],
+// Round 1 reads the first half alone: the thread is one-sided, Outlook is asked and
+// confirms there is no reply yet, nothing is written, the round completes, both cursors
+// commit and the accumulator AND the handles are erased. Round 2 follows the committed
+// deltaLink and reads the reply alone - a thread it does not remember - asks Outlook for
+// the rest of it, gets both halves back, folds them exactly as a same-round read would,
+// reads both bodies, drafts, and writes ONE suggestion under the SAME episode key the
+// one-round control produced.
+for (const [label, party, order, inboxRounds, sentRounds, expectRpc, controlKey] of [
+  ['unknown person: person writes in round 1, user replies in round 2', STRANGER, 'them_first', ['in', 'none'], ['none', 'out'], 'upsert_new_contact_candidate', 'them_first'],
+  ['unknown person: user writes in round 1, person replies in round 2', STRANGER, 'me_first', ['none', 'in'], ['out', 'none'], 'upsert_new_contact_candidate', 'me_first'],
+  ['existing contact: person writes in round 1, user replies in round 2', KNOWN, 'them_first', ['in', 'none'], ['none', 'out'], 'upsert_outlook_interaction_candidate', 'known-them_first'],
+  ['existing contact: user writes in round 1, person replies in round 2', KNOWN, 'me_first', ['none', 'in'], ['out', 'none'], 'upsert_outlook_interaction_candidate', 'known-me_first'],
 ]) {
-  await test(label + ' -> NOTHING is suggested in either round (the D2 gap)', async () => {
-    const { runs, ports, counts } = await runScenario({ party, order, inboxRounds, sentRounds, invocations: 2 })
+  await test(label + ' -> recovered in round 2: ONE suggestion, both halves in the draft, the same key as one round', async () => {
+    const { runs, ports, counts, s, after } = await runScenario({ party, order, inboxRounds, sentRounds, invocations: 2 })
     const [r1, r2] = runs
-    // Round 1: one-sided, committed, erased.
+    // Round 1: one-sided, asked, confirmed one-sided, committed, erased.
     assert.strictEqual(r1.run.outcome, 'committed', 'round 1: ' + summarize(r1))
     assert.strictEqual(r1.run.entry_skipped.not_two_sided, 1, 'round 1: ' + summarize(r1))
+    assert.deepStrictEqual(r1.run.content.recovery_outcomes, { not_two_sided: 1 }, 'round 1 asked Outlook and the reply was not there yet')
     assert.strictEqual(r1.run.cursors_advanced, 2, 'round 1 committed both cursors')
-    assert.strictEqual(ports.store.conversations.size, 0, 'the accumulator is erased by the complete release')
+    assert.strictEqual(after[0].candidates, 0, 'nothing written in round 1')
+    assert.strictEqual(after[0].conversations, 0, 'the accumulator is erased by the complete release')
+    assert.strictEqual(after[0].messages, 0, 'and so are the handles - nothing survives into round 2')
+    assert.strictEqual(after[0].bodies, 0, 'no body was read in round 1')
+    const round1Envelopes = after[0].envelopeGets
+    const round1Lookups = after[0].lookups
     // Round 2 really did start from the committed position.
     const tokens = counts.delta.map((d) => d.token)
     assert.ok(tokens.includes('R1'), 'round 2 must follow the committed deltaLink: ' + JSON.stringify(tokens))
-    // Round 2: the reply alone, one-sided again.
+    // Round 2: the reply alone in the round; recovered from Outlook; one suggestion.
     assert.strictEqual(r2.run.outcome, 'committed', 'round 2: ' + summarize(r2))
-    assert.strictEqual(r2.run.entry_skipped.not_two_sided, 1, 'round 2: ' + summarize(r2))
-    assert.strictEqual(r2.run.content.attempted, 0, 'round 2 never reaches the content stage')
-    assert.strictEqual(counts.bodies, 0, 'no body is ever read')
-    assert.strictEqual(counts.model, 0, 'the model is never called')
-    assert.strictEqual(ports.candidates.length, 0, 'NO suggestion across both rounds - this is the gap')
+    assert.strictEqual(r2.run.content.recoveries_attempted, 1, summarize(r2))
+    assert.strictEqual(r2.run.content.recoveries_two_sided, 1, summarize(r2))
+    assert.strictEqual(r2.run.content.recovered_messages, 2, 'both halves came back from Outlook')
+    assert.deepStrictEqual(r2.run.content.recovery_outcomes, { recovered: 1 })
+    assert.strictEqual(r2.run.content.attempted, 1)
+    assert.strictEqual(r2.run.content.bodies_read, 2, 'both bodies were read, after the exchange qualified')
+    assert.strictEqual(r2.run.content.model_calls, 1)
+    assert.deepStrictEqual(r2.run.content.deferred, {})
+    assert.strictEqual(r2.run.entry_skipped.not_two_sided, undefined, 'round 2 did not give up on it')
+    assert.strictEqual(r2.run.cursors_advanced, 2)
+    // The requests recovery made in round 2, shaped as documented.
+    assert.strictEqual(counts.envelopeGets.length - round1Envelopes, 1, 'exactly one envelope GET in round 2')
+    const lookups2 = counts.lookups.slice(round1Lookups)
+    assertLookupShape(lookups2, s.ex.inbound.conversationId)
+    // THE WRITE.
+    assert.strictEqual(ports.candidates.length, 1, JSON.stringify(ports.candidates.map((c) => c.rpc)))
+    const w = ports.candidates[0]
+    assert.strictEqual(w.rpc, expectRpc)
+    assert.strictEqual(w.result, 'created')
+    if (party === STRANGER) {
+      assert.strictEqual(w.args.p_proposed_email, STRANGER)
+      assert.strictEqual(w.args.p_draft_summary, MODEL.summary)
+      assert.strictEqual(w.args.p_draft_follow_up, MODEL.followUp)
+    } else {
+      assert.strictEqual(w.args.p_contact_id, KNOWN_CONTACT)
+      assert.strictEqual(w.args.p_proposed_notes, MODEL.summary)
+      assert.strictEqual(w.args.p_draft_follow_up, MODEL.followUp)
+    }
+    // THE KEY IS THE SAME KEY the one-round read of the identical exchange produced, so a
+    // later re-read of the thread refreshes this row instead of writing a second one.
+    assert.strictEqual(w.args.p_episode_fingerprint, controlFingerprints[controlKey],
+      'the dedupe key must not depend on which round saw which half')
+    // BOTH SIDES CONTRIBUTED TO THE DRAFT: the model request carries both bodies.
+    const sent = counts.modelBodies[counts.modelBodies.length - 1]
+    const mine = order === 'them_first' ? 'credit desk' : 'seed diligence'
+    const theirs = order === 'them_first' ? 'insight week' : 'Thursday afternoon'
+    assert.ok(sent.indexOf(mine) >= 0 && sent.indexOf(theirs) >= 0, 'the model request must carry both halves')
+    assert.ok(sent.indexOf(party) < 0 && sent.indexOf(ME) < 0, 'and no address')
   })
 }
 
-await test('CONTROL: the same two halves in ONE round are proposed - the gap is the round boundary, not the content', async () => {
-  const { runs, ports } = await runScenario({ party: STRANGER, order: 'them_first', inboxRounds: ['in'], sentRounds: ['out'] })
-  assert.strictEqual(runs[0].run.content.proposals_written, 1)
-  assert.strictEqual(ports.candidates.length, 1)
+await test('a THIRD message in a later round refreshes the recovered suggestion under the same key - no duplicate, no re-log', async () => {
+  // Round 1: both halves (proposed). Round 2: the stranger writes again -> one-sided in
+  // the round -> recovered as the whole three-message thread -> the same episode key ->
+  // the write RPC answers refreshed, not created.
+  const { runs, ports } = await runScenario({ party: STRANGER, order: 'them_first', inboxRounds: ['in', 'in2'], sentRounds: ['out', 'none'], invocations: 2 })
+  const [r1, r2] = runs
+  assert.strictEqual(r1.run.created, 1, summarize(r1))
+  assert.strictEqual(r2.run.outcome, 'committed', summarize(r2))
+  assert.deepStrictEqual(r2.run.content.recovery_outcomes, { recovered: 1 }, summarize(r2))
+  assert.strictEqual(r2.run.content.recovered_messages, 3)
+  assert.strictEqual(r2.run.created, 0, 'no second proposal')
+  assert.strictEqual(r2.run.accepted, 1, 'the repeat is a refresh')
+  assert.strictEqual(ports.candidates.length, 2)
+  assert.strictEqual(ports.candidates[0].args.p_episode_fingerprint, ports.candidates[1].args.p_episode_fingerprint)
+  assert.strictEqual(ports.candidates[1].result, 'refreshed')
 })
 
-// ═══════════════════════════════════════════════════════════════════════════════
-console.log('')
-console.log('4. a re-read of the same exchange does not duplicate the proposal')
-// ═══════════════════════════════════════════════════════════════════════════════
 await test('the same two messages served again produce the same episode key and a refreshed write, not a second proposal', async () => {
-  // Both halves in round 1; round 2 serves the SAME two messages again (what a reset
-  // cursor would do). The episode fingerprint is deterministic from the conversation and
-  // its first message, so the second write targets the existing row and the RPC answers
-  // 'refreshed' - counted as accepted, not created.
   const { runs, ports } = await runScenario({ party: STRANGER, order: 'them_first', inboxRounds: ['in', 'in'], sentRounds: ['out', 'out'], invocations: 2 })
   const [r1, r2] = runs
   assert.strictEqual(r1.run.created, 1, summarize(r1))
   assert.strictEqual(r2.run.created, 0, 'round 2 must not create a second proposal: ' + summarize(r2))
-  assert.strictEqual(r2.run.accepted, 1, 'the repeat is accepted as a refresh')
-  assert.strictEqual(ports.candidates.length, 2)
-  assert.strictEqual(ports.candidates[0].args.p_episode_fingerprint, ports.candidates[1].args.p_episode_fingerprint,
-    'the dedupe key must not change between reads')
+  assert.strictEqual(r2.run.accepted, 1)
+  assert.strictEqual(ports.candidates[0].args.p_episode_fingerprint, ports.candidates[1].args.p_episode_fingerprint)
   assert.strictEqual(ports.candidates[1].result, 'refreshed')
 })
 
 // ═══════════════════════════════════════════════════════════════════════════════
 console.log('')
-console.log('5. the known-contact write RPC: the follow-up and provenance parameters, and nothing else changed')
+console.log('4. when recovery cannot complete the exchange, it fails safely')
+// ═══════════════════════════════════════════════════════════════════════════════
+const CROSS = { party: STRANGER, order: 'them_first', inboxRounds: ['in', 'none'], sentRounds: ['none', 'out'], invocations: 2 }
+
+await test('the earlier half is MISSING from Outlook: settled as one-sided, no body read, no model call, round committed', async () => {
+  const { runs, ports, counts } = await runScenario({ ...CROSS, faults: { lookup: 'only_current' } })
+  const r2 = runs[1]
+  assert.strictEqual(r2.run.outcome, 'committed', summarize(r2))
+  assert.deepStrictEqual(r2.run.content.recovery_outcomes, { not_two_sided: 1 }, summarize(r2))
+  assert.strictEqual(r2.run.entry_skipped.not_two_sided, 1)
+  assert.strictEqual(counts.bodies, 0)
+  assert.strictEqual(counts.model, 0)
+  assert.strictEqual(ports.candidates.length, 0)
+})
+await test('the stored message no longer resolves (404): settled as recovery_source_missing, round committed, nothing written', async () => {
+  const { runs, ports } = await runScenario({ ...CROSS, faults: { envelope: 'not_found' } })
+  const r2 = runs[1]
+  assert.strictEqual(r2.run.outcome, 'committed', summarize(r2))
+  assert.deepStrictEqual(r2.run.content.recovery_outcomes, { recovery_source_missing: 1 }, summarize(r2))
+  assert.strictEqual(ports.candidates.length, 0)
+})
+await test('the provider refuses the conversation filter (400): settled as recovery_unsupported - the reportable signal', async () => {
+  const { runs, ports, counts } = await runScenario({ ...CROSS, faults: { lookup: 'bad_request' } })
+  const r2 = runs[1]
+  assert.strictEqual(r2.run.outcome, 'committed', summarize(r2))
+  assert.deepStrictEqual(r2.run.content.recovery_outcomes, { recovery_unsupported: 1 }, summarize(r2))
+  assert.strictEqual(counts.bodies, 0)
+  assert.strictEqual(ports.candidates.length, 0)
+})
+await test('a thread longer than one bounded page: settled as recovery_truncated, never followed', async () => {
+  const { runs, ports } = await runScenario({ ...CROSS, faults: { lookup: 'truncated' } })
+  const r2 = runs[1]
+  assert.strictEqual(r2.run.outcome, 'committed', summarize(r2))
+  assert.deepStrictEqual(r2.run.content.recovery_outcomes, { recovery_truncated: 1 }, summarize(r2))
+  assert.strictEqual(ports.candidates.length, 0)
+})
+await test('SCREENING still applies to a recovered stranger: an inbound body without headers is automation_unverified, nothing written', async () => {
+  const s0 = scenario(CROSS)
+  const { runs, ports, counts } = await runScenario({ ...CROSS, faults: { headersMissingFor: new Set([s0.ex.inbound.id]) } })
+  const r2 = runs[1]
+  assert.strictEqual(r2.run.outcome, 'committed', summarize(r2))
+  assert.deepStrictEqual(r2.run.content.recovery_outcomes, { recovered: 1 }, 'recovery itself succeeded')
+  assert.strictEqual(r2.run.content.deferred.automation_unverified, 1, 'and the content pass refused to summarize an unscreened stranger: ' + summarize(r2))
+  assert.strictEqual(counts.model, 0, 'the model was never called')
+  assert.strictEqual(ports.candidates.length, 0)
+  assert.strictEqual(r2.run.content.missing_headers.inbox, 1)
+})
+await test('a BUDGET interruption mid-recovery preserves the work: nothing settled, nothing written, the next invocation completes it', async () => {
+  const clock = { ms: FIXED, trapOnLookup: 0 }
+  const { runs, ports, after } = await runScenario({
+    ...CROSS, invocations: 3, clock,
+    beforeInvocation: (i) => {
+      clock.ms = FIXED + i * 10_000_000
+      // In round 2's first invocation the clock jumps 200 s when the first lookup is
+      // served, so the invocation budget is gone before the second lookup.
+      clock.trapOnLookup = i === 1 ? 200_000 : 0
+    },
+  })
+  const [, r2a, r2b] = runs
+  assert.deepStrictEqual(r2a.run.content.recovery_outcomes, { budget_exhausted: 1 }, 'interrupted: ' + summarize(r2a))
+  assert.strictEqual(r2a.run.cursors_advanced, 0, 'nothing committed while the conversation is unresolved')
+  assert.strictEqual(after[1].candidates, 0, 'nothing written yet')
+  assert.ok(after[1].conversations >= 1, 'the round and its record are kept for the next invocation')
+  assert.strictEqual(after[1].bodies, 0, 'and no body was read on the way out')
+  // The next invocation, with budget, recovers and writes.
+  assert.strictEqual(r2b.run.outcome, 'committed', 'completed: ' + summarize(r2b))
+  assert.deepStrictEqual(r2b.run.content.recovery_outcomes, { recovered: 1 })
+  assert.strictEqual(after[2].candidates, 1)
+  assert.strictEqual(after[2].bodies, 2)
+  assert.ok(ports.candidates.length === 1, 'exactly one write across the interrupted and the completing invocation')
+})
+
+// ═══════════════════════════════════════════════════════════════════════════════
+console.log('')
+console.log('5. nothing durable was added, so disconnect has nothing new to clear')
+// ═══════════════════════════════════════════════════════════════════════════════
+const MIG8 = read('supabase/migrations/20261008000000_outlook_known_contact_follow_up_provenance.sql')
+await test('the implementation adds no table, column or retained row: recovery state lives in memory for one invocation', () => {
+  assert.ok(!/CREATE TABLE|ADD COLUMN|ALTER TABLE/.test(MIG8), 'the migration changes no table')
+  const REC = read('supabase/functions/shared/outlookConversationRecovery.js')
+  assert.ok(!/rpc\(|\.from\(|INSERT|UPSERT/i.test(REC.replace(/^\s*\/\/.*$/gm, '')), 'the recovery module performs no database write')
+  assert.ok(REC.indexOf('inbound_seen') < 0 && REC.indexOf('expires_at') < 0, 'no recognition store')
+  // The existing disconnect deletes the round state and the handles; nothing else exists.
+  const STORE = read('tests/harness/outlookRoundStore.js')
+  assert.ok(STORE.indexOf('messages.length = 0') >= 0, 'the store erases handles with the round, as the cascade does')
+})
+
+// ═══════════════════════════════════════════════════════════════════════════════
+console.log('')
+console.log('6. the write RPC: the follow-up and provenance parameters, refresh semantics, and nothing else changed')
 // ═══════════════════════════════════════════════════════════════════════════════
 const OLD = read('supabase/migrations/20261006000000_outlook_content_note_and_new_contact_write.sql')
-const NEW = read('supabase/migrations/20261008000000_outlook_known_contact_follow_up_provenance.sql')
-const FN = 'CREATE FUNCTION public.upsert_outlook_interaction_candidate('
-function fnBody (sql) {
-  const i = sql.indexOf(FN)
-  assert.ok(i >= 0, 'definition not found')
+function fnBody (sql, head) {
+  const i = sql.indexOf(head)
+  assert.ok(i >= 0, 'definition not found: ' + head)
   const s = sql.indexOf('AS $$', i)
   const e = sql.indexOf('$$;', s)
   return sql.slice(s + 'AS $$'.length, e)
 }
-function fnParams (sql) {
-  const i = sql.indexOf(FN)
-  const head = sql.slice(i, sql.indexOf('RETURNS', i))
+function fnParams (sql, head) {
+  const i = sql.indexOf(head)
+  const seg = sql.slice(i, sql.indexOf('RETURNS', i))
   const out = []
-  for (const line of head.split(NL)) {
+  for (const line of seg.split(NL)) {
     const t = line.trim()
     if (t.startsWith('p_')) out.push(t.split(/\s+/)[0])
   }
@@ -526,71 +709,110 @@ function normalized (lines) {
   }
   return out
 }
-
-await test('the migration is the newest, says NOT APPLIED, and drops the 10-argument form before creating the 13-argument one', () => {
-  assert.ok(NEW.indexOf('NOT APPLIED') >= 0)
-  assert.ok(NEW.indexOf('DROP FUNCTION IF EXISTS public.upsert_outlook_interaction_candidate(') >= 0)
-  assert.ok(NEW.indexOf('uuid, uuid, uuid, text, text, smallint, text, date, text[], text);') >= 0,
-    'the dropped signature must be exactly the applied 10-argument one')
-  assert.ok(NEW.indexOf('CREATE OR REPLACE FUNCTION public.upsert_outlook_interaction_candidate') < 0,
-    'a signature change must never be CREATE OR REPLACE - that creates an overload')
-  assert.deepStrictEqual(fnParams(NEW), [
-    'p_connection_id', 'p_run_id', 'p_contact_id', 'p_episode_fingerprint', 'p_person_fingerprint',
-    'p_key_version', 'p_proposed_type', 'p_proposed_date', 'p_lookup_fingerprints', 'p_proposed_notes',
-    'p_draft_follow_up', 'p_summary_evidence', 'p_extraction_status',
-  ])
-  assert.deepStrictEqual(fnParams(OLD), fnParams(NEW).slice(0, 10), 'the first ten parameters are the applied ones, in order')
-  for (const stmt of ['REVOKE ALL ON FUNCTION', 'GRANT EXECUTE ON FUNCTION']) {
-    const i = NEW.indexOf(stmt)
-    assert.ok(i >= 0, stmt)
-    const sig = NEW.slice(i, NEW.indexOf(';', i))
-    assert.ok(sig.indexOf('uuid, uuid, uuid, text, text, smallint, text, date, text[], text, text, text, text') >= 0,
-      stmt + ' must name the new 13-type signature')
-  }
-  assert.ok(NEW.indexOf(') FROM PUBLIC, anon, authenticated;') >= 0)
-  assert.ok(NEW.indexOf(') TO service_role;') >= 0)
-  assert.ok(NEW.indexOf('SECURITY DEFINER') >= 0 && NEW.indexOf("SET search_path = ''") >= 0)
-  // Still no subject on the known-contact row: the privacy property the applied comment
-  // cites is kept, and this is the one thing the new parameters must not include.
-  assert.ok(NEW.indexOf('p_retained_subject') < 0, 'no subject parameter may be added to the known-contact write')
-})
-
-await test('the body is the applied 20261006000000 body plus exactly the marked additions - no guard was dropped or reworded', () => {
-  const additions = (NEW.match(/-- >>> 20261008/g) || []).length
-  assert.ok(additions >= 5, 'the additions must be marked: ' + additions)
-  assert.strictEqual((NEW.match(/-- <<< 20261008/g) || []).length, additions, 'every block must close')
-  const oldLines = normalized(fnBody(OLD).split(NL))
-  const newLines = normalized(withoutMarkedBlocks(fnBody(NEW)))
+function assertSameBody (newLines, oldLines) {
   for (let i = 0; i < Math.max(oldLines.length, newLines.length); i += 1) {
     assert.strictEqual(newLines[i], oldLines[i],
       'first difference at body line ' + (i + 1) + ': applied=' + JSON.stringify(oldLines[i]) + ' new=' + JSON.stringify(newLines[i]))
   }
+}
+const UPSERT = 'CREATE FUNCTION public.upsert_outlook_interaction_candidate('
+
+await test('upsert: newest, NOT APPLIED, drops the 10-argument form, creates the 13-argument one, ACL restated', () => {
+  assert.ok(MIG8.indexOf('NOT APPLIED') >= 0)
+  assert.ok(MIG8.indexOf('uuid, uuid, uuid, text, text, smallint, text, date, text[], text);') >= 0, 'drops exactly the applied signature')
+  assert.ok(MIG8.indexOf('CREATE OR REPLACE FUNCTION public.upsert_outlook_interaction_candidate') < 0)
+  assert.deepStrictEqual(fnParams(MIG8, UPSERT), [
+    'p_connection_id', 'p_run_id', 'p_contact_id', 'p_episode_fingerprint', 'p_person_fingerprint',
+    'p_key_version', 'p_proposed_type', 'p_proposed_date', 'p_lookup_fingerprints', 'p_proposed_notes',
+    'p_draft_follow_up', 'p_summary_evidence', 'p_extraction_status',
+  ])
+  assert.deepStrictEqual(fnParams(OLD, UPSERT), fnParams(MIG8, UPSERT).slice(0, 10))
+  assert.ok(MIG8.indexOf('upsert_outlook_interaction_candidate(\n  uuid, uuid, uuid, text, text, smallint, text, date, text[], text, text, text, text\n) FROM PUBLIC, anon, authenticated;') >= 0)
+  assert.ok(MIG8.indexOf('upsert_outlook_interaction_candidate(\n  uuid, uuid, uuid, text, text, smallint, text, date, text[], text, text, text, text\n) TO service_role;') >= 0)
+  assert.ok(MIG8.indexOf('p_retained_subject') < 0, 'no subject on the known-contact row')
+})
+await test('upsert: the body is the applied body plus exactly the marked additions', () => {
+  const oldLines = normalized(fnBody(OLD, UPSERT).split(NL))
+  const newLines = normalized(withoutMarkedBlocks(fnBody(MIG8, UPSERT)))
+  assertSameBody(newLines, oldLines)
   assert.strictEqual(newLines.length, oldLines.length)
 })
-
-await test('each new value is validated against the applied CHECK constraints and refused with a controlled code', () => {
-  const body = fnBody(NEW)
-  // draft_follow_up: <= 160, no control characters, no URL, never without a note.
+await test('upsert: validation mirrors the applied CHECKs with controlled codes', () => {
+  const body = fnBody(MIG8, UPSERT)
   assert.ok(body.indexOf('char_length(v_follow) > 160') >= 0)
-  assert.ok(body.indexOf("v_follow ~ '[[:cntrl:]]'") >= 0)
-  assert.ok(body.indexOf("'invalid_follow_up'") >= 0)
+  assert.ok(body.indexOf("'invalid_follow_up'") >= 0 && body.indexOf("'invalid_evidence'") >= 0 && body.indexOf("'invalid_extraction_status'") >= 0)
   assert.ok(body.indexOf('IF v_follow IS NOT NULL AND (v_notes IS NULL') >= 0, 'a next step without a note is refused')
-  // summary_evidence: one of the pair, never without a note, and the note then must not carry a URL.
   assert.ok(body.indexOf("p_summary_evidence NOT IN ('explicit_body', 'subject_only')") >= 0)
-  assert.ok(body.indexOf("'invalid_evidence'") >= 0)
-  assert.ok(body.indexOf('IF p_summary_evidence IS NOT NULL AND (v_notes IS NULL') >= 0)
-  // extraction_status: the applied allowlist.
   assert.ok(body.indexOf("p_extraction_status NOT IN ('deterministic', 'ai_extracted', 'ai_failed')") >= 0)
-  assert.ok(body.indexOf("'invalid_extraction_status'") >= 0)
-  // draft_summary and summary_evidence move together, on INSERT and on refresh.
-  assert.ok(body.indexOf('CASE WHEN p_summary_evidence IS NOT NULL THEN v_notes END') >= 0, 'INSERT pairs them')
-  assert.ok(body.indexOf('draft_summary            = CASE WHEN p_summary_evidence IS NOT NULL THEN v_notes ELSE draft_summary END') >= 0, 'refresh pairs them')
-  assert.ok(body.indexOf('draft_follow_up          = COALESCE(v_follow, draft_follow_up)') >= 0,
-    'a later run with no next step must not blank one an earlier run wrote')
-  // No provider or database error text can leave the function.
   assert.ok(body.indexOf('SQLERRM') < 0)
 })
+await test('upsert REFRESH: a new draft replaces the step (clearing it when absent); a metadata-only refresh preserves everything', () => {
+  const body = fnBody(MIG8, UPSERT)
+  assert.ok(body.indexOf('draft_follow_up          = CASE WHEN v_notes IS NOT NULL THEN v_follow ELSE draft_follow_up END') >= 0,
+    'the step turns on whether THIS call carried a note - a new draft with no step clears the old one')
+  assert.ok(body.indexOf('COALESCE(v_follow, draft_follow_up)') < 0, 'COALESCE kept an obsolete step beside a new summary')
+  assert.ok(body.indexOf('summary_evidence         = CASE WHEN v_notes IS NOT NULL THEN p_summary_evidence ELSE summary_evidence END') >= 0)
+  assert.ok(body.indexOf('extraction_status        = CASE WHEN v_notes IS NOT NULL THEN p_extraction_status ELSE extraction_status END') >= 0)
+  assert.ok(body.indexOf('proposed_notes           = COALESCE(v_notes, proposed_notes)') >= 0, 'the note itself still coalesces, as applied')
+  assert.ok(body.indexOf('CASE WHEN p_summary_evidence IS NOT NULL THEN v_notes END') >= 0, 'draft_summary and its evidence move as a pair')
+})
 
+// ═══════════════════════════════════════════════════════════════════════════════
+console.log('')
+console.log('7. the accept RPC keeps the approved next step and the chosen date, and nothing else changed')
+// ═══════════════════════════════════════════════════════════════════════════════
+const ACCEPT_OLD = 'CREATE OR REPLACE FUNCTION public.accept_interaction_candidate('
+const ACCEPT_NEW = 'CREATE FUNCTION public.accept_interaction_candidate('
+// Exactly two lines of the applied body are replaced, named here so the diff is explicit.
+const REPLACED = [
+  ['    INSERT INTO public.interactions (contact_id, user_id, type, interaction_date, notes, source, follow_up_date)',
+    '    INSERT INTO public.interactions (contact_id, user_id, type, interaction_date, notes, source)'],
+  ['    VALUES (v_cand.contact_id, v_uid, v_type, v_date, v_final, v_src, p_follow_up_date)',
+    '    VALUES (v_cand.contact_id, v_uid, v_type, v_date, v_notes, v_src)'],
+]
+await test('accept: drops the applied 4-argument form, creates the 6-argument one, authenticated-only ACL restated', () => {
+  assert.ok(MIG8.indexOf('DROP FUNCTION IF EXISTS public.accept_interaction_candidate(uuid, text, date, text);') >= 0)
+  assert.ok(MIG8.indexOf(ACCEPT_OLD) < 0, 'a signature change is never CREATE OR REPLACE')
+  assert.deepStrictEqual(fnParams(MIG8, ACCEPT_NEW), ['p_candidate_id', 'p_override_type', 'p_override_date', 'p_override_notes', 'p_follow_up', 'p_follow_up_date'])
+  assert.deepStrictEqual(fnParams(OLD, ACCEPT_OLD), fnParams(MIG8, ACCEPT_NEW).slice(0, 4))
+  assert.ok(MIG8.indexOf('REVOKE ALL ON FUNCTION public.accept_interaction_candidate(uuid, text, date, text, text, date)\n  FROM PUBLIC, anon;') >= 0)
+  assert.ok(MIG8.indexOf('GRANT EXECUTE ON FUNCTION public.accept_interaction_candidate(uuid, text, date, text, text, date)\n  TO authenticated;') >= 0)
+  assert.ok(!/accept_interaction_candidate\([^)]*\)\s*TO service_role/.test(MIG8), 'never granted to service_role')
+})
+await test('accept: the body is the applied body plus the marked additions and exactly the two named replaced lines', () => {
+  const oldLines = normalized(fnBody(OLD, ACCEPT_OLD).split(NL))
+  const kept = withoutMarkedBlocks(fnBody(MIG8, ACCEPT_NEW)).map((line) => {
+    for (const [replaced, original] of REPLACED) if (line === replaced) return original
+    return line
+  })
+  const newLines = normalized(kept)
+  assertSameBody(newLines, oldLines)
+  assert.strictEqual(newLines.length, oldLines.length)
+  // Both replacements really are in the file (so the mapping above did real work).
+  for (const [replaced] of REPLACED) assert.ok(MIG8.indexOf(replaced) >= 0, 'missing: ' + replaced)
+})
+await test('accept: the approved step is validated, saved into the note, and the date is the reviewer\'s own', () => {
+  const body = fnBody(MIG8, ACCEPT_NEW)
+  assert.ok(body.indexOf("v_follow := NULLIF(pg_catalog.btrim(COALESCE(p_follow_up, '')), '')") >= 0)
+  assert.ok(body.indexOf('char_length(v_follow) > 160') >= 0 && body.indexOf("'invalid_follow_up'") >= 0)
+  assert.ok(body.indexOf("'Next step: ' || v_follow") >= 0, 'kept as part of the note')
+  assert.ok(body.indexOf('pg_catalog.chr(10) || pg_catalog.chr(10)') >= 0, 'separated from the note by a blank line')
+  assert.ok(body.indexOf('WHEN v_follow IS NULL THEN v_notes') >= 0, 'a cleared step leaves the note alone')
+  assert.ok(body.indexOf('v_cand.draft_follow_up') < 0, 'the draft column is never read back at accept time - only the reviewer\'s value is saved')
+  assert.ok(body.indexOf('p_follow_up_date)') >= 0, 'the date passed in is the date saved')
+  assert.ok(!/p_follow_up_date\s*[+-]|interval/.test(body.replace(/^\s*--.*$/gm, '')), 'no date is derived or shifted')
+  // The applied guards are still there, verbatim (the diff guard proves it; these name the ones that matter).
+  for (const g of ["'already_accepted'", "'interaction_previously_deleted'", "'dismissed'", "'invalidated'", "'expired'",
+    'FOR KEY SHARE', 'foreign_key_violation', 'deadlock_detected OR serialization_failure',
+    'draft_summary = NULL, draft_follow_up = NULL, summary_evidence = NULL']) {
+    assert.ok(body.indexOf(g) >= 0, 'guard missing: ' + g)
+  }
+})
+
+// ═══════════════════════════════════════════════════════════════════════════════
+console.log('')
+console.log('8. the planner and the review surface')
+// ═══════════════════════════════════════════════════════════════════════════════
 await test('the write planner sends the three on a successful draft and NONE of them on the metadata-only path', () => {
   const entry = { kind: 'known_contact_interaction', contactId: KNOWN_CONTACT, proposedType: 'Email',
     proposedDate: '2026-09-21', episodeFingerprint: 'a'.repeat(64), personFingerprint: 'b'.repeat(64),
@@ -598,7 +820,6 @@ await test('the write planner sends the three on a successful draft and NONE of 
   const note = planContentWrite(entry, { outcome: 'interaction_draft', summary: 'A real summary.',
     summaryEvidence: 'subject_only', followUp: 'Reply with two times.', extractionStatus: 'ai_extracted',
     interactionDate: '2026-09-21' }, { consentOpen: true })
-  assert.strictEqual(note.rpc, 'upsert_outlook_interaction_candidate')
   assert.strictEqual(note.args.p_draft_follow_up, 'Reply with two times.')
   assert.strictEqual(note.args.p_summary_evidence, 'subject_only')
   assert.strictEqual(note.args.p_extraction_status, 'ai_extracted')
@@ -608,29 +829,29 @@ await test('the write planner sends the three on a successful draft and NONE of 
     assert.strictEqual(metadata.args[k], undefined, k + ' must stay absent when nothing was read')
   }
 })
-
-// ═══════════════════════════════════════════════════════════════════════════════
-console.log('')
-console.log('6. the review queue shows the next step and the provenance for an existing contact')
-// ═══════════════════════════════════════════════════════════════════════════════
 await test('the queue selects the two draft columns the card renders, and still no identifier', () => {
-  assert.ok(CANDIDATE_SELECT.indexOf('draft_follow_up') >= 0)
-  assert.ok(CANDIDATE_SELECT.indexOf('extraction_status') >= 0)
+  assert.ok(CANDIDATE_SELECT.indexOf('draft_follow_up') >= 0 && CANDIDATE_SELECT.indexOf('extraction_status') >= 0)
   for (const bad of ['source_fingerprint', 'user_id', 'interaction_id', 'context_expires_at', 'retained_subject',
     'draft_summary', 'summary_evidence', 'connection_id']) {
     assert.ok(CANDIDATE_SELECT.indexOf(bad) < 0, 'the queue must not select ' + bad)
   }
 })
-await test('the card renders the suggested next step and says when the note was drafted by AI', () => {
+await test('the card lets the reviewer keep, edit or clear the step, choose a date, and sends only approved values', () => {
   const PAGE = read('src/pages/SuggestionsPage.jsx')
-  assert.ok(PAGE.indexOf('candidate.draft_follow_up') >= 0, 'the next step is rendered')
-  assert.ok(PAGE.indexOf('Suggested next step:') >= 0)
-  assert.ok(PAGE.indexOf("candidate.extraction_status === 'ai_extracted'") >= 0, 'the provenance line is conditional on the AI status')
-  assert.ok(PAGE.indexOf('Drafted by AI from the message text') >= 0)
-  // Neither is editable and neither is sent back: acceptance still carries the note alone.
+  assert.ok(PAGE.indexOf('useState(candidate.draft_follow_up || \'\')') >= 0, 'the step starts as drafted')
+  assert.ok(PAGE.indexOf('useState(\'\')') >= 0 && PAGE.indexOf('setFollowUpDate') >= 0, 'the date starts EMPTY: never derived from the step')
+  assert.ok(PAGE.indexOf('name="nextStep"') >= 0 && PAGE.indexOf('name="followUpDate"') >= 0, 'both are editable fields')
+  assert.ok(PAGE.indexOf('maxLength={REVIEW_FOLLOW_UP_MAX}') >= 0)
+  assert.ok(PAGE.indexOf('p_follow_up: nextStep.trim() || null') >= 0, 'a cleared step is sent as null')
+  assert.ok(PAGE.indexOf('p_follow_up_date: followUpDate || null') >= 0, 'an unchosen date is sent as null')
+  assert.ok(PAGE.indexOf("candidate.extraction_status === 'ai_extracted'") >= 0, 'the provenance line stays conditional')
   assert.ok(PAGE.indexOf('p_override_notes: notes || null') >= 0)
-  assert.ok(PAGE.indexOf('p_draft_follow_up') < 0 && PAGE.indexOf('p_extraction_status') < 0,
-    'the browser never writes draft columns')
+  assert.ok(PAGE.indexOf('p_draft_follow_up') < 0 && PAGE.indexOf('p_extraction_status') < 0, 'the browser never writes draft columns')
+  assert.strictEqual(REVIEW_FOLLOW_UP_MAX, 160)
+  assert.deepStrictEqual(validateOverrides({ followUp: 'x'.repeat(160), followUpDate: '2026-10-21' }), { ok: true })
+  assert.strictEqual(validateOverrides({ followUp: 'x'.repeat(161) }).code, 'invalid_follow_up')
+  assert.strictEqual(validateOverrides({ followUpDate: 'next week' }).code, 'invalid_follow_up_date')
+  assert.deepStrictEqual(validateOverrides({ followUp: '', followUpDate: '' }), { ok: true }, 'blank is a valid choice for both')
 })
 
 console.log('')

@@ -44,6 +44,7 @@ import {
 } from './outlookDraftContract.js'
 import { summarizeConversation, summarizePassResult, MAX_FETCH_PER_CONVERSATION } from './outlookContentPass.js'
 import { contentPermissions } from './outlookContentConsent.js'
+import { RECOVERY_OUTCOME_CODES } from './outlookConversationRecovery.js'
 
 /**
  * Handle-read pages, bounded. The RPC caps a page at 20 and a conversation retains
@@ -185,6 +186,9 @@ export const CONTENT_FOLDERS = Object.freeze(['inbox', 'sentitems'])
 export const CONTENT_REPORT_COUNTS = Object.freeze([
   'attempted', 'notes_written', 'proposals_written',
   'metadata_only', 'bodies_read', 'model_calls',
+  // CONVERSATION RECOVERY: how many one-sided threads the round asked Outlook about, how
+  // many came back two-sided, and how many envelopes that took. Counts only.
+  'recoveries_attempted', 'recoveries_two_sided', 'recovered_messages',
 ])
 
 /**
@@ -200,6 +204,8 @@ export const CONTENT_REPORT_MAPS = Object.freeze([
   'deferred', 'ignored', 'refusal_categories',
   'model_failures', 'model_http_status', 'missing_headers',
   'model_bad_request',
+  // How each conversation recovery ended, by its controlled code.
+  'recovery_outcomes',
 ])
 
 /**
@@ -368,12 +374,28 @@ export async function summarizeOneConversation (p) {
     // NOT 'no_handles': the handles may well exist and simply could not be read.
     return { outcome: 'defer', reason: 'handles_unreadable', fetched: 0, code: read.code }
   }
+  // RECOVERED HANDLES, when a one-sided conversation was completed from Outlook rather
+  // than from the round's own pages (outlookConversationRecovery.js). They exist only in
+  // memory for this invocation; the stored set stays the authority for any message both
+  // hold. With more than the pass will fetch, the LATEST are kept - a summary is about the
+  // most recent exchange - and handed over in chronological order, which is how the stored
+  // set arrives. With no extras this is the unchanged read.
+  const extra = Array.isArray(p?.extraHandles) ? p.extraHandles : []
+  let handles = read.handles
+  if (extra.length > 0) {
+    const seen = new Set(read.handles.map((h) => h.mfp))
+    const merged = read.handles.concat(extra.filter((h) => isPlainObject(h)
+      && typeof h.mfp === 'string' && h.mfp.length > 0 && !seen.has(h.mfp)))
+    merged.sort((a, b) => String(b.sentAt).localeCompare(String(a.sentAt)))
+    handles = merged.slice(0, MAX_FETCH_PER_CONVERSATION)
+      .sort((a, b) => String(a.sentAt).localeCompare(String(b.sentAt)))
+  }
 
   return summarizeConversation({
     conversation,
     consentVersion: consentVersion ?? null,
     requiredConsent: requiredConsent ?? {},
-    handles: read.handles,
+    handles,
     decryptHandle: ({ ciphertext, nonce }) => decryptCursor(ciphertext, nonce),
     fetchMessage: makeMessageFetcher({ accessToken, deps, budgetAllows }),
     // STRAIGHT THROUGH, with no reshaping: the pass's port contract is this
@@ -636,6 +658,14 @@ export function summarizeContentStage (counts) {
     // as one status - so the category is what says which to go and fix. Controlled
     // strings only; the provider's message never reaches this map.
     model_bad_request: clean(c.badRequestCategories, DRAFT_BAD_REQUEST_CATEGORIES),
+    // CONVERSATION RECOVERY. How many one-sided threads the round asked Outlook about,
+    // how many came back two-sided, how many envelopes that took, and how each ended -
+    // by its controlled code. `recovery_unsupported` is the one to look for after a live
+    // run: it is the provider refusing the conversation filter itself.
+    recoveries_attempted: Number.isInteger(c.recoveriesAttempted) ? c.recoveriesAttempted : 0,
+    recoveries_two_sided: Number.isInteger(c.recoveriesTwoSided) ? c.recoveriesTwoSided : 0,
+    recovered_messages: Number.isInteger(c.recoveredMessages) ? c.recoveredMessages : 0,
+    recovery_outcomes: clean(c.recoveryOutcomes, RECOVERY_OUTCOME_CODES),
   }
 }
 
@@ -685,6 +715,7 @@ export function sanitizeContentReport (report) {
     model_http_status: numericKeys(report.model_http_status),
     missing_headers: codes(report.missing_headers, CONTENT_FOLDERS),
     model_bad_request: codes(report.model_bad_request, DRAFT_BAD_REQUEST_CATEGORIES),
+    recovery_outcomes: codes(report.recovery_outcomes, RECOVERY_OUTCOME_CODES),
   }
 }
 

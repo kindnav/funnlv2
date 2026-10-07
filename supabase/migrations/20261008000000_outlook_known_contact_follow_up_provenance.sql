@@ -51,6 +51,14 @@
 -- at acceptance. A metadata-only write (consent gate closed, no body read) passes none
 -- of the new arguments and leaves all four columns NULL - exactly today.
 --
+-- ON REFRESH, A DRAFT IS REPLACED WHOLE OR KEPT WHOLE. A later successful draft replaces
+-- the note, the evidence AND the next step - including clearing a step the new draft does
+-- not carry - so a row never pairs one draft's summary with another draft's step. A later
+-- run that read no content (the 10-argument call, or a closed gate) preserves all of them.
+--
+-- SECTION 2 of this file carries the matching change on the ACCEPT side: the reviewer's
+-- approved next step and chosen follow-up date survive acceptance.
+--
 -- A DROP AND CREATE, not CREATE OR REPLACE: parameters are being added, and
 -- CREATE OR REPLACE cannot change a signature - it would create a SECOND overload,
 -- after which every existing 10-argument call is ambiguous ("function ... is not
@@ -264,13 +272,20 @@ BEGIN
            -- it alone.
            proposed_notes           = COALESCE(v_notes, proposed_notes),
            -- >>> 20261008
-           -- The same rule for the next step and the provenance. draft_summary and
-           -- summary_evidence move together or not at all, so the pairing constraint
-           -- can never be caught between the two.
-           draft_follow_up          = COALESCE(v_follow, draft_follow_up),
-           draft_summary            = CASE WHEN p_summary_evidence IS NOT NULL THEN v_notes ELSE draft_summary END,
-           summary_evidence         = CASE WHEN p_summary_evidence IS NOT NULL THEN p_summary_evidence ELSE summary_evidence END,
-           extraction_status        = COALESCE(p_extraction_status, extraction_status),
+           -- A NEW DRAFT REPLACES THE OLD ONE WHOLE; a run that drafted nothing leaves it
+           -- alone. All three draft columns turn on ONE test - did this call carry a note -
+           -- so a successful draft with no next step CLEARS the obsolete step from the
+           -- previous draft (a COALESCE here kept it, pairing an old step with a new
+           -- summary), while a metadata-only refresh (v_notes NULL: the consent gate was
+           -- closed or a body fetch failed) preserves summary, evidence and step together.
+           -- draft_summary and summary_evidence still move as a pair, so the pairing
+           -- constraint can never be caught between the two.
+           draft_follow_up          = CASE WHEN v_notes IS NOT NULL THEN v_follow ELSE draft_follow_up END,
+           draft_summary            = CASE WHEN v_notes IS NOT NULL
+                                        THEN (CASE WHEN p_summary_evidence IS NOT NULL THEN v_notes END)
+                                        ELSE draft_summary END,
+           summary_evidence         = CASE WHEN v_notes IS NOT NULL THEN p_summary_evidence ELSE summary_evidence END,
+           extraction_status        = CASE WHEN v_notes IS NOT NULL THEN p_extraction_status ELSE extraction_status END,
            -- <<< 20261008
            context_expires_at       = now() + interval '30 days',
            updated_at               = now()
@@ -317,3 +332,227 @@ REVOKE ALL ON FUNCTION public.upsert_outlook_interaction_candidate(
 GRANT EXECUTE ON FUNCTION public.upsert_outlook_interaction_candidate(
   uuid, uuid, uuid, text, text, smallint, text, date, text[], text, text, text, text
 ) TO service_role;
+
+
+-- ============================================================================
+-- 2. Acceptance keeps the approved next step and the chosen follow-up date.
+-- ============================================================================
+--
+-- THE OMISSION, CONTINUED. Section 1 stores the drafted next step on the candidate and
+-- the card shows it - and then acceptance saved the note alone, so the step was lost at
+-- exactly the moment it should have become part of the record. The accept RPC now takes
+-- the reviewer's APPROVED step (kept as drafted, edited, or cleared to NULL) and an
+-- OPTIONAL follow-up date the reviewer chose, and saves both with the interaction: the
+-- step inside the note, the date in interactions.follow_up_date.
+--
+-- A DROP AND CREATE, not CREATE OR REPLACE: two parameters are added, and CREATE OR
+-- REPLACE cannot change a signature - it would leave a second overload and make the
+-- browser's named-argument call ambiguous. The applied signature is dropped by name.
+--
+-- HOW THE BODY WAS PRODUCED, AND HOW THAT IS CHECKED. The applied 20261006000000 body was
+-- copied verbatim. Every addition sits between `-- >>> 20261008` and `-- <<< 20261008`
+-- markers, and exactly TWO existing lines are replaced - the INSERT's column list and its
+-- VALUES - both named in tests/outlook-two-sided-rounds.test.js, which strips the marked
+-- blocks, maps the two lines back, and asserts the remainder equals the applied body line
+-- for line. So the ownership check, the terminal-state and expiry guards, the type/date/
+-- note validation, the FOR KEY SHARE lock, the erase of draft context and the EXCEPTION
+-- mapping are exactly as applied.
+--
+-- WHAT IS DELIBERATELY NOT DONE. No date is ever derived from the step; no step is read
+-- back from the draft column at accept time; interactions gains no column; the four-
+-- argument call keeps working unchanged (both new arguments default NULL), so the Calendar
+-- queue, which shares this RPC, is untouched.
+--
+-- VERIFY AFTER APPLYING:
+--   SELECT p.proname, p.pronargs FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+--    WHERE n.nspname='public' AND p.proname = 'accept_interaction_candidate';
+--   -- expect exactly ONE row; pronargs 6
+--   SELECT has_function_privilege('authenticated',
+--     'public.accept_interaction_candidate(uuid,text,date,text,text,date)', 'EXECUTE');
+--   -- expect true
+--   SELECT has_function_privilege('anon',
+--     'public.accept_interaction_candidate(uuid,text,date,text,text,date)', 'EXECUTE');
+--   -- expect false
+-- ============================================================================
+
+DROP FUNCTION IF EXISTS public.accept_interaction_candidate(uuid, text, date, text);
+
+CREATE FUNCTION public.accept_interaction_candidate(
+  p_candidate_id   uuid,
+  p_override_type  text DEFAULT NULL,
+  p_override_date  date DEFAULT NULL,
+  p_override_notes text DEFAULT NULL,
+  -- >>> 20261008
+  -- THE REVIEWER'S APPROVED NEXT STEP, and the follow-up date THEY chose. Both optional;
+  -- both default NULL, so the existing four-argument call from the browser and from the
+  -- Calendar queue behaves exactly as the applied definition does.
+  p_follow_up      text DEFAULT NULL,
+  p_follow_up_date date DEFAULT NULL
+  -- <<< 20261008
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_uid   uuid := (SELECT auth.uid());
+  v_cand  public.interaction_candidates%ROWTYPE;
+  v_type  text;
+  v_date  date;
+  v_notes text;
+  v_src   text;
+  v_iid   uuid;
+  -- >>> 20261008
+  v_follow text;
+  v_final  text;
+  -- <<< 20261008
+BEGIN
+  IF v_uid IS NULL THEN
+    RETURN jsonb_build_object('result', 'unauthenticated');
+  END IF;
+
+  -- Lock the caller's own candidate. Missing OR foreign → identical not_found.
+  SELECT * INTO v_cand
+  FROM public.interaction_candidates
+  WHERE id = p_candidate_id AND user_id = v_uid
+  FOR UPDATE;
+  IF NOT FOUND THEN
+    RETURN jsonb_build_object('result', 'not_found');
+  END IF;
+
+  -- Terminal / non-pending states (idempotent + controlled conflicts).
+  IF v_cand.status = 'accepted' THEN
+    IF v_cand.interaction_id IS NOT NULL THEN
+      RETURN jsonb_build_object('result', 'already_accepted', 'interaction_id', v_cand.interaction_id);
+    ELSE
+      -- accepted + NULL = the created interaction was later deleted; NEVER recreate it.
+      RETURN jsonb_build_object('result', 'interaction_previously_deleted');
+    END IF;
+  ELSIF v_cand.status = 'dismissed' THEN
+    RETURN jsonb_build_object('result', 'dismissed');
+  ELSIF v_cand.status = 'invalidated' THEN
+    RETURN jsonb_build_object('result', 'invalidated');
+  END IF;
+
+  -- status is 'pending' here. An inactive source (cancelled/deleted event) cannot accept.
+  -- (PRESERVED from the applied Calendar-review version — unchanged for E2A.)
+  IF v_cand.source_last_state <> 'active' THEN
+    RETURN jsonb_build_object('result', 'invalidated');
+  END IF;
+
+  -- ── OUTLOOK ONLY: the 30-day context window is enforced here ──────────────
+  -- REPRODUCED before this existed: an Outlook candidate 40 days past its deadline
+  -- answered 'accepted' and created an interaction. An approval packet had claimed
+  -- both acceptance RPCs refused an expired suggestion; only
+  -- accept_new_contact_candidate did, and the claim came from a grep whose two
+  -- matches were both inside defer_candidate.
+  --
+  -- WHY `source = 'outlook'` AND NOT A BLANKET RULE. Calendar and Gmail candidates
+  -- carry NULL in this column by design - nothing ever sets it for them - so a rule
+  -- that read NULL as expired, or that applied to every source, would refuse every
+  -- Calendar suggestion ever made. The window is an Outlook concept: it exists
+  -- because an Outlook candidate can carry provider-derived draft context, and that
+  -- context is what the window bounds.
+  --
+  -- WHY NULL FAILS CLOSED for Outlook. Every writer of an Outlook candidate sets the
+  -- deadline on both the insert and the refresh path, so a pending Outlook row
+  -- without one is anomalous rather than ordinary, and accepting on a missing value
+  -- is the wrong way to resolve an anomaly.
+  --
+  -- WHY IT SITS HERE, after every terminal-status check. Acceptance erases this
+  -- column to NULL. A guard placed before those checks would therefore answer
+  -- 'expired' for a row that had already been accepted, replacing a correct
+  -- 'already_accepted' with a misleading one and breaking idempotency.
+  IF v_cand.source = 'outlook'
+     AND (v_cand.context_expires_at IS NULL OR v_cand.context_expires_at <= now()) THEN
+    RETURN jsonb_build_object('result', 'expired');
+  END IF;
+
+  -- Resolve + validate the final interaction fields (overrides optional). Validation
+  -- runs before any write. Notes bound 200 matches the candidate schema.
+  v_type := COALESCE(p_override_type, v_cand.proposed_type);
+  IF v_type NOT IN ('Coffee chat', 'Email', 'Event', 'Call', 'Message', 'Other') THEN
+    RETURN jsonb_build_object('result', 'invalid_type');
+  END IF;
+  v_date := COALESCE(p_override_date, v_cand.proposed_interaction_date);
+  IF v_date IS NULL THEN
+    RETURN jsonb_build_object('result', 'invalid_date');
+  END IF;
+  v_notes := COALESCE(p_override_notes, v_cand.proposed_notes);
+  IF v_notes IS NOT NULL AND char_length(v_notes) > 200 THEN
+    RETURN jsonb_build_object('result', 'invalid_notes');
+  END IF;
+  -- >>> 20261008
+  -- THE APPROVED NEXT STEP. What the reviewer kept, edited or cleared - deliberately NOT
+  -- the draft column read back, so a suggestion only ever reaches a saved record through
+  -- the reviewer's hands. Bounded as interaction_candidates_draft_follow_up_bounds bounds
+  -- the draft (<= 160, no control characters) and refused rather than trimmed. It is saved
+  -- INTO the interaction note, after the note, because that is the one place Funnl's
+  -- interaction model already keeps free text and shows it everywhere an interaction is
+  -- shown; a second text column would be a note nothing else in the product reads.
+  v_follow := NULLIF(pg_catalog.btrim(COALESCE(p_follow_up, '')), '');
+  IF v_follow IS NOT NULL AND (char_length(v_follow) > 160 OR v_follow ~ '[[:cntrl:]]') THEN
+    RETURN jsonb_build_object('result', 'invalid_follow_up');
+  END IF;
+  v_final := CASE
+    WHEN v_follow IS NULL THEN v_notes
+    WHEN v_notes IS NULL THEN 'Next step: ' || v_follow
+    ELSE v_notes || pg_catalog.chr(10) || pg_catalog.chr(10) || 'Next step: ' || v_follow
+  END;
+  -- THE FOLLOW-UP DATE is the reviewer's own choice, passed in or NULL. Nothing here
+  -- derives a date from the wording of the step.
+  -- <<< 20261008
+
+  -- E2A CHANGE #1 (source-aware provenance): the interaction's source is taken from the
+  -- candidate's source (was hardcoded 'google_calendar'). All admitted by the widened
+  -- interactions_source_check; an unknown source fails closed to 'manual'.
+  v_src := CASE WHEN v_cand.source IN ('google_calendar', 'gmail', 'outlook')
+                THEN v_cand.source ELSE 'manual' END;
+
+  -- Ownership re-check + write, in ONE transaction (PRESERVED). The contact is locked
+  -- FOR KEY SHARE so it cannot be deleted between this check and the INSERT. The
+  -- EXCEPTION block converts concurrent-delete / lock-cycle outcomes into controlled
+  -- codes instead of leaking a raw SQL error; the failed write rolls back atomically.
+  BEGIN
+    PERFORM 1 FROM public.contacts
+      WHERE id = v_cand.contact_id AND user_id = v_uid
+      FOR KEY SHARE;
+    IF NOT FOUND THEN
+      RETURN jsonb_build_object('result', 'not_found');
+    END IF;
+
+    -- user_id is set explicitly (never taken from the caller). The accepted interaction
+    -- receives ONLY the user-reviewed note; retained_subject is never copied in.
+    INSERT INTO public.interactions (contact_id, user_id, type, interaction_date, notes, source, follow_up_date)
+    VALUES (v_cand.contact_id, v_uid, v_type, v_date, v_final, v_src, p_follow_up_date)
+    RETURNING id INTO v_iid;
+
+    -- E2A CHANGE #2: erase retained email context on resolution (calendar candidates
+    -- have NULL retained context → no-op; behavior for them is unchanged).
+    -- OUTLOOK ADDITION: the draft columns are erased too (NULL on Calendar/Gmail rows).
+    UPDATE public.interaction_candidates
+      SET status = 'accepted', interaction_id = v_iid,
+          draft_summary = NULL, draft_follow_up = NULL, summary_evidence = NULL, deferred_until = NULL,
+          retained_subject = NULL, context_expires_at = NULL, updated_at = now()
+    WHERE id = p_candidate_id;
+  EXCEPTION
+    WHEN foreign_key_violation THEN
+      -- Contact concurrently deleted; indistinguishable from "not yours".
+      RETURN jsonb_build_object('result', 'not_found');
+    WHEN deadlock_detected OR serialization_failure THEN
+      -- Transient lock cycle (e.g. concurrent contact delete). Safe to retry.
+      RETURN jsonb_build_object('result', 'conflict');
+  END;
+
+  RETURN jsonb_build_object('result', 'accepted', 'interaction_id', v_iid);
+END;
+$$;
+
+-- The ACL is restated because this is a DROP and CREATE: a dropped function loses its
+-- grants, and without these the default ACL would leave PUBLIC and anon with EXECUTE.
+-- Stated exactly as 20261006000000 stated it for the applied signature.
+REVOKE ALL ON FUNCTION public.accept_interaction_candidate(uuid, text, date, text, text, date)
+  FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.accept_interaction_candidate(uuid, text, date, text, text, date)
+  TO authenticated;

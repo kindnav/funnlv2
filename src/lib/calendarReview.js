@@ -15,6 +15,11 @@ export const REVIEW_PAGE_SIZE = 20
 // String.length (UTF-16 code units) on the client, which is always >= the DB's
 // char_length (code points) — so the client never lets through a value the DB rejects.
 export const REVIEW_NOTES_MAX = 200
+// The suggested next step a reviewer keeps, edits or removes before accepting. Matches
+// interaction_candidates_draft_follow_up_bounds (char_length <= 160) and the accept RPC's
+// own check, so the input, the draft column and the saved note agree.
+export const REVIEW_FOLLOW_UP_MAX = 160
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
 
 // ONLY the RLS-safe candidate columns are ever selected; the contact join is limited to
 // display fields. Provider ids, fingerprints, user_id, interaction_id, refs, and raw
@@ -40,6 +45,14 @@ export function validateOverrides(o = {}) {
   if (o.notes != null && typeof o.notes === 'string' && o.notes.length > REVIEW_NOTES_MAX) {
     return { ok: false, code: 'invalid_notes' }
   }
+  // The next step the reviewer approves (kept, edited or cleared), and the follow-up date
+  // they CHOSE - never one derived from the step. Both optional; both bounded like the RPC.
+  if (o.followUp != null && typeof o.followUp === 'string' && o.followUp.length > REVIEW_FOLLOW_UP_MAX) {
+    return { ok: false, code: 'invalid_follow_up' }
+  }
+  if (o.followUpDate != null && o.followUpDate !== '' && !ISO_DATE.test(String(o.followUpDate))) {
+    return { ok: false, code: 'invalid_follow_up_date' }
+  }
   return { ok: true }
 }
 
@@ -62,6 +75,8 @@ const ACCEPT_RESULTS = {
   invalid_type:                   { message: 'Pick a valid interaction type.',                   tone: 'error',   removeFromQueue: false },
   invalid_date:                   { message: 'Pick a valid date.',                               tone: 'error',   removeFromQueue: false },
   invalid_notes:                  { message: 'Note is too long (200 characters max).',           tone: 'error',   removeFromQueue: false },
+  invalid_follow_up:              { message: 'Next step is too long (160 characters max).',      tone: 'error',   removeFromQueue: false },
+  invalid_follow_up_date:         { message: 'Pick a valid follow-up date, or leave it blank.',  tone: 'error',   removeFromQueue: false },
   conflict:                       { message: 'That changed while you were reviewing. Try again.', tone: 'error',   removeFromQueue: false },
   unauthenticated:                { message: 'Please sign in again.',                            tone: 'error',   removeFromQueue: false },
 }
