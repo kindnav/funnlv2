@@ -84,7 +84,7 @@ import {
 } from '../supabase/functions/shared/outlookContentConsent.js'
 import {
   TERMINAL_DEFERRALS, RETRYABLE_DEFERRALS, DEFERRAL_CLASS,
-  CONTENT_DEFERRAL_CODES, CONTENT_REPORT_COUNTS, planContentWrite,
+  CONTENT_DEFERRAL_CODES, CONTENT_REPORT_COUNTS, CONTENT_REPORT_MAPS, planContentWrite,
 } from '../supabase/functions/shared/outlookContentStage.js'
 import { DEFER_REASONS } from '../supabase/functions/shared/outlookContentPass.js'
 import { makeRoundStore } from './harness/outlookRoundStore.js'
@@ -617,9 +617,13 @@ check('every reported refusal category is in the controlled vocabulary',
   Object.keys((repA && repA.refusal_categories) || {})
     .every((c) => MINIMIZATION_CATEGORIES.includes(c)),
   JSON.stringify(repA && repA.refusal_categories))
-check('the report still holds only counters and the three code maps',
+// PINNED AGAINST ONE LIST. This used to spell the maps out inline, which meant every
+// new diagnostic had to be added here, in the report suite, and in the pass suite
+// separately. CONTENT_REPORT_MAPS is the single list, so a field that is not on it
+// fails this check wherever it was added.
+check('the report still holds only counters and the controlled maps',
   Object.keys(repA || {}).every((k) => CONTENT_REPORT_COUNTS.includes(k)
-    || k === 'deferred' || k === 'ignored' || k === 'refusal_categories'),
+    || CONTENT_REPORT_MAPS.includes(k)),
   JSON.stringify(Object.keys(repA || {})))
 
 console.log('')

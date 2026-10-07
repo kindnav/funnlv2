@@ -38,7 +38,9 @@
 import {
   buildMessageContentRequest, executeGraphRequest, readMessageContent, isUsableGraphId,
 } from './outlookGraphTransport.js'
-import { callDraftModel, MINIMIZATION_CATEGORIES } from './outlookDraftContract.js'
+import {
+  callDraftModel, MINIMIZATION_CATEGORIES, DRAFT_FAILURE_CODES,
+} from './outlookDraftContract.js'
 import { summarizeConversation, summarizePassResult, MAX_FETCH_PER_CONVERSATION } from './outlookContentPass.js'
 import { contentPermissions } from './outlookContentConsent.js'
 
@@ -169,10 +171,33 @@ export const CONTENT_DEFERRAL_CODES = Object.freeze(
   [...new Set([...TERMINAL_DEFERRALS, ...RETRYABLE_DEFERRALS])],
 )
 
+/**
+ * The Graph folders a missing-header count can be keyed by.
+ *
+ * Direction is derived from the folder and not reported separately, because the two are
+ * the same fact here: `inbox` is inbound and `sentitems` is outbound. Two integers, and
+ * nothing else - never a header name, a value, a message id or an address.
+ */
+export const CONTENT_FOLDERS = Object.freeze(['inbox', 'sentitems'])
+
 /** The integer counters a content report carries, in the names it carries them under. */
 export const CONTENT_REPORT_COUNTS = Object.freeze([
   'attempted', 'notes_written', 'proposals_written',
   'metadata_only', 'bodies_read', 'model_calls',
+])
+
+/**
+ * The code-keyed maps a content report carries, beside the counters above.
+ *
+ * Named so the suites that pin the report's shape pin it against ONE list rather than
+ * an inline disjunction that has to be edited in three places every time a diagnostic
+ * is added. Every value in every one of these is an integer count, and every key comes
+ * from an allowlist: a deferral code, an ignore code, a minimization category, a draft
+ * failure code, an HTTP status, or a Graph folder.
+ */
+export const CONTENT_REPORT_MAPS = Object.freeze([
+  'deferred', 'ignored', 'refusal_categories',
+  'model_failures', 'model_http_status', 'missing_headers',
 ])
 
 /**
@@ -531,6 +556,24 @@ export function planContentWrite (entry, pass, opts = {}) {
 }
 
 /** Counts and controlled codes only. Never a summary, address, subject or id. */
+/**
+ * Keys that are HTTP status codes, values that are counts.
+ *
+ * The allowlist is structural rather than enumerated: a key is kept only when it is a
+ * three-digit integer in the range HTTP defines. That admits a status Anthropic has not
+ * used yet without admitting a string.
+ */
+function numericKeys (o) {
+  const out = Object.create(null)
+  for (const [k, v] of Object.entries(isPlainObject(o) ? o : {})) {
+    const n = Number(k)
+    if (!Number.isInteger(n) || n < 100 || n > 599) continue
+    if (!Number.isInteger(v)) continue
+    out[String(n)] = v
+  }
+  return out
+}
+
 export function summarizeContentStage (counts) {
   const c = isPlainObject(counts) ? counts : {}
   const clean = (o, allowed) => {
@@ -558,6 +601,20 @@ export function summarizeContentStage (counts) {
     // withheld" and "a request was withheld because an address was in it", which is
     // what an operator needs to tell a signature block from a leaking identifier.
     refusal_categories: clean(c.refusedCategories, MINIMIZATION_CATEGORIES),
+    // WHY A MODEL CALL FAILED, by callDraftModel's own controlled code. The pass always
+    // defers as `model_unavailable` - which keeps the retryability classification
+    // unchanged - and that single reason was the entire diagnosis the live report
+    // carried. An authentication refusal, a 400, a rate limit and a timeout are four
+    // different problems with four different answers, and the code separates them.
+    model_failures: clean(c.modelFailures, DRAFT_FAILURE_CODES),
+    // The numeric status line, where the provider actually answered. A status is a
+    // number, never a provider message or body. Absent for a transport failure or a
+    // timeout, because no response existed to have one.
+    model_http_status: numericKeys(c.modelStatuses),
+    // WHICH SIDE of an exchange had no header collection, counted by folder. Recorded
+    // on every outcome, including success: a conversation that succeeded with an absent
+    // collection on one side is exactly the case the old screening rule got wrong.
+    missing_headers: clean(c.missingHeaders, CONTENT_FOLDERS),
   }
 }
 
@@ -603,6 +660,9 @@ export function sanitizeContentReport (report) {
     deferred: codes(report.deferred, CONTENT_DEFERRAL_CODES),
     ignored: codes(report.ignored, CONTENT_IGNORE_CODES),
     refusal_categories: codes(report.refusal_categories, MINIMIZATION_CATEGORIES),
+    model_failures: codes(report.model_failures, DRAFT_FAILURE_CODES),
+    model_http_status: numericKeys(report.model_http_status),
+    missing_headers: codes(report.missing_headers, CONTENT_FOLDERS),
   }
 }
 

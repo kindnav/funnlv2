@@ -1009,6 +1009,13 @@ export async function runOutlookImport (p) {
     // WHICH CATEGORY the privacy guard objected to, when it did. Controlled labels
     // only; the offending value is never returned by the guard and is never read here.
     refusedCategories: Object.create(null),
+    // WHY a model call failed, by callDraftModel's controlled code, and the numeric
+    // status where the provider answered. Both are filtered against their allowlists
+    // on the way into the report and again on the way out of summarizeRun.
+    modelFailures: Object.create(null),
+    modelStatuses: Object.create(null),
+    // WHICH side of an exchange had no header collection, by folder.
+    missingHeaders: Object.create(null),
   }
   const bumpDeferral = (c) => { content.deferred[c] = (content.deferred[c] || 0) + 1 }
   // The observed cost of the slowest content stage so far, for the admission check.
@@ -1243,6 +1250,27 @@ export async function runOutlookImport (p) {
           for (const cat of pass.categories) {
             if (typeof cat !== 'string') continue
             content.refusedCategories[cat] = (content.refusedCategories[cat] || 0) + 1
+          }
+        }
+        // THE MODEL FAILURE, named. `model_unavailable` says a call failed; the code
+        // says whether the key was refused, the request rejected, the rate limit hit or
+        // the deadline reached. Keyed on the pass's own reason, and the code is only
+        // ever one of callDraftModel's controlled strings - or the pass's fixed
+        // `model_call_threw` for a local exception, whose message is never read.
+        if (pass.reason === 'model_unavailable' && typeof pass.code === 'string') {
+          content.modelFailures[pass.code] = (content.modelFailures[pass.code] || 0) + 1
+        }
+        if (pass.reason === 'model_unavailable' && Number.isInteger(pass.status)) {
+          const k = String(pass.status)
+          content.modelStatuses[k] = (content.modelStatuses[k] || 0) + 1
+        }
+        // THE MISSING HEADER COLLECTIONS, by folder, from EVERY outcome - a success
+        // included, because a conversation that succeeded with one side missing is the
+        // case the old screening rule deferred.
+        if (isPlainObject(pass.missingHeaders)) {
+          for (const [folder, n] of Object.entries(pass.missingHeaders)) {
+            if (!Number.isInteger(n) || n <= 0) continue
+            content.missingHeaders[folder] = (content.missingHeaders[folder] || 0) + n
           }
         }
         if (typeof plan.ignored === 'string') {
