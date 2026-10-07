@@ -372,11 +372,17 @@ test('NO RAW OR SANITIZED BODY COMES BACK in the result', async () => {
   // integer - two possible keys, counts as values - and carries no header name, no
   // header value, no address and no message id. Asserted as such below rather than
   // merely allowed.
+  // `summaryEvidence` joined with the known-contact follow-up/provenance fix: it is one
+  // of the two controlled values the validator already paired with the summary
+  // (explicit_body | subject_only), carried so the write can record on what basis the
+  // note was drafted. Asserted as exactly that below, not merely allowed.
   assert.deepStrictEqual(Object.keys(r).sort(), [
     'contactId', 'extractionStatus', 'fetched', 'followUp', 'interactionDate',
     'messagesInExchange', 'messagesSummarized', 'missingHeaders', 'outcome',
-    'retainedSubject', 'summary',
+    'retainedSubject', 'summary', 'summaryEvidence',
   ])
+  assert.ok(['explicit_body', 'subject_only'].includes(r.summaryEvidence),
+    'summaryEvidence must be one of the two controlled values, never text from the mail')
   for (const [k, v] of Object.entries(r.missingHeaders)) {
     assert.ok(['inbox', 'sentitems'].includes(k), `missingHeaders key ${k} is not a folder`)
     assert.ok(Number.isInteger(v), 'missingHeaders values are counts')

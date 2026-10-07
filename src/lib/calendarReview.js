@@ -19,8 +19,12 @@ export const REVIEW_NOTES_MAX = 200
 // ONLY the RLS-safe candidate columns are ever selected; the contact join is limited to
 // display fields. Provider ids, fingerprints, user_id, interaction_id, refs, and raw
 // event data are NEVER selected (and are not granted to authenticated anyway).
+// draft_follow_up and extraction_status are the two draft columns the card renders for an
+// Outlook suggestion: the suggested next step, and whether the note was drafted by AI from
+// the message text. Both are already granted to authenticated (20260921000000), both are
+// NULL on Calendar rows, and neither is an identifier, a fingerprint or a subject.
 export const CANDIDATE_SELECT =
-  'id, source, proposed_type, proposed_interaction_date, proposed_notes, created_at, contacts(name, company, role)'
+  'id, source, proposed_type, proposed_interaction_date, proposed_notes, draft_follow_up, extraction_status, created_at, contacts(name, company, role)'
 
 /**
  * Client-side validation of reviewed overrides before calling accept. Mirrors the

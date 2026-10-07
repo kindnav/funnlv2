@@ -530,6 +530,37 @@ test('a successful draft still writes the note on either disclosure', () => {
     assert.strictEqual(plan.write, 'interaction_with_note')
     assert.strictEqual(plan.args.p_proposed_notes, 'A real summary of what was discussed.')
     assert.strictEqual(plan.args.p_proposed_date, '2026-09-23')
+    // AND THE NEXT STEP TRAVELS WITH IT. REPRODUCED IN PRODUCTION on 2026-10-07: the
+    // first live content run drafted a summary and a follow-up for an existing contact,
+    // and this branch passed p_proposed_notes alone - the accepted suggestion had
+    // draft_follow_up, summary_evidence and extraction_status all NULL. The
+    // new-contact branch has always carried them; the two now agree.
+    assert.strictEqual(plan.args.p_draft_follow_up, 'Send the CV.')
+    assert.strictEqual(plan.args.p_extraction_status, 'ai_extracted',
+      'a successful draft is AI-written, and the row says so')
+  }
+  // Evidence rides along when the pass supplies it, and is null - not invented - when
+  // it does not, so the RPC pairing check can refuse rather than the constraint throw.
+  const withEvidence = planContentWrite(planEntry(), {
+    outcome: 'interaction_draft', summary: 'A real summary.', summaryEvidence: 'explicit_body',
+    followUp: null, interactionDate: '2026-09-23',
+  }, { consentOpen: true })
+  assert.strictEqual(withEvidence.args.p_summary_evidence, 'explicit_body')
+  assert.strictEqual(withEvidence.args.p_draft_follow_up, null, 'no follow-up means null, never a placeholder')
+  const withoutEvidence = planContentWrite(planEntry(), {
+    outcome: 'interaction_draft', summary: 'A real summary.', interactionDate: '2026-09-23',
+  }, { consentOpen: true })
+  assert.strictEqual(withoutEvidence.args.p_summary_evidence, null)
+})
+test('the METADATA-ONLY write still carries none of the draft arguments', () => {
+  // The closed-gate path writes a candidate with a NULL note and must keep every draft
+  // column NULL too: nothing was read, so there is no next step and no provenance to
+  // record. outlook-first-suggestion.test.js asserts the same through the real run.
+  const plan = planContentWrite(planEntry(),
+    { outcome: 'defer', reason: 'content_consent_missing' }, { consentOpen: false })
+  assert.strictEqual(plan.write, 'interaction_metadata')
+  for (const k of ['p_draft_follow_up', 'p_summary_evidence', 'p_extraction_status']) {
+    assert.strictEqual(plan.args[k], undefined, `${k} must not be carried by a metadata write`)
   }
 })
 

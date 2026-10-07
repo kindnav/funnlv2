@@ -141,6 +141,20 @@ function CandidateCard({ candidate, onResolved }) {
           {!editing && candidate.proposed_notes && (
             <p className="mt-2 text-[12px] text-muted leading-relaxed line-clamp-2">{candidate.proposed_notes}</p>
           )}
+          {/* The suggested next step and the provenance, shown the way the new-person card
+              shows them. Both come from the same draft as the note; neither is editable here,
+              and accepting records the note alone - the next step is for the reviewer to act
+              on or fold into the note. */}
+          {!editing && candidate.draft_follow_up && (
+            <p className="mt-1 text-[12px] text-accent leading-relaxed">
+              Suggested next step: {candidate.draft_follow_up}
+            </p>
+          )}
+          {!editing && candidate.extraction_status === 'ai_extracted' && (
+            <p className="mt-1 text-[11px] text-lower">
+              Drafted by AI from the message text. Review it before accepting.
+            </p>
+          )}
 
           {editing && (
             <div className="mt-3 grid gap-2">

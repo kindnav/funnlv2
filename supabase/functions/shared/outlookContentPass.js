@@ -528,6 +528,11 @@ export async function summarizeConversation (p) {
     messagesSummarized: bounded.kept.length,
     messagesInExchange: Number.isInteger(conv.messageCount) ? conv.messageCount : bounded.kept.length,
     summary,
+    // ON WHAT BASIS the summary was written, straight from the validated draft, which
+    // already pairs it with the summary the same way the database constraint does.
+    // Carried so the known-contact write can record it; it is one of two controlled
+    // values and never text from the mail.
+    summaryEvidence: typeof draft.summary_evidence === 'string' ? draft.summary_evidence : null,
     followUp: typeof draft.follow_up === 'string' && draft.follow_up.trim().length > 0
       ? draft.follow_up.trim() : null,
     interactionDate: typeof draft.interaction_date === 'string' ? draft.interaction_date : lastLocalDate,

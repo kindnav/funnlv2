@@ -449,6 +449,19 @@ export function planContentWrite (entry, pass, opts = {}) {
           ? entry.episodeLookupFingerprints : null,
         // THE WHOLE POINT: the note the accepted interaction was missing.
         p_proposed_notes: pass.summary,
+        // THE NEXT STEP AND THE PROVENANCE, which this branch used to drop. REPRODUCED IN
+        // PRODUCTION on 2026-10-07: the first live content run drafted a summary AND a
+        // follow-up for an existing contact, and only the summary reached the row -
+        // draft_follow_up, summary_evidence and extraction_status were all NULL on the
+        // candidate the owner then accepted. The new-contact branch below has carried
+        // these since the content release; the two paths now agree. Each is bounded by
+        // the validator (follow_up <= 160, evidence from the pair) before it gets here,
+        // and the RPC refuses rather than trims. Written ONLY on a successful draft: the
+        // metadata-only branch further down still passes none of them, so a closed
+        // consent gate leaves every draft column NULL exactly as before.
+        p_draft_follow_up: pass.followUp ?? null,
+        p_summary_evidence: pass.summaryEvidence ?? null,
+        p_extraction_status: pass.extractionStatus ?? 'ai_extracted',
       },
       deferral: null,
     }
