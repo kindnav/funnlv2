@@ -418,10 +418,20 @@ for (const pair of forbidden) {
   check('the response body does not contain ' + pair[0], !serialized.includes(pair[1]),
     serialized.slice(0, 200))
 }
-check('the report holds only the declared counters and the two code maps',
+check('the report holds only the declared counters and the three code maps',
   Object.keys(report).every(
-    (k) => CONTENT_REPORT_COUNTS.includes(k) || k === 'deferred' || k === 'ignored'),
+    (k) => CONTENT_REPORT_COUNTS.includes(k)
+      || k === 'deferred' || k === 'ignored' || k === 'refusal_categories'),
   JSON.stringify(Object.keys(report)))
+// `refusal_categories` arrived with the finalisation-stall fix: which CATEGORY the
+// privacy guard objected to, counted, from the guard's own controlled vocabulary.
+// Empty here because nothing in this fixture trips the guard - and empty, not absent,
+// is the point: the field is always present so a reader never has to guess whether
+// "no refusal" means none happened or means the field was dropped again.
+check('the refusal-category map is present and empty for a clean round',
+  report.refusal_categories !== null && typeof report.refusal_categories === 'object'
+  && Object.keys(report.refusal_categories).length === 0,
+  JSON.stringify(report.refusal_categories))
 check('every ignore code reported is one the allowlist knows',
   Object.keys(report.ignored || {}).every((c) => CONTENT_IGNORE_CODES.includes(c)),
   JSON.stringify(report.ignored))

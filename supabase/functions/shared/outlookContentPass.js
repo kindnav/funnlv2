@@ -108,6 +108,12 @@ export const DEFER_REASONS = Object.freeze([
   'model_unavailable',             // the provider failed after its own retries
   'model_output_invalid',          // the response did not satisfy the strict validator
   'minimization_failed',           // the request would have carried something forbidden
+  // THE REQUEST COULD NOT BE BUILT. Separate from the refusal above: this one means
+  // buildDraftRequest threw - a bad mode, no allowed dates, or a payload over
+  // MAX_REQUEST_CHARS - and nothing was checked, let alone withheld. Reporting it as
+  // `minimization_failed` made a construction bug read as a privacy event, and the
+  // live report could not tell the two apart.
+  'request_build_failed',
   'ambiguous_counterparty',        // more than one external person
   'counterparty_unusable',         // no usable envelope address for an unknown person
   // The provider did not return the header collection, so the exchange could not be
@@ -358,7 +364,10 @@ export async function summarizeConversation (p) {
       allowedDates,
     })
   } catch {
-    return deferral('minimization_failed', { fetched })
+    // CONSTRUCTION, not refusal. Nothing was sent and nothing was checked; the guard
+    // below never ran. Deterministic for the same inputs, so terminal - but reported
+    // as its own code so a bug here is never mistaken for a privacy event.
+    return deferral('request_build_failed', { fetched })
   }
 
   // RUNTIME MINIMIZATION, not just a test. Every address seen on the envelope,
