@@ -565,14 +565,56 @@ test('A 400 IS CLASSIFIED into one controlled category, and the message never es
   ]) {
     assert.strictEqual(classifyBadRequest(err(message)), category, message)
   }
-  // A documented billing TYPE classifies even when the message says little.
-  assert.strictEqual(classifyBadRequest(err('see console', 'billing_error')), 'insufficient_credits')
+  // CORRECTED. This used to assert that a generic `billing_error` TYPE classified as
+  // insufficient_credits even "when the message says little" - which was the bug. The
+  // type covers every payment problem there is, so naming one of them "out of credits"
+  // would send an operator to top up an account whose card had simply expired.
+  assert.strictEqual(classifyBadRequest(err('see console', 'billing_error')), 'unknown',
+    'a billing_error type alone is not evidence of a low balance')
+
+  // ── NEGATIVE CONTROLS: ambiguous evidence must NOT become a diagnosis ────
+  // Each of these was reproduced against the first version of this classifier.
+  for (const [label, body] of [
+    ['an expired card is a billing problem, not an empty balance',
+      err('Your payment card has expired.', 'billing_error')],
+    ['a bare pointer to the console says nothing about the balance',
+      err('See the console for billing details.', 'billing_error')],
+    ['a missing billing address is not a low balance',
+      err('The billing address is missing.')],
+    ['the word "billing" alone is not evidence',
+      err('A billing problem occurred.')],
+    ['a bare union-type mention is not a complexity ceiling',
+      err('The union type at properties.name is odd.')],
+    ['a bare anyOf mention is not a complexity ceiling',
+      err('anyOf appears at properties.summary.')],
+  ]) {
+    assert.strictEqual(classifyBadRequest(body), 'unknown', label)
+  }
+
+  // AND THE ONE THAT WAS MISFILED: an unsupported union keyword is an unsupported
+  // PARAMETER, not a ceiling. This is why the unsupported rule is tested before the
+  // complexity rule rather than after it.
+  assert.strictEqual(classifyBadRequest(err('anyOf is not supported in this position.')),
+    'unsupported_parameter', 'an unsupported keyword is not a complexity ceiling')
+
+  // ── POSITIVE CONTROLS, retained: explicit evidence still classifies ──────
+  for (const [category, message] of [
+    ['insufficient_credits', 'insufficient funds'],
+    ['insufficient_credits', 'Your balance is too low; please add credits.'],
+    ['spend_limit', 'workspace spending limit exceeded'],
+    ['schema_complexity', 'Schema is too complex for compilation.'],
+    ['schema_complexity', 'anyOf count exceeds the limit of 16.'],
+    ['unsupported_parameter', 'unsupported schema feature: minLength'],
+  ]) {
+    assert.strictEqual(classifyBadRequest(err(message)), category, message)
+  }
 
   // UNKNOWN IS THE HONEST ANSWER whenever no documented marker matches, and it is what
   // keeps a guess out of the report.
   for (const body of [
     err('A refusal nobody has documented yet.'),
-    err(''), { type: 'error', error: {} }, { type: 'error' }, {}, [], 'a string', 42, null, undefined,
+    err(''), err('', 'billing_error'),
+    { type: 'error', error: {} }, { type: 'error' }, {}, [], 'a string', 42, null, undefined,
   ]) {
     assert.strictEqual(classifyBadRequest(body), 'unknown', JSON.stringify(body))
   }

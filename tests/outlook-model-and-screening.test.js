@@ -873,6 +873,25 @@ for (const [label, body, category] of [
 }
 
 console.log('')
+console.log('   AMBIGUOUS evidence must not become a diagnosis, through the transport too')
+
+// Each of these was reproduced against the first version of the classifier, where it
+// returned a confident wrong answer. A category is something an operator acts on, so a
+// near-miss has to be `unknown`.
+for (const [label, body, category] of [
+  ['an expired card', { type: 'error', error: { type: 'billing_error', message: 'Your payment card has expired.' } }, 'unknown'],
+  ['a bare console pointer', { type: 'error', error: { type: 'billing_error', message: 'See the console for billing details.' } }, 'unknown'],
+  ['a missing billing address', { type: 'error', error: { type: 'invalid_request_error', message: 'The billing address is missing.' } }, 'unknown'],
+  ['a bare union-type mention', { type: 'error', error: { type: 'invalid_request_error', message: 'The union type at properties.name is odd.' } }, 'unknown'],
+  ['anyOf unsupported in a position', { type: 'error', error: { type: 'invalid_request_error', message: 'anyOf is not supported in this position.' } }, 'unsupported_parameter'],
+]) {
+  const { r } = await callWith(async () => ok(body, 400))
+  check(label + ' -> ' + category,
+    r.code === 'provider_bad_request' && r.status === 400 && r.category === category,
+    JSON.stringify(r))
+}
+
+console.log('')
 console.log('   an unreadable error body is `unknown`, not a failure of its own')
 
 {

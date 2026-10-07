@@ -108,26 +108,57 @@ export const DRAFT_BAD_REQUEST_CATEGORIES = Object.freeze([
 export function classifyBadRequest(body) {
   const err = isPlainObject(body) && isPlainObject(body.error) ? body.error : null
   const message = err !== null && typeof err.message === 'string' ? err.message.toLowerCase() : ''
-  const kind = err !== null && typeof err.type === 'string' ? err.type.toLowerCase() : ''
-  if (message.length === 0 && kind.length === 0) return 'unknown'
+  if (message.length === 0) return 'unknown'
+  const has = (...needles) => needles.some((n) => message.includes(n))
 
-  // MOST SPECIFIC FIRST. A spend-limit 400 and a credit-balance problem both read as
-  // billing trouble; the documented distinction is that the first is a limit the
-  // organization set and the second is the account's ability to pay at all.
-  if (message.includes('spend limit') || message.includes('spending limit')
-    || message.includes('usage limit')) return 'spend_limit'
-  if (message.includes('credit balance') || message.includes('insufficient credit')
-    || message.includes('insufficient funds') || message.includes('billing')
-    || kind === 'billing_error') return 'insufficient_credits'
-  // "Schema is too complex for compilation." is the documented message for exceeding
-  // the compiled-grammar limits, and the explicit union-type ceiling lives beside it.
-  if (message.includes('too complex')) return 'schema_complexity'
-  if (message.includes('union type') || message.includes('anyof')) return 'schema_complexity'
-  // "... is not supported for this model." and "Extra inputs are not permitted" are both
-  // documented 400 messages for a parameter the request should not have sent.
-  if (message.includes('not supported') || message.includes('not permitted')
-    || message.includes('unsupported') || message.includes('unexpected keyword')
-    || message.includes('extra inputs')) return 'unsupported_parameter'
+  // ── EVERY CATEGORY REQUIRES ITS OWN EXPLICIT EVIDENCE ────────────────────
+  //
+  // A category is a DIAGNOSIS an operator will act on, so a near-miss must become
+  // `unknown` rather than a confident wrong answer. Four ways the first version of this
+  // function turned ambiguous evidence into a specific diagnosis, all four reproduced:
+  //
+  //   billing_error + "Your payment card has expired."   -> insufficient_credits
+  //   billing_error + "See the console for billing..."    -> insufficient_credits
+  //   "The billing address is missing."                   -> insufficient_credits
+  //   "anyOf is not supported in this position."          -> schema_complexity
+  //
+  // An expired card, a missing billing address and a bare pointer to the console are
+  // billing problems, and NONE of them says the balance is too low to pay - which is
+  // the only thing `insufficient_credits` is supposed to mean. And an unsupported
+  // schema keyword is not a complexity ceiling; it is a parameter the request should
+  // not have sent.
+
+  // A LIMIT THE ORGANIZATION SET. Documented: the API "returns a 400 when usage reaches
+  // an organization or workspace spend limit you set".
+  if (has('spend limit', 'spending limit', 'usage limit')) return 'spend_limit'
+
+  // THE ACCOUNT CANNOT PAY. Requires EXPLICIT low-balance, insufficient-credit or
+  // insufficient-funds wording. The `billing_error` TYPE is deliberately NOT sufficient
+  // on its own, and neither is the word "billing": both cover every payment problem
+  // there is, and naming one of them `insufficient_credits` would send an operator to
+  // top up an account whose card had simply expired.
+  if (has('credit balance', 'insufficient credit', 'insufficient funds',
+    'insufficient balance', 'balance is too low', 'low balance', 'out of credits',
+    'no credits remaining')) return 'insufficient_credits'
+
+  // A PARAMETER OR SCHEMA FEATURE THIS MODEL DOES NOT ACCEPT. Checked BEFORE the
+  // complexity rule, because "anyOf is not supported in this position" names a union
+  // keyword and is nonetheless an unsupported-feature refusal, not a ceiling. Documented
+  // messages: "... is not supported for this model.", "Extra inputs are not permitted",
+  // and "If you use an unsupported feature, you'll receive a 400 error with details."
+  if (has('not supported', 'not permitted', 'unsupported', 'unexpected keyword',
+    'extra inputs', 'is not allowed')) return 'unsupported_parameter'
+
+  // THE SCHEMA WAS TOO BIG TO COMPILE. Requires EXPLICIT complexity wording - the
+  // documented message is "Schema is too complex for compilation." - or a union/anyOf
+  // mention TOGETHER WITH count-limit wording, which is how the explicit ceiling of 16
+  // "Parameters with union types" would be reported. A bare mention of anyOf or union
+  // types is not evidence of a ceiling: it is just the subject of some other complaint.
+  const unionMentioned = has('union type', 'union types', 'anyof')
+  const countLimited = has('maximum', 'limit', 'too many', 'exceed', 'at most')
+  if (has('too complex', 'schema is too large', 'compilation timeout')) return 'schema_complexity'
+  if (unionMentioned && countLimited) return 'schema_complexity'
+
   return 'unknown'
 }
 
