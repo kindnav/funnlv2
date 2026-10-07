@@ -82,9 +82,15 @@ const isPlainObject = (v) => typeof v === 'object' && v !== null && !Array.isArr
  * planContentWrite tested the retryable list first - so a DETERMINISTIC privacy
  * refusal was treated as work worth retrying. The run stopped the finalisation loop
  * without passing the conversation, no cursor moved, and the next invocation re-read
- * the same mail and refused again for the same reason. Measured on the pilot: the same
- * two bodies re-fetched every invocation, zero model calls, zero candidates, no cursor,
- * and every later conversation in the round unreachable - in about two seconds.
+ * the same mail and refused again for the same reason.
+ *
+ * OBSERVED on the pilot, on a RESUMED invocation: two bodies read, zero model calls,
+ * zero candidates, no cursor, processed 0 of 2 - in about two seconds. Reproduced
+ * through the real handler across three consecutive invocations, which is where the
+ * "for ever" comes from; the live report is one invocation of it.
+ *
+ * The live report named `minimization_failed`, which at the time ALSO covered a request
+ * that could not be built, so what the mail actually contained is not established by it.
  *
  * A map cannot express that overlap, because a key has one value. The two lists below
  * are DERIVED from it, so they cannot drift apart from each other or from this.
@@ -107,9 +113,12 @@ export const DEFERRAL_CLASS = Object.freeze({
   no_handles: 'terminal',                   // nothing was stored to fetch with
   no_usable_content: 'terminal',            // the bodies sanitized to nothing
   // THE PRIVACY GUARD REFUSED, and that refusal is a property of the MAIL, not of the
-  // configuration: the forbidden value is in the message text or signature, so reading
-  // it again produces the same request and the same refusal. Terminal, therefore -
-  // and this is the correction. The guard itself is unchanged.
+  // configuration: the forbidden value is somewhere in the material the request is
+  // built from, so building it again produces the same request and the same refusal.
+  // Terminal, therefore - and this is the correction. The guard itself is unchanged.
+  //
+  // WHICH value, and where, is not knowable from this code: the guard returns the
+  // CATEGORY only. That is reported separately, in refusal_categories.
   minimization_failed: 'terminal',
   // THE REQUEST COULD NOT BE BUILT AT ALL - a bad mode, no allowed dates, or a payload
   // over MAX_REQUEST_CHARS. Distinct from the refusal above on purpose: both are

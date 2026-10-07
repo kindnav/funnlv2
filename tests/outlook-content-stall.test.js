@@ -24,13 +24,29 @@
 //      resumed from the same write cursor - re-reading the same mail, re-fetching the
 //      same two bodies, and refusing again for the same reason.
 //
-// The refusal is DETERMINISTIC: the forbidden address is in the message signature, not
-// in the configuration. Retrying cannot change the answer, so every later conversation
-// in the round was unreachable and the mailbox cursor could never advance.
+// WHAT THE LIVE REPORT DOES AND DOES NOT ESTABLISH. It establishes the STALL: a
+// `minimization_failed` deferral left processed at 0 with no cursor, on a resumed
+// invocation, in about two seconds. It does NOT establish the CAUSE, and this suite
+// must not be read as though it did.
 //
-// WHAT IS NOT WRONG, AND IS NOT CHANGED. The guard did its job: a request that would
-// have carried an email address was withheld, and zero model requests were sent. The
-// defect is purely in what the run does AFTER the refusal.
+// Before this fix, `minimization_failed` was emitted from TWO places:
+//
+//   * the privacy guard refusing a built request (assertRequestMinimization), and
+//   * buildDraftRequest THROWING, where no request was built and the guard never ran.
+//
+// The live code cannot tell those apart - which is the second defect fixed here, and
+// the reason `request_build_failed` now exists. So the live refusal's cause is UNKNOWN:
+// it may have been an address in the mail, or it may have been a request that could not
+// be constructed at all. The next invocation on the deployed fix will say which.
+//
+// WHAT THIS SUITE DOES. It drives the PRIVACY-GUARD branch deliberately, with an
+// address in a fixture signature block, because that branch is the one whose
+// classification caused the stall. Both branches are deterministic and both are now
+// terminal, so the stall is fixed either way; the fixture picks one to exercise it.
+//
+// WHAT IS NOT WRONG, AND IS NOT CHANGED. In the fixture's branch the guard does its
+// job: the request is withheld and zero model requests are sent. The defect is purely
+// in what the run does AFTER a deterministic deferral.
 //
 // CASES
 //   A  THE STALL, reproduced end to end through the real handler: a blocked
@@ -95,8 +111,11 @@ const PARTY_BLOCKED = 'ava' + AT + 'bank.test'
 const PARTY_CLEAN = 'ben' + AT + 'fund.test'
 const PARTY_STRANGER = 'cleo' + AT + 'ventures.test'
 
-// THE ADDRESS THAT TRIPS THE GUARD. It is the counterparty's own address, written into
-// the body the way a real signature block writes it - which is exactly the live case.
+// THE ADDRESS THAT TRIPS THE GUARD, in this FIXTURE. It is the counterparty's own
+// address in a signature block, which is a realistic way for one to appear - but it is
+// the fixture's chosen cause, NOT a reconstruction of the live one. The live report said
+// only `minimization_failed`, a code that at the time also covered a request that could
+// not be built; nothing in it identifies an address or a signature.
 // Nothing here weakens or bypasses the scan; the fixture reproduces its input.
 const BLOCKED_IN = 'Good to meet you at the info session. I have put your name forward '
   + 'for the spring insight week and the team would like a short call next week.'
