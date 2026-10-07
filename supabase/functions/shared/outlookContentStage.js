@@ -113,6 +113,29 @@ export const RETRYABLE_DEFERRALS = Object.freeze([
 ])
 
 /**
+ * The two reasons a conversation is SETTLED WITHOUT A NOTE rather than deferred.
+ *
+ * Named rather than written inline because two separate functions now have to agree
+ * on it: the stage summary that builds the report, and the run summary that re-checks
+ * it before it reaches an HTTP response. A list in two places is a list that drifts.
+ */
+export const CONTENT_IGNORE_CODES = Object.freeze([
+  'bulk_or_list_mail',   // the automation headers screened it out; no model call
+  'model_ignored',       // the model read it and said there was nothing to record
+])
+
+/** Every deferral code the stage can report, terminal or retryable. */
+export const CONTENT_DEFERRAL_CODES = Object.freeze(
+  [...new Set([...TERMINAL_DEFERRALS, ...RETRYABLE_DEFERRALS])],
+)
+
+/** The integer counters a content report carries, in the names it carries them under. */
+export const CONTENT_REPORT_COUNTS = Object.freeze([
+  'attempted', 'notes_written', 'proposals_written',
+  'metadata_only', 'bodies_read', 'model_calls',
+])
+
+/**
  * Read one conversation's stored handles.
  *
  * Returns the handles in the shape summarizeConversation takes. A `stale_run` or
@@ -480,8 +503,52 @@ export function summarizeContentStage (counts) {
     model_calls: Number.isInteger(c.modelCalls) ? c.modelCalls : 0,
     // The explicit report of every deferral, which is what makes a missing note
     // explained rather than silent.
-    deferred: clean(c.deferred, [...TERMINAL_DEFERRALS, ...RETRYABLE_DEFERRALS]),
-    ignored: clean(c.ignored, ['bulk_or_list_mail', 'model_ignored']),
+    deferred: clean(c.deferred, CONTENT_DEFERRAL_CODES),
+    ignored: clean(c.ignored, CONTENT_IGNORE_CODES),
+  }
+}
+
+/**
+ * Re-check an ALREADY-SUMMARIZED content report at the last boundary before it leaves
+ * the worker.
+ *
+ * WHY THIS EXISTS, AND WHY IT IS NOT A PASS-THROUGH. summarizeRun is documented as the
+ * only shape of a run result that may be logged, and it earns that by naming every
+ * field it emits rather than spreading whatever it was handed. The content report is
+ * built by summarizeContentStage above and is already clean; this makes that an
+ * enforced property of the response rather than a property of one call site, so a
+ * future producer cannot widen what ships by widening what it puts in the result.
+ *
+ * READ IN snake_case, DELIBERATELY. summarizeContentStage has already renamed
+ * `notesWritten` to `notes_written` and so on. Reading camelCase here - which is what
+ * the run's own counters beside it do, because those arrive camelCase - would match
+ * nothing and emit six zeroes. That failure is worse than the dropped field it
+ * replaces: a missing key reads as "not reported", while `notes_written: 0` reads as
+ * "the stage ran and wrote nothing", which is a different and false claim.
+ *
+ * @param {unknown} report the value produced by summarizeContentStage
+ * @returns {object|null} null when the run never reached the content stage
+ */
+export function sanitizeContentReport (report) {
+  if (!isPlainObject(report)) return null
+  const counts = Object.create(null)
+  for (const k of CONTENT_REPORT_COUNTS) {
+    counts[k] = Number.isInteger(report[k]) ? report[k] : 0
+  }
+  const codes = (o, allowed) => {
+    const out = Object.create(null)
+    for (const [k, v] of Object.entries(isPlainObject(o) ? o : {})) {
+      if (allowed.includes(k) && Number.isInteger(v)) out[k] = v
+    }
+    return out
+  }
+  return {
+    ...counts,
+    // Controlled codes only. A reason the stage did not produce is dropped rather
+    // than forwarded, so an unexpected string - a provider message, say - cannot
+    // reach a response body through this field.
+    deferred: codes(report.deferred, CONTENT_DEFERRAL_CODES),
+    ignored: codes(report.ignored, CONTENT_IGNORE_CODES),
   }
 }
 
