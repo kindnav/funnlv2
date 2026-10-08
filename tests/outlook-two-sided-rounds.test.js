@@ -22,7 +22,9 @@
 // handler before they were made: the user's one older sent message falling out of a
 // newest-six selection behind seven replies, and a continuing exchange that was two-sided
 // in both rounds being CREATED twice because the second round anchored its identity on
-// its own opening message.
+// its own opening message - and, once that was corrected, the same duplicate still being
+// written whenever the required recovery was REFUSED (400, truncated page, 404). A refused
+// recovery is now a reported no-write settlement (3c).
 //
 // THE ROUND STORE is the shared in-memory stand-in for the SQL round state and mirrors
 // the applied schema's two lifecycle facts exactly: a confirmed complete release ERASES
@@ -637,12 +639,15 @@ async function runThreads ({ threads, schedule, invocations, faults, beforeInvoc
   const counts = newCounts()
   const fetchImpl = makeFetch({ rounds, envelopes, folderOf, bodies, counts, model: MODEL, faults })
   const runs = []
+  const after = []
   for (let i = 0; i < invocations; i += 1) {
     counts.currentIds = new Set()
     if (typeof beforeInvocation === 'function') beforeInvocation(i, ports, counts)
     runs.push(await invoke(ports, fetchImpl))
+    after.push({ candidates: ports.candidates.length, bodies: counts.bodies, model: counts.model,
+      envelopeGets: counts.envelopeGets.length, lookups: counts.lookups.length })
   }
-  return { runs, ports, counts }
+  return { runs, ports, counts, after }
 }
 const carries = (text, tag) => String(text).indexOf(tag) >= 0
 
@@ -797,21 +802,57 @@ await test('a THIRD person joins the thread in round 2: the COMPLETE thread show
   assert.strictEqual(ports.candidates.length, 1, 'nothing written in round 2')
 })
 
-await test('when Outlook cannot complete a two-sided thread (the filter is refused), what the round itself saw is written and the gap is REPORTED', async () => {
-  const t = thread({ party: KNOWN, conv: 'AAQkAD-fallback', turns: [
-    ['them', 1, 9, 'OPENING'], ['me', 1, 15, 'FIRST-REPLY'], ['them', 3, 9, 'SECOND-MESSAGE'], ['me', 3, 15, 'SECOND-REPLY'],
-  ] })
-  const { runs, ports } = await runThreads({ threads: [t], schedule: [t.ids.slice(0, 2), t.ids.slice(2)], invocations: 2, faults: { lookup: 'bad_request' } })
-  const [r1, r2] = runs
-  assert.strictEqual(r1.run.created, 1, summarize(r1))
-  assert.strictEqual(r2.run.outcome, 'committed', summarize(r2))
-  assert.deepStrictEqual(r2.run.content.recovery_outcomes, { recovery_unsupported: 1 }, 'the fallback is visible in the report: ' + summarize(r2))
-  // The pre-correction behaviour, kept for the case the provider cannot answer: the round's
-  // own two-sided view is written, under its own anchor. This is the one path on which a
-  // continuing thread can still appear twice, and the report names it.
-  assert.strictEqual(r2.run.content.notes_written, 1)
-  assert.strictEqual(ports.candidates.length, 2)
-})
+// WHEN THE REQUIRED RECOVERY IS REFUSED. Reproduced through this handler before the
+// correction, for a known and for an unknown person: round 1 created a pending suggestion;
+// round 2 held further messages from both sides; recovery settled as recovery_unsupported,
+// recovery_truncated or recovery_source_missing; the worker wrote the round-local view under
+// a DIFFERENT fingerprint and answered created:1 again. Now a deterministic refusal is a
+// reported no-write settlement: the pending suggestion and its draft stand, nothing further
+// is read or drafted, and the conversation is passed under the recovery's own code. Only a
+// transient failure or a budget/cap interruption keeps the conversation for the next
+// invocation (section 4, last test). The three codes are produced by fixture faults - a 400,
+// a page carrying @odata.nextLink, a 404 - not by the provider; what the provider actually
+// answers to the filter is the owner-run Graph Explorer check.
+for (const [label, party, expectRpc] of [
+  ['an unknown person', STRANGER, 'upsert_new_contact_candidate'],
+  ['an existing contact', KNOWN, 'upsert_outlook_interaction_candidate'],
+]) {
+  for (const [faultLabel, faults, code] of [
+    ['the provider refuses the filter (400)', { lookup: 'bad_request' }, 'recovery_unsupported'],
+    ['the thread is longer than one bounded page', { lookup: 'truncated' }, 'recovery_truncated'],
+    ['the stored message no longer resolves (404)', { envelope: 'not_found' }, 'recovery_source_missing'],
+  ]) {
+    await test(label + ', continuing exchange, ' + faultLabel + ' -> NO second write, nothing read or drafted, the pending suggestion untouched, ' + code + ' reported', async () => {
+      const t = thread({ party, conv: 'AAQkAD-refused-' + code + (party === KNOWN ? '-known' : '-new'), turns: [
+        ['them', 1, 9, 'OPENING good to meet you at the panel.'], ['me', 1, 15, 'FIRST-REPLY thank you, next week works.'],
+        ['them', 3, 9, 'SECOND-MESSAGE Thursday at three is confirmed.'], ['me', 3, 15, 'SECOND-REPLY confirmed.'],
+      ] })
+      const { runs, ports, after } = await runThreads({ threads: [t], schedule: [t.ids.slice(0, 2), t.ids.slice(2)], invocations: 2, faults })
+      const [r1, r2] = runs
+      // Round 1 (a first pass): the pending suggestion, with its draft.
+      assert.strictEqual(r1.run.created, 1, summarize(r1))
+      assert.strictEqual(ports.candidates.length, 1)
+      assert.strictEqual(ports.candidates[0].rpc, expectRpc)
+      assert.strictEqual(ports.candidates[0].args.p_draft_follow_up, MODEL.followUp)
+      const original = JSON.stringify(ports.candidates[0])
+      // Round 2 (a delta round): recovery was required and refused; the round-local view is NOT written.
+      assert.strictEqual(r2.run.outcome, 'committed', summarize(r2))
+      assert.deepStrictEqual(r2.run.content.recovery_outcomes, { [code]: 1 }, summarize(r2))
+      assert.strictEqual(r2.run.created, 0, 'NO second suggestion: ' + summarize(r2))
+      assert.strictEqual(r2.run.accepted, 0)
+      assert.deepStrictEqual(r2.run.write_results, {}, 'no producer write at all')
+      assert.strictEqual(r2.run.intended, 0, 'the write the pre-pass counted is no longer needed')
+      assert.deepStrictEqual(r2.run.entry_skipped, { [code]: 1 }, 'the reason is the reported skip: ' + summarize(r2))
+      assert.strictEqual(r2.run.content.attempted, 0, 'the content stage is never reached')
+      assert.strictEqual(after[1].bodies, after[0].bodies, 'no body read after recovery failed')
+      assert.strictEqual(after[1].model, after[0].model, 'no model call after recovery failed')
+      assert.strictEqual(after[1].envelopeGets - after[0].envelopeGets, 1, 'one envelope GET, the recovery itself')
+      assert.strictEqual(r2.run.cursors_advanced, 2, 'a deterministic refusal is a decision: the round commits')
+      assert.strictEqual(ports.candidates.length, 1, 'still exactly one write')
+      assert.strictEqual(JSON.stringify(ports.candidates[0]), original, 'the original proposal is unchanged')
+    })
+  }
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 console.log('')

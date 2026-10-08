@@ -95,7 +95,7 @@ import {
   INVOCATION_BUDGET_MS, CHECKPOINT_RESERVE_MS, runOutlookRoundSlice,
 } from './outlookContinuedPass.js'
 import {
-  ROUND_TTL_SECONDS, ROUND_TAINT_CODES, finalizeConversation, summarizeRoundProgress,
+  ROUND_TTL_SECONDS, finalizeConversation, summarizeRoundProgress,
 } from './outlookRoundState.js'
 import { checkPilotUser, designatedPilotUser } from './outlookPilotGate.js'
 import { buildMessageHandles } from './outlookHandleProducer.js'
@@ -1249,39 +1249,38 @@ export async function runOutlookImport (p) {
             break
           }
           if (rec.outcome === 'settled') {
-            if (entry === null) {
-              // Outlook was asked and the exchange is still not a two-sided one Funnl can
-              // act on. That IS a decision - reported under its code - so finalisation
-              // passes it, exactly as a same-round one-sided thread is passed.
-              bumpSkip('not_two_sided')
-              rowsProcessed += 1
-              if (cfp !== null) processedThrough = cfp
-              continue
-            }
-            if (ROUND_TAINT_CODES.includes(rec.reason)) {
-              // The WHOLE thread, as Outlook holds it, is tainted - a second external
-              // person, a second contact - where the round's partial view was not. The
-              // complete view decides, as it would have in one round: skipped under the
-              // taint, nothing written.
-              bumpSkip(rec.reason)
-              rowsProcessed += 1
-              if (cfp !== null) processedThrough = cfp
-              continue
-            }
-            // Outlook could not complete a thread the round itself saw both sides of: the
-            // stored message no longer resolves, the thread is longer than one bounded
-            // page, the provider refused the filter, a message has moved since. Written
-            // from the round's own view, as every round was before recovery existed, with
-            // no extra handles; the recovery code is reported so the fallback is visible.
-          } else {
-            // Two-sided after all, or two-sided and now complete: from here on it is an
-            // ordinary entry - the whole thread's - with the recovered handles beside the
-            // stored ones. An entry the pre-pass already counted is not counted again.
-            content.recoveriesTwoSided += 1
-            if (entry === null) intended += 1
-            entry = rec.entry
-            extraHandles = rec.extraHandles
+            // A SETTLED answer is a decision, whichever side of an entry it falls on, and
+            // finalisation passes the conversation WITHOUT a write.
+            //
+            // No entry yet (one-sided in the round): Outlook was asked and the exchange is
+            // still not a two-sided one Funnl can act on - reported as not_two_sided, exactly
+            // as a same-round one-sided thread is.
+            //
+            // An entry already (two-sided in a delta round): the thread's identity could NOT
+            // be established from Outlook - the stored message no longer resolves, the thread
+            // is longer than one bounded page, the provider refused the filter, the complete
+            // thread is tainted or is no longer two-sided. The round-local anchor is NOT
+            // written. Reproduced through the real handler before this, for a known and for
+            // an unknown person alike: the round-local view went out under a DIFFERENT
+            // fingerprint beside the pending suggestion, created:1 again. Now the pending
+            // suggestion and its draft stand untouched; the reason is reported under the
+            // entry's skip and in recovery_outcomes; a deterministic refusal is not retried
+            // (that would never resolve) and nothing metadata-only is substituted. A later
+            // round that can complete the thread refreshes the row. The write the pre-pass
+            // counted for this entry is no longer needed.
+            if (entry !== null) intended -= 1
+            bumpSkip(entry === null ? 'not_two_sided' : rec.reason)
+            rowsProcessed += 1
+            if (cfp !== null) processedThrough = cfp
+            continue
           }
+          // Two-sided after all, or two-sided and now complete: from here on it is an
+          // ordinary entry - the whole thread's - with the recovered handles beside the
+          // stored ones. An entry the pre-pass already counted is not counted again.
+          content.recoveriesTwoSided += 1
+          if (entry === null) intended += 1
+          entry = rec.entry
+          extraHandles = rec.extraHandles
         }
         if (entry === null) {
           // Skipped on purpose - a one-sided or unsupported conversation. A skip is a

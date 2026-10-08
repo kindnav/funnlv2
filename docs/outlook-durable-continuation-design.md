@@ -447,10 +447,19 @@ same conversation is not suggested twice — while a *new* thread with the same 
 new anchor and is proposed. (`tests/outlook-two-sided-rounds.test.js` section 3c;
 `tests/sql/outlook-known-contact-follow-up-runtime.sql` section 9, against the real producer
 RPC.) Where Outlook cannot complete a two-sided thread — the stored message no longer
-resolves, the thread is longer than one bounded page, the filter is refused — the round's
-own view is written as before and the recovery code is reported, so that one remaining path
-to a duplicate is visible rather than silent. Without content consent there are no stored
-handles, so a metadata-only candidate keeps the round-anchored identity it always had.
+resolves, the thread is longer than one bounded page, the filter is refused — the
+round-local anchor is **not** written: the conversation is passed without a write under the
+recovery's own code (`entry_skipped` and `recovery_outcomes`), the pending suggestion and
+its draft stand untouched, nothing further is read or drafted, and a later round that can
+complete the thread refreshes the row. (Reproduced before this, for a known and an unknown
+person: the round-local view went out under a different fingerprint, `created: 1` again.)
+A deterministic refusal is not retried and no metadata-only suggestion is substituted; only
+a transient failure or a budget/cap interruption keeps the conversation for the next
+invocation. The honest cost: while the thread cannot be completed, the pending suggestion
+stays as the earlier round drafted it — and if the filter is refused on this tenant that is
+every delta round, which is why the Graph Explorer check precedes rollout. Without content
+consent there are no stored handles, so a metadata-only candidate keeps the round-anchored
+identity it always had.
 
 **Both sides in the selection (same correction).** Reproduced: the user's one older sent
 message behind seven newer replies; the merged handles were cut to the newest six, all
