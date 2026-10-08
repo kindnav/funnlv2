@@ -374,20 +374,20 @@ export async function summarizeOneConversation (p) {
     // NOT 'no_handles': the handles may well exist and simply could not be read.
     return { outcome: 'defer', reason: 'handles_unreadable', fetched: 0, code: read.code }
   }
-  // RECOVERED HANDLES, when a one-sided conversation was completed from Outlook rather
-  // than from the round's own pages (outlookConversationRecovery.js). They exist only in
-  // memory for this invocation; the stored set stays the authority for any message both
-  // hold. With more than the pass will fetch, the LATEST are kept - a summary is about the
-  // most recent exchange - and handed over in chronological order, which is how the stored
-  // set arrives. With no extras this is the unchanged read.
+  // RECOVERED HANDLES, when a conversation was completed from Outlook rather than from the
+  // round's own pages alone (outlookConversationRecovery.js). They exist only in memory for
+  // this invocation; the stored set stays the authority for any message both hold, so the
+  // merge is DEDUPLICATION ONLY, by fingerprint, handed over in chronological order - which
+  // is how the stored set arrives. WHICH of them are fetched is not decided here: the pass
+  // applies the one selection rule (selectBalancedHandles) to stored and recovered handles
+  // alike, so the user's one older sent message cannot be pushed out by newer replies. With
+  // no extras this is the unchanged read.
   const extra = Array.isArray(p?.extraHandles) ? p.extraHandles : []
   let handles = read.handles
   if (extra.length > 0) {
     const seen = new Set(read.handles.map((h) => h.mfp))
-    const merged = read.handles.concat(extra.filter((h) => isPlainObject(h)
+    handles = read.handles.concat(extra.filter((h) => isPlainObject(h)
       && typeof h.mfp === 'string' && h.mfp.length > 0 && !seen.has(h.mfp)))
-    merged.sort((a, b) => String(b.sentAt).localeCompare(String(a.sentAt)))
-    handles = merged.slice(0, MAX_FETCH_PER_CONVERSATION)
       .sort((a, b) => String(a.sentAt).localeCompare(String(b.sentAt)))
   }
 

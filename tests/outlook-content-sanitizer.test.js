@@ -10,7 +10,7 @@ import { fileURLToPath } from 'url'
 import { join, dirname } from 'path'
 import {
   MAX_TEXT_CHARS, MAX_SIGNATURE_CHARS, MAX_SUBJECT_CHARS, MAX_EPISODE_CHARS,
-  MAX_EPISODE_MESSAGES, MAX_INPUT_CHARS,
+  MAX_EPISODE_MESSAGES, MAX_INPUT_CHARS, EPISODE_RESERVE_PER_DIRECTION,
   looksLikeHtml, decodeEntities, htmlToText, stripUnsafeCharacters,
   trimQuotedHistory, trimFooter, splitSignature, looksBinary, sanitizeSubject,
   sanitizeMessageContent, boundEpisodeContent,
@@ -326,6 +326,70 @@ test('the sanitizer performs no I/O and no logging of any kind', () => {
   for (const bad of ['console.', 'fetch(', 'require(', 'process.env', 'Deno.', 'localStorage', 'import ']) {
     assert.ok(!exec.includes(bad), `sanitizer must not contain ${bad}`)
   }
+})
+
+// ── Both sides survive the episode bound ────────────────────────────────────
+console.log('')
+console.log('the episode bound keeps both sides')
+
+const part = (iso, direction, text) => ({ timestampIso: iso, direction, sanitized: { text, signature: null } })
+const day = (n) => '2026-09-' + String(n).padStart(2, '0') + 'T10:00:00.000Z'
+const texts = (r) => r.kept.map((k) => k.sanitized.text)
+
+test('one older outbound message behind seven newer inbound ones: the user side is kept, then the five newest inbound', () => {
+  // THE REPRODUCED SHAPE: round 1 held the user's one sent message, round 2 brought seven
+  // replies. A plain "newest six" here is the second place the user's side could fall out.
+  assert.strictEqual(EPISODE_RESERVE_PER_DIRECTION, 2)
+  const parts = [part(day(1), 'outbound', 'MINE the only thing the user wrote')]
+  for (let i = 0; i < 7; i++) parts.push(part(day(i + 2), 'inbound', 'THEIRS ' + (i + 2)))
+  const r = boundEpisodeContent(parts)
+  assert.strictEqual(r.kept.length, MAX_EPISODE_MESSAGES)
+  assert.strictEqual(r.droppedForBudget, 2)
+  assert.deepStrictEqual(texts(r),
+    ['MINE the only thing the user wrote', 'THEIRS 4', 'THEIRS 5', 'THEIRS 6', 'THEIRS 7', 'THEIRS 8'],
+    'the user side (the oldest message) first, then the five newest inbound, in chronological order')
+})
+
+test('the reversed imbalance - one older inbound message behind seven newer outbound ones - keeps the other person', () => {
+  const parts = [part(day(1), 'inbound', 'THEIRS the only thing they wrote')]
+  for (let i = 0; i < 7; i++) parts.push(part(day(i + 2), 'outbound', 'MINE ' + (i + 2)))
+  assert.deepStrictEqual(texts(boundEpisodeContent(parts)),
+    ['THEIRS the only thing they wrote', 'MINE 4', 'MINE 5', 'MINE 6', 'MINE 7', 'MINE 8'])
+})
+
+test('two of each side are reserved before recency fills the rest, whatever the input order', () => {
+  const parts = []
+  for (let i = 0; i < 3; i++) parts.push(part(day(i + 1), 'outbound', 'MINE ' + (i + 1)))      // days 1-3
+  for (let i = 0; i < 7; i++) parts.push(part(day(i + 4), 'inbound', 'THEIRS ' + (i + 4)))     // days 4-10
+  const expected = ['MINE 2', 'MINE 3', 'THEIRS 7', 'THEIRS 8', 'THEIRS 9', 'THEIRS 10']
+  assert.deepStrictEqual(texts(boundEpisodeContent(parts)), expected)
+  assert.deepStrictEqual(texts(boundEpisodeContent(parts.slice().reverse())), expected, 'deterministic: reversed input')
+  const shuffled = [parts[5], parts[0], parts[9], parts[2], parts[7], parts[1], parts[4], parts[8], parts[3], parts[6]]
+  assert.deepStrictEqual(texts(boundEpisodeContent(shuffled)), expected, 'deterministic: shuffled input')
+})
+
+test('the reservation respects the character budget, and the newest message of each side always fits', () => {
+  // Four messages at the per-message ceiling. Placement alternates sides, newest first:
+  // inbound day 4, outbound day 3, inbound day 2 fill the 12,000 budget exactly; the
+  // second outbound is dropped FOR BUDGET, which is the honest answer.
+  const big = 'x'.repeat(MAX_TEXT_CHARS - 2)
+  const parts = [
+    part(day(1), 'outbound', 'o1' + big), part(day(2), 'inbound', 'i2' + big),
+    part(day(3), 'outbound', 'o3' + big), part(day(4), 'inbound', 'i4' + big),
+  ]
+  const r = boundEpisodeContent(parts)
+  assert.ok(r.totalChars <= MAX_EPISODE_CHARS)
+  assert.strictEqual(r.totalChars, 3 * MAX_TEXT_CHARS)
+  const kept = texts(r).map((t) => t.slice(0, 2))
+  assert.deepStrictEqual(kept, ['i2', 'o3', 'i4'], 'the newest of EACH side, then the second inbound; chronological')
+  assert.strictEqual(r.droppedForBudget, 1)
+  assert.strictEqual(2 * MAX_TEXT_CHARS <= MAX_EPISODE_CHARS, true, 'the arithmetic the guarantee rests on')
+})
+
+test('parts without a direction count as inbound, so a single-direction episode is bounded exactly as before', () => {
+  const parts = []
+  for (let i = 0; i < 9; i++) parts.push({ timestampIso: day(i + 1), sanitized: { text: 'n' + (i + 1), signature: null } })
+  assert.deepStrictEqual(texts(boundEpisodeContent(parts)), ['n4', 'n5', 'n6', 'n7', 'n8', 'n9'])
 })
 
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed\n`)

@@ -171,15 +171,15 @@ BEGIN
   -- These are not cosmetic. A dropped function loses its ACL, so this is what
   -- proves the REVOKE/GRANT pair was restated after the DROP.
   ASSERT has_function_privilege('service_role',
-           'public.upsert_outlook_interaction_candidate(uuid,uuid,uuid,text,text,smallint,text,date,text[],text)',
+           'public.upsert_outlook_interaction_candidate(uuid,uuid,uuid,text,text,smallint,text,date,text[],text,text,text,text)',
            'EXECUTE'),
          'the worker lost EXECUTE';
   ASSERT NOT has_function_privilege('authenticated',
-           'public.upsert_outlook_interaction_candidate(uuid,uuid,uuid,text,text,smallint,text,date,text[],text)',
+           'public.upsert_outlook_interaction_candidate(uuid,uuid,uuid,text,text,smallint,text,date,text[],text,text,text,text)',
            'EXECUTE'),
          'a user must never be able to manufacture a suggestion';
   ASSERT NOT has_function_privilege('anon',
-           'public.upsert_outlook_interaction_candidate(uuid,uuid,uuid,text,text,smallint,text,date,text[],text)',
+           'public.upsert_outlook_interaction_candidate(uuid,uuid,uuid,text,text,smallint,text,date,text[],text,text,text,text)',
            'EXECUTE'),
          'anon gained EXECUTE on the write RPC';
 

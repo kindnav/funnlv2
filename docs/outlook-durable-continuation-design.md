@@ -409,9 +409,10 @@ completes and erases its records; round 2 reads the reply alone and nothing is s
 for an unknown person and for an existing contact, in both orders.
 
 It is closed by **conversation recovery**, not by the retained row proposed in the sheet
-(`supabase/functions/shared/outlookConversationRecovery.js`). For exactly the one-sided
-conversations a round is about to give up on, and only while the content stage is on,
-the round asks **Outlook** for the rest of the thread: one envelope GET by a handle the
+(`supabase/functions/shared/outlookConversationRecovery.js`). While the content stage is
+on, the round asks **Outlook** for the rest of the thread — for every one-sided
+conversation it is about to give up on and, in a delta round, for every two-sided
+conversation it is about to write (see *One identity* below): one envelope GET by a handle the
 round already holds (to learn the conversation id, which is still never persisted), then
 one filtered listing per folder — `$filter=conversationId eq '…'`, `$select` to the
 envelope, `$top` bounded, **no `$orderby`** (Microsoft documents that a `$filter`/`$orderby`
@@ -429,11 +430,48 @@ a read completes, so retaining them is a disclosure change. Recovery stores **no
 new**: recovered handles live in memory for the invocation; if it stops before the write,
 the conversation is not passed and the next invocation recovers it again.
 
+**One identity for a continuing exchange (second correction, 2026-10-07).** The episode
+fingerprint is anchored on the thread's *first* message, and the lookup fingerprints are
+key-rotation variants of that one anchor, not alternative anchors. A delta round sees only
+what arrived since the committed cursors, so a thread that continued since the last round
+opens, in that round, on a reply — and a round that was two-sided on its own was written
+under *that* anchor. Reproduced through the real handler: a pending proposal from round 1,
+one further message each way in round 2, and round 2 created a second proposal instead of
+refreshing the first. The correction: in a delta round **every** conversation about to be
+written is completed from Outlook first — the same three bounded requests — whichever sides
+happened to write since the last round; the fold then anchors on the first message as
+Outlook holds it, which is the anchor a first pass (a read of the whole folder) produces. A
+first pass asks nothing extra. The write RPC then answers `refreshed` for the pending row and
+the draft is built from the whole thread; after the reviewer decides, `exists_terminal` — the
+same conversation is not suggested twice — while a *new* thread with the same person is a
+new anchor and is proposed. (`tests/outlook-two-sided-rounds.test.js` section 3c;
+`tests/sql/outlook-known-contact-follow-up-runtime.sql` section 9, against the real producer
+RPC.) Where Outlook cannot complete a two-sided thread — the stored message no longer
+resolves, the thread is longer than one bounded page, the filter is refused — the round's
+own view is written as before and the recovery code is reported, so that one remaining path
+to a duplicate is visible rather than silent. Without content consent there are no stored
+handles, so a metadata-only candidate keeps the round-anchored identity it always had.
+
+**Both sides in the selection (same correction).** Reproduced: the user's one older sent
+message behind seven newer replies; the merged handles were cut to the newest six, all
+inbound, and the user's words never reached the model. One selection rule now applies to
+stored and recovered handles alike — the newest two per folder first, then recency,
+deduplicated and deterministic (`selectBalancedHandles`) — and the episode bound applied
+after the bodies are read reserves the newest two per direction the same way
+(`boundEpisodeContent`); the request builder refuses an oversized request rather than
+trimming it, so there is no later point at which the exchange can become one-sided. The
+message and character limits are unchanged. (`tests/outlook-two-sided-rounds.test.js`
+section 3b, asserting on the actual outgoing model request.)
+
 **What is still open — one provider fact.** The reference pages list the OData parameters
 as supported and bound `$top` to 1–1000, but do not state per-property filterability. Whether
 `conversationId eq` is accepted on this tenant is established by the owner-run check in
 PR #75, not assumed: a 400 from the lookup is reported as `recovery_unsupported` and settles
-the conversation rather than retrying it.
+the conversation rather than retrying it. The check uses a thread known to have messages in
+*both* folders and confirms that the filtered listing of each folder returns messages with
+the matching `conversationId`; an empty `value` array is not proof of anything — it would be
+what a silently ignored filter returns for a thread with no messages in that folder, and
+what an accepted filter returns too.
 
 The sheet below is kept as the record of the alternative that was considered and not taken.
 

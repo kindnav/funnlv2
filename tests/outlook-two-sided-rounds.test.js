@@ -18,6 +18,12 @@
 // envelope, Graph conversation lookup, Graph message content, the Anthropic endpoint)
 // and throws on anything else. No network, no database, no browser.
 //
+// THE TWO CORRECTIONS pinned in sections 3b and 3c were both REPRODUCED through this
+// handler before they were made: the user's one older sent message falling out of a
+// newest-six selection behind seven replies, and a continuing exchange that was two-sided
+// in both rounds being CREATED twice because the second round anchored its identity on
+// its own opening message.
+//
 // THE ROUND STORE is the shared in-memory stand-in for the SQL round state and mirrors
 // the applied schema's two lifecycle facts exactly: a confirmed complete release ERASES
 // the accumulator (release_outlook_sync_lease, 20261002000000:1164) AND the message
@@ -149,6 +155,9 @@ async function makePorts ({ contacts }) {
   const candidates = []
   const releases = []
   const episodes = new Set()
+  // Exchanges the reviewer has DECIDED (accepted or dismissed): the write RPCs answer
+  // exists_terminal for them and write nothing, exactly as the applied functions do.
+  const terminal = new Set()
   const select = async (path) => {
     if (path.startsWith('microsoft_connections?')) {
       return { data: [{
@@ -187,7 +196,7 @@ async function makePorts ({ contacts }) {
     if (name === 'renew_outlook_sync_lease') return { data: true, error: null }
     if (name === 'upsert_outlook_interaction_candidate' || name === 'upsert_new_contact_candidate') {
       const fp = args && args.p_episode_fingerprint
-      const result = episodes.has(fp) ? 'refreshed' : 'created'
+      const result = terminal.has(fp) ? 'exists_terminal' : episodes.has(fp) ? 'refreshed' : 'created'
       episodes.add(fp)
       candidates.push({ rpc: name, args, result })
       return { data: { result }, error: null }
@@ -205,7 +214,7 @@ async function makePorts ({ contacts }) {
     if (s !== null) return s
     throw new Error('unexpected rpc: ' + name)
   }
-  return { select, rpc, store, candidates, releases }
+  return { select, rpc, store, candidates, releases, decide: (fp) => terminal.add(fp) }
 }
 
 const MESSAGES_PREFIX = GRAPH_BASE + '/me/messages/'
@@ -576,6 +585,232 @@ await test('the same two messages served again produce the same episode key and 
   assert.strictEqual(r2.run.accepted, 1)
   assert.strictEqual(ports.candidates[0].args.p_episode_fingerprint, ports.candidates[1].args.p_episode_fingerprint)
   assert.strictEqual(ports.candidates[1].result, 'refreshed')
+})
+
+// ═══════════════════════════════════════════════════════════════════════════════
+console.log('')
+console.log('3b. BOTH SIDES survive the selection when one side wrote much more')
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// REPRODUCED through this handler before the correction: round 1 held the user's one sent
+// message and committed; round 2 brought seven newer replies; recovery qualified the
+// exchange; the merged handles were sorted newest-first and cut to six - all inbound - and
+// the user's own words were absent from the model request. ONE selection rule now applies
+// to stored and recovered handles alike (selectBalancedHandles: the newest two per folder
+// first, then recency), and the episode bound after the bodies are read reserves the
+// newest two per direction the same way. The request builder refuses an oversized request
+// rather than trimming it, so there is no later point at which the account turns one-sided.
+
+/**
+ * A thread of ANY shape. Each turn is [who, day, hour, body]: `who` is 'me', 'them' or an
+ * invented address for a third person; the folder follows who wrote. Ids are invented.
+ */
+function thread ({ party, conv, turns }) {
+  const envelopes = {}
+  const folderOf = {}
+  const bodies = {}
+  const ids = []
+  turns.forEach(([who, day, hour, body], i) => {
+    const id = 'AAkALgAA' + conv + '-' + i
+    const at = '2026-09-' + String(day).padStart(2, '0') + 'T' + String(hour).padStart(2, '0') + ':00:00Z'
+    const subject = i === 0 ? 'Following up' : 'RE: Following up'
+    const from = who === 'me' ? ME : who === 'them' ? party : who
+    envelopes[id] = who === 'me' ? envelope(id, conv, ME, [party], at, subject) : envelope(id, conv, from, [ME], at, subject)
+    folderOf[id] = who === 'me' ? 'sentitems' : 'inbox'
+    bodies[id] = body
+    ids.push(id)
+  })
+  return { envelopes, folderOf, bodies, ids, conv }
+}
+
+/** Run `threads` over rounds: `schedule[k]` lists the message ids whose delta page arrives in round k+1. */
+async function runThreads ({ threads, schedule, invocations, faults, beforeInvocation }) {
+  const envelopes = Object.assign({}, ...threads.map((t) => t.envelopes))
+  const folderOf = Object.assign({}, ...threads.map((t) => t.folderOf))
+  const bodies = Object.assign({}, ...threads.map((t) => t.bodies))
+  const rounds = { inbox: [], sentitems: [] }
+  for (const ids of schedule) {
+    rounds.inbox.push(ids.filter((id) => folderOf[id] === 'inbox').map((id) => envelopes[id]))
+    rounds.sentitems.push(ids.filter((id) => folderOf[id] === 'sentitems').map((id) => envelopes[id]))
+  }
+  const ports = await makePorts({ contacts: [{ id: KNOWN_CONTACT, user_id: PILOT, email: KNOWN }] })
+  const counts = newCounts()
+  const fetchImpl = makeFetch({ rounds, envelopes, folderOf, bodies, counts, model: MODEL, faults })
+  const runs = []
+  for (let i = 0; i < invocations; i += 1) {
+    counts.currentIds = new Set()
+    if (typeof beforeInvocation === 'function') beforeInvocation(i, ports, counts)
+    runs.push(await invoke(ports, fetchImpl))
+  }
+  return { runs, ports, counts }
+}
+const carries = (text, tag) => String(text).indexOf(tag) >= 0
+
+await test('one older sent message, then SEVEN newer replies in a later round: the user side is among the six bodies read AND in the model request', async () => {
+  const t = thread({ party: STRANGER, conv: 'AAQkAD-balance-in', turns: [
+    ['me', 1, 9, 'MINE-ONLY thanks for your talk on the growth-fund panel; I would value fifteen minutes on seed diligence.'],
+    ['them', 2, 9, 'REPLY-ONE happy to; what are you working on at the moment?'],
+    ['them', 3, 9, 'REPLY-TWO and which year are you in?'],
+    ['them', 4, 9, 'REPLY-THREE I can do Thursday or Friday.'],
+    ['them', 5, 9, 'REPLY-FOUR Thursday at three then.'],
+    ['them', 6, 9, 'REPLY-FIVE the dial-in is in the calendar invite.'],
+    ['them', 7, 9, 'REPLY-SIX looking forward to it.'],
+    ['them', 8, 9, 'REPLY-SEVEN one more thing: bring a question about the fund.'],
+  ] })
+  const { runs, ports, counts } = await runThreads({ threads: [t], schedule: [[t.ids[0]], t.ids.slice(1)], invocations: 2 })
+  const [r1, r2] = runs
+  assert.strictEqual(r1.run.outcome, 'committed', summarize(r1))
+  assert.deepStrictEqual(r1.run.content.recovery_outcomes, { not_two_sided: 1 }, 'round 1: the user wrote, nobody had replied')
+  assert.strictEqual(r2.run.outcome, 'committed', summarize(r2))
+  assert.deepStrictEqual(r2.run.content.recovery_outcomes, { recovered: 1 }, summarize(r2))
+  assert.strictEqual(r2.run.content.recovered_messages, 8, 'the whole thread came back from Outlook')
+  assert.strictEqual(r2.run.content.bodies_read, 6, 'the fetch limit is unchanged: six bodies')
+  assert.strictEqual(r2.run.content.model_calls, 1)
+  assert.strictEqual(ports.candidates.length, 1)
+  assert.strictEqual(ports.candidates[0].rpc, 'upsert_new_contact_candidate')
+  const sent = counts.modelBodies[0]
+  assert.ok(carries(sent, 'MINE-ONLY'), 'THE USER SIDE IS IN THE MODEL REQUEST')
+  for (const tag of ['REPLY-THREE', 'REPLY-FOUR', 'REPLY-FIVE', 'REPLY-SIX', 'REPLY-SEVEN']) assert.ok(carries(sent, tag), tag + ' is in the request')
+  assert.ok(!carries(sent, 'REPLY-ONE') && !carries(sent, 'REPLY-TWO'), 'the two oldest replies gave way, not the other side')
+  assert.ok(!carries(sent, STRANGER) && !carries(sent, ME), 'no address')
+})
+
+await test('the reversed imbalance - one older message from the person, then SEVEN newer messages from the user: the other person is in the request', async () => {
+  const t = thread({ party: KNOWN, conv: 'AAQkAD-balance-out', turns: [
+    ['them', 1, 9, 'THEIRS-ONLY good to meet you at the panel; I have put your name forward for the insight week.'],
+    ['me', 2, 9, 'MINE-ONE thank you, that is very kind.'],
+    ['me', 3, 9, 'MINE-TWO I have attached my availability.'],
+    ['me', 4, 9, 'MINE-THREE and a short note on my background.'],
+    ['me', 5, 9, 'MINE-FOUR is next Thursday still convenient?'],
+    ['me', 6, 9, 'MINE-FIVE I will prepare questions about the credit desk.'],
+    ['me', 7, 9, 'MINE-SIX looking forward to it.'],
+    ['me', 8, 9, 'MINE-SEVEN see you Thursday.'],
+  ] })
+  const { runs, ports, counts } = await runThreads({ threads: [t], schedule: [[t.ids[0]], t.ids.slice(1)], invocations: 2 })
+  const [r1, r2] = runs
+  assert.deepStrictEqual(r1.run.content.recovery_outcomes, { not_two_sided: 1 }, summarize(r1))
+  assert.strictEqual(r2.run.outcome, 'committed', summarize(r2))
+  assert.deepStrictEqual(r2.run.content.recovery_outcomes, { recovered: 1 }, summarize(r2))
+  assert.strictEqual(r2.run.content.bodies_read, 6)
+  assert.strictEqual(r2.run.content.notes_written, 1, 'an existing contact: a note')
+  assert.strictEqual(ports.candidates[0].rpc, 'upsert_outlook_interaction_candidate')
+  const sent = counts.modelBodies[0]
+  assert.ok(carries(sent, 'THEIRS-ONLY'), 'THE OTHER PERSON IS IN THE MODEL REQUEST')
+  for (const tag of ['MINE-THREE', 'MINE-FOUR', 'MINE-FIVE', 'MINE-SIX', 'MINE-SEVEN']) assert.ok(carries(sent, tag), tag + ' is in the request')
+  assert.ok(!carries(sent, 'MINE-ONE') && !carries(sent, 'MINE-TWO'), 'the two oldest of the user side gave way')
+  assert.ok(!carries(sent, KNOWN) && !carries(sent, ME), 'no address')
+})
+
+// ═══════════════════════════════════════════════════════════════════════════════
+console.log('')
+console.log('3c. a CONTINUING exchange keeps ONE identity, whichever sides wrote between imports')
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// REPRODUCED before the correction: round 1 - a message and the user's reply - left a
+// pending proposal; round 2 - a further message and a further reply - was two-sided on its
+// own, so recovery was bypassed, the episode was anchored on round 2's opening message, a
+// DIFFERENT fingerprint, and the run answered created:1 instead of refreshing. Now a delta
+// round completes EVERY conversation it is about to write from Outlook first, so the fold
+// anchors on the thread's first message as Outlook holds it - the anchor a first pass
+// produces - and the write RPC refreshes the pending row. The draft is built from the whole
+// thread for the same reason.
+for (const [label, party, expectRpc] of [
+  ['an unknown person', STRANGER, 'upsert_new_contact_candidate'],
+  ['an existing contact', KNOWN, 'upsert_outlook_interaction_candidate'],
+]) {
+  await test(label + ': round 1 two-sided and proposed, round 2 two-sided again -> the pending proposal is REFRESHED under the same identity, from the whole thread', async () => {
+    const t = thread({ party, conv: 'AAQkAD-continuing-' + (party === KNOWN ? 'known' : 'new'), turns: [
+      ['them', 1, 9, 'OPENING good to meet you at the panel; the desk would like a short call about credit.'],
+      ['me', 1, 15, 'FIRST-REPLY thank you, next week works; I will send my availability.'],
+      ['them', 3, 9, 'SECOND-MESSAGE Thursday at three is confirmed; the dial-in is in the invite.'],
+      ['me', 3, 15, 'SECOND-REPLY confirmed, I will prepare questions about the credit desk.'],
+    ] })
+    const { runs, ports, counts } = await runThreads({ threads: [t], schedule: [t.ids.slice(0, 2), t.ids.slice(2)], invocations: 2 })
+    const [r1, r2] = runs
+    assert.strictEqual(r1.run.created, 1, summarize(r1))
+    assert.strictEqual(r1.run.content.recoveries_attempted, 0, 'a first pass sees the whole thread and asks nothing extra')
+    assert.strictEqual(r2.run.outcome, 'committed', summarize(r2))
+    assert.deepStrictEqual(r2.run.content.recovery_outcomes, { recovered: 1 }, 'completed from Outlook before the write: ' + summarize(r2))
+    assert.strictEqual(r2.run.content.recovered_messages, 4)
+    assert.strictEqual(r2.run.created, 0, 'NO second proposal: ' + summarize(r2))
+    assert.strictEqual(r2.run.accepted, 1)
+    assert.deepStrictEqual(r2.run.write_results, { refreshed: 1 }, summarize(r2))
+    assert.strictEqual(ports.candidates.length, 2)
+    assert.strictEqual(ports.candidates[1].rpc, expectRpc)
+    assert.strictEqual(ports.candidates[1].result, 'refreshed')
+    assert.strictEqual(ports.candidates[1].args.p_episode_fingerprint, ports.candidates[0].args.p_episode_fingerprint, 'ONE identity across the rounds')
+    // CONTEXT IS CONSISTENT TOO: round 2 drafted from the whole exchange, not from its own two messages.
+    assert.strictEqual(r2.run.content.bodies_read, 4)
+    const sent = counts.modelBodies[1]
+    for (const tag of ['OPENING', 'FIRST-REPLY', 'SECOND-MESSAGE', 'SECOND-REPLY']) assert.ok(carries(sent, tag), tag + ' is in the round-2 request')
+    assert.ok(!carries(sent, party) && !carries(sent, ME), 'no address')
+  })
+}
+
+await test('after the reviewer DECIDED on the exchange, a further round of it answers exists_terminal; a NEW thread with the same person is proposed', async () => {
+  const a = thread({ party: STRANGER, conv: 'AAQkAD-decided-a', turns: [
+    ['them', 1, 9, 'A-OPENING good to meet you.'], ['me', 1, 15, 'A-REPLY likewise, thank you.'],
+    ['them', 4, 9, 'A-THIRD here is the dial-in.'], ['me', 4, 15, 'A-FOURTH received, thank you.'],
+  ] })
+  const b = thread({ party: STRANGER, conv: 'AAQkAD-decided-b', turns: [
+    ['me', 5, 9, 'B-OPENING a separate question about the summer programme.'], ['them', 5, 15, 'B-REPLY of course, ask away.'],
+  ] })
+  const { runs, ports } = await runThreads({
+    threads: [a, b], schedule: [a.ids.slice(0, 2), a.ids.slice(2).concat(b.ids)], invocations: 2,
+    // Between the rounds the reviewer accepts (or dismisses) round 1's proposal.
+    beforeInvocation: (i, p) => { if (i === 1) p.decide(p.candidates[0].args.p_episode_fingerprint) },
+  })
+  const [r1, r2] = runs
+  assert.strictEqual(r1.run.created, 1, summarize(r1))
+  assert.strictEqual(r2.run.outcome, 'committed', summarize(r2))
+  assert.deepStrictEqual(r2.run.content.recovery_outcomes, { recovered: 2 }, 'both threads of the delta round were completed: ' + summarize(r2))
+  assert.deepStrictEqual(r2.run.write_results, { exists_terminal: 1, created: 1 }, summarize(r2))
+  assert.strictEqual(r2.run.accepted, 2, 'both are successful outcomes for the run')
+  const first = ports.candidates[0].args.p_episode_fingerprint
+  const terminalCall = ports.candidates.find((c) => c.result === 'exists_terminal')
+  assert.strictEqual(terminalCall.args.p_episode_fingerprint, first, 'the decided exchange keeps its identity and is NOT resurrected')
+  const fresh = ports.candidates.find((c, i) => i > 0 && c.result === 'created')
+  assert.notStrictEqual(fresh.args.p_episode_fingerprint, first, 'a different thread with the same person is a different identity - and IS proposed')
+  assert.strictEqual(fresh.args.p_proposed_email, STRANGER)
+})
+
+await test('a THIRD person joins the thread in round 2: the COMPLETE thread shows two external people, the pass refuses to pick one, nothing is written, the round-1 proposal stands', async () => {
+  const OTHER = 'sam@firm.test'
+  const t = thread({ party: STRANGER, conv: 'AAQkAD-third-person', turns: [
+    ['them', 1, 9, 'OPENING good to meet you.'], ['me', 1, 15, 'REPLY likewise.'],
+    [OTHER, 3, 9, 'CC-IN adding myself to this thread.'], ['me', 3, 15, 'REPLY-TWO welcome aboard.'],
+  ] })
+  const { runs, ports } = await runThreads({ threads: [t], schedule: [t.ids.slice(0, 2), t.ids.slice(2)], invocations: 2 })
+  const [r1, r2] = runs
+  assert.strictEqual(r1.run.created, 1, summarize(r1))
+  // On its own, round 2 looked like a two-sided exchange with the third person, and a
+  // proposal for THAT person would have been drafted from a thread that is really the
+  // first person's. Completed from Outlook, the thread carries both external people and
+  // the content pass refuses to choose between them - the same answer a one-round read of
+  // the four messages gives (ambiguous_counterparty) - so nothing is written.
+  assert.strictEqual(r2.run.outcome, 'committed', summarize(r2))
+  assert.deepStrictEqual(r2.run.content.recovery_outcomes, { recovered: 1 }, summarize(r2))
+  assert.strictEqual(r2.run.content.recovered_messages, 4)
+  assert.deepStrictEqual(r2.run.content.deferred, { ambiguous_counterparty: 1 }, summarize(r2))
+  assert.strictEqual(r2.run.content.model_calls, 0, 'the model is never called')
+  assert.strictEqual(r2.run.created, 0)
+  assert.strictEqual(ports.candidates.length, 1, 'nothing written in round 2')
+})
+
+await test('when Outlook cannot complete a two-sided thread (the filter is refused), what the round itself saw is written and the gap is REPORTED', async () => {
+  const t = thread({ party: KNOWN, conv: 'AAQkAD-fallback', turns: [
+    ['them', 1, 9, 'OPENING'], ['me', 1, 15, 'FIRST-REPLY'], ['them', 3, 9, 'SECOND-MESSAGE'], ['me', 3, 15, 'SECOND-REPLY'],
+  ] })
+  const { runs, ports } = await runThreads({ threads: [t], schedule: [t.ids.slice(0, 2), t.ids.slice(2)], invocations: 2, faults: { lookup: 'bad_request' } })
+  const [r1, r2] = runs
+  assert.strictEqual(r1.run.created, 1, summarize(r1))
+  assert.strictEqual(r2.run.outcome, 'committed', summarize(r2))
+  assert.deepStrictEqual(r2.run.content.recovery_outcomes, { recovery_unsupported: 1 }, 'the fallback is visible in the report: ' + summarize(r2))
+  // The pre-correction behaviour, kept for the case the provider cannot answer: the round's
+  // own two-sided view is written, under its own anchor. This is the one path on which a
+  // continuing thread can still appear twice, and the report names it.
+  assert.strictEqual(r2.run.content.notes_written, 1)
+  assert.strictEqual(ports.candidates.length, 2)
 })
 
 // ═══════════════════════════════════════════════════════════════════════════════

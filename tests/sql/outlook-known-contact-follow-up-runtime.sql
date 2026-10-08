@@ -22,6 +22,12 @@
 --      note, the chosen date in follow_up_date; a cleared step saves the note alone;
 --      the 4-argument call still works; a second accept is idempotent; the candidate's
 --      draft columns are erased.
+--   9. ONE IDENTITY FOR A CONTINUING EXCHANGE. The worker writes a continuing thread under
+--      the SAME episode fingerprint in every round (outlookImportRun.js completes a delta
+--      round's thread from Outlook before writing). The producer then REFRESHES the one
+--      pending row; a key-rotation variant of the anchor (a lookup fingerprint) finds the
+--      same row; after the reviewer decides, a repeat is exists_terminal and resurrects
+--      nothing; and a DIFFERENT thread with the same person is created.
 --
 -- HOW TO BUILD THE DATABASE THIS NEEDS: tests/sql/_bootstrap-disposable-db.sql, then
 -- every migration in supabase/migrations, in filename order.
@@ -337,6 +343,70 @@ BEGIN
   ASSERT res->>'result' = 'invalid_follow_up', 'an over-long approved step is refused: ' || res::text;
   ASSERT (SELECT status FROM public.interaction_candidates WHERE id = cand) = 'pending', 'and the candidate stays pending';
   ASSERT (SELECT count(*) FROM public.interactions WHERE user_id = u) = 3, 'three accepted, nothing more';
+END $$;
+
+-- ══ 9. ONE identity for a continuing exchange: refresh, never a second proposal ═══
+-- The claims from section 8 are still set: the accept call below reads auth.uid().
+DO $$
+DECLARE
+  u uuid := '44444444-4444-4444-4444-444444444444'; conn uuid := '55555555-5555-5555-5555-555555555555';
+  run uuid := '66666666-6666-6666-6666-666666666666'; cid uuid; res jsonb; cand uuid; again uuid;
+  efp text := repeat('e', 64); pfp text := repeat('f', 64);
+  rotated text := repeat('0', 63) || 'e';     -- the same anchor under a later key version
+  other text := repeat('1', 63) || 'e';       -- a different thread with the same person
+  pending_rows integer;
+BEGIN
+  SELECT id INTO cid FROM public.contacts WHERE user_id = u AND email = 'ava@bank.test';
+
+  -- Round 1: the thread's first two messages.
+  res := public.upsert_outlook_interaction_candidate(conn, run, cid, efp, pfp, 1::smallint, 'Email', DATE '2026-10-01', NULL,
+    'They offered a short call next week.', 'Send your availability.', 'explicit_body', 'ai_extracted');
+  ASSERT res->>'result' = 'created', 'round 1: ' || res::text;
+  cand := (res->>'candidate_id')::uuid;
+
+  -- Round 2: the exchange continued (one more message each way). The SAME identity, a
+  -- later date, a fresh draft from the whole thread.
+  res := public.upsert_outlook_interaction_candidate(conn, run, cid, efp, pfp, 1::smallint, 'Email', DATE '2026-10-03', NULL,
+    'They confirmed Thursday at three.', 'Prepare two questions about the desk.', 'explicit_body', 'ai_extracted');
+  ASSERT res->>'result' = 'refreshed', 'round 2 REFRESHES: ' || res::text;
+  ASSERT (res->>'candidate_id')::uuid = cand, 'the same row';
+  SELECT count(*) INTO pending_rows FROM public.interaction_candidates WHERE user_id = u AND source_fingerprint = efp;
+  ASSERT pending_rows = 1, 'ONE pending row for the exchange, not two: ' || pending_rows;
+  ASSERT (SELECT proposed_interaction_date FROM public.interaction_candidates WHERE id = cand) = DATE '2026-10-03', 'moved to the latest message';
+  ASSERT (SELECT draft_follow_up FROM public.interaction_candidates WHERE id = cand) = 'Prepare two questions about the desk.', 'the newer draft replaced the step';
+  ASSERT (SELECT status FROM public.interaction_candidates WHERE id = cand) = 'pending';
+
+  -- A rotated key: the write fingerprint differs, the lookup fingerprint is the SAME anchor
+  -- under the earlier key version, and it finds the row. Lookup fingerprints are rotation
+  -- variants of one anchor - not a way to match a different first message.
+  res := public.upsert_outlook_interaction_candidate(conn, run, cid, rotated, pfp, 2::smallint, 'Email', DATE '2026-10-04', ARRAY[efp],
+    'Still the same exchange.', NULL, NULL, 'ai_extracted');
+  ASSERT res->>'result' = 'refreshed' AND (res->>'candidate_id')::uuid = cand, 'a key-rotation variant refreshes, never creates: ' || res::text;
+
+  -- The reviewer decides (accepts). From here the exchange is terminal.
+  res := public.accept_interaction_candidate(cand, 'Email', DATE '2026-10-04', 'They confirmed Thursday at three.', NULL, NULL);
+  ASSERT res->>'result' = 'accepted', 'accept: ' || res::text;
+
+  -- Round 3: the thread continues. The producer answers exists_terminal and writes nothing:
+  -- the same conversation is not suggested twice.
+  res := public.upsert_outlook_interaction_candidate(conn, run, cid, efp, pfp, 1::smallint, 'Email', DATE '2026-10-06', NULL,
+    'They sent the dial-in.', 'Join on time.', 'explicit_body', 'ai_extracted');
+  ASSERT res->>'result' = 'exists_terminal', 'a decided exchange is never resurrected: ' || res::text;
+  ASSERT (res->>'candidate_id')::uuid = cand;
+  SELECT count(*) INTO pending_rows FROM public.interaction_candidates WHERE user_id = u AND source_fingerprint = efp;
+  ASSERT pending_rows = 1, 'still one row';
+  ASSERT (SELECT status FROM public.interaction_candidates WHERE id = cand) = 'accepted', 'and it stays decided';
+  ASSERT (SELECT draft_follow_up FROM public.interaction_candidates WHERE id = cand) IS NULL, 'the terminal row takes no new draft';
+
+  -- A NEW thread with the SAME person: a different first message is a different identity,
+  -- and IS proposed. Nothing about the person is suppressed - only the decided conversation.
+  res := public.upsert_outlook_interaction_candidate(conn, run, cid, other, pfp, 1::smallint, 'Email', DATE '2026-10-07', NULL,
+    'A new conversation with the same person.', NULL, NULL, 'ai_extracted');
+  ASSERT res->>'result' = 'created', 'a new thread with the same person is proposed: ' || res::text;
+  again := (res->>'candidate_id')::uuid;
+  ASSERT again <> cand;
+  ASSERT (SELECT status FROM public.interaction_candidates WHERE id = again) = 'pending';
+  ASSERT (SELECT contact_id FROM public.interaction_candidates WHERE id = again) = cid, 'for the same contact';
 END $$;
 
 SELECT set_config('request.jwt.claim.sub', NULL, false);

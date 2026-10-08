@@ -174,6 +174,69 @@ export function counterpartyFromEnvelopes (messages, selfAddresses) {
   return { ok: true, address, displayName: name.length > 0 ? name : null }
 }
 
+/** Handles reserved per folder before the rest is filled by recency. */
+export const HANDLE_RESERVE_PER_FOLDER = 2
+
+/**
+ * THE ONE SELECTION RULE for which of a conversation's handles are fetched when there are
+ * more than the pass will read: up to two per folder are reserved - the newest two from
+ * Inbox and the newest two from Sent Items - and the remaining places go to the newest of
+ * whatever is left. The database makes the same choice when it stores a round's handles
+ * ("two places reserved per folder"), and the published notice promises it: "two from
+ * each side kept back so a reply from either of you is always included".
+ *
+ * REPRODUCED through the real handler before this existed: a round holding seven newer
+ * inbound messages recovered the user's one older sent message, merged the handles, took
+ * the newest six - all inbound - and the model never saw the user's side of the exchange.
+ *
+ * Deterministic - ordered by sentAt descending, then by fingerprint, so two runs over the
+ * same handles choose the same set - and deduplicated by fingerprint. Returned in
+ * chronological order, which is the order the bodies are fetched and read in.
+ *
+ * @param {Array<object>} handles  [{ mfp, folder, sentAt, midCt, midNonce, keyVersion }]
+ * @param {number} limit
+ * @param {number} [reservePerFolder]
+ */
+export function selectBalancedHandles (handles, limit = MAX_FETCH_PER_CONVERSATION, reservePerFolder = HANDLE_RESERVE_PER_FOLDER) {
+  const seen = new Set()
+  const list = []
+  for (const h of Array.isArray(handles) ? handles : []) {
+    if (!isPlainObject(h) || typeof h.midCt !== 'string' || h.midCt.length === 0) continue
+    const key = typeof h.mfp === 'string' && h.mfp.length > 0 ? h.mfp : h.midCt
+    if (seen.has(key)) continue
+    seen.add(key)
+    list.push(h)
+  }
+  const newestFirst = (a, b) => {
+    const t = String(b.sentAt ?? '').localeCompare(String(a.sentAt ?? ''))
+    return t !== 0 ? t : String(a.mfp ?? '').localeCompare(String(b.mfp ?? ''))
+  }
+  const chronological = (a, b) => -newestFirst(a, b)
+  list.sort(newestFirst)
+  const max = Number.isInteger(limit) && limit > 0 ? limit : MAX_FETCH_PER_CONVERSATION
+  if (list.length <= max) return list.sort(chronological)
+  const chosen = []
+  const taken = new Set()
+  // BOTH SIDES FIRST: the newest `reservePerFolder` of each folder, when they exist.
+  for (const folder of ['inbox', 'sentitems']) {
+    let n = 0
+    for (const h of list) {
+      if (n >= reservePerFolder || chosen.length >= max) break
+      const f = h.folder === 'sentitems' ? 'sentitems' : 'inbox'
+      if (f !== folder || taken.has(h)) continue
+      chosen.push(h)
+      taken.add(h)
+      n += 1
+    }
+  }
+  // Then recency, whichever side it comes from.
+  for (const h of list) {
+    if (chosen.length >= max) break
+    if (!taken.has(h)) { chosen.push(h); taken.add(h) }
+  }
+  return chosen.sort(chronological)
+}
+
 /**
  * Summarize ONE conversation.
  *
@@ -249,9 +312,10 @@ export async function summarizeConversation (p) {
     return defer('third_party_consent_missing', { consent: perms })
   }
 
-  const handles = (Array.isArray(p.handles) ? p.handles : [])
-    .filter((h) => isPlainObject(h) && typeof h.midCt === 'string' && h.midCt.length > 0)
-    .slice(0, MAX_FETCH_PER_CONVERSATION)
+  // ONE selection rule, whether the handles came from the round's own pages, from a
+  // recovery, or both: see selectBalancedHandles. A plain "newest six" here is what let the
+  // user's one older sent message fall out behind seven newer replies.
+  const handles = selectBalancedHandles(p.handles, MAX_FETCH_PER_CONVERSATION)
   if (handles.length === 0) return defer('no_handles')
 
   // ── 2. fetch, sanitize, and drop the raw body immediately ────────────────

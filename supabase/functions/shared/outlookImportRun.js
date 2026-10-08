@@ -95,7 +95,7 @@ import {
   INVOCATION_BUDGET_MS, CHECKPOINT_RESERVE_MS, runOutlookRoundSlice,
 } from './outlookContinuedPass.js'
 import {
-  ROUND_TTL_SECONDS, finalizeConversation, summarizeRoundProgress,
+  ROUND_TTL_SECONDS, ROUND_TAINT_CODES, finalizeConversation, summarizeRoundProgress,
 } from './outlookRoundState.js'
 import { checkPilotUser, designatedPilotUser } from './outlookPilotGate.js'
 import { buildMessageHandles } from './outlookHandleProducer.js'
@@ -1138,6 +1138,26 @@ export async function runOutlookImport (p) {
       // keeps `intended` meaning what it has always meant - how many writes are needed -
       // even when the budget stops the writing part-way. Without the pre-pass it would
       // silently become `how many we got round to`, which `accepted` already reports.
+      // A DELTA ROUND reads only what arrived since the committed cursors, so its view of
+      // a thread is partial by construction: a thread that continued since the last round
+      // opens, in this round, on a reply. An episode's identity is anchored on the thread's
+      // FIRST message (HMAC of connection, conversation, first message, contact - and the
+      // lookup fingerprints are key-rotation variants of that one anchor, not alternative
+      // anchors), so anchoring on the reply makes a DIFFERENT identity from the one the
+      // earlier round wrote. Reproduced through the real handler: round 1 - a message and
+      // the user's reply - left a pending proposal; round 2 - a further message and a
+      // further reply - was two-sided on its own, recovery was bypassed, and the run
+      // CREATED a second proposal instead of refreshing the first.
+      //
+      // So in a delta round EVERY conversation that is about to be written is completed
+      // from Outlook first, whichever sides happened to write since the last round. The
+      // same fold then anchors on the thread's first message as Outlook holds it - the
+      // anchor a first pass, which reads the whole folder, produces. A first pass (no
+      // committed cursor) already sees the whole thread and asks nothing extra. Recovery
+      // needs a stored handle, so this - like the one-sided recovery - exists only while
+      // the content stage is on.
+      const deltaRound = GRAPH_FOLDERS.some((f) =>
+        typeof context.cursors?.[f] === 'string' && context.cursors[f].length > 0)
       const decisions = []
       for (const row of rows) {
         const one = finalizeConversation(row, (iso) => localDateFor(iso, context.timeZone),
@@ -1160,7 +1180,13 @@ export async function runOutlookImport (p) {
         for (const [code, n] of Object.entries(entrySkipped)) {
           skipped[code] = (skipped[code] || 0) + n
         }
-        decisions.push({ cfp, entry: writable[0] ?? null })
+        const entry = writable[0] ?? null
+        decisions.push({
+          cfp,
+          entry,
+          // Completed from Outlook before it is written, for the identity reason above.
+          recover: entry !== null && contentStageOn && deltaRound ? row : undefined,
+        })
       }
       intended += decisions.filter((x) => x.entry !== null).length
 
@@ -1169,11 +1195,14 @@ export async function runOutlookImport (p) {
         let entry = decision.entry
         // Handles recovered from Outlook for this conversation, in memory only.
         let extraHandles = []
-        if (entry === null && decision.recover) {
-          // ── CONVERSATION RECOVERY, for ONE one-sided thread ──────────────────
-          // Asked about rather than given up on. Capped per invocation and admitted on
-          // budget like a content attempt, because it is followed by one; past either cap
-          // the answer is "come back", not "no", so the conversation is NOT passed.
+        if (decision.recover) {
+          // ── CONVERSATION RECOVERY, for ONE thread ──────────────────────────────
+          // For a one-sided thread (no entry yet): asked about rather than given up on.
+          // For a two-sided thread in a delta round (an entry already): completed, so that
+          // it is written under the identity of the WHOLE thread (see the pre-pass). Either
+          // way it is capped per invocation and admitted on budget like a content attempt,
+          // because it is followed by one; past either cap the answer is "come back", not
+          // "no", so the conversation is NOT passed.
           if (content.recoveriesAttempted >= MAX_RECOVERIES_PER_INVOCATION
               || !budgetAllows(RECOVERY_ADMIT_MS + WRITE_STEP_RESERVE_MS)) {
             bumpDeferral('budget_exhausted')
@@ -1182,7 +1211,7 @@ export async function runOutlookImport (p) {
           }
           content.recoveriesAttempted += 1
           await ensureLease(PROGRESS_STEP_MS + RECOVERY_ADMIT_MS)
-          // The handles this round stored for the half it did see: one of them is how the
+          // The handles this round stored for the part it did see: one of them is how the
           // conversation is identified to Outlook. Read the same way the content pass reads them.
           const stored = await readConversationHandles({ rpc, connectionId, runId, roundId, cfp })
           let rec
@@ -1220,19 +1249,39 @@ export async function runOutlookImport (p) {
             break
           }
           if (rec.outcome === 'settled') {
-            // Outlook was asked and the exchange is still not a two-sided one Funnl can act
-            // on. That IS a decision - reported under its code - so finalisation passes it,
-            // exactly as a same-round one-sided thread is passed.
-            bumpSkip('not_two_sided')
-            rowsProcessed += 1
-            if (cfp !== null) processedThrough = cfp
-            continue
+            if (entry === null) {
+              // Outlook was asked and the exchange is still not a two-sided one Funnl can
+              // act on. That IS a decision - reported under its code - so finalisation
+              // passes it, exactly as a same-round one-sided thread is passed.
+              bumpSkip('not_two_sided')
+              rowsProcessed += 1
+              if (cfp !== null) processedThrough = cfp
+              continue
+            }
+            if (ROUND_TAINT_CODES.includes(rec.reason)) {
+              // The WHOLE thread, as Outlook holds it, is tainted - a second external
+              // person, a second contact - where the round's partial view was not. The
+              // complete view decides, as it would have in one round: skipped under the
+              // taint, nothing written.
+              bumpSkip(rec.reason)
+              rowsProcessed += 1
+              if (cfp !== null) processedThrough = cfp
+              continue
+            }
+            // Outlook could not complete a thread the round itself saw both sides of: the
+            // stored message no longer resolves, the thread is longer than one bounded
+            // page, the provider refused the filter, a message has moved since. Written
+            // from the round's own view, as every round was before recovery existed, with
+            // no extra handles; the recovery code is reported so the fallback is visible.
+          } else {
+            // Two-sided after all, or two-sided and now complete: from here on it is an
+            // ordinary entry - the whole thread's - with the recovered handles beside the
+            // stored ones. An entry the pre-pass already counted is not counted again.
+            content.recoveriesTwoSided += 1
+            if (entry === null) intended += 1
+            entry = rec.entry
+            extraHandles = rec.extraHandles
           }
-          // Two-sided after all: from here on it is an ordinary entry with extra handles.
-          content.recoveriesTwoSided += 1
-          entry = rec.entry
-          extraHandles = rec.extraHandles
-          intended += 1
         }
         if (entry === null) {
           // Skipped on purpose - a one-sided or unsupported conversation. A skip is a

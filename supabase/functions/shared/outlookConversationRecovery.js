@@ -16,8 +16,9 @@
 // cannot retrieve the earlier message TEXT, and both halves have to feed the draft; and
 // the published notice says the working records are removed when a read completes, so
 // keeping them longer is a disclosure change. Outlook already holds the earlier half.
-// So, for exactly the one-sided conversations a round is about to give up on, and only
-// while the content stage is on, the round asks Outlook for the rest of the thread:
+// So, while the content stage is on, the round asks Outlook for the rest of the thread -
+// for every one-sided conversation it is about to give up on AND, in a delta round, for
+// every two-sided conversation it is about to write (see below) - in three bounded steps:
 //
 //   1. ONE envelope GET, by a handle the round already stored, to learn the
 //      conversation id - which the round deliberately never persists;
@@ -28,6 +29,18 @@
 //      stable and a replay a refresh rather than a second suggestion;
 //   4. only if the merged exchange is two-sided and qualifies are bodies read - through
 //      the unchanged content pass, with its screening and minimization.
+//
+// WHY ALSO A TWO-SIDED THREAD, IN A DELTA ROUND. The episode fingerprint is anchored on
+// the thread's FIRST message, and the lookup fingerprints are key-rotation variants of
+// that one anchor, not alternative anchors. A delta round sees only what arrived since the
+// committed cursors, so a thread that continued since the last round opens, in this
+// round, on a reply - and a round that was two-sided on its own used to be written under
+// THAT anchor. Reproduced through the real handler: a pending proposal from round 1, one
+// further message each way in round 2, and round 2 created a second proposal instead of
+// refreshing the first. Completing the thread from Outlook before the write anchors it on
+// the first message as Outlook holds it, which is the anchor a first pass - a read of the
+// whole folder - produces. Identity then does not depend on which sides happened to write
+// between imports. A first pass asks nothing extra; outlookImportRun.js decides when.
 //
 // WHAT IS STORED: nothing new. The recovered handles live in memory for the rest of the
 // invocation. If the invocation stops before the write, the conversation is not passed
@@ -52,8 +65,12 @@ import { foldPage, finalizeConversation, ROUND_TAINT_CODES } from './outlookRoun
 
 const isPlainObject = (v) => typeof v === 'object' && v !== null && !Array.isArray(v)
 
-/** The most one-sided conversations one invocation asks Outlook about. "Come back" past it. */
-export const MAX_RECOVERIES_PER_INVOCATION = 10
+/**
+ * The most conversations one invocation asks Outlook about. "Come back" past it. Equal to
+ * MAX_CONTENT_CONVERSATIONS_PER_INVOCATION (outlookImportRun.js), because in a delta round
+ * every conversation the content stage will write is completed from Outlook first.
+ */
+export const MAX_RECOVERIES_PER_INVOCATION = 20
 /** Budget a single recovery request is admitted on: one attempt plus slack. */
 export const RECOVERY_REQUEST_ADMIT_MS = REQUEST_TIMEOUT_MS + 5_000
 /**
