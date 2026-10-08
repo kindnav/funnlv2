@@ -1650,6 +1650,80 @@ END $fill$;`, { tuplesOnly: false })
       'a malformed designation still reserved something')
   })
 
+  // ══ wake-ups across a PAUSED round, against the REAL database and the REAL worker ═══
+  console.log('\nwake-ups: a signal that arrives while finalisation is paused must survive the resuming invocation')
+
+  await test('run A pauses in finalisation; new mail is signalled; run B completes the OLD round and leaves the signal pending; run C reads the mail and consumes it', async () => {
+    // REPRODUCED BEFORE THE FIX, exactly this way: the consume trigger compared the wake-up
+    // with the resuming invocation's lease start. Run B's lease began after the signal, so
+    // completing A's round cleared a signal about mail that no delta read had ever seen.
+    await seed({ accessExpired: false })
+    const connId = one(`SELECT id FROM public.microsoft_connections WHERE user_id='${U1}';`)
+    const HASH = '62207479fd613eb0b98cbf40beb4094334d057dce0f64e2a2fea096114be246e'  // sha256('client-state-one')
+    psql(`INSERT INTO public.outlook_subscriptions (connection_id, user_id, subscription_id, client_state_hash, status, expires_at)
+          VALUES ('${connId}', '${U1}', 'sub-pause', '${HASH}', 'active', now() + interval '2 days');`, { tuplesOnly: false })
+    const graphC = manyConversationsFixture(12)
+    const ports = makePorts()
+    const slowRpc = async (name, args) => {
+      if (name === 'upsert_outlook_interaction_candidate') await new Promise((r) => setTimeout(r, 300))
+      return ports.rpc(name, args)
+    }
+    const SCALE = 100
+    let scaleFrom = Date.now()
+    const fastClock = () => scaleFrom + (Date.now() - scaleFrom) * SCALE
+    currentEnv = baseEnv()
+    currentDeps = {
+      tokenUrl: FIXTURE_TOKEN_URL, fetchImpl: tokenFixture().fetchImpl,
+      graphFetchImpl: graphC.fetchImpl, select: ports.select, rpc: slowRpc, now: fastClock,
+    }
+    // RUN A: discovery finishes on the first page of each folder; finalisation pauses.
+    const a = await callWorker({ secret: WORKER_SECRET })
+    assert.strictEqual(a.body?.run?.outcome, 'continued', a.raw.slice(0, 300))
+    assert.strictEqual(one(`SELECT count(*) FROM public.outlook_sync_state WHERE user_id='${U1}' AND round_folder_complete;`), '2',
+      'both folders were discovered by run A')
+    const graphCallsAfterA = graphC.calls.length
+
+    // NEW MAIL ARRIVES: Microsoft signals, and the endpoint records the wake-up through the
+    // same RPC it calls in production (as the service role, over real PostgREST).
+    await new Promise((r) => setTimeout(r, 60))
+    const n = await ports.rpc('record_outlook_change_notification', { p_subscription_id: 'sub-pause', p_client_state_hash: HASH, p_kind: 'change' })
+    assert.strictEqual(n.data?.result, 'accepted', JSON.stringify(n))
+    const wakeAt = one(`SELECT wake_requested_at::text FROM public.microsoft_connections WHERE id='${connId}';`)
+    assert.ok(wakeAt && wakeAt !== 'NULL', 'the wake-up is recorded')
+
+    // RUN B (and C, D... while 'continued'): the SAME round is resumed, discovery is skipped.
+    makeDueNow(); scaleFrom = Date.now()
+    const outcomes = []
+    for (let i = 0; i < 20; i += 1) {
+      const r = await callWorker({ secret: WORKER_SECRET })
+      outcomes.push(r.body?.run?.outcome)
+      if (r.body?.run?.outcome !== 'continued') break
+      makeDueNow(); scaleFrom = Date.now()
+    }
+    assert.strictEqual(outcomes.at(-1), 'committed', JSON.stringify(outcomes))
+    assert.strictEqual(graphC.calls.length, graphCallsAfterA,
+      'the resuming invocations re-read nothing: the signalled mail was never discovered by this round')
+    assert.strictEqual(one(`SELECT coalesce(wake_requested_at::text,'NULL') FROM public.microsoft_connections WHERE id='${connId}';`), wakeAt,
+      'THE DEFECT: a signal newer than the completed round\'s discovery must stay pending')
+
+    // RUN C: due by the wake-up ALONE - no makeDueNow, a fresh delta round, which finds the
+    // 13th conversation (the signalled mail) and consumes the signal.
+    const graphD = manyConversationsFixture(13)
+    currentDeps = { ...currentDeps, graphFetchImpl: graphD.fetchImpl, rpc: ports.rpc }
+    scaleFrom = Date.now()
+    const c = await callWorker({ secret: WORKER_SECRET })
+    assert.strictEqual(c.body?.run?.outcome, 'committed', c.raw.slice(0, 300))
+    assert.ok(Number.isInteger(c.body.run.wake_age_seconds), 'the run reports how old the signal was: ' + JSON.stringify(c.body.run.wake_age_seconds))
+    assert.strictEqual(c.body.run.created, 1, 'the signalled mail is proposed once: ' + JSON.stringify(c.body.run.write_results))
+    assert.strictEqual(one(`SELECT coalesce(wake_requested_at::text,'NULL') FROM public.microsoft_connections WHERE id='${connId}';`), 'NULL',
+      'consumed by the round that actually read it')
+    assert.strictEqual(one(`SELECT count(*) FROM public.interaction_candidates WHERE user_id='${U1}' AND source='outlook' AND status='pending';`), '13')
+    assert.strictEqual(one(`SELECT count(*) FROM public.interactions WHERE user_id='${U1}';`), '0', 'review before save is intact')
+    // And a signal that arrives DURING a fresh run is kept for the next one (lease + cutoff).
+    const d = await callWorker({ secret: WORKER_SECRET })
+    assert.strictEqual(d.body?.run?.outcome, 'none_due', 'nothing is due after the consuming run: ' + d.raw.slice(0, 120))
+  })
+
 console.log(`\n${passed + failed} checks: ${passed} passed, ${failed} failed\n`)
 if (failed > 0) process.exitCode = 1
 }

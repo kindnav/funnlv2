@@ -29,7 +29,7 @@ const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
 // the message text. Both are already granted to authenticated (20260921000000), both are
 // NULL on Calendar rows, and neither is an identifier, a fingerprint or a subject.
 export const CANDIDATE_SELECT =
-  'id, source, proposed_type, proposed_interaction_date, proposed_notes, draft_follow_up, extraction_status, created_at, contacts(name, company, role)'
+  'id, source, proposed_type, proposed_interaction_date, proposed_notes, draft_follow_up, extraction_status, created_at, updated_at, contacts(name, company, role)'
 
 /**
  * Client-side validation of reviewed overrides before calling accept. Mirrors the

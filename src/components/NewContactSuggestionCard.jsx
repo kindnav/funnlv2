@@ -44,10 +44,17 @@ function formatDate (iso) {
  * not inferred. `accept_new_contact_candidate` reads it from the stored row and ignores
  * any caller value, so an editable field here would be a lie about what gets saved.
  */
-export default function NewContactSuggestionCard ({ candidate, onResolved }) {
+export default function NewContactSuggestionCard ({ candidate, onResolved, onBusyChange }) {
   const [state, setState] = useState(() => initialReviewState(candidate))
   const [busy, setBusy] = useState(false)
   const [confirmDismiss, setConfirmDismiss] = useState(false)
+  // Busy = edited, confirming a dismissal, or mid-call: the page holds background updates
+  // to this card until it frees up, so typed values and focus survive a refresh.
+  const busyNow = busy || confirmDismiss || proposalEdited(candidate, state)
+  useEffect(() => {
+    if (typeof onBusyChange === 'function') onBusyChange(candidate.id, busyNow)
+  }, [busyNow, candidate.id, onBusyChange])
+  useEffect(() => () => { if (typeof onBusyChange === 'function') onBusyChange(candidate.id, false) }, [candidate.id, onBusyChange])
   const [error, setError] = useState('')
   const confirmBtnRef = useRef(null)
   const dismissBtnRef = useRef(null)
@@ -138,7 +145,7 @@ export default function NewContactSuggestionCard ({ candidate, onResolved }) {
   }
 
   return (
-    <div className={CARD}>
+    <div className={CARD} data-card="new_contact" data-candidate-id={candidate.id}>
       <div className="flex items-start gap-3">
         <div className="flex-none w-10 h-10 rounded-lg flex items-center justify-center font-display font-bold text-[14px]"
              style={{ background: getAvatarColor(displayName), color: 'var(--color-paper)' }}

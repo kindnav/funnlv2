@@ -16,8 +16,9 @@ import InteractionSourceBadge from '../components/InteractionSourceBadge'
 import NewContactSuggestionCard from '../components/NewContactSuggestionCard'
 import { NCC_SELECT } from '../lib/newContactReview'
 import {
-  countPendingSuggestions, decideRefresh, SUGGESTIONS_REFRESH_INTERVAL_MS, SUGGESTIONS_CHANGED_EVENT,
-  NEW_SUGGESTIONS_MESSAGE,
+  fetchPendingSignature, indexSignature, diffPendingSignature, mergeQueueRows, cardKey,
+  SUGGESTIONS_REFRESH_INTERVAL_MS, SUGGESTIONS_CHANGED_EVENT,
+  NEW_SUGGESTIONS_MESSAGE, UPDATED_SUGGESTIONS_MESSAGE, HELD_UPDATES_MESSAGE,
 } from '../lib/pendingSuggestions'
 
 const CARD = 'bg-card border border-line-1 rounded-2xl p-[18px]'
@@ -31,7 +32,7 @@ function formatDate(iso) {
 }
 
 // One reviewable candidate. Owns its edit fields, single-flight busy state, and outcome.
-function CandidateCard({ candidate, onResolved }) {
+function CandidateCard({ candidate, onResolved, onBusyChange }) {
   const name = candidate.contacts?.name || 'Unknown contact'
   const company = candidate.contacts?.company || ''
   const role = candidate.contacts?.role || ''
@@ -66,6 +67,16 @@ function CandidateCard({ candidate, onResolved }) {
     if (target === 'confirm') confirmBtnRef.current?.focus()
     else if (target === 'dismiss') dismissBtnRef.current?.focus()
   }, [confirmDismiss])
+
+  // BUSY means the reviewer is in the middle of something on this card: editing, deciding a
+  // dismissal, or waiting on Accept/Dismiss. The page holds background updates to a busy
+  // card and applies them when it frees up, so typed values, focus and the open
+  // confirmation survive a refresh. Reported on every change so the page's set stays exact.
+  const busyNow = editing || confirmDismiss || busy
+  useEffect(() => {
+    if (typeof onBusyChange === 'function') onBusyChange(candidate.id, busyNow)
+  }, [busyNow, candidate.id, onBusyChange])
+  useEffect(() => () => { if (typeof onBusyChange === 'function') onBusyChange(candidate.id, false) }, [candidate.id, onBusyChange])
 
   // Close the confirmation and flag that focus must return to the Dismiss button.
   function closeConfirm() {
@@ -135,7 +146,7 @@ function CandidateCard({ candidate, onResolved }) {
   }
 
   return (
-    <div className={CARD}>
+    <div className={CARD} data-card="interaction" data-candidate-id={candidate.id}>
       <div className="flex items-start gap-3">
         <div className="flex-none w-10 h-10 rounded-lg flex items-center justify-center font-display font-bold text-[14px]"
              style={{ background: getAvatarColor(name), color: 'var(--color-paper)' }} aria-hidden="true">
@@ -345,26 +356,102 @@ export default function SuggestionsPage() {
     loadInitial()
   }, [loadInitial])
 
-  // WHILE THE QUEUE IS OPEN, notice what arrives in the background. Proposals are written
-  // by a server process while Funnl may be closed - or open on this very page. The simplest
-  // supported way to see them is a bounded head-count of both pending queues every
+  // WHILE THE QUEUE IS OPEN, notice what changes in the background - WITHOUT disturbing the
+  // reviewer. Proposals are written by a server process while Funnl may be closed, or open on
+  // this very page; a pending proposal can also be REFRESHED by newer mail (same id, newer
+  // updated_at), or resolved from another tab. The simplest supported way to see all three is
+  // a bounded read of the pending SIGNATURE (ids + updated_at of both queues) every
   // SUGGESTIONS_REFRESH_INTERVAL_MS while the tab is visible, and once more when it becomes
-  // visible again. A changed count reloads the first page; an increase says so. The page's
-  // own accept/dismiss adjust the known count, so they do not trigger a reload of their own.
-  const knownPendingRef = useRef(null)
+  // visible again; no realtime channel, no publication or RLS change.
+  //
+  // What a difference does is decided card by card (mergeQueueRows), never by reloading the
+  // list: arrivals are inserted in queue order, a refreshed proposal is swapped in under a new
+  // key so it remounts with its new draft, a resolved one is removed - UNLESS that card is
+  // BUSY (editing, confirming a dismissal, or mid-accept), in which case the update is HELD
+  // and applied when the card frees up, and the banner says so. Loaded pages past the first
+  // are untouched; the page's own accept/dismiss update the known signature so they never
+  // read as a change.
+  //
+  // REPRODUCED BEFORE THIS: the first revision reloaded the first page on any count change,
+  // unmounting every card - typed edits, focus, an open confirmation and loaded pages were
+  // all lost - and a refreshed proposal with an unchanged count was never noticed.
+  const knownRef = useRef(null)                 // Map id -> { kind, updatedAt } of the last signature
+  const busyRef = useRef(new Set())             // ids whose card is busy right now
+  const heldRef = useRef(new Map())             // id -> { row | null } waiting for a busy card
+  const [busyVersion, setBusyVersion] = useState(0)
+  const onBusyChange = useCallback((id, isBusy) => {
+    const was = busyRef.current.has(id)
+    if (isBusy) busyRef.current.add(id); else busyRef.current.delete(id)
+    if (was !== isBusy) setBusyVersion((v) => v + 1)
+  }, [])
+
+  /** Fetch full rows for ids, by kind, with the same selects the queues use. */
+  const fetchRows = useCallback(async (entries) => {
+    const ids = { interaction: [], new_contact: [] }
+    for (const e of entries) if (ids[e.kind]) ids[e.kind].push(e.id)
+    const [a, b] = await Promise.all([
+      ids.interaction.length
+        ? supabase.from('interaction_candidates').select(CANDIDATE_SELECT).eq('status', 'pending').in('id', ids.interaction)
+        : Promise.resolve({ data: [], error: null }),
+      ids.new_contact.length
+        ? supabase.from('new_contact_candidates').select(NCC_SELECT).eq('status', 'pending').in('id', ids.new_contact)
+        : Promise.resolve({ data: [], error: null }),
+    ])
+    if (a?.error || b?.error) return null
+    return {
+      interaction: (a.data || []).map((r) => ({ ...r, kind: 'interaction' })),
+      new_contact: (b.data || []).map((r) => ({ ...r, kind: 'new_contact' })),
+    }
+  }, [])
+
+  /** Apply one merge to one queue; returns what was held. */
+  const applyMerge = useCallback((setter, { added, changed, removedIds }) => {
+    let heldOut = []
+    setter((prev) => {
+      const { list, held } = mergeQueueRows({ list: prev, added, changed, removedIds, busy: busyRef.current })
+      heldOut = held
+      return list
+    })
+    return heldOut
+  }, [])
+
   useEffect(() => {
     if (!SUGGESTION_REVIEW_ENABLED) return undefined
     let cancelled = false
+    let inFlight = false
     const poll = async () => {
       if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return
-      const fresh = await countPendingSuggestions(supabase)
-      if (cancelled || typeof fresh !== 'number') return
-      const decision = decideRefresh(knownPendingRef.current, fresh)
-      knownPendingRef.current = fresh
-      if (!decision.reload) return
-      if (decision.announce) setBanner(NEW_SUGGESTIONS_MESSAGE)
-      window.dispatchEvent(new Event(SUGGESTIONS_CHANGED_EVENT))
-      loadInitial()
+      if (inFlight) return
+      inFlight = true
+      try {
+        const fresh = await fetchPendingSignature(supabase)
+        if (cancelled || fresh === null) return
+        if (knownRef.current === null) { knownRef.current = indexSignature(fresh); return }   // first observation
+        const diff = diffPendingSignature(knownRef.current, fresh)
+        knownRef.current = indexSignature(fresh)
+        if (diff.added.length === 0 && diff.changed.length === 0 && diff.removed.length === 0) return
+        const rows = await fetchRows([...diff.added, ...diff.changed])
+        if (cancelled || rows === null) return
+        const byKind = (kind, entries) => entries.filter((e) => e.kind === kind).map((e) => e.id)
+        const pick = (list, ids) => list.filter((r) => ids.includes(r.id))
+        const heldA = applyMerge(setItems, {
+          added: pick(rows.interaction, byKind('interaction', diff.added)),
+          changed: pick(rows.interaction, byKind('interaction', diff.changed)),
+          removedIds: byKind('interaction', diff.removed),
+        })
+        const heldB = applyMerge(setProposals, {
+          added: pick(rows.new_contact, byKind('new_contact', diff.added)),
+          changed: pick(rows.new_contact, byKind('new_contact', diff.changed)),
+          removedIds: byKind('new_contact', diff.removed),
+        })
+        for (const h of [...heldA, ...heldB]) heldRef.current.set(h.id, h)
+        if (heldA.length + heldB.length > 0) setBanner(HELD_UPDATES_MESSAGE)
+        else if (diff.added.length > 0) setBanner(NEW_SUGGESTIONS_MESSAGE)
+        else if (diff.changed.length > 0) setBanner(UPDATED_SUGGESTIONS_MESSAGE)
+        window.dispatchEvent(new Event(SUGGESTIONS_CHANGED_EVENT))
+      } finally {
+        inFlight = false
+      }
     }
     const timer = setInterval(poll, SUGGESTIONS_REFRESH_INTERVAL_MS)
     document.addEventListener('visibilitychange', poll)
@@ -374,7 +461,21 @@ export default function SuggestionsPage() {
       clearInterval(timer)
       document.removeEventListener('visibilitychange', poll)
     }
-  }, [loadInitial])
+  }, [fetchRows, applyMerge])
+
+  // A HELD update is applied the moment its card is no longer busy.
+  useEffect(() => {
+    if (heldRef.current.size === 0) return
+    const ready = [...heldRef.current.values()].filter((h) => !busyRef.current.has(h.id))
+    if (ready.length === 0) return
+    for (const h of ready) heldRef.current.delete(h.id)
+    const changedI = ready.filter((h) => h.row && h.row.kind === 'interaction').map((h) => h.row)
+    const changedN = ready.filter((h) => h.row && h.row.kind === 'new_contact').map((h) => h.row)
+    const removed = ready.filter((h) => h.row === null).map((h) => h.id)
+    applyMerge(setItems, { added: [], changed: changedI, removedIds: removed })
+    applyMerge(setProposals, { added: [], changed: changedN, removedIds: removed })
+    if (heldRef.current.size === 0) setBanner(changedI.length + changedN.length > 0 ? UPDATED_SUGGESTIONS_MESSAGE : '')
+  }, [busyVersion, applyMerge])
 
   /** One more page of PROPOSALS, on its own cursor and its own single-flight. */
   const loadMoreProposals = useCallback(async () => {
@@ -458,7 +559,9 @@ export default function SuggestionsPage() {
     setBanner(message)
     // The queue knows this row is gone; the poll must not read the drop as a change, and
     // the navigation badge should drop with it.
-    if (typeof knownPendingRef.current === 'number' && knownPendingRef.current > 0) knownPendingRef.current -= 1
+    if (knownRef.current instanceof Map) knownRef.current.delete(id)
+    busyRef.current.delete(id)
+    heldRef.current.delete(id)
     window.dispatchEvent(new Event(SUGGESTIONS_CHANGED_EVENT))
   }
 
@@ -516,9 +619,9 @@ export default function SuggestionsPage() {
                   whether someone enters the network at all, which is a bigger call
                   than logging one more interaction against a contact that exists. */}
               {proposals.map((c) => (
-                <NewContactSuggestionCard key={c.id} candidate={c} onResolved={handleResolved} />
+                <NewContactSuggestionCard key={cardKey(c)} candidate={c} onResolved={handleResolved} onBusyChange={onBusyChange} />
               ))}
-              {items.map((c) => <CandidateCard key={c.id} candidate={c} onResolved={handleResolved} />)}
+              {items.map((c) => <CandidateCard key={cardKey(c)} candidate={c} onResolved={handleResolved} onBusyChange={onBusyChange} />)}
             </div>
             {anyMore && (
               <div className="mt-4 text-center">

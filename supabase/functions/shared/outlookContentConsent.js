@@ -84,6 +84,32 @@ export const REQUIRED_CONTENT_CONSENT_VERSION = 'ol-disc-e3e2b1714b453c2904e3ed0
 // bodies must remain expressible by changing one of them.
 export const REQUIRED_THIRD_PARTY_CONSENT_VERSION = 'ol-disc-e3e2b1714b453c2904e3ed08cb232097'
 
+/**
+ * The disclosure version an account must have consented to before Funnl may operate its
+ * mailbox UNATTENDED: keep a Microsoft change-notification subscription for it and read it
+ * automatically (on a signal, or on the schedule) while the user is not using the app.
+ *
+ * NULL UNTIL THE BACKGROUND-SYNC WORDING IS PUBLISHED AND THE PILOT HAS RE-CONSENTED.
+ * While null the gate is OPEN - exactly today's behaviour, where runs are started by an
+ * operator - so nothing in the current pilot changes. Once set, a connection whose
+ * recorded consent_policy_version differs is released untouched with
+ * `background_consent_missing`, before any read and before any subscription request:
+ * the account must disconnect and reconnect under the new disclosure. Recorded consent is
+ * never upgraded in place. docs/outlook-background-sync-plan.md section 6 is the
+ * activation plan that sets this.
+ */
+export const REQUIRED_BACKGROUND_CONSENT_VERSION = null
+
+/** Pure: may this connection be operated unattended, given what it consented to? */
+export function backgroundOperationAllowed (storedVersion, required = REQUIRED_BACKGROUND_CONSENT_VERSION) {
+  if (required === null || required === undefined) return { ok: true, reason: 'gate_open' }
+  if (!isDisclosureVersion(required)) return { ok: false, reason: 'background_consent_missing' }
+  if (typeof storedVersion !== 'string' || storedVersion.trim() !== required) {
+    return { ok: false, reason: 'background_consent_missing' }
+  }
+  return { ok: true, reason: 'consented' }
+}
+
 /** The shape a disclosure version has: the derived `ol-disc-<32 hex>` form. */
 const VERSION_RE = /^ol-disc-[0-9a-f]{32}$/
 

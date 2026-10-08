@@ -21,6 +21,12 @@
 --   8. THE STATUS RPC answers real state for the signed-in user only.
 --   9. DISCONNECT CASCADES: the local cleanup deletes the subscription record with the connection.
 --  10. THE SCHEDULE exists, is INACTIVE, reads both secrets from Vault, and embeds no secret.
+--  11. THE BATCH RPC the endpoint calls answers every item in order; a mixed batch answers
+--      each item for itself; an unknown kind or an oversized batch raises.
+--  12. THE ROUND CUTOFF: a signal that arrives while a round is PAUSED in finalisation is
+--      NOT consumed when a later invocation completes that round (its lease is newer than
+--      the signal, but its discovery is not); the next FRESH round consumes it. Reproduced
+--      against the real worker in tests/local/outlook-worker-token-access.mjs.
 --
 -- Separate DO blocks are deliberate where ORDER IN TIME matters: now() is fixed within one
 -- transaction, and the wake-up/run-start comparison needs distinct instants.
@@ -338,6 +344,7 @@ BEGIN
   ASSERT (res->>'wake_pending')::boolean = false, res::text;
   ASSERT res->'subscription'->>'status' = 'active', res::text;
   ASSERT (res->>'pending_suggestions')::integer = 0, res::text;
+  ASSERT (res->>'schedule_active')::boolean = false, 'the tick is inactive, and the card is told so: ' || res::text;
   ASSERT res->>'last_success_at' IS NOT NULL;
   -- A pending Outlook suggestion is counted; a wake-up shows as pending.
   INSERT INTO public.contacts (user_id, name, email) VALUES (u, 'Ava Recruiter', 'ava@bank.test') RETURNING id INTO cid;
@@ -403,6 +410,134 @@ BEGIN
   ASSERT position('supabase.co' in j.command) = 0, 'no URL is embedded';
   ASSERT (SELECT count(*) FROM vault.decrypted_secrets WHERE name IN ('outlook_worker_secret', 'outlook_worker_url')) = 0,
     'this database holds neither secret';
+END $$;
+
+-- ══ 11. the batch RPC: one round trip, one answer per item, in order ═══════
+DO $$
+DECLARE
+  u uuid := '47474747-4747-4747-4747-474747474747'; conn uuid := '58585858-5858-5858-5858-585858585858';
+  res jsonb; run uuid; raised boolean := false;
+BEGIN
+  -- A fresh connection with an active subscription (the previous sections disconnected).
+  INSERT INTO public.microsoft_connections
+    (id, user_id, ms_account_id, ms_tenant_id, account_type, ms_email, scopes, status, needs_reauth, consented_at, consent_policy_version)
+  VALUES (conn, u, 'acct-wake-2', '9188040d-6c67-4c5b-b112-36a304b66dad', 'personal', 'wake@outlook.test',
+          ARRAY['Mail.Read','User.Read','offline_access'], 'active', false, now(), 'ol-disc-e3e2b1714b453c2904e3ed08cb232097');
+  INSERT INTO public.outlook_sync_state
+    (connection_id, user_id, folder, sync_status, initial_import_done, last_success_at, last_attempt_at, last_run_complete)
+  VALUES (conn, u, 'inbox', 'idle', true, now() - interval '60 seconds', now() - interval '60 seconds', true),
+         (conn, u, 'sentitems', 'idle', true, now() - interval '60 seconds', now() - interval '60 seconds', true);
+  res := public.reserve_due_outlook_connection(420, 0, u);
+  run := (res->>'run_id')::uuid;
+  res := public.record_outlook_subscription_state(conn, run, 'active', 'sub-batch', 'me/messages', 'created',
+    '62207479fd613eb0b98cbf40beb4094334d057dce0f64e2a2fea096114be246e', now() + interval '3 days', NULL);
+  ASSERT res->>'result' = 'recorded';
+  ASSERT public.release_outlook_sync_lease(conn, run, 'idle', NULL, true, NULL, NULL, NULL, NULL, NULL, true, NULL);
+
+  -- A MIXED batch: accepted, unknown subscription, wrong hash - one call, three answers, in order.
+  res := public.record_outlook_change_notification_batch(jsonb_build_array(
+    jsonb_build_object('subscription_id', 'sub-batch', 'client_state_hash', '62207479fd613eb0b98cbf40beb4094334d057dce0f64e2a2fea096114be246e', 'kind', 'change'),
+    jsonb_build_object('subscription_id', 'sub-nope',  'client_state_hash', '62207479fd613eb0b98cbf40beb4094334d057dce0f64e2a2fea096114be246e', 'kind', 'change'),
+    jsonb_build_object('subscription_id', 'sub-batch', 'client_state_hash', '5f0a024a77aca6976bdb7e9495cf0e39999edf8499de4374e02391f0d0dac3bb', 'kind', 'change')));
+  ASSERT jsonb_array_length(res->'results') = 3, res::text;
+  ASSERT res->'results'->0->>'result' = 'accepted', res::text;
+  ASSERT res->'results'->1->>'result' = 'unknown_subscription', res::text;
+  ASSERT res->'results'->2->>'result' = 'client_state_mismatch', res::text;
+  ASSERT (SELECT wake_count FROM public.microsoft_connections WHERE id = conn) = 1, 'exactly the accepted item woke the connection';
+  -- Redelivery of the same batch: safe - the same answers, one more count, still one pending signal.
+  res := public.record_outlook_change_notification_batch(jsonb_build_array(
+    jsonb_build_object('subscription_id', 'sub-batch', 'client_state_hash', '62207479fd613eb0b98cbf40beb4094334d057dce0f64e2a2fea096114be246e', 'kind', 'change')));
+  ASSERT res->'results'->0->>'result' = 'accepted';
+  ASSERT (SELECT wake_count FROM public.microsoft_connections WHERE id = conn) = 2;
+  -- An empty batch is fine; an unknown kind or a non-array raises (the endpoint allowlists kinds first).
+  res := public.record_outlook_change_notification_batch('[]'::jsonb);
+  ASSERT jsonb_array_length(res->'results') = 0;
+  BEGIN
+    res := public.record_outlook_change_notification_batch(jsonb_build_array(
+      jsonb_build_object('subscription_id', 'sub-batch', 'client_state_hash', '62207479fd613eb0b98cbf40beb4094334d057dce0f64e2a2fea096114be246e', 'kind', 'deleted')));
+  EXCEPTION WHEN OTHERS THEN raised := true; END;
+  ASSERT raised, 'an unknown kind raises';
+  raised := false;
+  BEGIN
+    res := public.record_outlook_change_notification_batch('{}'::jsonb);
+  EXCEPTION WHEN OTHERS THEN raised := true; END;
+  ASSERT raised, 'a non-array raises';
+  ASSERT has_function_privilege('service_role', 'public.record_outlook_change_notification_batch(jsonb)', 'EXECUTE');
+  ASSERT NOT has_function_privilege('authenticated', 'public.record_outlook_change_notification_batch(jsonb)', 'EXECUTE');
+  -- Clear the signal for section 12 by running a complete round.
+  res := public.reserve_due_outlook_connection(420, 900, u);
+  ASSERT res->>'result' = 'reserved', res::text;
+  ASSERT public.release_outlook_sync_lease(conn, (res->>'run_id')::uuid, 'idle', NULL, true, NULL, NULL, NULL, NULL, NULL, true, NULL);
+  ASSERT (SELECT wake_requested_at FROM public.microsoft_connections WHERE id = conn) IS NULL;
+END $$;
+
+-- ══ 12. the round cutoff: a signal during a PAUSED round survives the resuming invocation ══
+-- Run A starts a round (fresh reservation stamps the cutoff), discovers, and pauses.
+DO $$
+DECLARE
+  u uuid := '47474747-4747-4747-4747-474747474747'; conn uuid := '58585858-5858-5858-5858-585858585858';
+  res jsonb; run uuid;
+BEGIN
+  res := public.reserve_due_outlook_connection(420, 0, u);
+  ASSERT res->>'result' = 'reserved', res::text;
+  run := (res->>'run_id')::uuid;
+  ASSERT (SELECT count(*) FROM public.outlook_sync_state WHERE connection_id = conn AND wake_cutoff_at IS NOT NULL) = 2,
+    'a fresh reservation stamps the cutoff on both rows';
+  PERFORM set_config('test.cutoff_a', (SELECT min(wake_cutoff_at)::text FROM public.outlook_sync_state WHERE connection_id = conn), false);
+  -- Discovery happened in this invocation: the round is adopted (what record_outlook_page_progress does).
+  UPDATE public.outlook_sync_state SET round_id = pg_catalog.gen_random_uuid(), round_started_at = now()
+   WHERE connection_id = conn;
+  -- Finalisation pauses: an INCOMPLETE release keeps the round.
+  ASSERT public.release_outlook_sync_lease(conn, run, 'idle', NULL, false, NULL, NULL, NULL, NULL, NULL, false, NULL);
+  ASSERT (SELECT count(*) FROM public.outlook_sync_state WHERE connection_id = conn AND round_id IS NOT NULL) = 2, 'the round is kept';
+END $$;
+-- New mail is signalled AFTER A's discovery.
+DO $$
+DECLARE res jsonb;
+BEGIN
+  PERFORM pg_sleep(0.05);
+  res := public.record_outlook_change_notification('sub-batch', '62207479fd613eb0b98cbf40beb4094334d057dce0f64e2a2fea096114be246e', 'change');
+  ASSERT res->>'result' = 'accepted';
+END $$;
+-- Run B resumes the SAME round (lease newer than the signal) and completes it.
+DO $$
+DECLARE
+  u uuid := '47474747-4747-4747-4747-474747474747'; conn uuid := '58585858-5858-5858-5858-585858585858';
+  res jsonb; run uuid; wake timestamptz;
+BEGIN
+  PERFORM pg_sleep(0.05);
+  SELECT wake_requested_at INTO wake FROM public.microsoft_connections WHERE id = conn;
+  res := public.reserve_due_outlook_connection(420, 900, u);
+  ASSERT res->>'result' = 'reserved', 'the paused round (and the signal) make it due: ' || res::text;
+  run := (res->>'run_id')::uuid;
+  ASSERT (SELECT min(run_started_at) FROM public.outlook_sync_state WHERE connection_id = conn) > wake, 'B''s lease is newer than the signal';
+  ASSERT (SELECT min(wake_cutoff_at)::text FROM public.outlook_sync_state WHERE connection_id = conn) = current_setting('test.cutoff_a'),
+    'resuming a round keeps the cutoff of the reservation that started it';
+  ASSERT public.release_outlook_sync_lease(conn, run, 'idle', NULL, true, NULL, NULL, NULL, NULL, NULL, true, NULL);
+  ASSERT (SELECT wake_requested_at FROM public.microsoft_connections WHERE id = conn) IS NOT NULL,
+    'THE DEFECT, fixed: completing the OLD round does not consume a signal newer than its discovery';
+END $$;
+-- Run C: a FRESH round (round_id NULL after the complete release) stamps a new cutoff after the
+-- signal, reads the mail, and its complete release consumes the signal.
+DO $$
+DECLARE
+  u uuid := '47474747-4747-4747-4747-474747474747'; conn uuid := '58585858-5858-5858-5858-585858585858';
+  res jsonb; run uuid;
+BEGIN
+  PERFORM pg_sleep(0.05);
+  res := public.reserve_due_outlook_connection(420, 900, u);
+  ASSERT res->>'result' = 'reserved', 'the surviving signal makes the fresh round due: ' || res::text;
+  run := (res->>'run_id')::uuid;
+  ASSERT (SELECT min(wake_cutoff_at)::text FROM public.outlook_sync_state WHERE connection_id = conn) <> current_setting('test.cutoff_a'),
+    'a fresh round stamps a new cutoff';
+  ASSERT (SELECT min(wake_cutoff_at) FROM public.outlook_sync_state WHERE connection_id = conn)
+         >= (SELECT wake_requested_at FROM public.microsoft_connections WHERE id = conn), 'and it is after the signal';
+  ASSERT public.release_outlook_sync_lease(conn, run, 'idle', NULL, true, NULL, NULL, NULL, NULL, NULL, true, NULL);
+  ASSERT (SELECT wake_requested_at FROM public.microsoft_connections WHERE id = conn) IS NULL, 'consumed by the round that read it';
+  res := public.reserve_due_outlook_connection(420, 900, u);
+  ASSERT res->>'result' = 'none_due', res::text;
+  -- Leave nothing behind.
+  PERFORM public.run_microsoft_local_cleanup(u);
 END $$;
 
 SELECT 'outlook-change-notifications-runtime: all assertions passed' AS result;

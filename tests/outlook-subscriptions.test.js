@@ -27,7 +27,9 @@ import {
 import { GRAPH_BASE } from '../supabase/functions/shared/outlookGraphTransport.js'
 import { handleOutlookImportWorker } from '../supabase/functions/outlook-import-worker/handler.js'
 import { importKeyFromBase64, encryptToken } from '../supabase/functions/shared/googleTokenCrypto.js'
-import { REQUIRED_CONTENT_CONSENT_VERSION } from '../supabase/functions/shared/outlookContentConsent.js'
+import {
+  REQUIRED_CONTENT_CONSENT_VERSION, REQUIRED_BACKGROUND_CONSENT_VERSION, backgroundOperationAllowed,
+} from '../supabase/functions/shared/outlookContentConsent.js'
 import { makeRoundStore } from './harness/outlookRoundStore.js'
 
 let passed = 0
@@ -330,8 +332,8 @@ function makeWorkerGraph (opts) {
   return { fetchImpl, calls: g.calls }
 }
 
-async function invoke (ports, fetchImpl, over) {
-  const res = await handleOutlookImportWorker(workerReq(), env(over), { tokenUrl: 'https://login.invalid/token', select: ports.select, rpc: ports.rpc, graphFetchImpl: fetchImpl, now: () => NOW, subtle })
+async function invoke (ports, fetchImpl, over, runOver = {}) {
+  const res = await handleOutlookImportWorker(workerReq(), env(over), { tokenUrl: 'https://login.invalid/token', select: ports.select, rpc: ports.rpc, graphFetchImpl: fetchImpl, now: () => NOW, subtle, ...runOver })
   return { status: res.status, run: (await res.json()).run }
 }
 
@@ -396,6 +398,41 @@ await test('without a notification URL the step is skipped and reported; nothing
   assert.strictEqual(run.subscription.outcome, 'skipped_no_url')
   assert.strictEqual(graph.calls.length, 0)
   assert.strictEqual(ports.state.recorded.length, 0)
+})
+
+console.log('')
+console.log('5. the background-operation consent gate: open while unset, closed to stale consent once set')
+await test('the pure gate: null required = open; a set version must match the recorded one exactly', () => {
+  assert.strictEqual(REQUIRED_BACKGROUND_CONSENT_VERSION, null, 'unset until the wording is published and re-consented')
+  assert.deepStrictEqual(backgroundOperationAllowed('anything', null), { ok: true, reason: 'gate_open' })
+  const v = 'ol-disc-' + 'f'.repeat(32)
+  assert.deepStrictEqual(backgroundOperationAllowed(v, v), { ok: true, reason: 'consented' })
+  assert.deepStrictEqual(backgroundOperationAllowed(REQUIRED_CONTENT_CONSENT_VERSION, v), { ok: false, reason: 'background_consent_missing' })
+  assert.deepStrictEqual(backgroundOperationAllowed(null, v), { ok: false, reason: 'background_consent_missing' })
+  assert.deepStrictEqual(backgroundOperationAllowed(v, 'not-a-version'), { ok: false, reason: 'background_consent_missing' }, 'a malformed requirement fails closed')
+})
+await test('once set, a connection consented under an older disclosure is released untouched: no read, no subscription request, consent_missing', async () => {
+  const { runOutlookImport } = await import('../supabase/functions/shared/outlookImportRun.js')
+  const { makeRunContextLoader, makeCursorEncryptor, makeCursorDecryptor } = await import('../supabase/functions/shared/outlookRunContext.js')
+  const ports = await makePorts()
+  const graph = makeWorkerGraph()
+  const run = (required) => runOutlookImport({
+    rpc: ports.rpc, select: ports.select, pilotUserId: PILOT, requestEntryMs: NOW,
+    encryptCursor: makeCursorEncryptor({ tokenKeyB64: KEY_B64, keyVersion: 1, subtle }),
+    decryptCursor: makeCursorDecryptor({ tokenKeyB64: KEY_B64, subtle }),
+    loadRunContext: makeRunContextLoader({ select: ports.select, rpc: ports.rpc, config: { clientId: 'c', clientSecret: 'cs', tokenUrl: 'https://login.invalid/token', tokenKeyB64: KEY_B64, keyVersion: 1, keyRing: env().fingerprintKey, scope: env().scope }, deps: { subtle, now: () => NOW } }),
+    subscriptions: { notificationUrl: URL_N }, deps: { fetchImpl: graph.fetchImpl, now: () => NOW },
+    requiredBackgroundConsent: required,
+  })
+  const closed = await run('ol-disc-' + 'f'.repeat(32))   // the connection recorded REQUIRED_CONTENT_CONSENT_VERSION
+  assert.strictEqual(closed.outcome, 'consent_missing', JSON.stringify(closed))
+  assert.strictEqual(closed.reason, 'background_consent_missing')
+  assert.strictEqual(graph.calls.length, 0, 'no subscription request')
+  assert.strictEqual(ports.state.recorded.length, 0, 'nothing recorded')
+  assert.deepStrictEqual(ports.state.releases, [{ status: 'idle', complete: false }], 'released untouched, with the backoff')
+  const open = await run(REQUIRED_CONTENT_CONSENT_VERSION)   // the same version the row recorded
+  assert.strictEqual(open.outcome, 'committed', JSON.stringify(open))
+  assert.strictEqual(graph.calls.filter((c) => c.method === 'POST').length, 1, 'the subscription is created once consent matches')
 })
 
 console.log('')

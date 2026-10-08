@@ -20,6 +20,12 @@
 --      idle with the run complete - the same moment release_outlook_sync_lease erases the
 --      round's working records. A trigger rather than a redefinition of release, so the
 --      12-argument function the worker calls is byte-identical to the applied one.
+--      THE CUTOFF IS THE ROUND'S, NOT THE INVOCATION'S: outlook_sync_state.wake_cutoff_at is
+--      stamped by the reservation that STARTS a round (no round_id yet) and carried through
+--      every continuation invocation of that round. Reproduced against the real worker
+--      (tests/local/outlook-worker-token-access.mjs): run A paused in finalisation, new mail
+--      was signalled, run B resumed the same round without re-reading, and a cutoff taken from
+--      B's lease start consumed a signal about mail no delta read had seen.
 --   5. get_my_outlook_sync_status(), authenticated-only, for the Settings card: real persisted
 --      state (last success, current activity, retry, reauth, subscription), never a timer.
 --   6. The schedule: pg_cron job `outlook-worker-tick`, every minute, POSTing to the worker
@@ -48,6 +54,10 @@ ALTER TABLE public.microsoft_connections
 -- The authenticated column-level SELECT grant on microsoft_connections names its columns
 -- explicitly (20260921000000), so the four new columns are NOT readable by users. The
 -- Settings card reads a summary through get_my_outlook_sync_status() below.
+
+-- The discovery cutoff a round's wake-ups are judged against (see section 4 and 5).
+ALTER TABLE public.outlook_sync_state
+  ADD COLUMN IF NOT EXISTS wake_cutoff_at timestamptz;
 
 -- ══ 2. the subscription record ═════════════════════════════════════════════
 CREATE TABLE IF NOT EXISTS public.outlook_subscriptions (
@@ -245,11 +255,49 @@ $$;
 REVOKE ALL ON FUNCTION public.record_outlook_change_notification(text, text, text) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.record_outlook_change_notification(text, text, text) TO service_role;
 
+-- ══ 3c. record_outlook_change_notification_batch — ONE round trip per POST ═══
+-- Microsoft allows 3 seconds for the whole delivery and the worker's PostgREST port allows
+-- 15 per call, so the endpoint persists a whole batch in one call. Each item is decided by
+-- the single-item function above, in order; the answers come back in the same order. An
+-- item with an unknown kind raises, which fails the whole call - the endpoint allowlists
+-- kinds before calling, so that is a bug, never a Microsoft input.
+CREATE FUNCTION public.record_outlook_change_notification_batch(p_items jsonb)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_item    jsonb;
+  v_results jsonb := '[]'::jsonb;
+BEGIN
+  IF p_items IS NULL OR jsonb_typeof(p_items) <> 'array' THEN
+    RAISE EXCEPTION 'invalid_notification_batch';
+  END IF;
+  IF jsonb_array_length(p_items) > 100 THEN
+    RAISE EXCEPTION 'notification_batch_too_large';
+  END IF;
+  FOR v_item IN SELECT * FROM jsonb_array_elements(p_items) LOOP
+    v_results := v_results || jsonb_build_array(public.record_outlook_change_notification(
+      v_item ->> 'subscription_id', v_item ->> 'client_state_hash', v_item ->> 'kind'));
+  END LOOP;
+  RETURN jsonb_build_object('results', v_results);
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.record_outlook_change_notification_batch(jsonb) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.record_outlook_change_notification_batch(jsonb) TO service_role;
+
 -- ══ 4. the wake-up is consumed when the run that saw it completes ═══════════
--- release_outlook_sync_lease sets both folder rows idle with last_run_complete = true and
--- nulls run_started_at. Each row's transition fires this once; the OLD row still carries the
--- run's start, which is what decides whether a signal predates the run (consumed) or arrived
--- during it (kept). Two firings are idempotent.
+-- release_outlook_sync_lease sets both folder rows idle with last_run_complete = true. Each
+-- row's transition fires this once; the OLD row still carries wake_cutoff_at - the moment the
+-- reservation that STARTED this round took its lease, before any delta request, carried
+-- unchanged through every invocation that resumed the round. A signal at or before the
+-- cutoff announced mail the round's delta reads covered: consumed. A signal after it may
+-- announce mail no read of this round has seen - including one that arrived while
+-- finalisation was paused and a later invocation finished without re-reading: kept, and
+-- the next reservation is due for it. Two firings are idempotent. run_started_at is the
+-- fallback for a row reserved before this column existed.
 CREATE FUNCTION public.outlook_sync_state_consume_wake()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -264,7 +312,7 @@ BEGIN
            wake_source       = NULL
      WHERE c.id = NEW.connection_id
        AND c.wake_requested_at IS NOT NULL
-       AND c.wake_requested_at <= OLD.run_started_at;
+       AND c.wake_requested_at <= COALESCE(OLD.wake_cutoff_at, OLD.run_started_at);
   END IF;
   RETURN NEW;
 END;
@@ -281,8 +329,9 @@ REVOKE ALL ON FUNCTION public.outlook_sync_state_consume_wake() FROM PUBLIC, ano
 -- DROP and CREATE, same three-argument signature: CREATE OR REPLACE cannot change a body
 -- safely when a default is involved, and a dropped function loses its ACL, so it is restated.
 -- The ONLY changes against 20261003000000: the third due alternative (a pending wake-up), the
--- order (a woken connection first), and `wake_requested_at` in the answer so the run can
--- report how old the signal was.
+-- order (a woken connection first), `wake_requested_at` in the answer so the run can report
+-- how old the signal was, and wake_cutoff_at: stamped now() when the reservation STARTS a
+-- round (no round_id on the row), left untouched when it resumes one.
 DROP FUNCTION IF EXISTS public.reserve_due_outlook_connection(integer, integer, uuid);
 
 CREATE FUNCTION public.reserve_due_outlook_connection(
@@ -350,17 +399,21 @@ BEGIN
   v_run := pg_catalog.gen_random_uuid();
 
   INSERT INTO public.outlook_sync_state
-    (connection_id, user_id, folder, sync_status, sync_run_id, sync_lease_until, run_started_at, last_attempt_at, updated_at)
+    (connection_id, user_id, folder, sync_status, sync_run_id, sync_lease_until, run_started_at, last_attempt_at, updated_at, wake_cutoff_at)
   VALUES
-    (v_conn, v_uid, 'inbox',     'running', v_run, now() + make_interval(secs => p_lease_seconds), now(), now(), now()),
-    (v_conn, v_uid, 'sentitems', 'running', v_run, now() + make_interval(secs => p_lease_seconds), now(), now(), now())
+    (v_conn, v_uid, 'inbox',     'running', v_run, now() + make_interval(secs => p_lease_seconds), now(), now(), now(), now()),
+    (v_conn, v_uid, 'sentitems', 'running', v_run, now() + make_interval(secs => p_lease_seconds), now(), now(), now(), now())
   ON CONFLICT (connection_id, folder) DO UPDATE
     SET sync_status      = 'running',
         sync_run_id      = v_run,
         sync_lease_until = now() + make_interval(secs => p_lease_seconds),
         run_started_at   = now(),
         last_attempt_at  = now(),
-        updated_at       = now()
+        updated_at       = now(),
+        -- A round in progress keeps the cutoff of the reservation that started it.
+        wake_cutoff_at   = CASE WHEN public.outlook_sync_state.round_id IS NULL
+                                THEN now()
+                                ELSE COALESCE(public.outlook_sync_state.wake_cutoff_at, now()) END
     WHERE public.outlook_sync_state.sync_status <> 'running'
        OR public.outlook_sync_state.sync_lease_until IS NULL
        OR public.outlook_sync_state.sync_lease_until < now();
@@ -463,6 +516,9 @@ BEGIN
     'wake_pending',         v_conn.wake_requested_at IS NOT NULL,
     'last_wake_at',         v_conn.last_wake_at,
     'pending_suggestions',  v_pending,
+    -- Whether the scheduled tick is ACTIVE. Until it is, no claim about automatic checks
+    -- may be made to the user; the card reads this rather than assuming.
+    'schedule_active',      COALESCE((SELECT bool_or(j.active) FROM cron.job j WHERE j.jobname = 'outlook-worker-tick'), false),
     'subscription',         CASE WHEN v_sub.connection_id IS NULL THEN NULL ELSE jsonb_build_object(
                               'status',               v_sub.status,
                               'expires_at',           v_sub.expires_at,

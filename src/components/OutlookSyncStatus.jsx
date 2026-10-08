@@ -71,6 +71,10 @@ export default function OutlookSyncStatus () {
       <p className="text-sm font-semibold">{view.headline}</p>
       <p className="mt-1 text-sm text-muted">{view.detail}</p>
       <p className="mt-1 text-[12px] text-muted" data-testid="outlook-listening">{view.listening.text}</p>
+      {/* What can honestly be promised about unattended checks: the schedule's own flag. */}
+      <p className="mt-1 text-[12px] text-muted" data-testid="outlook-automation" data-on={view.automation.on ? 'true' : 'false'}>
+        {view.automation.text}
+      </p>
       {answer?.pending_suggestions > 0 && (
         <p className="mt-1 text-[12px] text-muted">
           {answer.pending_suggestions} {answer.pending_suggestions === 1 ? 'suggestion' : 'suggestions'} waiting for your review.

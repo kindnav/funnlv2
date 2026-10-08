@@ -103,7 +103,7 @@ import {
   summarizeOneConversation, planContentWrite, summarizeContentStage, CONTENT_WRITE_RPCS,
   sanitizeContentReport, readConversationHandles,
 } from './outlookContentStage.js'
-import { contentPermissions } from './outlookContentConsent.js'
+import { contentPermissions, backgroundOperationAllowed, REQUIRED_BACKGROUND_CONSENT_VERSION } from './outlookContentConsent.js'
 import {
   recoverConversation, MAX_RECOVERIES_PER_INVOCATION, RECOVERY_ADMIT_MS,
 } from './outlookConversationRecovery.js'
@@ -323,6 +323,10 @@ export const RUN_OUTCOMES = Object.freeze([
   // reported as advanced. The next run re-reads the same mail and the fingerprint
   // dedupe makes that idempotent.
   'release_failed',
+  // The connection's recorded consent does not cover UNATTENDED operation (background
+  // sync). Released untouched, with a backoff, before any read and before any subscription
+  // request; the account must reconnect under the current disclosure. Not a 200.
+  'consent_missing',
   'reserve_failed',      // the reservation RPC itself failed
   // The run lost its lease mid-pass: a renewal returned false, meaning another run
   // owns the connection now. Nothing is committed and no cursor is claimed.
@@ -484,6 +488,9 @@ export async function runOutlookImport (p) {
     // row (the worker's PostgREST port), `subscriptions.notificationUrl` is where Microsoft
     // is told to POST. Either absent means the step is skipped and reported as skipped.
     select = null, subscriptions = null,
+    // INJECTED ONLY BY TESTS, like requiredConsent: which disclosure version unattended
+    // operation demands. The worker never passes it, so the module constant decides.
+    requiredBackgroundConsent = REQUIRED_BACKGROUND_CONSENT_VERSION,
   } = p || {}
   if (typeof rpc !== 'function') throw new Error('rpc_not_injected')
   if (typeof encryptCursor !== 'function') throw new Error('encrypt_cursor_not_injected')
@@ -709,6 +716,26 @@ export async function runOutlookImport (p) {
       return {
         outcome: 'not_in_pilot',
         reason: pilot.reason,
+        connectionId,
+        intended: 0,
+        accepted: 0,
+        created: 0,
+        cursorsAdvanced: 0,
+      }
+    }
+
+    // ── THE BACKGROUND-OPERATION CONSENT GATE ────────────────────────────────
+    // Open while REQUIRED_BACKGROUND_CONSENT_VERSION is null (today). Once the background-
+    // sync disclosure is published and the constant set, a connection consented under an
+    // older disclosure is released here - nothing read, nothing subscribed - until it
+    // reconnects. Checked AFTER the context load so it reads the row's own recorded version,
+    // and BEFORE the subscription step and the delta read, which are what it governs.
+    const background = backgroundOperationAllowed(context.consentVersion, requiredBackgroundConsent)
+    if (!background.ok) {
+      await release('idle', false, null, background.reason, RETRY_BACKOFF_SECONDS)
+      return {
+        outcome: 'consent_missing',
+        reason: background.reason,
         connectionId,
         intended: 0,
         accepted: 0,

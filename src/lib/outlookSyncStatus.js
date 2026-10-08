@@ -5,8 +5,14 @@
 //
 // Every line below is backed by a column: `activity` is 'running' only while a lease is live
 // in outlook_sync_state, 'retry_scheduled' only while next_retry_at is in the future,
-// 'error' only when a last_error_code is recorded. Nothing here is a timer, a spinner that
-// assumes progress, or an optimistic "synced" label.
+// 'error' only when a last_error_code is recorded; `wake_pending` is a recorded signal that
+// no completed round has covered; `last_run_complete` says whether the last round finished
+// the mailbox; `schedule_active` is the pg_cron job's own flag. Nothing here is a timer, a
+// spinner that assumes progress, or an optimistic "synced" label.
+//
+// REPRODUCED BEFORE THIS REVISION: "Up to date" was shown while new mail was signalled and
+// unread, and while a round was paused mid-way; and "checks run about every 15 minutes" was
+// claimed before any schedule was switched on.
 
 export const SYNC_TONES = Object.freeze(['ok', 'info', 'warn', 'error', 'muted'])
 
@@ -38,13 +44,22 @@ export function formatRelativeFuture (iso, nowMs) {
   return `in ${n} day${n === 1 ? '' : 's'}`
 }
 
+/** What an automatic check can honestly be promised, given the schedule's own flag. */
+export function describeAutomation (scheduleActive) {
+  return scheduleActive === true
+    ? { text: 'Automatic checks are on: about every 15 minutes, and within minutes of new mail.', on: true }
+    : { text: 'Automatic checks are not switched on yet. Checks run only when started by Funnl.', on: false }
+}
+
 /**
- * The "listening for new mail" line, from the subscription record.
+ * The "listening for new mail" line, from the subscription record. Never promises a
+ * fallback check unless the schedule is on.
  * @returns {{text:string, tone:string}}
  */
-export function describeListening (sub, nowMs) {
+export function describeListening (sub, nowMs, scheduleActive = false) {
+  const fallback = scheduleActive === true ? ' Scheduled checks continue about every 15 minutes.' : ''
   if (!sub || typeof sub !== 'object') {
-    return { text: 'Not yet listening for new mail. Checks still run about every 15 minutes.', tone: 'muted' }
+    return { text: `Not yet listening for new mail.${fallback}`, tone: 'muted' }
   }
   const exp = Date.parse(sub.expires_at ?? '')
   if (sub.status === 'active' && Number.isFinite(exp) && exp > nowMs) {
@@ -58,7 +73,7 @@ export function describeListening (sub, nowMs) {
     return { text: 'Microsoft removed the mail listener; the next check sets it up again.', tone: 'warn' }
   }
   if (sub.status === 'failed') {
-    return { text: `Could not set up the mail listener${sub.last_error_code ? ` (${sub.last_error_code})` : ''}. Checks still run about every 15 minutes.`, tone: 'warn' }
+    return { text: `Could not set up the mail listener${sub.last_error_code ? ` (${sub.last_error_code})` : ''}.${fallback}`, tone: 'warn' }
   }
   return { text: 'The mail listener has expired; the next check sets it up again.', tone: 'warn' }
 }
@@ -67,60 +82,60 @@ export function describeListening (sub, nowMs) {
  * The whole status block, or null when there is nothing to show (not connected).
  * @param {object|null} s   the get_my_outlook_sync_status() answer
  * @param {number} nowMs    the reference clock (the RPC's server_now when available)
- * @returns {null|{headline:string, detail:string, listening:{text:string,tone:string}, tone:string, reconnect:boolean, queued:boolean}}
  */
 export function describeSyncStatus (s, nowMs) {
   if (!s || typeof s !== 'object' || s.result !== 'connected') return null
   const now = Number.isFinite(nowMs) ? nowMs : Date.parse(s.server_now ?? '') || Date.now()
-  const listening = describeListening(s.subscription, now)
+  const scheduleActive = s.schedule_active === true
+  const listening = describeListening(s.subscription, now, scheduleActive)
+  const automation = describeAutomation(scheduleActive)
   const lastOk = formatRelativePast(s.last_success_at, now)
   const queued = s.wake_pending === true
+  const incomplete = s.last_run_complete === false && !!lastOk
+  const base = { listening, automation, reconnect: false, queued }
 
   if (s.needs_reauth === true || s.status !== 'active') {
     return {
-      tone: 'error',
-      headline: 'Needs your permission again',
-      detail: 'Funnl cannot check this mailbox until you disconnect and reconnect Outlook.',
-      listening, reconnect: true, queued: false,
+      ...base, tone: 'error', headline: 'Needs your permission again',
+      detail: 'Funnl cannot check this mailbox until you disconnect and reconnect Outlook.', reconnect: true, queued: false,
     }
   }
   if (s.activity === 'running') {
     return {
-      tone: 'info',
-      headline: 'Checking your mailbox now',
+      ...base, tone: 'info', headline: 'Checking your mailbox now',
       detail: lastOk ? `Last successful sync ${lastOk}.` : 'This is the first check.',
-      listening, reconnect: false, queued,
     }
   }
   if (s.activity === 'retry_scheduled') {
     const when = formatRelativeFuture(s.next_retry_at, now)
     return {
-      tone: 'warn',
-      headline: 'The last check did not finish',
+      ...base, tone: 'warn', headline: 'The last check did not finish',
       detail: `Funnl will try again${when ? ` ${when}` : ' shortly'}${s.last_error_code ? ` (${s.last_error_code})` : ''}.${lastOk ? ` Last successful sync ${lastOk}.` : ''}`,
-      listening, reconnect: false, queued,
     }
   }
   if (s.activity === 'error') {
     return {
-      tone: 'warn',
-      headline: 'The last check did not finish',
-      detail: `${s.last_error_code ? `Reason: ${s.last_error_code}. ` : ''}The next scheduled check will try again.${lastOk ? ` Last successful sync ${lastOk}.` : ''}`,
-      listening, reconnect: false, queued,
+      ...base, tone: 'warn', headline: 'The last check did not finish',
+      detail: `${s.last_error_code ? `Reason: ${s.last_error_code}. ` : ''}${scheduleActive ? 'The next scheduled check will try again.' : 'The next check will try again.'}${lastOk ? ` Last successful sync ${lastOk}.` : ''}`,
     }
   }
   if (s.activity === 'never_synced' || !lastOk) {
     return {
-      tone: 'muted',
-      headline: 'Not synced yet',
-      detail: queued ? 'New mail was signalled; the first check is queued.' : 'The first check runs automatically within a few minutes.',
-      listening, reconnect: false, queued,
+      ...base, tone: 'muted', headline: 'Not synced yet',
+      detail: queued
+        ? 'New mail was signalled; the first check is queued.'
+        : (scheduleActive ? 'The first check runs automatically within a few minutes.' : 'The first check has not run.'),
+    }
+  }
+  // Idle with a complete last round and no signal is the ONLY state that may say up to date.
+  if (queued || incomplete) {
+    return {
+      ...base, tone: 'info', headline: 'A check is due',
+      detail: `${queued ? 'New mail was signalled and has not been checked yet.' : 'The last check paused before finishing the mailbox.'}${scheduleActive ? ' It will be picked up by the next automatic check.' : ''} Last successful sync ${lastOk}.`,
     }
   }
   return {
-    tone: 'ok',
-    headline: 'Up to date',
-    detail: `Last successful sync ${lastOk}.${queued ? ' New mail was signalled; a check is queued.' : ''}`,
-    listening, reconnect: false, queued,
+    ...base, tone: 'ok', headline: 'Up to date',
+    detail: `Last successful sync ${lastOk}.`,
   }
 }
