@@ -28,6 +28,7 @@ import {
 import {
   summarizeConversation, summarizePassResult, counterpartyFromEnvelopes,
   PASS_OUTCOMES, DEFER_REASONS, IGNORE_REASONS, MAX_FETCH_PER_CONVERSATION,
+  selectBalancedHandles, HANDLE_RESERVE_PER_FOLDER,
 } from '../supabase/functions/shared/outlookContentPass.js'
 
 let passed = 0, failed = 0
@@ -372,11 +373,17 @@ test('NO RAW OR SANITIZED BODY COMES BACK in the result', async () => {
   // integer - two possible keys, counts as values - and carries no header name, no
   // header value, no address and no message id. Asserted as such below rather than
   // merely allowed.
+  // `summaryEvidence` joined with the known-contact follow-up/provenance fix: it is one
+  // of the two controlled values the validator already paired with the summary
+  // (explicit_body | subject_only), carried so the write can record on what basis the
+  // note was drafted. Asserted as exactly that below, not merely allowed.
   assert.deepStrictEqual(Object.keys(r).sort(), [
     'contactId', 'extractionStatus', 'fetched', 'followUp', 'interactionDate',
     'messagesInExchange', 'messagesSummarized', 'missingHeaders', 'outcome',
-    'retainedSubject', 'summary',
+    'retainedSubject', 'summary', 'summaryEvidence',
   ])
+  assert.ok(['explicit_body', 'subject_only'].includes(r.summaryEvidence),
+    'summaryEvidence must be one of the two controlled values, never text from the mail')
   for (const [k, v] of Object.entries(r.missingHeaders)) {
     assert.ok(['inbox', 'sentitems'].includes(k), `missingHeaders key ${k} is not a folder`)
     assert.ok(Number.isInteger(v), 'missingHeaders values are counts')
@@ -657,6 +664,75 @@ test('a partial selection is reported honestly against the full exchange', async
   assert.strictEqual(r.messagesSummarized, 6)
   assert.strictEqual(r.messagesInExchange, 11,
     'the reviewer can be told this is 6 of 11, rather than being misled')
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+console.log('')
+console.log('ONE selection rule: both folders are represented before recency fills the rest')
+
+const handleAt = (i, folder, day) => ({
+  mfp: String(i).padStart(64, '0'), folder,
+  sentAt: '2026-09-' + String(day).padStart(2, '0') + 'T10:00:00.000Z',
+  midCt: 'SEAL:AAkALgAAmsg' + i, midNonce: 'N1',
+})
+const last = (h) => h.midCt.slice(-1)
+
+test('selectBalancedHandles: one older sent message behind seven newer inbound - the sent one is kept, then the newest inbound, chronological', () => {
+  // THE REPRODUCED SHAPE, at the selection: round 1 stored the user's one sent message,
+  // round 2 brought seven replies; "newest six" chose six inbound and the user's words
+  // never reached the model.
+  assert.strictEqual(HANDLE_RESERVE_PER_FOLDER, 2)
+  const older = handleAt(1, 'sentitems', 1)
+  const inbound = [2, 3, 4, 5, 6, 7, 8].map((i) => handleAt(i, 'inbox', i))
+  assert.deepStrictEqual(selectBalancedHandles(inbound.concat([older]), MAX_FETCH_PER_CONVERSATION).map(last),
+    ['1', '4', '5', '6', '7', '8'])
+  // The reversed imbalance: one older inbound message behind seven newer sent ones.
+  const olderIn = handleAt(1, 'inbox', 1)
+  const sent = [2, 3, 4, 5, 6, 7, 8].map((i) => handleAt(i, 'sentitems', i))
+  assert.deepStrictEqual(selectBalancedHandles(sent.concat([olderIn])).map(last), ['1', '4', '5', '6', '7', '8'])
+})
+
+test('selectBalancedHandles: two per folder first, then recency; deterministic for any input order; deduplicated; everything at or under the limit', () => {
+  const list = [
+    handleAt(1, 'sentitems', 1), handleAt(2, 'inbox', 2), handleAt(3, 'inbox', 3), handleAt(4, 'sentitems', 4),
+    handleAt(5, 'inbox', 5), handleAt(6, 'inbox', 6), handleAt(7, 'inbox', 7), handleAt(8, 'sentitems', 8),
+  ]
+  // Reserved: inbox 7, 6; sentitems 8, 4. Then by recency: 5, 3. Dropped: 2, 1.
+  const expected = ['3', '4', '5', '6', '7', '8']
+  assert.deepStrictEqual(selectBalancedHandles(list).map(last), expected)
+  assert.deepStrictEqual(selectBalancedHandles(list.slice().reverse()).map(last), expected, 'reversed input')
+  assert.deepStrictEqual(selectBalancedHandles([list[4], list[0], list[7], list[2], list[6], list[1], list[5], list[3]]).map(last), expected, 'shuffled input')
+  assert.deepStrictEqual(selectBalancedHandles(list.concat([Object.assign({}, list[7])])).map(last), expected, 'a repeated fingerprint is one handle')
+  assert.deepStrictEqual(selectBalancedHandles(list.slice(0, 6)).map(last), ['1', '2', '3', '4', '5', '6'], 'at the limit: everything, chronological')
+  assert.deepStrictEqual(selectBalancedHandles([]), [])
+  assert.deepStrictEqual(selectBalancedHandles([{ mfp: 'x'.repeat(64), folder: 'inbox', sentAt: '2026-09-01T10:00:00.000Z' }]), [],
+    'a handle without a ciphertext is not a handle')
+})
+
+test('the pass FETCHES the balanced selection: with one older sent message and seven newer inbound, the sent body is read and reaches the request', async () => {
+  // Dated so the fixture model's '2026-09-22' stays an allowed date, as in the other runs.
+  const older = handleAt(1, 'sentitems', 21)
+  const inbound = [2, 3, 4, 5, 6, 7, 8].map((i) => handleAt(i, 'inbox', 20 + i))
+  const { calls, params } = run({
+    handles: inbound.concat([older]),
+    conversation: { cfp: CFP, contactId: CONTACT_ID, messageCount: 8, lastLocalDate: '2026-09-22' },
+  })
+  params.fetchMessage = async (id) => {
+    calls.fetched.push(id)
+    return id.endsWith('msg1')
+      ? fixtureMessage({ dir: 'outbound', text: OUTBOUND_TEXT })
+      : fixtureMessage({ dir: 'inbound', text: INBOUND_TEXT })
+  }
+  const r = await summarizeConversation(params)
+  assert.strictEqual(r.outcome, 'interaction_draft', JSON.stringify(r))
+  assert.strictEqual(calls.fetched.length, MAX_FETCH_PER_CONVERSATION)
+  assert.ok(calls.fetched.some((id) => id.endsWith('msg1')), 'the user side was fetched: ' + calls.fetched.join(','))
+  assert.strictEqual(calls.fetched.filter((id) => !id.endsWith('msg1')).length, 5, 'and the five newest inbound')
+  const sent = typeof calls.requests[0] === 'string' ? calls.requests[0] : JSON.stringify(calls.requests[0])
+  assert.ok(sent.indexOf(OUTBOUND_TEXT) >= 0, 'the user side reached the model request')
+  assert.ok(sent.indexOf(INBOUND_TEXT) >= 0, 'and so did the other side')
+  assert.strictEqual(r.messagesSummarized, 6)
+  assert.strictEqual(r.messagesInExchange, 8)
 })
 
 await Promise.all(pending)

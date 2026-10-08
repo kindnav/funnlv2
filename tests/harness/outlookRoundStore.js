@@ -52,6 +52,14 @@ export function makeRoundStore ({ clock } = {}) {
   const folders = Object.fromEntries(GRAPH_FOLDERS.map((f) => [f, blankFolder()]))
   /** conversation fingerprint -> accumulated record */
   const conversations = new Map()
+  /**
+   * The round's message handles (outlook_round_messages), with the REAL lifecycle: a
+   * confirmed complete release erases them, and so does every round discard, because the
+   * table cascades from the accumulator row (20261007000000, orm_round_conv_fk). A harness
+   * that let handles outlive the round would let cross-round recovery pass on fixture-only
+   * state; this one cannot.
+   */
+  const messages = []
   const refusals = new Map()
   const calls = []
 
@@ -71,6 +79,7 @@ export function makeRoundStore ({ clock } = {}) {
   }
   const discardRound = () => {
     conversations.clear()
+    messages.length = 0
     for (const f of GRAPH_FOLDERS) {
       folders[f] = { ...blankFolder(), ...committedOf(f) }
     }
@@ -85,6 +94,16 @@ export function makeRoundStore ({ clock } = {}) {
       return { data: { result: refusals.get(name) }, error: null }
     }
 
+    if (name === 'list_outlook_round_message_handles') {
+      // Only THIS round's handles, in sent order - the shape the content stage reads. An
+      // expired round is refused, as the SQL refuses it.
+      if (roundExpired()) return { data: { result: 'round_expired' }, error: null }
+      const want = new Set(Array.isArray(args?.p_cfps) ? args.p_cfps : [])
+      const mine = messages
+        .filter((h) => want.has(h.cfp) && h.round_id === args?.p_round_id)
+        .sort((a, b) => String(a.sent_at).localeCompare(String(b.sent_at)))
+      return { data: { result: 'ok', handles: mine, next_cursor: null }, error: null }
+    }
     if (name === 'read_outlook_round_progress') {
       const expired = roundExpired()
       return {
@@ -192,6 +211,11 @@ export function makeRoundStore ({ clock } = {}) {
       }
       if (folder.messages + (args.p_messages_seen ?? 0) > MAX_MESSAGES_PER_ROUND) {
         return { data: { result: 'round_message_cap' }, error: null }
+      }
+      // The page's retrieval handles, committed with the page exactly as the SQL does,
+      // and keyed to THIS round so a later round can never read them.
+      for (const m of Array.isArray(args.p_messages) ? args.p_messages : []) {
+        if (m && typeof m === 'object') messages.push({ ...m, round_id: args.p_round_id })
       }
 
       let dropped = 0
@@ -304,6 +328,8 @@ export function makeRoundStore ({ clock } = {}) {
       }
     }
     conversations.clear()
+    // The handles go with the accumulator they cascade from.
+    messages.length = 0
     for (const f of GRAPH_FOLDERS) {
       const committed = {
         delta_link_ciphertext: folders[f].delta_link_ciphertext,
@@ -320,6 +346,7 @@ export function makeRoundStore ({ clock } = {}) {
     commitRelease,
     folders,
     conversations,
+    messages,
     calls,
   }
 }

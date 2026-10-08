@@ -120,10 +120,14 @@ test('internetMessageHeaders is requested ONLY in CONTENT_SELECT, never in disco
   const content = /CONTENT_SELECT = Object\.freeze\(\[([\s\S]*?)\]\)/.exec(t)[1]
   assert.ok(!discovery.includes('internetMessageHeaders'), 'discovery must not request headers')
   assert.ok(content.includes("'internetMessageHeaders',"), 'the content read is where they are requested')
-  // And no OTHER select/query anywhere asks for them.
+  // And no OTHER select/query anywhere asks for them. ENVELOPE_SELECT is the same
+  // projection as DISCOVERY_SELECT under its other name (the conversation-recovery
+  // requests use it), asserted as such so a third projection cannot creep in.
   const selects = [...t.matchAll(/\$select=\$\{(\w+)\.join/g)].map((m) => m[1])
-  assert.deepStrictEqual([...new Set(selects)].sort(), ['CONTENT_SELECT', 'DISCOVERY_SELECT'],
-    'only these two projections exist')
+  assert.deepStrictEqual([...new Set(selects)].sort(), ['CONTENT_SELECT', 'DISCOVERY_SELECT', 'ENVELOPE_SELECT'],
+    'only these projections exist')
+  assert.ok(/export const ENVELOPE_SELECT = DISCOVERY_SELECT/.test(t),
+    'ENVELOPE_SELECT must be the discovery projection itself, so it cannot carry headers')
 })
 
 test('the raw header collection is consumed only by the transport classifier call', () => {
@@ -441,6 +445,10 @@ test('applied migrations are unmodified; the only addition is the forward scope 
   // upsert_outlook_interaction_candidate to add the note parameter, so applying it
   // before 20260930000000 (which creates the 9-argument form) would drop a function
   // that does not exist yet and then be overwritten by the older file.
+  //
+  // 20261008000000 is newer still and must stay last for the same reason: it DROPs the
+  // 10-argument form that 20261006000000 creates and re-CREATEs the function with the
+  // follow-up and provenance parameters, so it can only apply after that file.
   const UNAPPLIED = [
     '20260928000000_outlook_add_user_read_scope.sql',
     '20260929000000_outlook_connection_status_rpc.sql',
@@ -450,6 +458,7 @@ test('applied migrations are unmodified; the only addition is the forward scope 
     '20261003000000_outlook_pilot_reservation.sql',
     '20261006000000_outlook_content_note_and_new_contact_write.sql',
     '20261007000000_outlook_round_message_retrieval.sql',
+    '20261008000000_outlook_known_contact_follow_up_provenance.sql',
   ]
   assert.deepStrictEqual(files.slice(-UNAPPLIED.length), UNAPPLIED,
     'the unapplied forward migrations must be the newest, in this order')

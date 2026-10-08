@@ -44,6 +44,7 @@ import {
 } from './outlookDraftContract.js'
 import { summarizeConversation, summarizePassResult, MAX_FETCH_PER_CONVERSATION } from './outlookContentPass.js'
 import { contentPermissions } from './outlookContentConsent.js'
+import { RECOVERY_OUTCOME_CODES } from './outlookConversationRecovery.js'
 
 /**
  * Handle-read pages, bounded. The RPC caps a page at 20 and a conversation retains
@@ -185,6 +186,9 @@ export const CONTENT_FOLDERS = Object.freeze(['inbox', 'sentitems'])
 export const CONTENT_REPORT_COUNTS = Object.freeze([
   'attempted', 'notes_written', 'proposals_written',
   'metadata_only', 'bodies_read', 'model_calls',
+  // CONVERSATION RECOVERY: how many one-sided threads the round asked Outlook about, how
+  // many came back two-sided, and how many envelopes that took. Counts only.
+  'recoveries_attempted', 'recoveries_two_sided', 'recovered_messages',
 ])
 
 /**
@@ -200,6 +204,8 @@ export const CONTENT_REPORT_MAPS = Object.freeze([
   'deferred', 'ignored', 'refusal_categories',
   'model_failures', 'model_http_status', 'missing_headers',
   'model_bad_request',
+  // How each conversation recovery ended, by its controlled code.
+  'recovery_outcomes',
 ])
 
 /**
@@ -368,12 +374,28 @@ export async function summarizeOneConversation (p) {
     // NOT 'no_handles': the handles may well exist and simply could not be read.
     return { outcome: 'defer', reason: 'handles_unreadable', fetched: 0, code: read.code }
   }
+  // RECOVERED HANDLES, when a conversation was completed from Outlook rather than from the
+  // round's own pages alone (outlookConversationRecovery.js). They exist only in memory for
+  // this invocation; the stored set stays the authority for any message both hold, so the
+  // merge is DEDUPLICATION ONLY, by fingerprint, handed over in chronological order - which
+  // is how the stored set arrives. WHICH of them are fetched is not decided here: the pass
+  // applies the one selection rule (selectBalancedHandles) to stored and recovered handles
+  // alike, so the user's one older sent message cannot be pushed out by newer replies. With
+  // no extras this is the unchanged read.
+  const extra = Array.isArray(p?.extraHandles) ? p.extraHandles : []
+  let handles = read.handles
+  if (extra.length > 0) {
+    const seen = new Set(read.handles.map((h) => h.mfp))
+    handles = read.handles.concat(extra.filter((h) => isPlainObject(h)
+      && typeof h.mfp === 'string' && h.mfp.length > 0 && !seen.has(h.mfp)))
+      .sort((a, b) => String(a.sentAt).localeCompare(String(b.sentAt)))
+  }
 
   return summarizeConversation({
     conversation,
     consentVersion: consentVersion ?? null,
     requiredConsent: requiredConsent ?? {},
-    handles: read.handles,
+    handles,
     decryptHandle: ({ ciphertext, nonce }) => decryptCursor(ciphertext, nonce),
     fetchMessage: makeMessageFetcher({ accessToken, deps, budgetAllows }),
     // STRAIGHT THROUGH, with no reshaping: the pass's port contract is this
@@ -449,6 +471,19 @@ export function planContentWrite (entry, pass, opts = {}) {
           ? entry.episodeLookupFingerprints : null,
         // THE WHOLE POINT: the note the accepted interaction was missing.
         p_proposed_notes: pass.summary,
+        // THE NEXT STEP AND THE PROVENANCE, which this branch used to drop. REPRODUCED IN
+        // PRODUCTION on 2026-10-07: the first live content run drafted a summary AND a
+        // follow-up for an existing contact, and only the summary reached the row -
+        // draft_follow_up, summary_evidence and extraction_status were all NULL on the
+        // candidate the owner then accepted. The new-contact branch below has carried
+        // these since the content release; the two paths now agree. Each is bounded by
+        // the validator (follow_up <= 160, evidence from the pair) before it gets here,
+        // and the RPC refuses rather than trims. Written ONLY on a successful draft: the
+        // metadata-only branch further down still passes none of them, so a closed
+        // consent gate leaves every draft column NULL exactly as before.
+        p_draft_follow_up: pass.followUp ?? null,
+        p_summary_evidence: pass.summaryEvidence ?? null,
+        p_extraction_status: pass.extractionStatus ?? 'ai_extracted',
       },
       deferral: null,
     }
@@ -623,6 +658,14 @@ export function summarizeContentStage (counts) {
     // as one status - so the category is what says which to go and fix. Controlled
     // strings only; the provider's message never reaches this map.
     model_bad_request: clean(c.badRequestCategories, DRAFT_BAD_REQUEST_CATEGORIES),
+    // CONVERSATION RECOVERY. How many one-sided threads the round asked Outlook about,
+    // how many came back two-sided, how many envelopes that took, and how each ended -
+    // by its controlled code. `recovery_unsupported` is the one to look for after a live
+    // run: it is the provider refusing the conversation filter itself.
+    recoveries_attempted: Number.isInteger(c.recoveriesAttempted) ? c.recoveriesAttempted : 0,
+    recoveries_two_sided: Number.isInteger(c.recoveriesTwoSided) ? c.recoveriesTwoSided : 0,
+    recovered_messages: Number.isInteger(c.recoveredMessages) ? c.recoveredMessages : 0,
+    recovery_outcomes: clean(c.recoveryOutcomes, RECOVERY_OUTCOME_CODES),
   }
 }
 
@@ -672,6 +715,7 @@ export function sanitizeContentReport (report) {
     model_http_status: numericKeys(report.model_http_status),
     missing_headers: codes(report.missing_headers, CONTENT_FOLDERS),
     model_bad_request: codes(report.model_bad_request, DRAFT_BAD_REQUEST_CATEGORIES),
+    recovery_outcomes: codes(report.recovery_outcomes, RECOVERY_OUTCOME_CODES),
   }
 }
 

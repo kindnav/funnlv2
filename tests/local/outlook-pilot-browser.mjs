@@ -332,6 +332,22 @@ class Page {
     }
     await sleep(100)
   }
+  /** Real keystrokes into whatever already has focus - used after a programmatic select(). */
+  async typeKeys (text) {
+    for (const ch of text) {
+      await this.send('Input.dispatchKeyEvent', { type: 'keyDown', text: ch })
+      await this.send('Input.dispatchKeyEvent', { type: 'keyUp', text: ch })
+    }
+    await sleep(100)
+  }
+  /** A real Backspace keystroke, `n` times. */
+  async backspace (n = 1) {
+    for (let i = 0; i < n; i++) {
+      await this.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 })
+      await this.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Backspace', code: 'Backspace', windowsVirtualKeyCode: 8 })
+    }
+    await sleep(100)
+  }
 }
 
 function setServeDir (d) { serveDir = d }
@@ -463,12 +479,16 @@ INSERT INTO public.contacts (user_id, name, email)
 VALUES ('${PILOT_USER}', '${CONTACT_NAME}', 'ava@bank.test');
 INSERT INTO public.interaction_candidates
   (user_id, contact_id, source, source_fingerprint, proposed_type,
-   proposed_interaction_date, status, source_last_state, context_expires_at)
+   proposed_interaction_date, status, source_last_state, context_expires_at,
+   proposed_notes, draft_summary, draft_follow_up, summary_evidence, extraction_status)
 SELECT '${PILOT_USER}', c.id, 'outlook', repeat('e',64), 'Email',
-       current_date - 1, 'pending', 'active', now() + interval '30 days'
+       current_date - 1, 'pending', 'active', now() + interval '30 days',
+       'They offered a short call next week about the credit desk.',
+       'They offered a short call next week about the credit desk.',
+       'Send your availability for next week.', 'explicit_body', 'ai_extracted'
   FROM public.contacts c WHERE c.user_id = '${PILOT_USER}' LIMIT 1;`,
   { tuplesOnly: false })
-  console.log('  seeded: 1 contact, 1 PENDING Outlook suggestion, 0 interactions')
+  console.log('  seeded: 1 contact, 1 PENDING Outlook suggestion WITH a drafted next step, 0 interactions')
 
   ensureCert()
   sink = await startSink()
@@ -681,27 +701,91 @@ SELECT '${PILOT_USER}', c.id, 'outlook', repeat('e',64), 'Email',
     `before=${before.interactions} afterView=${afterView}`)
   check('the pending suggestion is visible', before.pending === '1', `pending=${before.pending}`)
 
+  // The drafted next step and the AI provenance line are visible BEFORE editing.
+  const cardText = await page.eval('return document.body.innerText')
+  check('the drafted next step is shown on the card', /Suggested next step: Send your availability for next week\./.test(cardText))
+  check('the card says the note was drafted by AI', /Drafted by AI from the message text/.test(cardText))
   // The note field sits behind the card's own "Edit details" toggle, so this is the
   // real two-step a user performs: reveal the fields, type, then accept.
   const EDIT = 'Edited in the browser before accepting.'
+  const EDITED_STEP = 'Chase them on Friday if nothing has arrived.'
+  const CHOSEN_DATE = '2026-10-21'
   await page.click('Edit details', { byText: true })
   await page.waitFor('document.querySelector(\'textarea\')', 8000, 'the note field')
-  await page.click('textarea')
-  await page.type('textarea', EDIT)
+  // The note: real click, real keystrokes. The seeded note is selected first so the
+  // keystrokes replace it rather than append.
+  await page.eval('const el=document.querySelector(\'textarea\'); el.focus(); el.select(); return true')
+  await page.typeKeys(EDIT)
   const typed = await page.eval('return document.querySelector(\'textarea\').value')
-  check('the note field accepted browser keystrokes', typed.includes(EDIT),
+  check('the note field accepted browser keystrokes', typed === EDIT,
     `textarea=${JSON.stringify(typed)}`)
+  // THE NEXT STEP: prefilled from the draft, then EDITED with real keystrokes.
+  const stepBefore = await page.eval('return document.querySelector(\'input[name="nextStep"]\').value')
+  check('the next-step field is prefilled with the drafted step', stepBefore === 'Send your availability for next week.',
+    `nextStep=${JSON.stringify(stepBefore)}`)
+  await page.eval('const el=document.querySelector(\'input[name="nextStep"]\'); el.focus(); el.select(); return true')
+  await page.typeKeys(EDITED_STEP)
+  const stepTyped = await page.eval('return document.querySelector(\'input[name="nextStep"]\').value')
+  check('the next-step field accepted browser keystrokes', stepTyped === EDITED_STEP, `nextStep=${JSON.stringify(stepTyped)}`)
+  // THE FOLLOW-UP DATE starts empty - never derived from the step - and is the reviewer's
+  // choice. A date input does not take locale-free keystrokes reliably, so the value is set
+  // through the native setter and an input event, which is how React sees a user's change;
+  // that part is programmatic, and said so here.
+  const dateBefore = await page.eval('return document.querySelector(\'input[name="followUpDate"]\').value')
+  check('the follow-up date starts EMPTY', dateBefore === '', `followUpDate=${JSON.stringify(dateBefore)}`)
+  await page.eval(`const el=document.querySelector('input[name="followUpDate"]');
+    const set=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;
+    set.call(el, ${JSON.stringify(CHOSEN_DATE)}); el.dispatchEvent(new Event('input', {bubbles:true})); return true`)
+  const dateSet = await page.eval('return document.querySelector(\'input[name="followUpDate"]\').value')
+  check('the follow-up date took the chosen value', dateSet === CHOSEN_DATE, `followUpDate=${JSON.stringify(dateSet)}`)
   await page.click('Accept', { byText: true })
   await sleep(1200)
-  const saved = psql(`SELECT count(*), coalesce(max(notes),'NULL'), coalesce(max(type),'NULL')
+  const saved = psql(`SELECT count(*), coalesce(max(notes),'NULL'), coalesce(max(type),'NULL'),
+      coalesce(max(follow_up_date)::text,'NULL')
     FROM public.interactions WHERE user_id='${PILOT_USER}';`).trim().split('|')
   check('exactly ONE interaction was saved', saved[0] === '1', `rows=${saved[0]}`)
   check('it is typed Email', saved[2] === 'Email', `type=${saved[2]}`)
-  check('it carries the note typed IN THE BROWSER', saved[1] === EDIT,
+  check('it carries the note typed IN THE BROWSER with the EDITED next step after it',
+    saved[1] === EDIT + '\n\nNext step: ' + EDITED_STEP,
     `notes=${JSON.stringify(saved[1])}`)
+  check('and the follow-up date the reviewer CHOSE', saved[3] === CHOSEN_DATE, `follow_up_date=${saved[3]}`)
   check('the candidate is no longer pending',
     one(`SELECT count(*) FROM public.interaction_candidates
       WHERE user_id='${PILOT_USER}' AND status='pending';`) === '0')
+  check('the candidate\'s draft columns are erased at acceptance',
+    one(`SELECT count(*) FROM public.interaction_candidates
+      WHERE user_id='${PILOT_USER}' AND source_fingerprint=repeat('e',64)
+        AND draft_follow_up IS NULL AND draft_summary IS NULL AND summary_evidence IS NULL;`) === '1')
+  // ── a second suggestion: the reviewer CLEARS the drafted step, picks no date ──
+  psql(`INSERT INTO public.interaction_candidates
+    (user_id, contact_id, source, source_fingerprint, proposed_type,
+     proposed_interaction_date, status, source_last_state, context_expires_at,
+     proposed_notes, draft_summary, draft_follow_up, summary_evidence, extraction_status)
+  SELECT '${PILOT_USER}', c.id, 'outlook', repeat('f',64), 'Email',
+         current_date - 3, 'pending', 'active', now() + interval '30 days',
+         'They confirmed Thursday for the call.', 'They confirmed Thursday for the call.',
+         'Prepare three questions before Thursday.', 'explicit_body', 'ai_extracted'
+    FROM public.contacts c WHERE c.user_id='${PILOT_USER}' LIMIT 1;`, { tuplesOnly: false })
+  await page.goto(`${ORIGIN}/suggestions`)
+  await page.waitFor(`document.body.innerText.includes(${JSON.stringify(CONTACT_NAME)})`, 20000)
+  await page.click('Edit details', { byText: true })
+  await page.waitFor('document.querySelector(\'input[name="nextStep"]\')', 8000, 'the next-step field')
+  const prefilled = await page.eval('return document.querySelector(\'input[name="nextStep"]\').value')
+  check('the second card is prefilled with its own drafted step', prefilled === 'Prepare three questions before Thursday.',
+    `nextStep=${JSON.stringify(prefilled)}`)
+  await page.eval('const el=document.querySelector(\'input[name="nextStep"]\'); el.focus(); el.select(); return true')
+  await page.backspace(1)
+  const cleared = await page.eval('return document.querySelector(\'input[name="nextStep"]\').value')
+  check('a real Backspace cleared the step', cleared === '', `nextStep=${JSON.stringify(cleared)}`)
+  await page.click('Accept', { byText: true })
+  await sleep(1200)
+  const second = psql(`SELECT coalesce(notes,'NULL'), coalesce(follow_up_date::text,'NULL')
+    FROM public.interactions WHERE user_id='${PILOT_USER}'
+    ORDER BY created_at DESC LIMIT 1;`).trim().split('|')
+  check('two interactions now', one(`SELECT count(*) FROM public.interactions WHERE user_id='${PILOT_USER}';`) === '2')
+  check('a cleared step saves the note ALONE', second[0] === 'They confirmed Thursday for the call.',
+    `notes=${JSON.stringify(second[0])}`)
+  check('and no date was invented', second[1] === 'NULL', `follow_up_date=${second[1]}`)
 
   // Dismiss a second one.
   psql(`INSERT INTO public.interaction_candidates
@@ -981,8 +1065,11 @@ SELECT '${PILOT_USER}', 'outlook', 'pending',
         DELETE FROM public.contacts
          WHERE user_id = '${PILOT_USER}' AND email LIKE 'person%@fund.test';`,
   { tuplesOnly: false })
+  // Relative to what this section FOUND (section 4 now leaves two accepted interactions,
+  // one with an edited next step and one with the step cleared), not a fixed count.
   check('this section left exactly the interaction count it found',
-    one(`SELECT count(*) FROM public.interactions WHERE user_id='${PILOT_USER}';`) === '1')
+    one(`SELECT count(*) FROM public.interactions WHERE user_id='${PILOT_USER}';`) === nccBefore.interactions,
+    `found=${nccBefore.interactions}`)
 
   console.log('\n5. the disconnect confirmation, as rendered')
   psql(`
@@ -1048,6 +1135,9 @@ ON CONFLICT DO NOTHING;`, { tuplesOnly: false })
   // Confirm: exactly one RPC, and it takes effect.
   await page.click('Disconnect', { byText: true })
   await sleep(400)
+  // The accepted interactions are the user's records, not working state: whatever number
+  // exists before the disconnect must exist after it.
+  const interactionsBeforeDisconnect = one(`SELECT count(*) FROM public.interactions WHERE user_id='${PILOT_USER}';`)
   await page.click(discMod.DISCONNECT_CONFIRM_LABEL, { byText: true })
   await sleep(1500)
   const afterConfirm = rpcCount()
@@ -1056,8 +1146,10 @@ ON CONFLICT DO NOTHING;`, { tuplesOnly: false })
     `${DISCONNECT_RPC} count went ${afterCancel} -> ${afterConfirm}`)
   check('and the connection is gone',
     one(`SELECT count(*) FROM public.microsoft_connections WHERE user_id='${PILOT_USER}';`) === '0')
-  check('and the accepted interaction SURVIVED the disconnect',
-    one(`SELECT count(*) FROM public.interactions WHERE user_id='${PILOT_USER}';`) === '1')
+  check('and the accepted interactions SURVIVED the disconnect',
+    one(`SELECT count(*) FROM public.interactions WHERE user_id='${PILOT_USER}';`) === interactionsBeforeDisconnect
+    && Number(interactionsBeforeDisconnect) >= 2,
+    `before=${interactionsBeforeDisconnect}`)
 
   // == 6. the post-OAuth return to Settings ==================================
   // The callback redirects to /settings?outlook=error on EVERY failing path, and

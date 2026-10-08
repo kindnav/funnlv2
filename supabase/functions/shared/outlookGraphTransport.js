@@ -279,6 +279,97 @@ export function buildMessageContentRequest(p) {
   }
 }
 
+/**
+ * CONVERSATION RECOVERY - the two requests that let a round recognise the earlier half of
+ * an exchange it never saw.
+ *
+ * THE GAP THEY CLOSE. The accumulator is round-scoped by design, and the published notice
+ * says its working records are removed when a read completes. So when the reply to a
+ * message arrives in a LATER round, that round sees one message in a thread it no longer
+ * remembers, calls it one-sided, and never suggests it. Rather than keep recognition state
+ * across rounds (a retention decision with published wording), the round asks OUTLOOK for
+ * the rest of the conversation, on demand, for exactly the one-sided threads it is about
+ * to give up on: one envelope GET to learn the conversation id, then one filtered listing
+ * per folder. Envelopes only; a body is read only after the recovered exchange has
+ * qualified as two-sided, through the same content pass as everything else.
+ *
+ * WHAT MICROSOFT DOCUMENTS, and what it does not. List messages supports the OData query
+ * parameters; `$top` is "within the range of 1 and 1000"; `$select` is recommended; and
+ * when `$filter` and `$orderby` are combined, "properties that appear in $orderby must also
+ * appear in $filter ... Failing to do this results in ... InefficientFilter: The restriction
+ * or sort order is too complex for this operation." So there is NO `$orderby` here: the
+ * caller sorts the handful of envelopes it gets back. Single quotes in a literal "should be
+ * double escaped". The immutable-id header "only applies to the request it is included
+ * with", so it is on both requests. The reference pages do not state per-property
+ * filterability, so whether `conversationId eq` is accepted on this tenant is established
+ * by the owner-run check in the PR, not assumed here: a 400 from this request is reported
+ * as `recovery_unsupported` and settles the conversation rather than retrying it.
+ *
+ * BOUNDED. One page per folder, capped at MAX_RECOVERY_MESSAGES_PER_FOLDER; a response
+ * that still carries @odata.nextLink means the thread is longer than a summary should
+ * rest on and is reported as truncated. Never a mailbox-wide listing, never a `$search`.
+ */
+export const MAX_RECOVERY_MESSAGES_PER_FOLDER = 25
+/** OData string-literal escaping: a single quote is doubled. */
+export function escapeODataString(s) {
+  return String(s).split("'").join("''")
+}
+/**
+ * The ENVELOPE of one message the round already holds a handle to - requested only to
+ * learn its conversationId, which the round deliberately does not persist. No body, no
+ * headers: the same projection the delta read uses.
+ * @param {{ messageId:string }} p
+ */
+export function buildMessageEnvelopeRequest(p) {
+  assertSafeParams(p)
+  if (!isUsableGraphId(p.messageId)) throw new Error('invalid_message_id')
+  const url = `${GRAPH_BASE}/me/messages/${encodeURIComponent(p.messageId)}` +
+    `?$select=${ENVELOPE_SELECT.join(',')}`
+  return {
+    method: 'GET',
+    url,
+    headers: { Prefer: preferAll(PREFER_IMMUTABLE_ID) },
+    stage: 'envelope',
+  }
+}
+/**
+ * Every message of ONE conversation in ONE of the two folders, envelopes only.
+ * `$filter` without `$orderby` (see above), `$select` to the envelope, `$top` bounded.
+ * @param {{ folder:'inbox'|'sentitems', conversationId:string, top?:number }} p
+ */
+export function buildConversationLookupRequest(p) {
+  assertSafeParams(p)
+  if (!GRAPH_FOLDERS.includes(p.folder)) throw new Error('invalid_folder')
+  if (!isUsableGraphId(p.conversationId)) throw new Error('invalid_conversation_id')
+  const top = Number.isInteger(p.top)
+    ? Math.min(Math.max(p.top, 1), MAX_RECOVERY_MESSAGES_PER_FOLDER)
+    : MAX_RECOVERY_MESSAGES_PER_FOLDER
+  const filter = `conversationId eq '${escapeODataString(p.conversationId)}'`
+  const url = `${GRAPH_BASE}/me/mailFolders/${p.folder}/messages` +
+    `?$filter=${encodeURIComponent(filter)}` +
+    `&$select=${ENVELOPE_SELECT.join(',')}` +
+    `&$top=${top}`
+  return {
+    method: 'GET',
+    url,
+    headers: { Prefer: preferAll(PREFER_IMMUTABLE_ID) },
+    stage: 'envelope',
+  }
+}
+/**
+ * Read a conversation lookup response. `truncated` is true when the folder holds more of
+ * the thread than one bounded page returned - the caller treats that as a thread too long
+ * to summarize, never as "follow the link".
+ * @param {unknown} json
+ * @returns {{ok:true, items:Array<object>, truncated:boolean}|{ok:false, code:'malformed_response'}}
+ */
+export function readConversationLookupPage(json) {
+  if (!isPlainObject(json) || !Array.isArray(json.value)) return { ok: false, code: 'malformed_response' }
+  const items = json.value.filter((v) => isPlainObject(v))
+  if (items.length !== json.value.length) return { ok: false, code: 'malformed_response' }
+  const next = json['@odata.nextLink']
+  return { ok: true, items, truncated: typeof next === 'string' && next.length > 0 }
+}
 function boundedPageSize(n) {
   const v = Number.isInteger(n) ? n : MAX_PAGE_SIZE
   return Math.min(Math.max(v, 1), MAX_PAGE_SIZE)

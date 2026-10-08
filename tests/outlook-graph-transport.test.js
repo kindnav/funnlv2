@@ -84,15 +84,22 @@ test('content $select requests body, uniqueBody AND headers in ONE request', () 
 })
 
 test('there is exactly ONE builder that can fetch headers — no header-only second call', () => {
+  // Five builders: the two conversation-recovery requests (an envelope GET and a per-folder
+  // conversation lookup) joined the three, both on the header-free envelope projection.
   const builders = [...SRC.matchAll(/^export function (build\w+Request)\b/gm)].map((m) => m[1])
   assert.deepStrictEqual(builders.sort(),
-    ['buildFolderDeltaRequest', 'buildFollowLinkRequest', 'buildMessageContentRequest'])
+    ['buildConversationLookupRequest', 'buildFolderDeltaRequest', 'buildFollowLinkRequest',
+      'buildMessageContentRequest', 'buildMessageEnvelopeRequest'])
   const headerBuilders = builders.filter((b) => {
     const i = SRC.indexOf(`export function ${b}`)
     return SRC.slice(i, i + 700).includes('CONTENT_SELECT')
   })
   assert.deepStrictEqual(headerBuilders, ['buildMessageContentRequest'],
     'headers come from the content request only')
+  for (const b of ['buildConversationLookupRequest', 'buildMessageEnvelopeRequest']) {
+    const i = SRC.indexOf(`export function ${b}`)
+    assert.ok(SRC.slice(i, i + 900).includes('ENVELOPE_SELECT'), `${b} must select the envelope only`)
+  }
 })
 
 test('delta request targets only a well-known folder and sets a bounded page size', () => {

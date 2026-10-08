@@ -449,6 +449,48 @@ test('an unknown but genuinely two-sided counterparty yields a NEW CONTACT sugge
   assert.strictEqual(r.counterparty, ALEX, 'the address comes from the envelope')
   assert.strictEqual(r.displayName, 'Alex Wilber', 'provider metadata name is carried for review')
 })
+test('an unknown person is proposed WHICHEVER SIDE STARTED: user sends, person replies', () => {
+  // The case above has the person writing first. This is the other half of the
+  // requirement: two-way communication with the same person, regardless of who opened
+  // the thread. The user's outbound message is the EARLIER one here, so the episode
+  // anchors on it, and the counterparty is still read from the envelope - the To of
+  // the outbound message - never from a name the model might supply.
+  const outboundFirst = assessed(graphMsg({
+    id: 'o0', conversationId: 'conv_alex_2', from: rcpt(USER), toRecipients: [rcpt(ALEX, 'Alex Wilber')],
+    sentDateTime: '2026-09-12T08:00:00Z', receivedDateTime: '2026-09-12T08:00:00Z',
+  }), 'sentitems')
+  const reply = assessed(graphMsg({
+    id: 'i2', conversationId: 'conv_alex_2', from: rcpt(ALEX, 'Alex Wilber'),
+    sentDateTime: '2026-09-12T11:00:00Z', receivedDateTime: '2026-09-12T11:00:00Z',
+  }))
+  for (const [label, entries] of [['stored outbound first', [outboundFirst, reply]],
+    ['stored reply first', [reply, outboundFirst]]]) {
+    const r = qualifyEpisode({ entries, selfSet, contactIndex })
+    assert.ok(r.ok, `${label}: ${r.code}`)
+    assert.strictEqual(r.kind, 'new_contact_suggestion', label)
+    assert.strictEqual(r.contactId, null, label)
+    assert.strictEqual(r.counterparty, ALEX, `${label}: the address comes from the envelope`)
+    assert.strictEqual(r.inbound, 1, label)
+    assert.strictEqual(r.outbound, 1, label)
+    assert.strictEqual(r.firstMessageKey, 'o0', `${label}: the episode anchors on the user's opening message`)
+  }
+})
+test('a SINGLE UNANSWERED message never proposes a new person, in either direction', () => {
+  // A cold email the user sent and never heard back on is not a relationship, and a
+  // message that arrived and was never answered is not one either. Both are refused
+  // before any body could be read - the same not_two_sided the known-contact path uses.
+  const inbound = assessed(graphMsg({ id: 'i9', from: rcpt(ALEX, 'Alex Wilber'), conversationId: 'conv_cold_in' }))
+  const outbound = assessed(graphMsg({
+    id: 'o9', conversationId: 'conv_cold_out', from: rcpt(USER), toRecipients: [rcpt(ALEX, 'Alex Wilber')],
+    sentDateTime: '2026-09-12T09:00:00Z', receivedDateTime: '2026-09-12T09:00:00Z',
+  }), 'sentitems')
+  for (const [label, entries] of [['person wrote, user never replied', [inbound]],
+    ['user wrote, person never replied', [outbound]]]) {
+    const r = qualifyEpisode({ entries, selfSet, contactIndex })
+    assert.ok(!r.ok, label)
+    assert.strictEqual(r.code, 'not_two_sided', label)
+  }
+})
 
 test('nothing in the qualification result creates or implies an automatic save', () => {
   const r = qualifyEpisode({ entries: [inboundFromDana(), outboundToDana()], selfSet, contactIndex })

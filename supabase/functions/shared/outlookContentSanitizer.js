@@ -367,29 +367,73 @@ export function sanitizeMessageContent(input) {
   }
 }
 
+/** Messages reserved per direction before the rest of an episode is filled by recency. */
+export const EPISODE_RESERVE_PER_DIRECTION = 2
+
 /**
  * Apply the AGGREGATE bound across the messages of one episode. Keeps the most recent
  * messages (the ones an interaction summary is actually about) and stops once the
- * total budget or the message cap is reached.
+ * total budget or the message cap is reached - BUT BOTH SIDES FIRST: the newest
+ * EPISODE_RESERVE_PER_DIRECTION messages of each direction are placed before any others,
+ * alternating sides, so a one-sided run of newer replies cannot push the other person's
+ * words out of the episode. This is the same rule the handle selection applies per folder
+ * (selectBalancedHandles), carried through to the bound that runs AFTER the bodies were
+ * read - the last point at which trimming could otherwise turn a two-sided exchange back
+ * into a one-sided account. buildDraftRequest refuses an oversized request rather than
+ * trimming it, so there is no later point.
  *
- * @param {Array<{ timestampIso:string, sanitized:{text:string,signature:string|null} }>} parts
+ * The budget arithmetic honours the newest message of EACH side unconditionally:
+ * MAX_TEXT_CHARS x 2 = 8,000 <= MAX_EPISODE_CHARS, and the third placed message still fits.
+ *
+ * Deterministic: ordered by timestamp descending, then by text, so two runs over the same
+ * parts keep the same set. Returned in chronological order for the reader.
+ *
+ * @param {Array<{ timestampIso:string, direction?:string, sanitized:{text:string,signature:string|null} }>} parts
  * @returns {{ kept:Array<object>, totalChars:number, droppedForBudget:number }}
  */
 export function boundEpisodeContent(parts) {
   const list = Array.isArray(parts) ? parts.slice() : []
-  list.sort((a, b) => String(b?.timestampIso ?? '').localeCompare(String(a?.timestampIso ?? '')))
+  const textOf = (p) => (p && p.sanitized && typeof p.sanitized.text === 'string' ? p.sanitized.text : '')
+  const newestFirst = (a, b) => {
+    const t = String(b?.timestampIso ?? '').localeCompare(String(a?.timestampIso ?? ''))
+    return t !== 0 ? t : textOf(a).localeCompare(textOf(b))
+  }
+  list.sort(newestFirst)
   const kept = []
   let total = 0
   let dropped = 0
-  for (const p of list) {
-    const text = p && p.sanitized && typeof p.sanitized.text === 'string' ? p.sanitized.text : ''
+  const admit = (p) => {
+    const text = textOf(p)
     if (kept.length >= MAX_EPISODE_MESSAGES || total + text.length > MAX_EPISODE_CHARS) {
       dropped += 1
-      continue
+      return
     }
     kept.push(p)
     total += text.length
   }
-  kept.reverse()   // chronological for the reader
+  // BOTH SIDES FIRST: the newest `EPISODE_RESERVE_PER_DIRECTION` of each direction,
+  // alternating - newest inbound, newest outbound, then the second of each.
+  const directionOf = (p) => (p?.direction === 'outbound' ? 'outbound' : 'inbound')
+  const reserved = { inbound: [], outbound: [] }
+  for (const p of list) {
+    const q = reserved[directionOf(p)]
+    if (q.length < EPISODE_RESERVE_PER_DIRECTION) q.push(p)
+  }
+  const taken = new Set()
+  for (let i = 0; i < EPISODE_RESERVE_PER_DIRECTION; i += 1) {
+    for (const d of ['inbound', 'outbound']) {
+      const p = reserved[d][i]
+      if (p === undefined || taken.has(p)) continue
+      taken.add(p)
+      admit(p)
+    }
+  }
+  // Then recency, whichever side it comes from.
+  for (const p of list) {
+    if (taken.has(p)) continue
+    taken.add(p)
+    admit(p)
+  }
+  kept.sort((a, b) => -newestFirst(a, b))   // chronological for the reader
   return { kept, totalChars: total, droppedForBudget: dropped }
 }
