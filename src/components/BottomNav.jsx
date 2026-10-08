@@ -24,6 +24,9 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
+import { SUGGESTION_REVIEW_ENABLED } from '../lib/suggestionReview'
+import { usePendingSuggestionCount } from '../lib/usePendingSuggestionCount'
+import { badgeLabel } from '../lib/pendingSuggestions'
 import { useProStatus } from '../lib/useProStatus'
 import { classifyProStatus } from '../lib/pro-ui-status'
 import { useContactPicker } from '../lib/useContactPicker'
@@ -147,6 +150,7 @@ export default function BottomNav() {
   const navigate = useNavigate()
 
   const [followUpCount, setFollowUpCount] = useState(0)
+  const pendingSuggestions = usePendingSuggestionCount(SUGGESTION_REVIEW_ENABLED)
 
   // Pro access — from shared context (one RPC per app mount, not one per component)
   const proStatus = useProStatus()
@@ -503,6 +507,29 @@ export default function BottomNav() {
           </svg>
           <span className="text-[9.5px] font-semibold tracking-wide" style={{ color: tabColor('/followups') }} aria-hidden="true">Due</span>
         </Link>
+
+        {SUGGESTION_REVIEW_ENABLED && (
+          <Link
+            to="/suggestions"
+            className="flex-1 flex flex-col items-center gap-[3px] py-[10px] no-underline relative"
+            aria-label={pendingSuggestions > 0 ? `Suggestions, ${pendingSuggestions > 9 ? '9 or more' : pendingSuggestions} to review` : 'Suggestions'}
+          >
+            {badgeLabel(pendingSuggestions) && (
+              <span
+                className="absolute top-[7px] right-[calc(50%-14px)] min-w-[14px] h-[14px] rounded-full flex items-center justify-center px-[3px] text-[8px] font-bold font-mono leading-none"
+                style={{ background: 'var(--color-accent)', color: 'var(--color-ink)' }}
+                aria-hidden="true"
+                data-testid="suggestions-badge-mobile"
+              >
+                {badgeLabel(pendingSuggestions)}
+              </span>
+            )}
+            <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke={tabColor('/suggestions')} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M4 4h16v12H4z"/><path d="M4 10h5l1.5 2.5h3L15 10h5"/><path d="M8 20h8"/>
+            </svg>
+            <span className="text-[9.5px] font-semibold tracking-wide" style={{ color: tabColor('/suggestions') }} aria-hidden="true">Review</span>
+          </Link>
+        )}
 
         <Link to="/ai" className="flex-1 flex flex-col items-center gap-[3px] py-[10px] no-underline" aria-label="Funnl AI">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">

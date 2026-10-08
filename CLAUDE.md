@@ -1312,3 +1312,36 @@ Note: `total_duration_ms` meaning changed from the prior version (where it measu
 ### Layer D spec — Stripe billing (later)
 
 When billing is ready: update `canUseAI()` to read Stripe subscription status instead of (or in addition to) `ai_enabled`. Because every AI feature calls `canUseAI()`, this is a one-place change. The `ai_enabled` column either becomes the fallback for manually-granted access or is retired. See Monetization section for timing.
+
+---
+
+## Outlook background sync (Draft PR, branch `feature/outlook-background-sync`, base `f1c95bc`)
+
+**Goal:** remove manual networking data entry. Funnl detects a two-way exchange whichever person
+started it, prepares a contact-plus-interaction or interaction proposal with both sides' context,
+and the user reviews before anything is saved. This slice makes the pipeline run on its own and
+makes its output discoverable. Full plan, latency target, measurement and next workstreams:
+`docs/outlook-background-sync-plan.md`. Disclosure wording for review: `docs/outlook-content-disclosure-draft.md` section F.
+
+**How it works (nothing applied or deployed yet):**
+- `outlook-notifications` Edge Function (`verify_jwt=false`): Microsoft Graph's validation handshake
+  and change notifications. A notification is a WAKE-UP only — the database matches the subscription
+  id and the SHA-256 of the clientState, records `wake_requested_at` on the connection, the endpoint
+  answers 202 and kicks the worker off the response path. No message content or id is read or kept.
+- The worker (`outlook-import-worker`) creates/renews ONE Graph subscription per connection
+  (`me/messages`, `created`, 3-day lifetime) under its lease — `outlookSubscriptions.js`,
+  recorded via `record_outlook_subscription_state` (fenced on the run id). Never fatal to the import.
+- Migration `20261009000000`: wake columns, `outlook_subscriptions`, the two RPCs,
+  `get_my_outlook_sync_status()` (authenticated), the reservation treating a pending wake-up as
+  due now (lease + backoff still apply), a trigger clearing a wake-up only when a run that started
+  after it completes, and pg_cron `outlook-worker-tick` (every minute, secrets from Vault,
+  CREATED INACTIVE).
+- UI: Suggestions rail item + mobile Review tab with a pending badge (gated by
+  `SUGGESTION_REVIEW_ENABLED`); Settings sync status from persisted state only; the queue polls
+  pending counts every 30 s while visible.
+
+**Rollout order (not interchangeable):** apply migration → deploy `outlook-notifications` and
+`outlook-import-worker` from merged main → owner stores Vault secrets `outlook_worker_url` and
+`outlook_worker_secret` → enable `OUTLOOK_IMPORT_WORKER_ENABLED` (first run creates the subscription,
+validating the endpoint) → activate the cron job → live acceptance test (fresh two-way exchange →
+proposal while Funnl is closed → accepted in Funnl).

@@ -558,3 +558,58 @@ In order, with the state checked after each:
 
 Stop at the first step that does not hold. Steps 3, 5, 7, 8, 9, 10 and 13 are each
 separately authorized; approving the wording authorizes none of them.
+
+## F. Background syncing and change notifications — wording for review (NOT published)
+
+Status: draft for the owner's review. Nothing here is published, and no recorded consent is
+changed in place. The questions this section answers: does the background-sync slice
+(`docs/outlook-background-sync-plan.md`) store anything the published Outlook section does
+not already name, and does it change how reads run? Both answers are yes, narrowly.
+
+### What changes, factually
+
+1. **A Microsoft change-notification subscription exists per connected mailbox.** Funnl
+   asks Microsoft to POST a signal to Funnl's servers when a message is created in the
+   mailbox. Funnl stores: the subscription identifier Microsoft assigns, its expiry time, the
+   time of the last signal, a count of signals, and a one-way SHA-256 hash of the secret
+   Funnl gave Microsoft so that it can tell Microsoft's signals from anyone else's. The
+   secret itself is not stored. The signal Microsoft sends names the message that changed;
+   Funnl does not read or keep that identifier — it treats the signal only as "check this
+   mailbox now".
+2. **Reads now run without the user doing anything**, within minutes of new mail, and on a
+   routine schedule (about every 15 minutes) as a fallback. The published text already
+   describes offline_access as what lets Funnl keep reading "while you are not using the
+   app"; it did not say that reads are automatic or how soon after new mail they happen.
+3. **Four timing fields on the connection record**: when a signal last asked for a check,
+   what kind of signal it was, how many signals arrived, and when the last one arrived.
+   These are operational timestamps and counts, not message data.
+
+### Proposed addition to "What Funnl would keep" (one bullet)
+
+> a record of the mail-change subscription Funnl holds with Microsoft for your mailbox: the
+> identifier Microsoft assigns it, when it expires, when Microsoft last signalled a change,
+> how many signals have arrived, and a one-way hash of the secret Funnl uses to recognise
+> Microsoft's signals; plus, on the connection itself, the time and kind of the most recent
+> signal. A signal tells Funnl only that your mailbox changed; Funnl does not store the
+> message identifier it carries.
+
+### Proposed addition to "How a read runs" (one sentence, plus one)
+
+> Funnl asks Microsoft to notify its servers when new mail arrives, and starts a check
+> within a few minutes of that signal; it also checks about every fifteen minutes in case
+> a signal was missed. Checks run on Funnl's servers whether or not Funnl is open; nothing
+> runs in your browser.
+
+### Proposed addition to the just-in-time notice (one sentence, in the offline_access paragraph)
+
+> Funnl also asks Microsoft to tell its servers when new mail arrives, so a check can run
+> within minutes while Funnl is closed.
+
+### For the owner to confirm
+
+- Whether the subscription bullet belongs under "What Funnl would keep" (recommended: it is
+  a stored record with an identifier) or under connection details.
+- Whether "within minutes" is acceptable wording. The measured target is five minutes at
+  p95; Microsoft's own delivery is documented at under one minute on average, three at most.
+- Publication is a separate, owner-approved step, after the migration is applied and the
+  functions are deployed, and before the schedule is activated.

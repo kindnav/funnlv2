@@ -20,6 +20,11 @@
 //     be. Its response is a Microsoft-SHAPED url, and the navigation to it is intercepted
 //     and blocked, so nothing leaves this machine.
 //
+// Sections 7-9 cover the background-sync slice: the Suggestions navigation and its badge,
+// the Settings sync status rendered from persisted rows, and a proposal that arrives while
+// the queue is open. Microsoft and the worker are NOT run here; the rows they would leave
+// are written directly, and the harness says so where it does it.
+//
 // RUN: node tests/local/outlook-pilot-browser.mjs
 
 import { spawn, execFileSync, spawnSync } from 'node:child_process'
@@ -1235,6 +1240,149 @@ VALUES ('${PILOT_USER}','acct-2','consumers','personal','${PILOT_EMAIL}',
   // Leave no row behind for anything added after this.
   psql(`DELETE FROM public.microsoft_connections WHERE user_id='${PILOT_USER}';`,
     { tuplesOnly: false })
+
+  // ══ 7. Suggestions is reachable from the navigation, with the pending count ═══
+  // The queue used to be reachable only by URL or from a Dashboard entry that renders
+  // only when something is pending. A proposal written while Funnl was closed has to be
+  // discoverable: a rail item on desktop, a tab on mobile, both gated like the route.
+  console.log('\n7. Suggestions is reachable from the navigation, with the pending count')
+  const pendingMod = await import(pathToFileURL(join(ROOT, 'src/lib/pendingSuggestions.js')).href)
+  const pendingNow = () => Number(one(`SELECT (SELECT count(*) FROM public.interaction_candidates
+      WHERE user_id='${PILOT_USER}' AND status='pending')
+    + (SELECT count(*) FROM public.new_contact_candidates WHERE user_id='${PILOT_USER}' AND status='pending');`))
+  await page.goto(`${ORIGIN}/`)
+  await page.waitFor('!!document.querySelector(\'a[aria-label="Suggestions"]\')', 20000, 'the Suggestions rail item')
+  await sleep(800)   // the badge count is a separate RLS-scoped head request
+  const rail = await page.eval(`
+    const a = document.querySelector('a[aria-label="Suggestions"]')
+    const badge = a ? a.querySelector('[data-testid="suggestions-badge"]') : null
+    const all = [...document.querySelectorAll('a[href="/suggestions"]')]
+    const mobile = document.querySelector('nav[aria-label="Main navigation"] a[href="/suggestions"]')
+    return { href: a && a.getAttribute('href'), badge: badge ? badge.innerText.trim() : null,
+             links: all.length, mobileLabel: mobile ? mobile.getAttribute('aria-label') : null,
+             mobileHidden: mobile ? mobile.getClientRects().length === 0 : null }`)
+  check('the rail item links to /suggestions', rail.href === '/suggestions', JSON.stringify(rail))
+  const expectedBadge = pendingMod.badgeLabel(pendingNow())
+  check('its badge shows the pending count across BOTH queues (' + pendingNow() + ')', rail.badge === expectedBadge,
+    `badge=${rail.badge} expected=${expectedBadge}`)
+  check('the mobile Review tab is rendered too, hidden at desktop width by CSS',
+    rail.links >= 2 && typeof rail.mobileLabel === 'string' && rail.mobileLabel.startsWith('Suggestions') && rail.mobileHidden === true,
+    JSON.stringify(rail))
+  await page.click('a[aria-label="Suggestions"]')
+  await page.waitFor('location.pathname === "/suggestions"', 10000, 'navigation to the queue')
+  check('a real click on the rail item opens the queue - no direct URL needed',
+    await page.eval('return location.pathname') === '/suggestions')
+
+  // ══ 8. Settings shows the sync status from PERSISTED state ═══════════════
+  // Every line comes from a row: the sync state, the retry state, the connection flags,
+  // the subscription record. The rows are written here directly, which is exactly what the
+  // worker would leave behind; the worker itself is not run by this harness.
+  console.log('\n8. Settings shows the Outlook sync status from persisted state')
+  const CONN_ID = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
+  psql(`
+INSERT INTO public.microsoft_connections
+  (id, user_id, ms_account_id, ms_tenant_id, account_type, ms_email, scopes, status, consented_at, consent_policy_version)
+VALUES ('${CONN_ID}', '${PILOT_USER}', 'acct-3', 'consumers', 'personal', '${PILOT_EMAIL}',
+        ARRAY['Mail.Read','User.Read','offline_access'], 'active', now(), '${mod.OUTLOOK_DISCLOSURE_VERSION}');
+INSERT INTO public.outlook_sync_state
+  (connection_id, user_id, folder, sync_status, initial_import_done, last_success_at, last_attempt_at, last_run_complete)
+VALUES ('${CONN_ID}', '${PILOT_USER}', 'inbox',     'idle', true, now() - interval '5 minutes', now() - interval '5 minutes', true),
+       ('${CONN_ID}', '${PILOT_USER}', 'sentitems', 'idle', true, now() - interval '5 minutes', now() - interval '5 minutes', true);
+INSERT INTO public.outlook_subscriptions
+  (connection_id, user_id, subscription_id, client_state_hash, status, expires_at, last_notification_at)
+VALUES ('${CONN_ID}', '${PILOT_USER}', 'sub-browser', repeat('a', 64), 'active', now() + interval '2 days', now() - interval '5 minutes');`,
+  { tuplesOnly: false })
+  const statusBlock = async (expect, label) => {
+    await page.goto(`${ORIGIN}/settings`)
+    try {
+      await page.waitFor(`(() => { const el = document.querySelector('[data-testid="outlook-sync-status"]');
+        return !!el && new RegExp(${JSON.stringify(expect)}).test(el.innerText) })()`, 20000, label)
+    } catch (e) {
+      const diag = await page.eval(`const el = document.querySelector('[data-testid="outlook-sync-status"]');
+        return { block: el ? el.innerText : null, card: (document.body.innerText.match(/Outlook[^]*?(Disconnect Outlook|Connect Outlook)/) || [''])[0].slice(0, 600) }`)
+      console.error('    status block diagnostics: ' + JSON.stringify(diag))
+      throw e
+    }
+    return page.eval(`const el = document.querySelector('[data-testid="outlook-sync-status"]');
+      return { text: el.innerText, tone: el.getAttribute('data-tone'), live: el.getAttribute('aria-live') }`)
+  }
+  let st = await statusBlock('Up to date', 'the up-to-date status')
+  check('idle after a complete run reads "Up to date" (ok tone)', st.tone === 'ok', JSON.stringify(st))
+  check('it names the last successful sync FROM THE ROW: 5 minutes ago', /Last successful sync 5 minutes ago\./.test(st.text), st.text)
+  check('it says Funnl is listening for new mail, with the renewal from the subscription row',
+    /Listening for new mail \(renews in 2 days\)\./.test(st.text), st.text)
+  check('the status is announced politely', st.live === 'polite', JSON.stringify(st))
+  // A failed check with a scheduled retry: warn, with the code and the timing, still from rows.
+  psql(`UPDATE public.outlook_sync_state SET sync_status = 'error', last_error_code = 'graph_failed',
+          next_retry_at = now() + interval '20 minutes'
+        WHERE connection_id = '${CONN_ID}' AND folder = 'inbox';`, { tuplesOnly: false })
+  st = await statusBlock('did not finish', 'the retry status')
+  check('a scheduled retry is reported with its code and timing (warn tone)',
+    st.tone === 'warn' && /try again in 20 minutes \(graph_failed\)\./.test(st.text), JSON.stringify(st))
+  // The connection needs permission again: error tone, with the actionable instruction.
+  psql(`UPDATE public.microsoft_connections SET needs_reauth = true WHERE id = '${CONN_ID}';`, { tuplesOnly: false })
+  st = await statusBlock('Needs your permission again', 'the reauth status')
+  check('needs_reauth reads "Needs your permission again" (error tone) with the reconnect instruction',
+    st.tone === 'error' && /Disconnect Outlook/.test(st.text), JSON.stringify(st))
+  // New mail signalled, nothing running yet: the queued check is said, and nothing else is claimed.
+  psql(`UPDATE public.microsoft_connections SET needs_reauth = false, wake_requested_at = now(), wake_source = 'change',
+          wake_count = 1, last_wake_at = now() WHERE id = '${CONN_ID}';
+        UPDATE public.outlook_sync_state SET sync_status = 'idle', last_error_code = NULL, next_retry_at = NULL
+        WHERE connection_id = '${CONN_ID}';`, { tuplesOnly: false })
+  st = await statusBlock('a check is queued', 'the queued status')
+  check('a pending wake-up reads "New mail was signalled; a check is queued."',
+    /New mail was signalled; a check is queued\./.test(st.text) && st.tone === 'ok', JSON.stringify(st))
+  const leaksSt = ['token', 'ciphertext', 'nonce', 'service_role', 'rpc', 'sub-browser', 'aaaaaaaa']
+    .filter((w) => st.text.toLowerCase().includes(w))
+  check('the status block reveals no identifier, hash or secret', leaksSt.length === 0, JSON.stringify(leaksSt))
+
+  // ══ 9. a proposal that ARRIVES while the queue is open becomes visible ════
+  // SIMULATED ARRIVAL: the background worker is not run here. The row it would write is
+  // inserted directly while the page is open; the page's bounded head-count poll (every
+  // 30 s while visible) must notice it, reload, announce it, and raise the badge.
+  console.log('\n9. a proposal arriving while the queue is open becomes visible without a reload')
+  await page.goto(`${ORIGIN}/suggestions`)
+  await page.waitFor('/Suggestions/.test(document.body.innerText)', 20000, 'the queue')
+  await sleep(1500)   // let the first poll record the baseline count
+  const ARRIVAL = 'Priya Arrival'
+  check('the arriving contact is not shown yet',
+    (await page.eval(`return document.body.innerText.includes(${JSON.stringify(ARRIVAL)})`)) === false)
+  const badgeBefore = pendingNow()
+  psql(`
+INSERT INTO public.contacts (user_id, name, email) VALUES ('${PILOT_USER}', '${ARRIVAL}', 'priya@fund.test');
+INSERT INTO public.interaction_candidates
+  (user_id, contact_id, source, source_fingerprint, proposed_type, proposed_interaction_date, status,
+   source_last_state, context_expires_at, proposed_notes, draft_summary, summary_evidence, extraction_status)
+SELECT '${PILOT_USER}', c.id, 'outlook', repeat('9', 63) || 'a', 'Email', current_date, 'pending', 'active',
+       now() + interval '30 days', 'Arrived while the queue was open.', 'Arrived while the queue was open.',
+       'explicit_body', 'ai_extracted'
+  FROM public.contacts c WHERE c.user_id = '${PILOT_USER}' AND c.name = '${ARRIVAL}';`, { tuplesOnly: false })
+  const t0 = Date.now()
+  let arrived = false
+  try {
+    await page.waitFor(`document.body.innerText.includes(${JSON.stringify(ARRIVAL)})`, 75000, 'the arrived proposal')
+    arrived = true
+  } catch { /* recorded below */ }
+  const waitedMs = Date.now() - t0
+  check('the new proposal appeared WITHOUT navigation or reload', arrived, `${waitedMs} ms`)
+  check('within one poll interval plus a margin (< 45 s)', arrived && waitedMs < 45000, `${waitedMs} ms`)
+  check('the page announced the arrival in its status banner',
+    await page.eval(`return document.body.innerText.includes(${JSON.stringify(pendingMod.NEW_SUGGESTIONS_MESSAGE)})`))
+  await sleep(600)
+  const badgeAfter = await page.eval(`const b = document.querySelector('[data-testid="suggestions-badge"]'); return b ? b.innerText.trim() : null`)
+  check('and the rail badge rose with it', badgeAfter === pendingMod.badgeLabel(badgeBefore + 1),
+    `badge=${badgeAfter} expected=${pendingMod.badgeLabel(badgeBefore + 1)}`)
+  check('seeing the arrival saved NOTHING: no interaction exists for the arrived contact',
+    one(`SELECT count(*) FROM public.interactions WHERE user_id='${PILOT_USER}'
+      AND contact_id = (SELECT id FROM public.contacts WHERE user_id='${PILOT_USER}' AND name='${ARRIVAL}');`) === '0')
+  check('the arrived proposal is still pending, awaiting the user',
+    one(`SELECT count(*) FROM public.interaction_candidates WHERE user_id='${PILOT_USER}' AND source_fingerprint = repeat('9', 63) || 'a' AND status='pending';`) === '1')
+  // Leave no row behind.
+  psql(`DELETE FROM public.interaction_candidates WHERE user_id='${PILOT_USER}' AND source_fingerprint = repeat('9', 63) || 'a';
+        DELETE FROM public.contacts WHERE user_id='${PILOT_USER}' AND name='${ARRIVAL}';
+        DELETE FROM public.microsoft_connections WHERE id='${CONN_ID}';`, { tuplesOnly: false })
+  check('disconnect-style cleanup took the subscription record with the connection',
+    one(`SELECT count(*) FROM public.outlook_subscriptions WHERE connection_id='${CONN_ID}';`) === '0')
 
   console.log('\n── what was actually CLICKED in the browser ──')
   for (const c of clicked) console.log(`   ${c}`)

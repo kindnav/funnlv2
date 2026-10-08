@@ -20,6 +20,7 @@ import {
   loadOutlookStatus,
   runOutlookDisconnect,
 } from '../lib/outlookDisconnect'
+import OutlookSyncStatus from './OutlookSyncStatus'
 
 // Settings → Outlook. DORMANT: SettingsPage mounts this only when
 // VITE_OUTLOOK_CONNECTION_ENABLED is exactly 'true', which it is nowhere.
@@ -197,6 +198,10 @@ export default function OutlookConnectionCard() {
             Granted: {connection.scopes.join(', ') || 'none recorded'} · disclosure{' '}
             {connection.consentVersion || 'unknown'}
           </p>
+
+          {/* Persisted import state - last success, current activity, retry, listener - read by
+              a child from one authenticated RPC. The card itself still only connects. */}
+          <OutlookSyncStatus />
 
           {connection.needsReauth && (
             <p className="mt-3 rounded-xl border border-warning/40 bg-warning/10 p-3 text-sm text-warning">

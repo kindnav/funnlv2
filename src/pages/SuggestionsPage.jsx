@@ -15,6 +15,10 @@ import { dismissConfirmFocusTarget } from '../lib/dismissConfirmFocus'
 import InteractionSourceBadge from '../components/InteractionSourceBadge'
 import NewContactSuggestionCard from '../components/NewContactSuggestionCard'
 import { NCC_SELECT } from '../lib/newContactReview'
+import {
+  countPendingSuggestions, decideRefresh, SUGGESTIONS_REFRESH_INTERVAL_MS, SUGGESTIONS_CHANGED_EVENT,
+  NEW_SUGGESTIONS_MESSAGE,
+} from '../lib/pendingSuggestions'
 
 const CARD = 'bg-card border border-line-1 rounded-2xl p-[18px]'
 const SECTION_LABEL = 'block mb-[10px] font-mono text-[8.5px] font-semibold tracking-[1.5px] text-muted uppercase'
@@ -341,6 +345,37 @@ export default function SuggestionsPage() {
     loadInitial()
   }, [loadInitial])
 
+  // WHILE THE QUEUE IS OPEN, notice what arrives in the background. Proposals are written
+  // by a server process while Funnl may be closed - or open on this very page. The simplest
+  // supported way to see them is a bounded head-count of both pending queues every
+  // SUGGESTIONS_REFRESH_INTERVAL_MS while the tab is visible, and once more when it becomes
+  // visible again. A changed count reloads the first page; an increase says so. The page's
+  // own accept/dismiss adjust the known count, so they do not trigger a reload of their own.
+  const knownPendingRef = useRef(null)
+  useEffect(() => {
+    if (!SUGGESTION_REVIEW_ENABLED) return undefined
+    let cancelled = false
+    const poll = async () => {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return
+      const fresh = await countPendingSuggestions(supabase)
+      if (cancelled || typeof fresh !== 'number') return
+      const decision = decideRefresh(knownPendingRef.current, fresh)
+      knownPendingRef.current = fresh
+      if (!decision.reload) return
+      if (decision.announce) setBanner(NEW_SUGGESTIONS_MESSAGE)
+      window.dispatchEvent(new Event(SUGGESTIONS_CHANGED_EVENT))
+      loadInitial()
+    }
+    const timer = setInterval(poll, SUGGESTIONS_REFRESH_INTERVAL_MS)
+    document.addEventListener('visibilitychange', poll)
+    poll()
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+      document.removeEventListener('visibilitychange', poll)
+    }
+  }, [loadInitial])
+
   /** One more page of PROPOSALS, on its own cursor and its own single-flight. */
   const loadMoreProposals = useCallback(async () => {
     if (loadingProposalsRef.current) return
@@ -421,6 +456,10 @@ export default function SuggestionsPage() {
     setItems((prev) => prev.filter((c) => c.id !== id))
     setProposals((prev) => prev.filter((c) => c.id !== id))
     setBanner(message)
+    // The queue knows this row is gone; the poll must not read the drop as a change, and
+    // the navigation badge should drop with it.
+    if (typeof knownPendingRef.current === 'number' && knownPendingRef.current > 0) knownPendingRef.current -= 1
+    window.dispatchEvent(new Event(SUGGESTIONS_CHANGED_EVENT))
   }
 
   // Flag off → render nothing (route is also flag-gated).

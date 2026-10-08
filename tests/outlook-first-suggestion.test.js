@@ -563,6 +563,9 @@ test('the run module calls only the permitted RPCs', () => {
     'list_outlook_round_message_handles',
     'read_outlook_round_progress',
     'record_outlook_page_progress',
+    // Background sync added ONE: the change-notification subscription the run keeps alive,
+    // recorded through an RPC fenced on the run id like every other worker write.
+    'record_outlook_subscription_state',
     'release_outlook_sync_lease', 'renew_outlook_sync_lease',
     'reserve_due_outlook_connection', 'reset_outlook_round',
     'upsert_new_contact_candidate',

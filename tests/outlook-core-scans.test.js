@@ -459,6 +459,9 @@ test('applied migrations are unmodified; the only addition is the forward scope 
     '20261006000000_outlook_content_note_and_new_contact_write.sql',
     '20261007000000_outlook_round_message_retrieval.sql',
     '20261008000000_outlook_known_contact_follow_up_provenance.sql',
+    // Background sync: the wake-up signal, the subscription record, the notification RPC,
+    // the status RPC and the INACTIVE pg_cron tick. DROP/CREATE of the reservation again.
+    '20261009000000_outlook_change_notifications.sql',
   ]
   assert.deepStrictEqual(files.slice(-UNAPPLIED.length), UNAPPLIED,
     'the unapplied forward migrations must be the newest, in this order')
@@ -534,6 +537,9 @@ test('the only Outlook Edge Functions are the two OAuth entrypoints and the dorm
   // separately reviewed slice and must not appear silently.
   const ALLOWED = new Set([
     'outlook-oauth-start', 'outlook-oauth-callback', 'outlook-import-worker',
+    // The change-notification endpoint (background sync). Its dormancy is asserted in
+    // tests/outlook-change-notifications.test.js through the real handler.
+    'outlook-notifications',
   ])
   const dirs = readdirSync(join(ROOT, 'supabase/functions'), { withFileTypes: true })
     .filter((d) => d.isDirectory()).map((d) => d.name)
@@ -606,7 +612,7 @@ test('config.toml pins verify_jwt for every Outlook function, and only those', (
   const sections = [...cfg.matchAll(/^\[functions\.([^\]]+)\]/gm)].map((m) => m[1])
   const outlook = sections.filter((n) => /outlook|microsoft|graph/i.test(n))
   assert.deepStrictEqual(outlook.sort(),
-    ['outlook-import-worker', 'outlook-oauth-callback', 'outlook-oauth-start'])
+    ['outlook-import-worker', 'outlook-notifications', 'outlook-oauth-callback', 'outlook-oauth-start'])
   // The start is user-initiated and must verify the caller's JWT. The callback
   // receives Microsoft's form_post, which carries no Supabase JWT, so platform
   // verification must be off there or every completion would be rejected before
@@ -619,6 +625,9 @@ test('config.toml pins verify_jwt for every Outlook function, and only those', (
   }
   assert.strictEqual(verifyJwtFor('outlook-oauth-start'), 'true')
   assert.strictEqual(verifyJwtFor('outlook-oauth-callback'), 'false')
+  // Microsoft Graph carries no Supabase JWT either; the endpoint authenticates each
+  // notification by subscription id and clientState hash in the database instead.
+  assert.strictEqual(verifyJwtFor('outlook-notifications'), 'false')
   assert.ok(cfg.includes('[functions.delete-account]'), 'the existing delete-account section is intact')
   assert.ok(/verify_jwt = true/.test(cfg.slice(cfg.indexOf('[functions.delete-account]'))),
     'the merged delete-account JWT setting is unchanged')
