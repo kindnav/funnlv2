@@ -391,6 +391,9 @@ test('the disclosure is longer than before and still one paragraph per idea', ()
   // the check does from what it cannot do. The overclaim hid in the join.
   assert.strictEqual(DISCLOSURE_PARAGRAPH_COUNT, 23,
     'the paragraph count is pinned; change it deliberately with the text')
+  // Published 2026-10-09: paragraph 3 ends with the approved background-sync sentence.
+  assert.ok(OUTLOOK_DISCLOSURE_PARAGRAPHS[2].endsWith("Funnl also asks Microsoft to tell its servers when new mail arrives, so a check can start automatically within minutes while Funnl is closed."),
+    'the just-in-time notice carries the approved automatic-check sentence, word for word')
   assert.strictEqual(DISCLOSURE_PARAGRAPH_COUNT, OUTLOOK_DISCLOSURE_PARAGRAPHS.length,
     'the rendered count is derived from the array, so the card shows all of them')
   for (const para of OUTLOOK_DISCLOSURE_PARAGRAPHS) {

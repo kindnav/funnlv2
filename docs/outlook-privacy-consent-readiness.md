@@ -74,7 +74,7 @@ re-reads the array and fails if this section paraphrases any of them.
 
 > 2. Access is restricted to one designated Funnl-controlled test account. Funnl’s servers refuse a connection request from any other account.
 
-> 3. You would grant six Microsoft scopes. Two of them read data, and both are read-only: Mail.Read (“Read user mail”) and User.Read (“Sign in and read user profile”). Three are the standard sign-in scopes openid, profile and email. The sixth, offline_access, grants no new access of its own — it is what lets Funnl keep using those two read permissions while you are not using the app, so a read can run without asking you to sign in again.
+> 3. You would grant six Microsoft scopes. Two of them read data, and both are read-only: Mail.Read (“Read user mail”) and User.Read (“Sign in and read user profile”). Three are the standard sign-in scopes openid, profile and email. The sixth, offline_access, grants no new access of its own — it is what lets Funnl keep using those two read permissions while you are not using the app, so a read can run without asking you to sign in again. Funnl also asks Microsoft to tell its servers when new mail arrives, so a check can start automatically within minutes while Funnl is closed.
 
 > 4. Microsoft grants those two more broadly than Funnl uses them. Mail.Read is granted at the mailbox level: it would technically permit reading message bodies and attachments anywhere in your mailbox. User.Read permits your profile and basic company information; Funnl asks it for three fields and uses them only to record which mailbox is connected. Neither requires administrator consent by default, but a work or school tenant can be configured to require an administrator to approve the app, and then you may not be able to consent for yourself.
 
@@ -123,8 +123,12 @@ each as a paragraph and shows nothing else as disclosure.
 `ol-disc-<first 32 hex of SHA-256 over the paragraphs joined by newline>`, so any edit
 produces a different version and the server's exact-string gate refuses the stale one.
 
-The derived version for this text is **`ol-disc-e3e2b1714b453c2904e3ed08cb232097`**
-(fingerprint `e3e2b1714b453c2904e3ed08cb232097`). **Not approved, and configured nowhere.**
+The derived version for this text is **`ol-disc-6d1ddd67f51d5b3bfd8d3801c50271a7`**
+(fingerprint `6d1ddd67f51d5b3bfd8d3801c50271a7`), **published October 9, 2026** (background-sync wording approved at
+PR #76 head 505523f). The previous content-release version `ol-disc-e3e2b1714b453c2904e3ed08cb232097`
+(October 6, 2026) is what the three worker requirements still name until the separately
+authorized cutover moves them to this value together. The paragraph below about `null`
+constants is historical (they were set on the content release).
 The server's `OUTLOOK_DISCLOSURE_VERSION` is not set to it. What that variable holds
 today has **not been read from this branch**, and is not asserted here either way -
 see section 0, which records that it WAS configured in Production for the

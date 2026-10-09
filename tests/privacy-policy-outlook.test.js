@@ -574,13 +574,13 @@ test('human-access wording is precise and includes the Anthropic safety exceptio
 // ── Date guard and non-regression ────────────────────────────────────────────
 console.log('\npublication date guard')
 
-test('the public date is the actual October 6, 2026 publication date', () => {
-  // Owner/product decision: publish THIS content-release wording dated 2026-10-06, the
-  // actual New York date of the publishing commit. October 5 and September 27 covered
-  // the superseded envelope-only text and are historical. If a later merge moves the
-  // day, this pin must move with it in that same commit - which is the point of pinning
-  // it rather than leaving it free.
-  assert.ok(POLICY.includes('Last updated: October 6, 2026'),
+test('the public date is the actual October 9, 2026 publication date', () => {
+  // Owner/product decision: publish the background-sync wording dated 2026-10-09, the
+  // actual New York date of the publishing commit. October 6 (content release), October 5
+  // and September 27 (envelope-only) are historical. If a later merge moves the day, this
+  // pin must move with it in that same commit - which is the point of pinning it rather
+  // than leaving it free.
+  assert.ok(POLICY.includes('Last updated: October 9, 2026'),
     'the approved publication date must be present')
   assert.ok(!/Last updated: September 2[07], 2026/.test(POLICY),
     'a superseded Last-updated date must be gone')
@@ -590,10 +590,13 @@ test('the public date is the actual October 6, 2026 publication date', () => {
     'exactly one public date line')
   // Once in the public line, twice in the source decision comment (the approval and
   // the recheck instruction). Pinned so a stray extra date cannot creep in unnoticed.
-  assert.strictEqual((POLICY.match(/October 6, 2026/g) || []).length, 3,
+  assert.strictEqual((POLICY.match(/October 9, 2026/g) || []).length, 3,
     'one public date line plus the two source-comment mentions')
-  assert.strictEqual((POLICY.match(/Last updated: October 6, 2026/g) || []).length, 1,
+  assert.strictEqual((POLICY.match(/Last updated: October 9, 2026/g) || []).length, 1,
     'exactly one public Last-updated line carries the date')
+  // The content-release approval date survives ONCE, in the comment, as history.
+  assert.strictEqual((POLICY.match(/October 6, 2026/g) || []).length, 1,
+    'the superseded-as-a-date content-release approval is recorded once, as history')
   // The two superseded approval dates survive ONCE EACH, in the comment, recorded as
   // history - so a replaced approval stays auditable rather than being quietly erased.
   // October 5 is the envelope-only wording this release replaces; September 27 is the
@@ -609,6 +612,16 @@ test('the public date is the actual October 6, 2026 publication date', () => {
   // extract sent to Anthropic, not just a reworded disclosure.
   assert.ok(/selected message-body\s+processing/.test(POLICY),
     'the recorded approval names the body processing it authorizes')
+})
+
+test('the approved background-sync wording is published VERBATIM (activation packet section 2)', () => {
+  const a = "a record of the mail-change subscription Funnl holds with Microsoft for your mailbox: the identifier Microsoft assigns it, when it expires, when Microsoft last signalled a change, how many signals have arrived, and a one-way hash of the secret Funnl uses to recognise Microsoft's signals; plus, on the connection itself, the time and kind of the most recent signal. A signal tells Funnl only that your mailbox changed; Funnl does not store the message identifier it carries."
+  const b = "Funnl asks Microsoft to notify its servers when new mail arrives, and aims to start a check within a few minutes of that signal; it also runs a routine check, normally about every fifteen minutes, in case a signal was missed. These checks run automatically on Funnl's servers while Funnl is closed; nothing runs in your browser."
+  assert.ok(OUTLOOK.includes(a), 'the subscription-record bullet is present, word for word')
+  assert.ok(OUTLOOK.includes(b), 'the two automatic-check sentences are present, word for word')
+  assert.ok(/How a read would run<\/strong> — Funnl asks Microsoft/.test(OUTLOOK), 'placed as its own bullet in the Outlook section')
+  // The timing is stated as an aim and a normal interval, never as a guarantee or a figure.
+  assert.ok(!/within five minutes|5 minutes|p95/i.test(OUTLOOK), 'no latency figure or percentile reaches the user-facing text')
 })
 
 test('the section still carries a mandatory date-recheck instruction and an approval that is not legal advice', () => {

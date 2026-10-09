@@ -1,6 +1,8 @@
 # Outlook background sync — implementation plan, activation plan and completion criteria
 
-Status: **implemented in Draft PR #76, nothing applied or deployed** (base `main` =
+Status: **PR #76 merged 2026-10-09 (`4bc50c8`); migration applied; both functions deployed; wording
+published (version `ol-disc-6d1ddd67f51d5b3bfd8d3801c50271a7`); Vault, cutover, consent, bootstrap, listener verification and
+activation still pending** (base `main` =
 `f1c95bc7e01532f4fe9465b5faa5f8341b8827fa`, the PR #75 merge).
 
 The product goal this serves: Funnl removes manual networking data entry. It detects a
@@ -123,6 +125,7 @@ and the notice paragraph in `src/lib/outlookDisclosure.js`.
 notice paragraphs (`computeDisclosureVersion()`), so the new paragraph yields a **new**
 `ol-disc-<32 hex>` value; `verifyDisclosureIntegrity()` refuses the control until
 `DISCLOSURE_FINGERPRINT` matches the new text. Record the new value in this plan.
+**Recorded 2026-10-09:** the published notice derives to `ol-disc-6d1ddd67f51d5b3bfd8d3801c50271a7` (fingerprint `6d1ddd67f51d5b3bfd8d3801c50271a7`).
 
 **C. Server and worker version updates — ONE new value, carried everywhere.** Every
 disclosure version is the digest of the ENTIRE notice, and each requirement compares the

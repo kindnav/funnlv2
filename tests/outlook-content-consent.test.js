@@ -58,10 +58,15 @@ test('the APPROVED content version is configured, and only it is allowed', () =>
     'ol-disc-e3e2b1714b453c2904e3ed08cb232097',
     'the configured version must be the one derived from the approved text')
 
-  // DERIVED, NOT TYPED. The constant must equal what the shipped paragraphs produce,
-  // or a recorded consent would name a document nobody saw.
-  assert.strictEqual(REQUIRED_CONTENT_CONSENT_VERSION, OUTLOOK_DISCLOSURE_VERSION,
-    'the configured version must match the notice the card actually renders')
+  // CUTOVER PENDING (published 2026-10-09, activation packet step 4): the notice gained the
+  // background-sync sentence, so the shipped version MOVED ON while this requirement, by
+  // deliberate order, has not. The three worker requirements move to the published value
+  // together in the separately authorized step 5 - never one ahead of approval. Until then
+  // a connection that consents under the PUBLISHED notice is refused by this gate as stale.
+  assert.notStrictEqual(REQUIRED_CONTENT_CONSENT_VERSION, OUTLOOK_DISCLOSURE_VERSION,
+    'the published notice is ahead of the worker requirement until the cutover')
+  assert.strictEqual(contentProcessingAllowed(OUTLOOK_DISCLOSURE_VERSION).reason, 'content_consent_stale',
+    'consent under the newly published notice is refused until the cutover moves the requirement')
   assert.ok(verifyDisclosureIntegrity(), 'and the notice must pass its own integrity check')
 
   // THE LIVE PILOT'S CONSENT IS STALE, not merely different: the envelope-only text
@@ -150,7 +155,8 @@ test('both gates are configured, and the live pilot is STALE against both', () =
   // the gate is open in principle and that connection does not satisfy it.
   assert.strictEqual(REQUIRED_THIRD_PARTY_CONSENT_VERSION,
     'ol-disc-e3e2b1714b453c2904e3ed08cb232097')
-  assert.strictEqual(REQUIRED_THIRD_PARTY_CONSENT_VERSION, OUTLOOK_DISCLOSURE_VERSION)
+  // Cutover pending, as for the content twin: the published notice is ahead of this requirement.
+  assert.notStrictEqual(REQUIRED_THIRD_PARTY_CONSENT_VERSION, OUTLOOK_DISCLOSURE_VERSION)
   // Two constants, deliberately, even carrying the same value: they answer two
   // questions, and turning the model path off while keeping body reading must stay
   // expressible by changing one of them.

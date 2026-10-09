@@ -559,10 +559,12 @@ In order, with the state checked after each:
 Stop at the first step that does not hold. Steps 3, 5, 7, 8, 9, 10 and 13 are each
 separately authorized; approving the wording authorizes none of them.
 
-## F. Background syncing and change notifications — wording for review (NOT published)
+## F. Background syncing and change notifications — wording (PUBLISHED October 9, 2026)
 
-Status: draft for the owner's review. Nothing here is published, and no recorded consent is
-changed in place. The questions this section answers: does the background-sync slice
+Status: **approved by the owner at PR #76 head 505523f and published October 9, 2026**
+(activation packet step 4). Derived version of the published notice: `ol-disc-6d1ddd67f51d5b3bfd8d3801c50271a7`.
+The three worker requirements still name the content-release version until the separately
+authorized cutover (step 5). No recorded consent is changed in place. The questions this section answers: does the background-sync slice
 (`docs/outlook-background-sync-plan.md`) store anything the published Outlook section does
 not already name, and does it change how reads run? Both answers are yes, narrowly.
 

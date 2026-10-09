@@ -36,7 +36,7 @@ function PrivacyPage() {
             <span className="font-display font-bold text-[20px] text-hi">Funnl</span>
           </div>
           <h1 className="font-display text-[32px] font-bold text-hi tracking-[-0.5px] mb-3">Privacy Policy</h1>
-          <p className="text-[14px] text-low">Last updated: October 6, 2026</p>
+          <p className="text-[14px] text-low">Last updated: October 9, 2026</p>
           <div className="mt-4 px-4 py-3 bg-elevated border border-line-1 rounded-xl">
             <p className="text-[13.5px] text-muted leading-relaxed">
               This policy explains, in plain language, what Funnl collects, how it is used, who processes it, and how to remove it.
@@ -170,17 +170,20 @@ function PrivacyPage() {
             its contact, date and fingerprint. Do not describe that row as empty or
             as deleted.
 
-            PUBLICATION DECISION: the owner approved the CONTENT-RELEASE wording for
-            publication, dated October 6, 2026 - the actual New York date of the
-            commit that publishes it. The approval covers selected message-body
-            processing and sending the disclosed minimized extract to Anthropic,
-            including the identifying information that may remain in message text and
-            signatures. The earlier October 5, 2026 and September 27, 2026 approvals
-            covered the superseded envelope-only wording and are historical. Each is a
-            product decision and not legal advice, and is not evidence that outside
+            PUBLICATION DECISION: the owner approved the BACKGROUND-SYNC wording - the
+            mail-change subscription record under "What Funnl would keep", the "How a
+            read would run" bullet, and one sentence in the just-in-time notice - at PR
+            #76 head 505523f, published October 9, 2026 - the actual New York date of
+            the commit that publishes it. The October 6, 2026 content-release approval
+            stands: it covers selected message-body processing and sending the
+            disclosed minimized extract to Anthropic, including the identifying
+            information that may remain in message text and signatures. The earlier
+            October 5, 2026 and September 27, 2026 approvals covered the superseded
+            envelope-only wording and are historical. Each is a product decision and
+            not legal advice, and is not evidence that outside
             counsel reviewed or approved this policy.
 
-            MANDATORY AT PUBLICATION: the date above is October 6, 2026. If the merge
+            MANDATORY AT PUBLICATION: the date above is October 9, 2026. If the merge
             that publishes this section happens on any later day, the "Last updated"
             date MUST be changed again in that same commit.
             tests/privacy-policy-outlook.test.js pins the conditional framing and the
@@ -238,6 +241,8 @@ function PrivacyPage() {
               and whether the message is a draft. Only for the messages that survive that check would Funnl make a second, bounded request
               for the message text — Microsoft's plain-text body projections, including the "unique body" that excludes the quoted reply
               history — together with a short, fixed list of headers that identify automated and bulk mail.</li>
+
+            <li><strong className="text-hi font-semibold">How a read would run</strong> — Funnl asks Microsoft to notify its servers when new mail arrives, and aims to start a check within a few minutes of that signal; it also runs a routine check, normally about every fifteen minutes, in case a signal was missed. These checks run automatically on Funnl's servers while Funnl is closed; nothing runs in your browser.</li>
 
             <li><strong className="text-hi font-semibold">The only headers Funnl would look at</strong> — exactly five:
               <strong className="text-hi font-semibold"> Auto-Submitted</strong>, <strong className="text-hi font-semibold">Precedence</strong>,
@@ -349,6 +354,7 @@ function PrivacyPage() {
                   records above, are removed by the same four events, and are also removed if you delete your account. The
                   <strong className="text-hi font-semibold"> same 24-hour limit and the same absent sweep apply</strong>: reaching the deadline
                   does not remove them, so a read abandoned without one of those events leaves its references stored;</li>
+                <li>a record of the mail-change subscription Funnl holds with Microsoft for your mailbox: the identifier Microsoft assigns it, when it expires, when Microsoft last signalled a change, how many signals have arrived, and a one-way hash of the secret Funnl uses to recognise Microsoft's signals; plus, on the connection itself, the time and kind of the most recent signal. A signal tells Funnl only that your mailbox changed; Funnl does not store the message identifier it carries.</li>
               </ul>
             </li>
 
