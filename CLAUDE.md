@@ -253,6 +253,7 @@ supabase/
 - `supabase/migrations/20260713185900_harden_handle_new_user.sql` — revokes EXECUTE on `public.handle_new_user()` from `PUBLIC`, `anon`, and `authenticated`. Applied to production 2026-07-13 via `supabase db push`. Post-migration verification: PUBLIC absent from explicit ACL; `anon` and `authenticated` effective execute = false; trigger `on_auth_user_created` still enabled; function owner, SECURITY DEFINER, and search_path unchanged. Requires a real signup/profile creation test to confirm trigger path is unaffected.
 - `supabase/migrations/20260721000000_add_outreach_status.sql` — adds nullable `outreach_status text` column to `public.interactions` with named CHECK constraint `interactions_outreach_status_check` (five allowed values). Applied to production 2026-07-24 via `supabase db push --linked`. Column verified: text, nullable YES, no default. Constraint verified: correct five-value check, NULL permitted. Existing 5 interaction rows unaffected (all `outreach_status = NULL`). RLS and all four ownership policies verified unchanged.
 - `supabase/migrations/20260729000000_add_followup_completion.sql` — adds nullable `follow_up_completed_at timestamptz`, `follow_up_previous_date date`, and `follow_up_completion_method text` columns to `public.interactions`, with named CHECK constraint `interactions_follow_up_completion_method_check` (allowed values: `mark_done`, `log_result`). Applied to production 2026-07-29. Powers the "Recently Completed" section, Undo, and completion-method tracking on `/followups`.
+- `supabase/migrations/20261009000000_outlook_change_notifications.sql` — Outlook background sync: wake-up columns on `microsoft_connections`, `outlook_subscriptions` (RLS on, no user policy), `wake_cutoff_at`, the notification RPCs (single and batch), `record_outlook_subscription_state`, `get_my_outlook_sync_status()` (authenticated), the reservation treating a pending wake as due, the consume trigger, and pg_cron `outlook-worker-tick` created INACTIVE. **Applied to production 2026-10-09** (ledger: nothing pending) and catalog-verified: four worker RPCs one overload each, SECURITY DEFINER, service_role-only.
 - `supabase/migrations/20260727000000_add_pro_trials.sql` — creates `public.pro_trials` table with explicit REVOKE/GRANT hardening (no INSERT/UPDATE/DELETE for authenticated), updates `handle_new_user()` to also create a trial eligibility row on signup (auto-confirmed accounts start trial immediately; normal flow starts with NULL/NULL), adds `on_email_confirmed` DB trigger (`AFTER UPDATE OF email_confirmed_at ON auth.users`) that activates the trial on the NULL→non-NULL transition, and creates two RPCs: `start_my_pro_trial()` (SECURITY DEFINER, recovery mechanism only) and `get_my_pro_access_status()` (SECURITY INVOKER, server-authoritative entitlement using DB clock). All functions use `SET search_path = ''` with fully qualified object names. **NOT YET APPLIED to production** — branch `review/pro-trial-7-days`, Draft PR #23 pending. Do not apply without explicit approval.
 
 **Pro trial production rollout order (do not deviate):**
@@ -1319,7 +1320,7 @@ When billing is ready: update `canUseAI()` to read Stripe subscription status in
 
 ---
 
-## Outlook background sync (Draft PR, branch `feature/outlook-background-sync`, base `f1c95bc`)
+## Outlook background sync (PR #76, merged 2026-10-09 as `4bc50c8`; rollout in progress)
 
 **Goal:** remove manual networking data entry. Funnl detects a two-way exchange whichever person
 started it, prepares a contact-plus-interaction or interaction proposal with both sides' context,
@@ -1327,7 +1328,14 @@ and the user reviews before anything is saved. This slice makes the pipeline run
 makes its output discoverable. Full plan, latency target, measurement and next workstreams:
 `docs/outlook-background-sync-plan.md`. Disclosure wording for review: `docs/outlook-content-disclosure-draft.md` section F.
 
-**How it works (nothing applied or deployed yet):**
+**Rollout state (2026-10-09):** migration `20261009000000` APPLIED; `outlook-notifications` v1 and
+`outlook-import-worker` v40 DEPLOYED (verify_jwt=false, closures byte-identical to main); background
+disclosure wording PUBLISHED (notice version `ol-disc-6d1ddd67f51d5b3bfd8d3801c50271a7`, policy "Last updated" October 9, 2026);
+Vault secrets NOT yet present on the project; the three worker consent requirements and the server
+`OUTLOOK_DISCLOSURE_VERSION` still at the content-release value pending the cutover; worker flag
+absent; cron job inactive. Owner packet: `docs/outlook-background-activation-packet.md`.
+
+**How it works:**
 - `outlook-notifications` Edge Function (`verify_jwt=false`): Microsoft Graph's validation handshake
   and change notifications. A notification is a WAKE-UP only — the database matches the subscription
   id and the SHA-256 of the clientState, records `wake_requested_at` on the connection, the endpoint

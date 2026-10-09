@@ -112,7 +112,8 @@ export const OUTLOOK_DISCLOSURE_PARAGRAPHS = Object.freeze([
     + 'are the standard sign-in scopes openid, profile and email. The sixth, offline_access, '
     + 'grants no new access of its own — it is what lets Funnl keep using those two read '
     + 'permissions while you are not using the app, so a read can run without asking you to '
-    + 'sign in again.',
+    + 'sign in again. Funnl also asks Microsoft to tell its servers when new mail arrives, so a '
+    + 'check can start automatically within minutes while Funnl is closed.',
   'Microsoft grants those two more broadly than Funnl uses them. Mail.Read is granted at '
     + 'the mailbox level: it would technically permit reading message bodies and attachments '
     + 'anywhere in your mailbox. User.Read permits your profile and basic company '
@@ -270,7 +271,15 @@ export function disclosureFingerprint (paragraphs) {
 // text it shows. It is deliberately NOT kept as an accepted alternative here: the two
 // documents say opposite things about body reading, so that connection must disconnect
 // and reconnect rather than be treated as having agreed to this one.
-export const DISCLOSURE_FINGERPRINT = 'e3e2b1714b453c2904e3ed08cb232097'
+// THE BACKGROUND-SYNC RELEASE (published October 9, 2026, approved at PR #76 head 505523f):
+// paragraph 3 gained one sentence - Funnl asks Microsoft to tell its servers when new mail
+// arrives, so a check can start automatically within minutes while Funnl is closed. The
+// previous value, e3e2b1714b453c2904e3ed08cb232097, identified the content-release text
+// (October 6, 2026); it is what the three worker requirements still name until the separately
+// authorized cutover moves them to this value together (activation packet, step 5). Until
+// then a connection consented under THIS notice is refused by those gates as stale - by
+// design, so that no requirement is ever raised ahead of its approval.
+export const DISCLOSURE_FINGERPRINT = '6d1ddd67f51d5b3bfd8d3801c50271a7'
 
 /**
  * True only when the paragraphs still match the fingerprint the version was
