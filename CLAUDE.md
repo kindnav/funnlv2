@@ -90,6 +90,8 @@ docs/
   phase-4-pilot-plan.md    Pilot objective, target group, core session tasks, primary funnel, activation/retention definitions, feedback process, interview questions, founder checklist, decision rules
   posthog-pilot-dashboard.md  Setup instructions for 12 PostHog insights: signup funnel, confirmation conversion trend, official activation funnel (email_confirmed → activation_completed), activation milestone diagnostic, first core-loop diagnostic, time to activation, WAU (Core product activity Action), follow-up loop, CSV adoption, AI adoption, 7-day retention (activation_completed cohort, 30%/25% thresholds), error monitoring
   pilot-feedback-guide.md  5-minute observation checklist, non-leading questions, post-session questions, severity system (P0–P3), feature request frequency rule
+  outlook-background-sync-plan.md  Background-sync slice: latency target, fixture vs live evidence, activation plan (section 6) with the one-value consent cutover, next workstreams
+  outlook-background-activation-packet.md  Owner packet: exact background-disclosure wording for approval + ordered activation with a gate per step, rollback, milestone, subsequent workstreams
 supabase/
   templates/
     confirm-signup.html    Custom HTML email template for signup confirmation. MUST be pasted into Supabase → Auth → Email Templates → Confirm signup. Uses {{ .ConfirmationURL }} for the confirmation link.

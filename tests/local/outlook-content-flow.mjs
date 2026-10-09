@@ -215,7 +215,10 @@ const BODIES = {
   'AAkALgAAnew-in-1':
     'I spoke to our analyst programme lead and she is happy to review your '
     + 'application for the summer cohort. Could you send an updated CV by Friday, '
-    + 'and let me know whether you prefer the markets or the coverage track?',
+    + 'and let me know whether you prefer the markets or the coverage track?'
+    // A signature block the sanitizer splits off (short, trailing, cue-bearing), which is
+    // the input evidence for name_evidence = 'explicit_signature' above. No address.
+    + ['', '', 'Best,', 'Priya Nair', 'Analyst Programme Team | Harbour Street Partners'].join(String.fromCharCode(10)),
   'AAkALgAAnew-out-1':
     'That is really kind of you. I will send the CV tomorrow - markets is the '
     + 'better fit given the modelling work I did last summer.',
@@ -289,14 +292,16 @@ function provider (counts, opts = {}) {
       if (/analyst programme/i.test(text)) {
         return modelResponse(opts.newContactPayload ?? {
           result: 'new_contact_suggestion',
+          // THE CURRENT STRICT CONTRACT (#73): the name triple, summary and its evidence,
+          // follow_up and interaction_date - nothing else. The company/role/how_met/
+          // linkedin_url triples and the tags array were removed from the model contract;
+          // validateDraftResponse rejects any of them as `extra_keys`, which is exactly what
+          // this fixture produced until it was brought up to date (reproduced before the
+          // repair). The name's evidence is REAL: the inbound body below ends in a
+          // signature block that states it.
           name: 'Priya Nair',
           name_evidence: 'explicit_signature',
           name_confidence: 'high',
-          company: null, company_evidence: null, company_confidence: null,
-          role: null, role_evidence: null, role_confidence: null,
-          how_met: null, how_met_evidence: null, how_met_confidence: null,
-          linkedin_url: null, linkedin_url_evidence: null, linkedin_url_confidence: null,
-          tags: [],
           summary: 'She put your application in front of the analyst programme lead '
             + 'and asked for an updated CV by Friday, plus your track preference.',
           summary_evidence: 'explicit_body',
@@ -664,6 +669,18 @@ async function main () {
         assert.ok(!b.includes(leak), `the request leaked ${leak}`)
       }
     }
+  })
+
+  await test('THE NAME EVIDENCE IS IN THE INPUT: the stranger request carried her signature block, naming her', () => {
+    // name_evidence = 'explicit_signature' is only honest if the model was shown a signature
+    // that states the name. The sanitizer split the trailing block off the inbound body and
+    // the request builder sent it under the CONTACT signature marker.
+    const stranger = counts.modelBodies.find((b) => /analyst programme/i.test(b))
+    assert.ok(stranger, 'the stranger conversation reached the model')
+    assert.ok(stranger.includes('[CONTACT signature block]'), 'the signature block was sent as such')
+    assert.ok(stranger.includes('Priya Nair'), 'and it states the proposed name')
+    const known = counts.modelBodies.find((b) => /insight week/i.test(b))
+    assert.ok(known && !known.includes('Priya Nair'), 'the other conversation did not carry it')
   })
 
   // ════════════════════════════════════════════════════════════════════════
