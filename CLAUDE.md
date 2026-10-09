@@ -92,6 +92,9 @@ docs/
   pilot-feedback-guide.md  5-minute observation checklist, non-leading questions, post-session questions, severity system (P0–P3), feature request frequency rule
   outlook-background-sync-plan.md  Background-sync slice: latency target, fixture vs live evidence, activation plan (section 6) with the one-value consent cutover, next workstreams
   outlook-background-activation-packet.md  Owner packet: exact background-disclosure wording for approval + ordered activation with a gate per step, rollback, milestone, subsequent workstreams
+scripts/
+  outlook-worker-flag.ps1    Owner-run: OUTLOOK_IMPORT_WORKER_ENABLED status / enable / disable on Production (names only, never values or digests); used only inside authorized windows
+  outlook-vault-secrets.ps1  Owner-run: stores Vault outlook_worker_url + outlook_worker_secret by masked input, statement on psql stdin, names-only read-back
 supabase/
   templates/
     confirm-signup.html    Custom HTML email template for signup confirmation. MUST be pasted into Supabase → Auth → Email Templates → Confirm signup. Uses {{ .ConfirmationURL }} for the confirmation link.

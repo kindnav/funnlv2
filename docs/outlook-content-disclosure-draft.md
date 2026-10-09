@@ -576,8 +576,8 @@ not already name, and does it change how reads run? Both answers are yes, narrow
    secret itself is not stored. The signal Microsoft sends names the message that changed;
    Funnl does not read or keep that identifier — it treats the signal only as "check this
    mailbox now".
-2. **Reads now run without the user doing anything**, within minutes of new mail, and on a
-   routine schedule (about every 15 minutes) as a fallback. The published text already
+2. **Reads now run without the user doing anything**: a check aims to start within minutes
+   of new mail, and a routine check runs normally about every 15 minutes as a fallback. The published text already
    describes offline_access as what lets Funnl keep reading "while you are not using the
    app"; it did not say that reads are automatic or how soon after new mail they happen.
 3. **Four timing fields on the connection record**: when a signal last asked for a check,
@@ -595,22 +595,26 @@ not already name, and does it change how reads run? Both answers are yes, narrow
 
 ### Proposed addition to "How a read runs" (one sentence, plus one)
 
-> Funnl asks Microsoft to notify its servers when new mail arrives, and starts a check
-> within a few minutes of that signal; it also checks about every fifteen minutes in case
-> a signal was missed. Checks run on Funnl's servers whether or not Funnl is open; nothing
-> runs in your browser.
+> Funnl asks Microsoft to notify its servers when new mail arrives, and aims to start a
+> check within a few minutes of that signal; it also runs a routine check, normally about
+> every fifteen minutes, in case a signal was missed. These checks run automatically on
+> Funnl's servers while Funnl is closed; nothing runs in your browser.
 
 ### Proposed addition to the just-in-time notice (one sentence, in the offline_access paragraph)
 
-> Funnl also asks Microsoft to tell its servers when new mail arrives, so a check can run
-> within minutes while Funnl is closed.
+> Funnl also asks Microsoft to tell its servers when new mail arrives, so a check can start
+> automatically within minutes while Funnl is closed.
 
 ### For the owner to confirm
 
 - Whether the subscription bullet belongs under "What Funnl would keep" (recommended: it is
   a stored record with an identifier) or under connection details.
-- Whether "within minutes" is acceptable wording. The measured target is five minutes at
-  p95; Microsoft's own delivery is documented at under one minute on average, three at most.
+- Timing wording (recommended, as drafted above): notification-triggered checks "aim to
+  start within a few minutes"; routine checks run "normally about every fifteen minutes".
+  The five-minutes-at-p95 figure is an **unmeasured pilot target** and is not in the
+  user-facing text; Microsoft documents its own delivery as under one minute on average,
+  three at most.
+- Keep it explicit that checks run automatically while Funnl is closed (both sentences say so).
 - Publication is a separate, owner-approved step, after the migration is applied and the
   functions are deployed, and before the schedule is activated. The full order - publication,
   deriving the new disclosure version from this wording, carrying that ONE value into the

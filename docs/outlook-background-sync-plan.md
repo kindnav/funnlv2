@@ -31,7 +31,7 @@ connection).
 ## 2. Latency target, and how it is measured
 
 **Target (near-real-time, not instant):** a qualifying reply that lands in the mailbox
-becomes a reviewable proposal within **5 minutes at p95** and **2 minutes median** while
+becomes a reviewable proposal within **5 minutes at p95** and **2 minutes median** (an **unmeasured pilot target**, not a user-facing promise; measured only after activation, over the first 50 signalled runs) while
 Funnl is closed, measured over the first 50 signalled runs of the controlled pilot.
 
 Budget behind the target: Microsoft documents message notification latency as under 1
@@ -68,7 +68,7 @@ shows what Microsoft Graph actually does for this tenant. Live-provider evidence
 from the activation plan below, and the plan records each live fact as it is established:
 
 - the endpoint validation handshake succeeds for the deployed URL (step E);
-- a message arriving in **Inbox** produces a notification that wakes a run (step F);
+- a message arriving in **Inbox** produces a notification that wakes an automatic run (step F);
 - the user **sending an existing draft** (a message created in Sent Items) produces a
   notification that wakes a run — the mailbox-wide subscription is expected to cover it
   (Microsoft also documents folder-level subscriptions, so a Sent Items-only subscription
@@ -82,7 +82,9 @@ from the activation plan below, and the plan records each live fact as it is est
 
 1. Apply `20261009000000` (adds `pg_cron`, `pg_net`; the job is inactive).
 2. Deploy `outlook-notifications` (new) and `outlook-import-worker` from merged main.
-3. Owner stores two Vault secrets by hidden input: `outlook_worker_url`
+3. Owner stores two Vault secrets by private input - `scripts/outlook-vault-secrets.ps1`
+   (masked prompts, statement handed to `psql` on standard input, names-only read-back) or
+   the dashboard's Vault form: `outlook_worker_url`
    (`https://<ref>.supabase.co/functions/v1/outlook-import-worker`) and
    `outlook_worker_secret` (the existing `OUTLOOK_WORKER_SECRET` value; not rotated).
 4. Disclosure publication and fresh consent (section 6).
@@ -150,48 +152,61 @@ configures the new value**; it is derived from the approved wording, after appro
 reconnects under the new notice. Verify `microsoft_connections.consent_policy_version`
 equals the new value. Recorded consent is never edited in place.
 
-**E. Bootstrap invocation (controlled, authorized separately).** Setting
-`OUTLOOK_IMPORT_WORKER_ENABLED=true` executes nothing by itself. With the flag set and the
-tick still inactive, the owner runs ONE invocation (the existing hidden-input PowerShell
-pattern, `OUTLOOK_WORKER_SECRET` not shown). The subscription is created only inside a
-RESERVED run, so the proof is a run that reserved the connection: `run.outcome` `committed`
-(or `continued`) **and** `run.subscription.action = create`, `outcome = created`, **and** an
-`outlook_subscriptions` row with `status = 'active'` and `expires_at` about three days out.
-A `none_due` answer establishes nothing — no connection was reserved and no subscription
-step ran. If the connection is not yet due (its last attempt is under `DUE_AFTER_SECONDS` =
-900 s old), wait until it is and invoke once more; do not read `none_due` as success. This
+**E. Bootstrap window (controlled, authorized separately).** The worker flag
+`OUTLOOK_IMPORT_WORKER_ENABLED` is an Edge Function secret, absent until here. It is enabled
+for this window only, with the tick still inactive: `scripts/outlook-worker-flag.ps1 status`
+(expect `ABSENT`), then `enable` (expect `PRESENT`; setting the flag executes nothing). ONE
+invocation by the existing run-once PowerShell pattern - which removes the flag in its
+`finally`, so run `status` afterwards and expect `ABSENT`; if the pattern used does not remove
+it, run `disable`. The subscription is created only inside a RESERVED run, so the proof is
+`run.outcome` `committed` (or `continued`) **and** `run.subscription.action = create`,
+`outcome = created`, **and** an `outlook_subscriptions` row with `status = 'active'` and
+`expires_at` about three days out. **`none_due` proves nothing** - no connection was reserved
+and no subscription step ran; if the connection's last attempt is under `DUE_AFTER_SECONDS` =
+900 s old, wait until it is due and invoke once more (re-enabling the flag the same way). This
 is where Microsoft validates the deployed endpoint (first live fact).
 
-**F. Listener verification before unattended operation.** The tick is still inactive, but
-the endpoint already **kicks the worker** after it records a notification, and the flag is
-on since step E — so an accepted notification runs the worker by itself. No manual
-invocation is needed here, and one would only blur which trigger did the work. Observe, in
-this order, for an inbound message sent to the pilot mailbox from another account:
+**F. Listener-verification window (authorized separately).** No manual invocation inside it:
+the endpoint kicks the worker after recording a signal, and with the flag present the worker
+runs by itself. Open the window with `scripts/outlook-worker-flag.ps1 enable` (`PRESENT`) and
+confirm `SELECT active FROM cron.job WHERE jobname = 'outlook-worker-tick'` is `false`.
 
-1. `microsoft_connections.wake_count` increments and `last_wake_at` is set (the endpoint
-   accepted the notification);
-2. within about a minute, the kicked run shows in `outlook_sync_state`: `run_started_at`
-   after `last_wake_at`, then a complete release with `wake_requested_at` cleared (the
-   signal was consumed by the run it woke);
-3. a proposal appears if the exchange qualifies; its latency is the SQL in section 2
-   (candidate `created_at` against `last_wake_at`). `wake_age_seconds` is in the worker's
-   HTTP answer, which only a manual invocation sees; a kicked run leaves its evidence in
-   the rows above.
+Take a **baseline** of the persistent fields before any signal, and wait for any run in
+progress to finish first (both folders `idle`, lease NULL):
 
-Repeat by **sending an existing draft** from the pilot mailbox (Sent Items): `wake_count`
-must increment again and a run must follow the same way. Only after both signals are
-observed, each followed by its automatic run, does activation continue. If a signal is
-recorded but no run follows, the kick is the thing to diagnose (worker flag, secret,
-`not_enabled` answers in the worker log) before any schedule is activated.
+```sql
+SELECT folder, sync_status, sync_lease_until, last_attempt_at, last_success_at, last_run_complete
+  FROM public.outlook_sync_state s JOIN public.microsoft_connections c ON c.id = s.connection_id
+ WHERE c.user_id = '<pilot user id>' ORDER BY folder;
+SELECT wake_requested_at, wake_count, last_wake_at FROM public.microsoft_connections WHERE user_id = '<pilot user id>';
+```
 
-**G. Activate.** `SELECT cron.alter_job((SELECT jobid FROM cron.job WHERE jobname =
+Then, for an inbound message sent to the pilot mailbox from another account, the **persistent
+evidence** is: `wake_count` = baseline + 1 and `last_wake_at` set (the endpoint accepted the
+signal); on both folder rows `last_attempt_at` and `last_success_at` later than the baseline,
+`last_run_complete = true`, `sync_status = 'idle'`, `sync_lease_until` NULL (the kicked run
+ran to completion and released its lease); `wake_requested_at` NULL again (consumed by the
+run it woke). A completed run clears `run_started_at`, so that column is not part of the
+proof. **Wait for the run to finish** and take a fresh baseline, then repeat by **sending an
+existing draft** from the pilot mailbox (Sent Items): the same evidence must follow. Only
+after both signals are evidenced does activation continue.
+
+If a signal is recorded but no run follows (`wake_requested_at` stays set, `last_attempt_at`
+unchanged), the kick is the thing to diagnose - flag state, `not_enabled` answers in the
+worker's function log, the Vault names - and nothing is activated. If verification fails or
+stops: `scripts/outlook-worker-flag.ps1 disable` (`ABSENT`); kicks then answer `503
+not_enabled`, and recorded wake-ups stay pending for the first run after a later re-enable.
+Close the window with `disable` unless step G is authorized immediately (say which).
+
+**G. Activate.** `scripts/outlook-worker-flag.ps1 enable` (unattended operation needs the
+flag), then `SELECT cron.alter_job((SELECT jobid FROM cron.job WHERE jobname =
 'outlook-worker-tick'), active := true);` Then the live acceptance test: with Funnl closed, a
 fresh two-way exchange produces a reviewable proposal within the target; the user accepts
 it in Funnl; `wake_age_seconds` and the SQL above record the latency.
 
 **Rollback — stopping both triggers.**
 1. `SELECT cron.alter_job(<jobid>, active := false);` stops scheduled execution.
-2. Unset `OUTLOOK_IMPORT_WORKER_ENABLED`: every tick and every kick answers `503 not_enabled`
+2. `scripts/outlook-worker-flag.ps1 disable`: every tick and every kick answers `503 not_enabled`
    and runs nothing; the pilot's connection, tokens and cursors are untouched.
 3. The Graph subscription keeps posting notifications until it expires (≤3 days from its
    last renewal): the endpoint records wake-ups (harmless timestamps/counts) and kicks a
