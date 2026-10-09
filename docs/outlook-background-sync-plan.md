@@ -82,11 +82,12 @@ from the activation plan below, and the plan records each live fact as it is est
 
 1. Apply `20261009000000` (adds `pg_cron`, `pg_net`; the job is inactive).
 2. Deploy `outlook-notifications` (new) and `outlook-import-worker` from merged main.
-3. Owner stores two Vault secrets by private input - `scripts/outlook-vault-secrets.ps1`
-   (masked prompts, statement handed to `psql` on standard input, names-only read-back) or
-   the dashboard's Vault form: `outlook_worker_url`
+3. Owner stores two Vault secrets through the Supabase dashboard's Vault form (Integrations
+   -> Vault -> Add new secret), exactly named `outlook_worker_url`
    (`https://<ref>.supabase.co/functions/v1/outlook-import-worker`) and
    `outlook_worker_secret` (the existing `OUTLOOK_WORKER_SECRET` value; not rotated).
+   Verified by names only: `SELECT name FROM vault.secrets WHERE name IN (...)`. No script in
+   this repository handles these values.
 4. Disclosure publication and fresh consent (section 6).
 5. Bootstrap invocation and listener verification (section 6).
 6. Activate the tick.
@@ -155,7 +156,9 @@ equals the new value. Recorded consent is never edited in place.
 **E. Bootstrap window (controlled, authorized separately).** The worker flag
 `OUTLOOK_IMPORT_WORKER_ENABLED` is an Edge Function secret, absent until here. It is enabled
 for this window only, with the tick still inactive: `scripts/outlook-worker-flag.ps1 status`
-(expect `ABSENT`), then `enable` (expect `PRESENT`; setting the flag executes nothing). ONE
+(expect `ABSENT (verified)`; `UNVERIFIED` means the inventory could not be read and nothing
+proceeds), then `enable` (expect `PRESENT (verified)`; setting the flag executes nothing; an
+unverified enable is cleaned up and reported, or reported `UNKNOWN`). ONE
 invocation by the existing run-once PowerShell pattern - which removes the flag in its
 `finally`, so run `status` afterwards and expect `ABSENT`; if the pattern used does not remove
 it, run `disable`. The subscription is created only inside a RESERVED run, so the proof is
@@ -182,8 +185,9 @@ SELECT wake_requested_at, wake_count, last_wake_at FROM public.microsoft_connect
 ```
 
 Then, for an inbound message sent to the pilot mailbox from another account, the **persistent
-evidence** is: `wake_count` = baseline + 1 and `last_wake_at` set (the endpoint accepted the
-signal); on both folder rows `last_attempt_at` and `last_success_at` later than the baseline,
+evidence** is: `wake_count` greater than the baseline and `last_wake_at` set (the endpoint accepted the
+signal; `wake_count` need only be GREATER than the baseline - a draft or a retry can add more
+than one); on both folder rows `last_attempt_at` and `last_success_at` later than the baseline,
 `last_run_complete = true`, `sync_status = 'idle'`, `sync_lease_until` NULL (the kicked run
 ran to completion and released its lease); `wake_requested_at` NULL again (consumed by the
 run it woke). A completed run clears `run_started_at`, so that column is not part of the

@@ -93,8 +93,7 @@ docs/
   outlook-background-sync-plan.md  Background-sync slice: latency target, fixture vs live evidence, activation plan (section 6) with the one-value consent cutover, next workstreams
   outlook-background-activation-packet.md  Owner packet: exact background-disclosure wording for approval + ordered activation with a gate per step, rollback, milestone, subsequent workstreams
 scripts/
-  outlook-worker-flag.ps1    Owner-run: OUTLOOK_IMPORT_WORKER_ENABLED status / enable / disable on Production (names only, never values or digests); used only inside authorized windows
-  outlook-vault-secrets.ps1  Owner-run: stores Vault outlook_worker_url + outlook_worker_secret by masked input, statement on psql stdin, names-only read-back
+  outlook-worker-flag.ps1    Owner-run: OUTLOOK_IMPORT_WORKER_ENABLED status / enable / disable on Production via npx.cmd, each verified against the JSON secret inventory (UNVERIFIED/UNKNOWN never read as absent; names only, never values or digests); used only inside authorized windows. Offline behaviour test: tests/local/outlook-worker-flag-helper.test.ps1 (synthetic CLI, no credentials). Vault secrets go through the dashboard form - no credential-handling script exists.
 supabase/
   templates/
     confirm-signup.html    Custom HTML email template for signup confirmation. MUST be pasted into Supabase → Auth → Email Templates → Confirm signup. Uses {{ .ConfirmationURL }} for the confirmation link.

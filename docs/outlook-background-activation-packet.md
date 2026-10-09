@@ -10,9 +10,11 @@ Source documents, which this packet summarizes and defers to on detail:
 `docs/outlook-content-disclosure-draft.md` section F (wording rationale) and
 `docs/outlook-background-sync-plan.md` sections 2, 3 and 6 (target, evidence rules, plan).
 
-Owner-run helpers added for this packet (documentation and operator tooling only; no product
-code): `scripts/outlook-worker-flag.ps1` (the worker flag: status / enable / disable) and
-`scripts/outlook-vault-secrets.ps1` (the two Vault secrets by masked input).
+Owner-run helper added for this packet (operator tooling only; no product code):
+`scripts/outlook-worker-flag.ps1` (the worker flag: status / enable / disable, each verified
+against the JSON secret inventory; exercised offline against a synthetic CLI by
+`tests/local/outlook-worker-flag-helper.test.ps1`). Vault secrets are entered through the
+Supabase dashboard's Vault form; no credential-handling script exists in this repository.
 
 ---
 
@@ -95,18 +97,20 @@ jzybxhvgnksrwxfivdwt --use-api` and the same for `outlook-import-worker`, from m
 **Evidence:** `npx supabase functions download <name>` sources byte-identical to main. The
 worker flag is absent: every tick, kick or invocation answers `503 not_enabled`.
 
-### Step 3 — Vault secrets, by private input
-Owner, locally: `.\scripts\outlook-vault-secrets.ps1`. It asks for the Production database
-URL, `outlook_worker_url` (`https://jzybxhvgnksrwxfivdwt.supabase.co/functions/v1/outlook-import-worker`)
-and `outlook_worker_secret` (the existing `OUTLOOK_WORKER_SECRET`, **not rotated**) at masked
-prompts, composes the `vault.create_secret` / `vault.update_secret` statements in memory,
-hands them to `psql` on standard input (never a command-line argument, never a file), clears
-the variables, and prints only the two secret **names** read back from `vault.decrypted_secrets`.
-Alternative with no script: Supabase dashboard → Integrations → Vault → "Add new secret", once
-per name, exactly those names. Nothing is pasted into chat; no value is displayed by either
-route.
-**Evidence:** `SELECT name FROM vault.decrypted_secrets WHERE name IN ('outlook_worker_url',
-'outlook_worker_secret');` returns both names. (The inactive job still posts nothing.)
+### Step 3 — Vault secrets, through the dashboard form
+Owner, in the Supabase dashboard: Integrations → Vault → "Add new secret", twice, with
+exactly these names:
+
+| Name | Value |
+|---|---|
+| `outlook_worker_url` | `https://jzybxhvgnksrwxfivdwt.supabase.co/functions/v1/outlook-import-worker` |
+| `outlook_worker_secret` | the existing `OUTLOOK_WORKER_SECRET` value, typed into the form's secret field; **not rotated** |
+
+The form is a private browser input: the value is not pasted into chat, not typed on a
+command line, not written to a file. No script in this repository handles these values.
+**Evidence (names only, nothing decrypted):**
+`SELECT name FROM vault.secrets WHERE name IN ('outlook_worker_url', 'outlook_worker_secret') ORDER BY name;`
+returns exactly the two names. (The inactive job still posts nothing.)
 
 ### Step 4 — Publish the approved wording
 Owner approval of section 2, then a PR: `/privacy` text and the notice paragraph in
@@ -134,12 +138,17 @@ consent is never edited in place.
 ### Step 7 — Bootstrap window (controlled, authorized separately)
 The flag is enabled for this window only and disabled at its end; the cron job stays inactive.
 
-1. `.\scripts\outlook-worker-flag.ps1 status` → `ABSENT`.
-2. `.\scripts\outlook-worker-flag.ps1 enable` → `PRESENT`. Setting the flag executes nothing.
+1. `.\scripts\outlook-worker-flag.ps1 status` → `ABSENT (verified)`. The helper reads the
+   JSON secret inventory; empty, malformed or failed output is reported `UNVERIFIED`, never
+   absent, and the step does not proceed on it.
+2. `.\scripts\outlook-worker-flag.ps1 enable` → `PRESENT (verified)`. Setting the flag executes
+   nothing. If the set succeeds but is not verified, the helper removes the flag again and
+   reports the verified result (exit 1), or `UNKNOWN` (exit 2) if even that cannot be
+   verified - in which case check Edge Functions → Secrets in the dashboard before anything else.
 3. ONE invocation by the existing run-once PowerShell pattern. **Note:** that pattern removes
    `OUTLOOK_IMPORT_WORKER_ENABLED` in its `finally`, which is right for this step (the window
-   closes with the invocation) — so after it returns, run `status` and expect `ABSENT`. If the
-   pattern used does not remove it, run `disable` yourself.
+   closes with the invocation) — so after it returns, run `status` and expect `ABSENT (verified)`.
+   If the pattern used does not remove it, run `disable` yourself and require `ABSENT (verified)`.
 4. The proof is a run that **reserved** the connection: `run.outcome` `committed` (or
    `continued`) **and** `run.subscription.action = create`, `outcome = created`, **and** an
    `outlook_subscriptions` row with `status = 'active'` and `expires_at` about three days out.
@@ -153,8 +162,8 @@ This is where Microsoft validates the deployed endpoint — **live fact 1**.
 A separate, bounded window. No manual invocation inside it: once a notification is recorded,
 the endpoint kicks the worker, and with the flag present the worker runs by itself.
 
-**Open the window:** `.\scripts\outlook-worker-flag.ps1 enable` → `PRESENT`. Confirm the cron
-job is still inactive: `SELECT active FROM cron.job WHERE jobname = 'outlook-worker-tick';` → `false`.
+**Open the window:** `.\scripts\outlook-worker-flag.ps1 enable` → `PRESENT (verified)`. Confirm
+the cron job is still inactive: `SELECT active FROM cron.job WHERE jobname = 'outlook-worker-tick';` → `false`.
 
 **Baseline, before any signal** (record the values):
 ```sql
@@ -169,7 +178,8 @@ If a run is in progress (`running`, or a lease in the future), **wait for it to 
 **Signal A — inbound mail.** Another account sends a message to the pilot mailbox. Within
 Microsoft's documented latency (under a minute on average, three at most) and then about a
 minute for the kick, re-run the two queries. **Persistent evidence of success:**
-- `wake_count` = baseline + 1 and `last_wake_at` set (the endpoint accepted the signal) — **live fact 2**;
+- `wake_count` **greater than** the baseline and `last_wake_at` set (the endpoint accepted the
+  signal; a draft being created or a retry can add more than one) — **live fact 2**;
 - on both folder rows: `last_attempt_at` later than the baseline, `last_success_at` later than
   the baseline, `last_run_complete = true`, `sync_status = 'idle'`, `sync_lease_until` NULL
   (the kicked run ran to completion and released its lease);
@@ -181,7 +191,7 @@ persist.
 and take a fresh baseline before the next signal.
 
 **Signal B — the pilot sends an existing draft** from the mailbox (Sent Items). Re-run the two
-queries. Same persistent evidence: `wake_count` + 1, `last_wake_at` advanced, both folder rows
+queries. Same persistent evidence: `wake_count` greater than the fresh baseline, `last_wake_at` advanced, both folder rows
 attempted and succeeded after the new baseline, complete, idle, lease NULL, `wake_requested_at`
 NULL — **live fact 3**. A proposal appears if the exchange qualifies.
 
@@ -189,16 +199,18 @@ NULL — **live fact 3**. A proposal appears if the exchange qualifies.
 set, `last_attempt_at` unchanged): the kick is the thing to diagnose — flag state (`status`),
 `not_enabled` answers in the worker's function log, the Vault names — and nothing is activated.
 **If verification fails or stops for any reason:** `.\scripts\outlook-worker-flag.ps1 disable`
-→ `ABSENT`. From then on kicks answer `503 not_enabled`; recorded wake-ups stay pending and are
-served by the first run after a later re-enable.
+→ `ABSENT (verified)`. If it reports `PRESENT` or `UNKNOWN` instead, the window is NOT closed:
+check Edge Functions → Secrets in the dashboard and remove the flag by hand before leaving.
+From then on kicks answer `503 not_enabled`; recorded wake-ups stay pending and are served by
+the first run after a later re-enable.
 
 **Close the window:** after both signals are evidenced, `.\scripts\outlook-worker-flag.ps1
-disable` → `ABSENT` until step 9 is authorized. (If step 9 is authorized immediately, the flag
+disable` → `ABSENT (verified)` until step 9 is authorized. (If step 9 is authorized immediately, the flag
 may instead stay present; say which in the authorization.)
 
 ### Step 9 — Activate the schedule
-Owner: `.\scripts\outlook-worker-flag.ps1 enable` → `PRESENT` (unattended operation needs the
-flag), then
+Owner: `.\scripts\outlook-worker-flag.ps1 enable` → `PRESENT (verified)` (unattended operation
+needs the flag), then
 `SELECT cron.alter_job((SELECT jobid FROM cron.job WHERE jobname = 'outlook-worker-tick'), active := true);`
 **Evidence:** `cron.job.active = true`; the next minute's tick posts to the worker; Settings'
 automation line now says automatic checks are on.
@@ -213,8 +225,8 @@ median) begins here, over the first 50 signalled runs.
 
 ### Rollback at any point after step 7
 1. `SELECT cron.alter_job(<jobid>, active := false);` — stops scheduled execution.
-2. `.\scripts\outlook-worker-flag.ps1 disable` — every tick, kick and invocation answers
-   `503 not_enabled`; the pilot's connection, tokens and cursors are untouched.
+2. `.\scripts\outlook-worker-flag.ps1 disable` → `ABSENT (verified)` — every tick, kick and
+   invocation answers `503 not_enabled`; the pilot's connection, tokens and cursors are untouched.
 3. The Graph subscription keeps posting until it expires (at most three days from its last
    renewal): the endpoint records harmless timestamps and counts and kicks a worker that
    refuses. To silence the endpoint too, unset `OUTLOOK_INTEGRATION_ENABLED` (503; Microsoft
@@ -245,7 +257,7 @@ by kind; and the latency figures themselves (step 10 onward).
 - Single-account pilot restriction; Google Calendar off the UI.
 - Review before save: no contact or interaction is written without the user pressing Accept.
 - `OUTLOOK_WORKER_SECRET` is never shown, pasted, logged or rotated by any step here; the
-  helpers print secret names only.
+  flag helper prints the one flag name and a state word, never a value or digest.
 - No message content is stored by this slice; the signal's message identifier is not kept.
 
 ---
