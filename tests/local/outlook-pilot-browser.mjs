@@ -1552,18 +1552,88 @@ VALUES ('${PILOT_USER}', 'outlook', 'pending', ${hex('e', fpLast)}, ${hex('f', f
     applied: document.body.innerText.includes('Refreshed again while editing.') }`)
   check('10e: while editing, the refresh is HELD - the typed text is intact and the newer draft is not forced in', held.value === 'Still typing here.' && held.applied === false, JSON.stringify(held))
   check('10e: and the page says an update is waiting', held.heldBanner === true, JSON.stringify(held))
+  // REPRODUCED BEFORE THIS REVISION: "Done editing" let the waiting draft in, which remounted
+  // the card and erased the typed note. Done editing finishes editing; it does not discard.
   await page.click('Done editing', { byText: true, within: REFRESHED })
-  let applied = true
-  try { await page.waitFor('document.body.innerText.includes("Refreshed again while editing.")', 8000, 'the held update, applied') } catch { applied = false }
-  check('10e: the held update is applied once editing ends', applied)
+  await sleep(1500)
+  const afterDone = await page.eval(`const card=document.querySelector(${JSON.stringify(REFRESHED)}); return {
+    typedShown: !!card && card.innerText.includes('Still typing here.'),
+    draftForcedIn: !!card && card.innerText.includes('Refreshed again while editing.'),
+    choiceOffered: !!card && [...card.querySelectorAll('button')].some((b) => b.innerText.trim() === 'Use newer draft'),
+    editing: !!card && [...card.querySelectorAll('button')].some((b) => b.innerText.trim() === 'Done editing') }`)
+  check('10e: after Done editing the TYPED note is still what the card shows', afterDone.typedShown === true && afterDone.editing === false, JSON.stringify(afterDone))
+  check('10e: the waiting draft was NOT forced in', afterDone.draftForcedIn === false, JSON.stringify(afterDone))
+  check('10e: the card offers the newer draft as an explicit choice instead', afterDone.choiceOffered === true, JSON.stringify(afterDone))
+  await page.click('Accept', { byText: true, within: REFRESHED })
+  await sleep(1500)
+  const savedE = one(`SELECT coalesce(notes,'NULL') FROM public.interactions i JOIN public.contacts c ON c.id = i.contact_id
+    WHERE i.user_id='${PILOT_USER}' AND c.name='Arrival Four';`)
+  check('10e: edit -> background refresh -> Done editing -> Accept saved the REVIEWER\u2019S note', savedE === 'Still typing here.', JSON.stringify(savedE))
+
+  // ── 10f. the NEW-CONTACT card: typed values survive a refresh of its own row and are what acceptance saves ──
+  const arrivalPersonId = one(`SELECT id FROM public.new_contact_candidates WHERE user_id='${PILOT_USER}' AND proposed_name='Arrival Person';`)
+  const ARRIVAL_PERSON = cardSel(arrivalPersonId)
+  await page.eval(`const el=document.querySelector(${JSON.stringify(ARRIVAL_PERSON + ' input[type="text"]')}); el.focus(); el.select(); return true`)
+  const TYPED_NAME_F = 'Renamed Person'
+  await page.typeKeys(TYPED_NAME_F)
+  await page.eval(`const el=document.querySelector(${JSON.stringify(ARRIVAL_PERSON + ' textarea')}); el.focus(); el.select(); return true`)
+  const TYPED_NOTE_F = 'My own note for the new person.'
+  await page.typeKeys(TYPED_NOTE_F)
+  psql(`UPDATE public.new_contact_candidates SET draft_summary = 'A newer summary for the new person.', updated_at = now()
+        WHERE id = '${arrivalPersonId}';`, { tuplesOnly: false })
+  await pokePoll()
+  await sleep(2500)
+  const heldF = await page.eval(`const card=document.querySelector(${JSON.stringify(ARRIVAL_PERSON)}); const i=card && card.querySelector('input[type="text"]'); const t=card && card.querySelector('textarea');
+    return { name: i ? i.value : null, note: t ? t.value : null, forced: !!card && card.innerText.includes('A newer summary for the new person.'),
+      choiceOffered: !!card && [...card.querySelectorAll('button')].some((b) => b.innerText.trim() === 'Use newer draft'),
+      heldBanner: document.body.innerText.includes(${JSON.stringify(pendingMod.HELD_UPDATES_MESSAGE)}) }`)
+  check('10f: the new-contact card keeps the typed name and note through a refresh of its row', heldF.name === TYPED_NAME_F && heldF.note === TYPED_NOTE_F && heldF.forced === false, JSON.stringify(heldF))
+  check('10f: the update is held, said so, and offered as a choice', heldF.heldBanner === true && heldF.choiceOffered === true, JSON.stringify(heldF))
+  await page.click('Save contact & interaction', { byText: true, within: ARRIVAL_PERSON })
+  await sleep(1500)
+  check('10f: acceptance saved the TYPED name and note', one(`SELECT count(*) FROM public.contacts c JOIN public.interactions i ON i.contact_id = c.id
+    WHERE c.user_id='${PILOT_USER}' AND c.name='${TYPED_NAME_F}' AND i.notes LIKE '${TYPED_NOTE_F}%';`) === '1')
+
+  // ── 10g. the EXPLICIT choice: "Use newer draft" replaces the typed values with the waiting draft ──
+  const arrivalOneId = one(`SELECT ic.id FROM public.interaction_candidates ic JOIN public.contacts c ON c.id = ic.contact_id
+    WHERE ic.user_id='${PILOT_USER}' AND c.name='Arrival One';`)
+  const ARRIVAL_ONE = cardSel(arrivalOneId)
+  await page.click('Edit details', { byText: true, within: ARRIVAL_ONE })
+  await page.waitFor(`!!document.querySelector(${JSON.stringify(ARRIVAL_ONE + ' textarea')})`, 8000, 'the note field')
+  await page.eval(`const el=document.querySelector(${JSON.stringify(ARRIVAL_ONE + ' textarea')}); el.focus(); el.select(); return true`)
+  await page.typeKeys('Typed, then replaced on purpose.')
+  psql(`UPDATE public.interaction_candidates SET proposed_notes = 'The newer draft, taken on purpose.', draft_summary = 'The newer draft, taken on purpose.', updated_at = now()
+        WHERE id = '${arrivalOneId}';`, { tuplesOnly: false })
+  await pokePoll()
+  await page.waitFor(`(() => { const c=document.querySelector(${JSON.stringify(ARRIVAL_ONE)}); return !!c && [...c.querySelectorAll('button')].some((b) => b.innerText.trim() === 'Use newer draft') })()`, 15000, 'the choice on the card')
+  await page.click('Use newer draft', { byText: true, within: ARRIVAL_ONE })
+  let replaced = true
+  try { await page.waitFor(`(() => { const c=document.querySelector(${JSON.stringify(ARRIVAL_ONE)}); return !!c && c.innerText.includes('The newer draft, taken on purpose.') && !c.innerText.includes('Typed, then replaced on purpose.') })()`, 8000, 'the newer draft, taken') } catch { replaced = false }
+  check('10g: choosing "Use newer draft" replaces the typed values with the waiting draft', replaced)
+  check('10g: and the banner no longer says an update is waiting', await page.eval(`return !document.body.innerText.includes(${JSON.stringify(pendingMod.HELD_UPDATES_MESSAGE)})`))
+
+  // ── 10h. a TRANSIENT full-row fetch failure is retried on the next poll, even with the signature unchanged ──
+  // Chrome blocks the by-id row fetch (the signature read has no id=in. filter, so it still
+  // succeeds); the arrival is therefore noticed but cannot be fetched. The checkpoint must NOT
+  // advance, so the next poll - with the signature unchanged - fetches and shows it.
+  await page.send('Network.setBlockedURLs', { urls: ['*interaction_candidates*id=in.*'] })
+  seedInteraction('Arrival Five', 'arrival5@bank.test', '5', 'current_date', 'Arrived during an outage.', null)
+  await pokePoll()
+  await sleep(3000)
+  check('10h: while the row fetch fails the arrival is not shown (nothing invented)', await page.eval(`return !document.body.innerText.includes('Arrival Five')`))
+  await page.send('Network.setBlockedURLs', { urls: [] })
+  await pokePoll()
+  let retried = true
+  try { await page.waitFor('document.body.innerText.includes("Arrival Five")', 15000, 'the arrival after the outage') } catch { retried = false }
+  check('10h: the next poll fetches it although the signature did not change again', retried)
   // Scoped to this section's contacts: earlier sections accepted suggestions of their own.
-  const sectionTen = `(c.name IN ('Hold Contact', ${JSON.stringify(TYPED_NAME).replace(/"/g, "'")}) OR c.name LIKE 'Arrival %' OR c.name LIKE 'Bulk %')`
-  check('10: nothing was created by refreshing: interactions are exactly the two accepted above',
+  const sectionTen = `(c.name IN ('Hold Contact', 'Arrival Four', ${JSON.stringify(TYPED_NAME).replace(/"/g, "'")}, ${JSON.stringify(TYPED_NAME_F).replace(/"/g, "'")}) OR c.name LIKE 'Arrival %' OR c.name LIKE 'Bulk %')`
+  check('10: nothing was created by refreshing: interactions are exactly the four accepted above',
     one(`SELECT count(*) FROM public.interactions i JOIN public.contacts c ON c.id = i.contact_id
-      WHERE i.user_id='${PILOT_USER}' AND ${sectionTen};`) === '2')
-  check('10: the arrived and paged proposals saved nothing by themselves',
+      WHERE i.user_id='${PILOT_USER}' AND ${sectionTen};`) === '4')
+  check('10: the merely arrived, paged, refreshed-on-purpose and outage proposals saved nothing by themselves',
     one(`SELECT count(*) FROM public.interactions i JOIN public.contacts c ON c.id = i.contact_id
-      WHERE i.user_id='${PILOT_USER}' AND (c.name LIKE 'Arrival %' OR c.name LIKE 'Bulk %');`) === '0')
+      WHERE i.user_id='${PILOT_USER}' AND (c.name IN ('Arrival One', 'Arrival Three', 'Arrival Five') OR c.name LIKE 'Bulk %');`) === '0')
   // Leave no row behind.
   psql(`DELETE FROM public.outlook_candidate_refs WHERE user_id = '${PILOT_USER}';
         DELETE FROM public.interaction_candidates WHERE user_id = '${PILOT_USER}';

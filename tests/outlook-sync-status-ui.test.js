@@ -18,7 +18,8 @@ import {
 } from '../src/lib/outlookSyncStatus.js'
 import {
   decideRefresh, badgeLabel, countPendingSuggestions, fetchPendingSignature, indexSignature, diffPendingSignature,
-  mergeQueueRows, compareQueueRows, cardKey, SUGGESTIONS_REFRESH_INTERVAL_MS, NEW_SUGGESTIONS_MESSAGE,
+  mergeQueueRows, compareQueueRows, cardKey, nextSignatureCheckpoint, busyExcept,
+  SUGGESTIONS_REFRESH_INTERVAL_MS, NEW_SUGGESTIONS_MESSAGE,
   UPDATED_SUGGESTIONS_MESSAGE, HELD_UPDATES_MESSAGE, SUGGESTIONS_CHANGED_EVENT,
 } from '../src/lib/pendingSuggestions.js'
 import { CANDIDATE_SELECT } from '../src/lib/calendarReview.js'
@@ -197,6 +198,36 @@ await test('the merge inserts arrivals in queue order and never disturbs a BUSY 
   assert.strictEqual(cardKey(row('a', 'x', '2')), 'a:2', 'a refreshed row remounts under a new key; an untouched one does not')
   assert.ok(compareQueueRows(row('x', '2026-10-02'), row('y', '2026-10-01')) < 0)
 })
+await test('the merge is PURE: inputs untouched, the same plan twice, and a released card takes its update while the others keep theirs', () => {
+  const row = (id, date, updated = '1') => ({ id, proposed_interaction_date: date, updated_at: updated })
+  const list = [row('b', '2026-10-05'), row('a', '2026-10-01')]
+  const listCopy = JSON.parse(JSON.stringify(list))
+  const busy = new Set(['a', 'b'])
+  const change = { list, changed: [row('a', '2026-10-01', '2'), row('b', '2026-10-05', '2')], busy }
+  const r1 = mergeQueueRows(change)
+  const r2 = mergeQueueRows(change)
+  assert.deepStrictEqual(list, listCopy, 'the input list is not mutated')
+  assert.deepStrictEqual([...busy], ['a', 'b'], 'the busy set is not mutated')
+  assert.deepStrictEqual(r1, r2, 'planning twice from the same inputs gives the same plan (safe to re-plan inside a pure updater)')
+  assert.deepStrictEqual(r1.held.map((h) => h.id), ['a', 'b'])
+  // The reviewer releases ONE card explicitly: only that card takes its update.
+  const released = busyExcept(busy, 'a')
+  assert.deepStrictEqual([...busy], ['a', 'b'], 'busyExcept never mutates its input')
+  const r3 = mergeQueueRows({ ...change, busy: released })
+  assert.strictEqual(r3.list.find((x) => x.id === 'a').updated_at, '2', 'the released card took the newer draft')
+  assert.strictEqual(r3.list.find((x) => x.id === 'b').updated_at, '1', 'the other busy card kept its hold')
+  assert.deepStrictEqual(r3.held.map((h) => h.id), ['b'])
+})
+await test('the signature CHECKPOINT advances only after the changed rows were fetched and applied or held', () => {
+  const t0 = [{ id: 'a', kind: 'interaction', updatedAt: '1' }]
+  const t1 = [{ id: 'a', kind: 'interaction', updatedAt: '1' }, { id: 'b', kind: 'interaction', updatedAt: '1' }]
+  const known = indexSignature(t0)
+  assert.deepStrictEqual(nextSignatureCheckpoint(null, t0, true), known, 'the first observation learns only')
+  assert.strictEqual(nextSignatureCheckpoint(known, t1, false), known, 'a FAILED row fetch leaves the checkpoint where it was...')
+  assert.deepStrictEqual(diffPendingSignature(nextSignatureCheckpoint(known, t1, false), t1).added.map((e) => e.id), ['b'], '...so the next poll sees the SAME arrival again and retries, with the signature unchanged')
+  assert.deepStrictEqual(nextSignatureCheckpoint(known, t1, true), indexSignature(t1), 'an applied fetch advances it')
+  assert.deepStrictEqual(diffPendingSignature(nextSignatureCheckpoint(known, t1, true), t1), { added: [], changed: [], removed: [] })
+})
 await test('the selects carry updated_at so refreshed proposals are detectable and re-keyable', () => {
   assert.ok(CANDIDATE_SELECT.includes('updated_at'))
   assert.ok(NCC_SELECT.includes('updated_at'))
@@ -217,22 +248,41 @@ await test('Sidebar and BottomNav mount the Suggestions entry under SUGGESTION_R
   assert.ok(hook.includes('setInterval(tick, SUGGESTIONS_REFRESH_INTERVAL_MS)'), 'the badge polls while another page is open')
   assert.ok(hook.includes("document.visibilityState === 'visible'"))
 })
-await test('the Suggestions page polls the SIGNATURE, merges card by card, holds updates to busy cards, and never calls loadInitial from the poll', () => {
+await test('the Suggestions page polls the SIGNATURE, merges card by card from a snapshot with pure updaters, holds updates to busy cards, and never calls loadInitial from the poll', () => {
   const page = read('src/pages/SuggestionsPage.jsx')
   assert.ok(page.includes('fetchPendingSignature(supabase)'))
   assert.ok(page.includes('diffPendingSignature(knownRef.current, fresh)'))
-  assert.ok(page.includes('mergeQueueRows({ list: prev, added, changed, removedIds, busy: busyRef.current })'))
   assert.ok(page.includes('setBanner(HELD_UPDATES_MESSAGE)'))
   assert.ok(page.includes('key={cardKey(c)}'), 'cards are keyed by id and row version')
   assert.ok(page.includes('onBusyChange={onBusyChange}'))
+  // The plan is computed OUTSIDE the state updater, from the list snapshot; the updater is pure
+  // and re-plans from prev when the snapshot is stale. Nothing is assigned inside an updater.
+  assert.ok(page.includes('const planned = mergeQueueRows({ list: snapshot, added, changed, removedIds, busy })'))
+  assert.ok(page.includes('mergeQueueRows({ list: prev, added, changed, removedIds, busy }).list))'))
+  assert.ok(!/setter\(\(prev\) => \{[^}]*=[^=>][^}]*\}\)/.test(page), 'no assignment inside a state updater')
+  assert.ok(!page.includes('let heldOut'), 'the held list is not captured through an updater side effect')
   const pollStart = page.indexOf('const poll = async () => {')
   const pollEnd = page.indexOf('const timer = setInterval(poll, SUGGESTIONS_REFRESH_INTERVAL_MS)')
   assert.ok(pollStart > 0 && pollEnd > pollStart)
-  assert.ok(!page.slice(pollStart, pollEnd).includes('loadInitial('), 'the poll never reloads the list')
+  const poll = page.slice(pollStart, pollEnd)
+  assert.ok(!poll.includes('loadInitial('), 'the poll never reloads the list')
+  // The checkpoint advances AFTER the rows were fetched and applied; a failed fetch keeps it.
+  const fetchAt = poll.indexOf('await fetchRows(')
+  const failAt = poll.indexOf('if (rows === null) { knownRef.current = nextSignatureCheckpoint(knownRef.current, fresh, false); return }')
+  const advanceAt = poll.indexOf('knownRef.current = nextSignatureCheckpoint(knownRef.current, fresh, true)')
+  assert.ok(fetchAt > 0 && failAt > fetchAt && advanceAt > failAt, 'fetch, then (keep on failure), then advance')
+  assert.ok(poll.indexOf('applyMerge(itemsRef, setItems') < advanceAt && poll.indexOf('holdUpdates(') < advanceAt, 'applied or held BEFORE the checkpoint moves')
   assert.ok(!/supabase\.channel\(|postgres_changes/.test(page), 'no realtime channel')
   for (const card of [page, read('src/components/NewContactSuggestionCard.jsx')]) {
     assert.ok(card.includes("onBusyChange(candidate.id, busyNow)"), 'each card reports busy')
+    assert.ok(card.includes('<PendingUpdateNotice pendingUpdate={pendingUpdate} busy={busy} onTake={() => onTakeUpdate?.(candidate.id)} />'), 'each card offers the waiting update as an explicit choice')
   }
+  // A DIRTY existing-contact card stays protected after Done editing: dirty is part of busy.
+  assert.ok(page.includes('const busyNow = editing || dirty || confirmDismiss || busy'), 'dirty keeps the hold after Done editing')
+  assert.ok(page.includes('{!editing && notes && ('), 'the collapsed view shows the note that will be saved')
+  const notice = read('src/components/PendingUpdateNotice.jsx')
+  assert.ok(notice.includes("'Use newer draft'") && notice.includes("'Remove from list'"))
+  assert.ok(page.includes('busyExcept(busyRef.current, id)'), 'taking the update releases only that card')
 })
 await test('the Settings card mounts the sync status on the CONNECTED branch only; the component shows the activation line from the RPC', () => {
   const card = read('src/components/OutlookConnectionCard.jsx')

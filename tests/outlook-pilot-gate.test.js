@@ -51,6 +51,7 @@ import {
 } from '../supabase/functions/outlook-import-worker/handler.js'
 import { GRAPH_BASE } from '../supabase/functions/shared/outlookGraphTransport.js'
 import { makeRoundStore } from './harness/outlookRoundStore.js'
+const CONSENTED = 'ol-disc-' + '0'.repeat(32)   // the version these fixtures' connections consented under; injected as the background requirement
 
 let passed = 0, failed = 0
 const pending = []
@@ -268,10 +269,11 @@ function harness ({ owner, pilotUserId, reportOwner = true }) {
       encryptCursor: async (l) => ({ ciphertext: `CT:${l}`, nonce: 'N', keyVersion: 1 }),
       decryptCursor: async (c) => String(c).replace(/^CT:/, ''),
       pilotUserId,
+      requiredBackgroundConsent: CONSENTED,
       loadRunContext: async () => ({
         primaryEmail: ME, userId: owner, timeZone: 'UTC',
         contacts: [{ id: CONTACT, user_id: owner, email: OTHER_PARTY }],
-        cursors: {}, accessToken: 'tok',
+        cursors: {}, accessToken: 'tok', consentVersion: CONSENTED,
         keyRing: { current: { keyBytes: new Uint8Array(32).fill(1), keyVersion: 1 } },
       }),
       deps: { fetchImpl },

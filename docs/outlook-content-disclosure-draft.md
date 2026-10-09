@@ -613,9 +613,10 @@ not already name, and does it change how reads run? Both answers are yes, narrow
   p95; Microsoft's own delivery is documented at under one minute on average, three at most.
 - Publication is a separate, owner-approved step, after the migration is applied and the
   functions are deployed, and before the schedule is activated. The full order - publication,
-  deriving the new disclosure version from this wording, the server and worker version
-  updates (including the background-consent gate), fresh pilot consent, the controlled
-  bootstrap invocation, listener verification and activation - is section 6 of
-  `docs/outlook-background-sync-plan.md`. Recorded consent is never upgraded in place: a
+  deriving the new disclosure version from this wording, carrying that ONE value into the
+  browser, the server's `OUTLOOK_DISCLOSURE_VERSION` and all three worker requirements
+  (body, Anthropic, background - the version is a digest of the whole notice, so none may
+  stay behind), fresh pilot consent, the controlled bootstrap invocation, listener
+  verification and activation - is section 6 of `docs/outlook-background-sync-plan.md`. Recorded consent is never upgraded in place: a
   connection consented under the current wording is released untouched by the worker until
   the pilot reconnects under the new one.

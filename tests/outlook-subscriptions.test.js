@@ -333,7 +333,9 @@ function makeWorkerGraph (opts) {
 }
 
 async function invoke (ports, fetchImpl, over, runOver = {}) {
-  const res = await handleOutlookImportWorker(workerReq(), env(over), { tokenUrl: 'https://login.invalid/token', select: ports.select, rpc: ports.rpc, graphFetchImpl: fetchImpl, now: () => NOW, subtle, ...runOver })
+  // The fixture connection recorded REQUIRED_CONTENT_CONSENT_VERSION; the background requirement
+  // is injected to the same value, modelling an account that re-consented under the current notice.
+  const res = await handleOutlookImportWorker(workerReq(), env(over), { tokenUrl: 'https://login.invalid/token', select: ports.select, rpc: ports.rpc, graphFetchImpl: fetchImpl, now: () => NOW, subtle, requiredBackgroundConsent: REQUIRED_CONTENT_CONSENT_VERSION, ...runOver })
   return { status: res.status, run: (await res.json()).run }
 }
 
@@ -401,17 +403,17 @@ await test('without a notification URL the step is skipped and reported; nothing
 })
 
 console.log('')
-console.log('5. the background-operation consent gate: open while unset, closed to stale consent once set')
-await test('the pure gate: null required = open; a set version must match the recorded one exactly', () => {
+console.log('5. the background-operation consent gate: CLOSED while unset, closed to stale consent once set, open to the exact version')
+await test('the pure gate: an unset requirement authorizes nothing; a set version must match the recorded one exactly', () => {
   assert.strictEqual(REQUIRED_BACKGROUND_CONSENT_VERSION, null, 'unset until the wording is published and re-consented')
-  assert.deepStrictEqual(backgroundOperationAllowed('anything', null), { ok: true, reason: 'gate_open' })
+  assert.deepStrictEqual(backgroundOperationAllowed('anything', null), { ok: false, reason: 'background_consent_not_configured' }, 'unset is CLOSED, not open')
   const v = 'ol-disc-' + 'f'.repeat(32)
   assert.deepStrictEqual(backgroundOperationAllowed(v, v), { ok: true, reason: 'consented' })
   assert.deepStrictEqual(backgroundOperationAllowed(REQUIRED_CONTENT_CONSENT_VERSION, v), { ok: false, reason: 'background_consent_missing' })
   assert.deepStrictEqual(backgroundOperationAllowed(null, v), { ok: false, reason: 'background_consent_missing' })
-  assert.deepStrictEqual(backgroundOperationAllowed(v, 'not-a-version'), { ok: false, reason: 'background_consent_missing' }, 'a malformed requirement fails closed')
+  assert.deepStrictEqual(backgroundOperationAllowed(v, 'not-a-version'), { ok: false, reason: 'background_consent_not_configured' }, 'a malformed requirement fails closed as unconfigured')
 })
-await test('once set, a connection consented under an older disclosure is released untouched: no read, no subscription request, consent_missing', async () => {
+await test('unset, or set to a version the connection did not record: released untouched - no read, no subscription request, consent_missing', async () => {
   const { runOutlookImport } = await import('../supabase/functions/shared/outlookImportRun.js')
   const { makeRunContextLoader, makeCursorEncryptor, makeCursorDecryptor } = await import('../supabase/functions/shared/outlookRunContext.js')
   const ports = await makePorts()
@@ -424,12 +426,16 @@ await test('once set, a connection consented under an older disclosure is releas
     subscriptions: { notificationUrl: URL_N }, deps: { fetchImpl: graph.fetchImpl, now: () => NOW },
     requiredBackgroundConsent: required,
   })
+  const unset = await run(null)                           // today's module value
+  assert.strictEqual(unset.outcome, 'consent_missing', JSON.stringify(unset))
+  assert.strictEqual(unset.reason, 'background_consent_not_configured')
+  assert.strictEqual(graph.calls.length, 0, 'unconfigured: no subscription request, no read')
   const closed = await run('ol-disc-' + 'f'.repeat(32))   // the connection recorded REQUIRED_CONTENT_CONSENT_VERSION
   assert.strictEqual(closed.outcome, 'consent_missing', JSON.stringify(closed))
   assert.strictEqual(closed.reason, 'background_consent_missing')
   assert.strictEqual(graph.calls.length, 0, 'no subscription request')
   assert.strictEqual(ports.state.recorded.length, 0, 'nothing recorded')
-  assert.deepStrictEqual(ports.state.releases, [{ status: 'idle', complete: false }], 'released untouched, with the backoff')
+  assert.deepStrictEqual(ports.state.releases, [{ status: 'idle', complete: false }, { status: 'idle', complete: false }], 'released untouched both times, with the backoff')
   const open = await run(REQUIRED_CONTENT_CONSENT_VERSION)   // the same version the row recorded
   assert.strictEqual(open.outcome, 'committed', JSON.stringify(open))
   assert.strictEqual(graph.calls.filter((c) => c.method === 'POST').length, 1, 'the subscription is created once consent matches')

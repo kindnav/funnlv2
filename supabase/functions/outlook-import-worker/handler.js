@@ -274,6 +274,14 @@ export async function handleOutlookImportWorker (req, env, deps) {
       // checked against the CONNECTION's recorded disclosure version regardless, so
       // configuring this key does not by itself enable any body read.
       anthropicApiKey: e.anthropicApiKey ?? null,
+      // TEST SEAMS ONLY, exactly like `select`, `rpc` and the fetches: which disclosure
+      // versions the content gates and the background gate demand. The deployed entry
+      // (index.ts) passes neither, so in production the module constants decide and nothing
+      // in the environment can loosen a gate. A fixture passes the version its connection
+      // row records, to model an account that re-consented under the current notice.
+      ...(d.requiredConsent !== undefined ? { requiredConsent: d.requiredConsent } : {}),
+      ...(d.requiredBackgroundConsent !== undefined
+        ? { requiredBackgroundConsent: d.requiredBackgroundConsent } : {}),
       // The change-notification subscription: the stored row is read through the same
       // PostgREST port, and Microsoft is told to POST to OUTLOOK_NOTIFICATION_URL (the
       // deployed outlook-notifications function). Absent, the step is skipped and reported.

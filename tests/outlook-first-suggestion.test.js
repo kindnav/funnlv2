@@ -55,6 +55,7 @@ import { CANDIDATE_SELECT, validateOverrides } from '../src/lib/calendarReview.j
 import {
   SUGGESTION_EVENTS, SUGGESTION_SOURCES, suggestionSourceLabel, suggestionEventProps,
 } from '../src/lib/suggestionAnalytics.js'
+const CONSENTED = 'ol-disc-' + '0'.repeat(32)   // the version this fixture's connection consented under; injected as the background requirement
 
 /**
  * Every run now reads and writes ROUND PROGRESS, so this suite's port is wrapped: the
@@ -240,6 +241,7 @@ function context (contacts) {
     contacts,
     cursors: { inbox: null, sentitems: null },
     accessToken: 'fixture',
+    consentVersion: CONSENTED,
     keyRing: { current: { keyBytes: new Uint8Array(32).fill(3), keyVersion: 1 } },
   })
 }
@@ -256,6 +258,7 @@ test('a commit-ready pass writes one suggestion, then releases with both cursors
   const r = await runOutlookImport({
     rpc: withRounds(p.rpc, makeRoundStore()),
     pilotUserId: OWNER,
+    requiredBackgroundConsent: CONSENTED,
     encryptCursor,
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext: context(OWN_CONTACT),
@@ -287,6 +290,7 @@ test('the cursor reaching the database is the ENCRYPTED value, never the link', 
   await runOutlookImport({
     rpc: withRounds(p.rpc, makeRoundStore()),
     pilotUserId: OWNER,
+    requiredBackgroundConsent: CONSENTED,
     encryptCursor,
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext: context(OWN_CONTACT),
@@ -312,6 +316,7 @@ test('with the consent gates CLOSED the write carries a NULL note, never a place
   const r = await runOutlookImport({
     rpc: withRounds(p.rpc, makeRoundStore()),
     pilotUserId: OWNER,
+    requiredBackgroundConsent: CONSENTED,
     encryptCursor,
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext: context(OWN_CONTACT),
@@ -354,6 +359,7 @@ test('no candidate write is attempted at all, and the release carries no cursor'
   const r = await runOutlookImport({
     rpc: withRounds(p.rpc, makeRoundStore()),
     pilotUserId: OWNER,
+    requiredBackgroundConsent: CONSENTED,
     encryptCursor,
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext: context(OWN_CONTACT),
@@ -394,6 +400,7 @@ test('a REFUSED write downgrades the whole run: no cursor, retry later', async (
   const r = await runOutlookImport({
     rpc: withRounds(p.rpc, makeRoundStore()),
     pilotUserId: OWNER,
+    requiredBackgroundConsent: CONSENTED,
     encryptCursor,
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext: context(OWN_CONTACT),
@@ -425,6 +432,7 @@ test('a tombstoned exchange still lets the run commit', async () => {
   const r = await runOutlookImport({
     rpc: withRounds(p.rpc, makeRoundStore()),
     pilotUserId: OWNER,
+    requiredBackgroundConsent: CONSENTED,
     encryptCursor,
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext: context(OWN_CONTACT),
@@ -439,6 +447,7 @@ test('nothing due takes no lease and performs no other call', async () => {
   const r = await runOutlookImport({
     rpc: withRounds(p.rpc, makeRoundStore()),
     pilotUserId: OWNER,
+    requiredBackgroundConsent: CONSENTED,
     encryptCursor,
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext: context(OWN_CONTACT),
@@ -453,6 +462,7 @@ test('a thrown pass releases the lease as an error rather than holding it', asyn
   const r = await runOutlookImport({
     rpc: withRounds(p.rpc, makeRoundStore()),
     pilotUserId: OWNER,
+    requiredBackgroundConsent: CONSENTED,
     encryptCursor,
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext: async () => { throw new Error('token fetch failed at https://secret') },
@@ -612,6 +622,7 @@ test('summarizeRun reports counts and controlled codes only', async () => {
   const r = await runOutlookImport({
     rpc: withRounds(p.rpc, makeRoundStore()),
     pilotUserId: OWNER,
+    requiredBackgroundConsent: CONSENTED,
     encryptCursor,
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext: context(OWN_CONTACT),
@@ -786,6 +797,7 @@ test('a release returning FALSE is release_failed, not committed', async () => {
   const r = await runOutlookImport({
     rpc: withRounds(p.rpc, makeRoundStore()),
     pilotUserId: OWNER,
+    requiredBackgroundConsent: CONSENTED,
     encryptCursor,
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext: context(OWN_CONTACT),
@@ -808,6 +820,7 @@ test('a release that ERRORS is release_failed, not committed', async () => {
   const r = await runOutlookImport({
     rpc: withRounds(p.rpc, makeRoundStore()),
     pilotUserId: OWNER,
+    requiredBackgroundConsent: CONSENTED,
     encryptCursor,
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext: context(OWN_CONTACT),
@@ -831,6 +844,7 @@ test('a release that THROWS is release_failed, and does not escape the run', asy
   const r = await runOutlookImport({
     rpc: withRounds(rpc, makeRoundStore()),
     pilotUserId: OWNER,
+    requiredBackgroundConsent: CONSENTED,
     encryptCursor,
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext: context(OWN_CONTACT),
@@ -860,6 +874,7 @@ test('a THROWN candidate write releases as an error and commits nothing', async 
   const r = await runOutlookImport({
     rpc: withRounds(rpc, makeRoundStore()),
     pilotUserId: OWNER,
+    requiredBackgroundConsent: CONSENTED,
     encryptCursor,
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext: context(OWN_CONTACT),
@@ -882,6 +897,7 @@ test('a THROWN cursor encryption now fails BEFORE any suggestion is written', as
   const r = await runOutlookImport({
     rpc: withRounds(p.rpc, makeRoundStore()),
     pilotUserId: OWNER,
+    requiredBackgroundConsent: CONSENTED,
     encryptCursor: async () => { throw new Error('key unavailable') },
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext: context(OWN_CONTACT),
@@ -913,6 +929,7 @@ test('a best-effort release that ALSO throws still returns a controlled outcome'
   const r = await runOutlookImport({
     rpc: withRounds(rpc, makeRoundStore()),
     pilotUserId: OWNER,
+    requiredBackgroundConsent: CONSENTED,
     encryptCursor,
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext: context(OWN_CONTACT),
@@ -931,6 +948,7 @@ test('two of three accepted then a refusal: the two are still counted', async ()
   const r = await runOutlookImport({
     rpc: withRounds(p.rpc, makeRoundStore()),
     pilotUserId: OWNER,
+    requiredBackgroundConsent: CONSENTED,
     encryptCursor,
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext: context(OWN_CONTACT),
@@ -955,6 +973,7 @@ test('the run STOPS at the first refusal rather than piling up uncommittable wor
   const r = await runOutlookImport({
     rpc: withRounds(p.rpc, makeRoundStore()),
     pilotUserId: OWNER,
+    requiredBackgroundConsent: CONSENTED,
     encryptCursor,
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext: context(OWN_CONTACT),
@@ -972,6 +991,7 @@ test('a partial run keeps the RETRY idempotent - no rollback, no new machinery',
   const a = await runOutlookImport({
     rpc: withRounds(first.rpc, makeRoundStore()),
     pilotUserId: OWNER,
+    requiredBackgroundConsent: CONSENTED,
     encryptCursor,
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext: context(OWN_CONTACT),
@@ -985,6 +1005,7 @@ test('a partial run keeps the RETRY idempotent - no rollback, no new machinery',
   const b = await runOutlookImport({
     rpc: withRounds(second.rpc, makeRoundStore()),
     pilotUserId: OWNER,
+    requiredBackgroundConsent: CONSENTED,
     encryptCursor,
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext: context(OWN_CONTACT),
@@ -1005,6 +1026,7 @@ test('summarizeRun exposes intended, accepted and created separately', async () 
   const r = await runOutlookImport({
     rpc: withRounds(p.rpc, makeRoundStore()),
     pilotUserId: OWNER,
+    requiredBackgroundConsent: CONSENTED,
     encryptCursor,
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext: context(OWN_CONTACT),

@@ -725,11 +725,14 @@ export async function runOutlookImport (p) {
     }
 
     // ── THE BACKGROUND-OPERATION CONSENT GATE ────────────────────────────────
-    // Open while REQUIRED_BACKGROUND_CONSENT_VERSION is null (today). Once the background-
-    // sync disclosure is published and the constant set, a connection consented under an
-    // older disclosure is released here - nothing read, nothing subscribed - until it
-    // reconnects. Checked AFTER the context load so it reads the row's own recorded version,
-    // and BEFORE the subscription step and the delta read, which are what it governs.
+    // CLOSED while REQUIRED_BACKGROUND_CONSENT_VERSION is null (today): an unconfigured
+    // requirement authorizes neither a subscription nor a read, for any connection. Once the
+    // background-sync disclosure is published and the constant set, a connection consented
+    // under an older disclosure is released here - nothing read, nothing subscribed - until
+    // it reconnects; one consented under the current notice proceeds. Checked AFTER the
+    // context load so it reads the row's own recorded version, and BEFORE the subscription
+    // step and the delta read, which are what it governs. The release carries the gate's
+    // controlled reason and the retry backoff, so the row is simply tried again later.
     const background = backgroundOperationAllowed(context.consentVersion, requiredBackgroundConsent)
     if (!background.ok) {
       await release('idle', false, null, background.reason, RETRY_BACKOFF_SECONDS)

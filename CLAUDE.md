@@ -1336,12 +1336,24 @@ makes its output discoverable. Full plan, latency target, measurement and next w
   due now (lease + backoff still apply), a trigger clearing a wake-up only when a run that started
   after it completes, and pg_cron `outlook-worker-tick` (every minute, secrets from Vault,
   CREATED INACTIVE).
+- Consent gate for unattended operation: `REQUIRED_BACKGROUND_CONSENT_VERSION` in
+  `outlookContentConsent.js` is null and **closed while null** (every run released with
+  `background_consent_not_configured`; no subscription, no read). All three worker requirements
+  (body, Anthropic, background) are digests of the whole notice and move to the same new value in
+  one cutover with the browser and server `OUTLOOK_DISCLOSURE_VERSION` — never one alone.
 - UI: Suggestions rail item + mobile Review tab with a pending badge (gated by
-  `SUGGESTION_REVIEW_ENABLED`); Settings sync status from persisted state only; the queue polls
-  pending counts every 30 s while visible.
+  `SUGGESTION_REVIEW_ENABLED`); Settings sync status from persisted state only. The queue polls the
+  pending SIGNATURE (ids + updated_at) every 30 s while visible and merges card by card; a card
+  with unsaved changes keeps them (also after "Done editing") until accept, dismiss, or the
+  explicit "Use newer draft" choice; the signature checkpoint advances only after changed rows are
+  applied or held, so a failed row fetch is retried next poll.
 
-**Rollout order (not interchangeable):** apply migration → deploy `outlook-notifications` and
-`outlook-import-worker` from merged main → owner stores Vault secrets `outlook_worker_url` and
-`outlook_worker_secret` → enable `OUTLOOK_IMPORT_WORKER_ENABLED` (first run creates the subscription,
-validating the endpoint) → activate the cron job → live acceptance test (fresh two-way exchange →
-proposal while Funnl is closed → accepted in Funnl).
+**Rollout order (not interchangeable; plan section 6):** apply migration → deploy
+`outlook-notifications` and `outlook-import-worker` from merged main → owner stores Vault secrets
+`outlook_worker_url` and `outlook_worker_secret` → publish the approved wording, derive the new
+version, carry it into browser + server + all three worker requirements, pilot reconnects →
+enable `OUTLOOK_IMPORT_WORKER_ENABLED` and run ONE controlled bootstrap invocation (a reserved run
+that creates the subscription; `none_due` proves nothing) → listener verification: an inbound
+message and a sent draft each record a wake AND trigger an automatic kicked run while the tick is
+still inactive → activate the cron job → live acceptance test (fresh two-way exchange → proposal
+while Funnl is closed → accepted in Funnl).

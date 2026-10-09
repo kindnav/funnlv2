@@ -13,11 +13,11 @@ This slice makes the pipeline run on its own and makes its output discoverable.
 
 | Piece | Where | What it does |
 |---|---|---|
-| Change-notification subscription | `supabase/functions/shared/outlookSubscriptions.js`, worker step in `outlookImportRun.js` | One Graph subscription per connection on `me/messages` / `created`. Microsoft documents two message resources: the whole mailbox (`/me/messages`) and the Inbox folder (`/me/mailFolders('inbox')/messages`); there is no Sent Items-specific resource, so the mailbox-wide one is used and covers Inbox **and** Sent Items. Created on the first run under the lease, renewed when under 24 h remain or Microsoft asks for reauthorization, recreated when removed. 3-day lifetime (documented ceiling 10,080 min). ClientState: 32 random bytes; **only its SHA-256 is stored**. |
+| Change-notification subscription | `supabase/functions/shared/outlookSubscriptions.js`, worker step in `outlookImportRun.js` | One Graph subscription per connection on `me/messages` / `created`. Microsoft documents message subscriptions at two levels: the whole mailbox (`/me/messages`) and a single folder (`/me/mailFolders('{id}')/messages`, the Inbox being the documented example) - so a folder-level Sent Items subscription is possible. The mailbox-wide resource is chosen because ONE subscription then covers Inbox **and** Sent Items (a reply the user sends and a message the user receives both wake processing); whether it does in fact fire for a sent draft is a live fact the activation plan verifies, not an assumption. Created on the first run under the lease, renewed when under 24 h remain or Microsoft asks for reauthorization, recreated when removed. 3-day lifetime (documented ceiling 10,080 min). ClientState: 32 random bytes; **only its SHA-256 is stored**. |
 | Notification endpoint | `supabase/functions/outlook-notifications/` (`verify_jwt=false`) | Answers Microsoft's validation handshake (200 text/plain, decoded token). Parses a batch to subscription id + clientState + kind only (never `resourceData`). **One** database call per POST (`record_outlook_change_notification_batch`) matches id and hash and records a durable wake-up. The whole ingress path — body read and persistence — is raced against a 2.5 s budget. **202 only when every item got a definitive answer** (accepted, or refused for a reason a retry cannot change); **503** when the batch could not be durably recorded (port failure, unknown shape, budget exhausted), which Microsoft retries; redelivery is idempotent. Kicks the worker off the response path after persistence. |
 | Wake-up + eligibility | migration `20261009000000` | `microsoft_connections.wake_requested_at/wake_source/wake_count/last_wake_at`. `reserve_due_outlook_connection` treats a pending wake-up as due **now**; lease exclusivity and `next_retry_at` backoff still apply. A trigger clears a wake-up only when a completed round's **discovery** covered it: the cutoff is `outlook_sync_state.wake_cutoff_at`, stamped by the reservation that **starts** a round and carried through every invocation that resumes it — a signal that arrives while finalisation is paused survives the completing invocation and makes the next fresh round due. The routine 900 s interval remains as the catch-up. |
 | Schedule | same migration | pg_cron `outlook-worker-tick`, every minute, `net.http_post` to the worker with `Authorization: Bearer <vault outlook_worker_secret>` and the URL from Vault `outlook_worker_url`. **Created inactive**; posts nothing until both Vault secrets exist. |
-| Consent gate for unattended operation | `outlookContentConsent.js` (`REQUIRED_BACKGROUND_CONSENT_VERSION`, null today), run gate in `outlookImportRun.js` | Once set, a connection whose recorded `consent_policy_version` differs is released untouched with `background_consent_missing` before any read and before any subscription request. Recorded consent is never upgraded in place; the account reconnects under the new disclosure. |
+| Consent gate for unattended operation | `outlookContentConsent.js` (`REQUIRED_BACKGROUND_CONSENT_VERSION`, null today), run gate in `outlookImportRun.js` | **Closed while unconfigured:** with the requirement null, every run is released untouched with `background_consent_not_configured` - no subscription request, no delta read, no body - because nobody can have consented to wording that is not published. Once set, a connection whose recorded `consent_policy_version` differs is released with `background_consent_missing`, before any read and before any subscription request; one that matches proceeds. Recorded consent is never upgraded in place; the account reconnects under the new disclosure. Proven through the real run in `tests/outlook-background-consent-cutover.test.js`. |
 | Settings sync status | `get_my_outlook_sync_status()`, `OutlookSyncStatus.jsx`, `outlookSyncStatus.js` | Last successful sync, current activity (live lease / scheduled retry / error / idle), **"A check is due"** whenever mail is signalled or the last round was incomplete (never "Up to date" then), reconnect instruction when `needs_reauth`, listener state, and an activation line that follows the cron job's own `active` flag — no automatic-check promise while it is off. Server clock for relative times. |
 | Discoverability | `Sidebar.jsx`, `BottomNav.jsx`, `usePendingSuggestionCount.js` | A Suggestions rail item (desktop) and Review tab (mobile) with a pending badge, gated exactly like the route; the badge polls the pending counts every 30 s while visible, so arrivals are noticed from any page. |
 | Queue refresh without losing work | `SuggestionsPage.jsx`, `pendingSuggestions.js` | The page polls the pending **signature** (ids + `updated_at` of both queues) every 30 s while visible and on visibility change; a difference is merged card by card: arrivals inserted in queue order, a refreshed proposal swapped in under a new key, a resolution elsewhere removed — unless that card is **busy** (editing, confirming a dismissal, mid-accept), in which case the update is **held** and applied when the card frees up, and the banner says so. Loaded pages past the first are untouched. No realtime channel. |
@@ -67,11 +67,12 @@ against the real handlers, the real worker, a real Postgres and a real browser. 
 shows what Microsoft Graph actually does for this tenant. Live-provider evidence comes only
 from the activation plan below, and the plan records each live fact as it is established:
 
-- the endpoint validation handshake succeeds for the deployed URL (step 6);
-- a message arriving in **Inbox** produces a notification that wakes a run (step 8);
+- the endpoint validation handshake succeeds for the deployed URL (step E);
+- a message arriving in **Inbox** produces a notification that wakes a run (step F);
 - the user **sending an existing draft** (a message created in Sent Items) produces a
-  notification that wakes a run — the mailbox-wide subscription is expected to cover it,
-  and this is checked rather than assumed (step 8). Note: creating or editing a draft also
+  notification that wakes a run — the mailbox-wide subscription is expected to cover it
+  (Microsoft also documents folder-level subscriptions, so a Sent Items-only subscription
+  would be an alternative if it did not), and this is checked rather than assumed (step F). Note: creating or editing a draft also
   creates a message (in Drafts); such notifications wake a run that finds nothing to do,
   because the normalizer drops drafts. That is a cost, not a correctness issue, and the
   wake counters will show it;
@@ -96,9 +97,14 @@ from the activation plan below, and the plan records each live fact as it is est
 - Without content consent no handles are stored and no proposal is drafted; the wake-up
   still triggers a delta read.
 - The notification kick shares `OUTLOOK_WORKER_SECRET` with the scheduled tick.
-- A refreshed proposal is applied to a card the reviewer is editing only after they finish
-  editing (the typed values are then replaced by the newer draft — the banner says an
-  update is waiting; accepting first keeps the typed values).
+- A refreshed proposal never replaces a card the reviewer has changed. The update is held,
+  the banner and the card say so, and the reviewer's values stay until acceptance, dismissal,
+  or the explicit choice "Use newer draft" on that card. "Done editing" closes the fields and
+  keeps the values. A card with no changes takes the update as soon as it is free (fields
+  closed, no confirmation open, no accept in flight).
+- A transient failure of the full-row fetch after the signature poll noticed a change is
+  retried on the next poll: the signature checkpoint advances only after the changed rows
+  were applied or held.
 
 ## 6. Activation plan — the exact steps, in order, nothing interchangeable
 
@@ -115,14 +121,30 @@ notice paragraphs (`computeDisclosureVersion()`), so the new paragraph yields a 
 `ol-disc-<32 hex>` value; `verifyDisclosureIntegrity()` refuses the control until
 `DISCLOSURE_FINGERPRINT` matches the new text. Record the new value in this plan.
 
-**C. Server and worker version updates.** Set the server-side `OUTLOOK_DISCLOSURE_VERSION`
-secret to the new value (so `outlook-oauth-start` stamps it into new consents). Set
-`REQUIRED_BACKGROUND_CONSENT_VERSION` in `outlookContentConsent.js` to the new value and
-redeploy `outlook-import-worker`; from then on, a connection consented under an older
+**C. Server and worker version updates — ONE new value, carried everywhere.** Every
+disclosure version is the digest of the ENTIRE notice, and each requirement compares the
+stored version to it by exact equality. A connection that reconnects under the changed
+notice records the new version; any requirement left at the old one then fails for that
+very connection. So the approved value from step B goes, in the same cutover, into:
+
+1. the browser: `OUTLOOK_DISCLOSURE_VERSION` in `src/lib/outlookDisclosure.js` derives it
+   from the published paragraphs once `DISCLOSURE_FINGERPRINT` is updated to the new text;
+2. the server: the `OUTLOOK_DISCLOSURE_VERSION` secret read by `outlook-oauth-start`, so the
+   same value is stamped into new consents (and the control refuses to mint a state until
+   the two agree);
+3. the worker, all three requirements in `outlookContentConsent.js`:
+   `REQUIRED_CONTENT_CONSENT_VERSION`, `REQUIRED_THIRD_PARTY_CONSENT_VERSION` and
+   `REQUIRED_BACKGROUND_CONSENT_VERSION`. They remain three independent checks (body
+   reading, Anthropic processing, unattended operation) and a later decision may move one
+   alone — a notice change is not that decision. Raising only the background requirement
+   would open unattended operation while closing body reading and the model path for the
+   re-consented account (`tests/outlook-background-consent-cutover.test.js`, "the hazard").
+
+Redeploy `outlook-import-worker`. From then on a connection consented under an older
 version is released with `background_consent_missing` — no read, no subscription — until it
-reconnects. (`REQUIRED_CONTENT_CONSENT_VERSION` / `REQUIRED_THIRD_PARTY_CONSENT_VERSION`
-are raised to the same value only if the content paragraphs changed; section F changes
-only the background paragraph, so they stay unless the owner decides otherwise.)
+reconnects; until this step, with the requirement still null, every run is released with
+`background_consent_not_configured` the same way. **Nothing in this PR chooses or
+configures the new value**; it is derived from the approved wording, after approval.
 
 **D. Fresh pilot consent.** The pilot disconnects (Settings → Disconnect Outlook) and
 reconnects under the new notice. Verify `microsoft_connections.consent_policy_version`
@@ -131,18 +153,36 @@ equals the new value. Recorded consent is never edited in place.
 **E. Bootstrap invocation (controlled, authorized separately).** Setting
 `OUTLOOK_IMPORT_WORKER_ENABLED=true` executes nothing by itself. With the flag set and the
 tick still inactive, the owner runs ONE invocation (the existing hidden-input PowerShell
-pattern, `OUTLOOK_WORKER_SECRET` not shown). Expected: `run.outcome` `committed` or
-`none_due` with `run.subscription.action = create`, `outcome = created`, and
-`outlook_subscriptions.status = 'active'` with an `expires_at` about three days out. This
+pattern, `OUTLOOK_WORKER_SECRET` not shown). The subscription is created only inside a
+RESERVED run, so the proof is a run that reserved the connection: `run.outcome` `committed`
+(or `continued`) **and** `run.subscription.action = create`, `outcome = created`, **and** an
+`outlook_subscriptions` row with `status = 'active'` and `expires_at` about three days out.
+A `none_due` answer establishes nothing — no connection was reserved and no subscription
+step ran. If the connection is not yet due (its last attempt is under `DUE_AFTER_SECONDS` =
+900 s old), wait until it is and invoke once more; do not read `none_due` as success. This
 is where Microsoft validates the deployed endpoint (first live fact).
 
-**F. Listener verification before unattended operation.** With the tick still inactive:
-send a message to the pilot mailbox from another account; within Microsoft's documented
-latency, `wake_count` increments and `last_wake_at` is set (the endpoint accepted a
-notification); then the owner runs one invocation and observes `wake_age_seconds` and a
-proposal if the exchange qualifies. Repeat by **sending an existing draft** from the pilot
-mailbox (Sent Items): `wake_count` must increment again. Only after both signals are
-observed does activation continue.
+**F. Listener verification before unattended operation.** The tick is still inactive, but
+the endpoint already **kicks the worker** after it records a notification, and the flag is
+on since step E — so an accepted notification runs the worker by itself. No manual
+invocation is needed here, and one would only blur which trigger did the work. Observe, in
+this order, for an inbound message sent to the pilot mailbox from another account:
+
+1. `microsoft_connections.wake_count` increments and `last_wake_at` is set (the endpoint
+   accepted the notification);
+2. within about a minute, the kicked run shows in `outlook_sync_state`: `run_started_at`
+   after `last_wake_at`, then a complete release with `wake_requested_at` cleared (the
+   signal was consumed by the run it woke);
+3. a proposal appears if the exchange qualifies; its latency is the SQL in section 2
+   (candidate `created_at` against `last_wake_at`). `wake_age_seconds` is in the worker's
+   HTTP answer, which only a manual invocation sees; a kicked run leaves its evidence in
+   the rows above.
+
+Repeat by **sending an existing draft** from the pilot mailbox (Sent Items): `wake_count`
+must increment again and a run must follow the same way. Only after both signals are
+observed, each followed by its automatic run, does activation continue. If a signal is
+recorded but no run follows, the kick is the thing to diagnose (worker flag, secret,
+`not_enabled` answers in the worker log) before any schedule is activated.
 
 **G. Activate.** `SELECT cron.alter_job((SELECT jobid FROM cron.job WHERE jobname =
 'outlook-worker-tick'), active := true);` Then the live acceptance test: with Funnl closed, a
@@ -164,12 +204,15 @@ it in Funnl; `wake_age_seconds` and the SQL above record the latency.
 
 ## 7. Next workstreams, with completion criteria (not in this slice)
 
-**A. Detailed notes.** Done when: the drafted note carries the concrete facts of the
-exchange (who offered what, dates named, next steps) in up to 500 characters, the draft
-contract bounds and evidence codes are extended accordingly, the migration raises the
-column limit with a marker-strip diff, and the reviewer sees the longer note in the card
-and in the saved interaction. Verified through the real handler against the model contract
-and in the browser harness.
+**A. Detailed conversation notes.** Done when the drafted note states the concrete facts
+of the exchange — who offered what, dates and places named, commitments made, the next
+step — each traceable to the message text (evidence codes extended to name what each fact
+rests on), with the reviewer able to see and edit the whole of it on the card and in the
+saved interaction. Raising the summary ceiling (today 200 characters) is a consequence of
+that, not the deliverable: a longer vague note does not complete this item, and a new cap
+alone is not a completion criterion. The draft contract bounds, the column limit (migration
+with a marker-strip diff) and the privacy wording move together with the content change.
+Verified through the real handler against the model contract and in the browser harness.
 
 **B. Broader metadata extraction.** Done when: company, role and how-met are proposed for a
 new contact only with an evidence code and confidence, start blank unless `high`, are

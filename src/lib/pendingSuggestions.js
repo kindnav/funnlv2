@@ -23,7 +23,7 @@ export const SUGGESTIONS_REFRESH_INTERVAL_MS = 30_000
 export const SUGGESTIONS_CHANGED_EVENT = 'funnl:suggestions-changed'
 export const NEW_SUGGESTIONS_MESSAGE = 'New suggestions arrived and were added to the list.'
 export const UPDATED_SUGGESTIONS_MESSAGE = 'A suggestion was updated with newer mail.'
-export const HELD_UPDATES_MESSAGE = 'An update to a suggestion you are editing is waiting; it will appear when you finish.'
+export const HELD_UPDATES_MESSAGE = 'A newer version of a suggestion you are editing is waiting. Your edits are kept; choose "Use newer draft" on the card if you want it.'
 /** The most pending rows one signature read covers per queue. */
 export const SIGNATURE_LIMIT = 500
 
@@ -161,6 +161,36 @@ export function mergeQueueRows ({ list, added = [], changed = [], removedIds = [
   }
   out.sort(compareQueueRows)
   return { list: out, held, applied }
+}
+
+/**
+ * Pure: the signature checkpoint the page should keep after one poll.
+ *
+ * The checkpoint advances ONLY when the rows a difference named were fetched and then applied
+ * or held (`applied` true). A transient failure of the full-row fetch leaves the checkpoint
+ * where it was, so the next poll sees the same difference again and retries - even when the
+ * signature itself has not changed in between. Advancing first and fetching second (the
+ * earlier order) lost any change whose fetch happened to fail: the next poll compared equal
+ * signatures and never asked again.
+ *
+ * @param {Map|null} known   the checkpoint before this poll
+ * @param {Array|null} fresh  the signature just read
+ * @param {boolean} applied  whether the changed rows were fetched and applied/held
+ * @returns {Map|null}
+ */
+export function nextSignatureCheckpoint (known, fresh, applied) {
+  if (known === null || known === undefined) return indexSignature(fresh)   // first observation learns only
+  return applied === true ? indexSignature(fresh) : known
+}
+
+/**
+ * Pure: the set of ids whose cards are busy, minus one the reviewer explicitly released - the
+ * card whose "Use newer draft" / "Remove from list" was pressed. Never mutates the input.
+ */
+export function busyExcept (busy, id) {
+  const out = new Set(busy instanceof Set ? busy : [])
+  out.delete(id)
+  return out
 }
 
 /** A card's React key: the id, plus the row version so a refreshed proposal remounts fresh. */

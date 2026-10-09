@@ -295,6 +295,7 @@ function manyConversationsFixture (n) {
 
 let currentEnv = null
 let currentDeps = null
+const SEEDED_CONSENT = 'ol-disc-00000000000000000000000000000000'
 
 function startWorkerServer () {
   const server = createServer((req, res) => {
@@ -309,7 +310,9 @@ function startWorkerServer () {
       })
       let out
       try {
-        out = await handleOutlookImportWorker(request, currentEnv, currentDeps)
+        // The seeded connections consented under SEEDED_CONSENT; the background requirement is
+        // injected to that value (the handler's test seam) so the runs model a re-consented account.
+        out = await handleOutlookImportWorker(request, currentEnv, { requiredBackgroundConsent: SEEDED_CONSENT, ...currentDeps })
       } catch (e) {
         res.writeHead(500, { 'Content-Type': 'application/json' })
         res.end(JSON.stringify({ harnessError: String(e && e.message) }))

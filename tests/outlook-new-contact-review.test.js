@@ -598,7 +598,9 @@ test('the QUEUE only reads, and reads both tables', () => {
   const deletes = [...code.matchAll(/\.delete\(/g)].length
   const inMemoryDeletes = [...code.matchAll(/Ref\.current\.delete\(/g)].length
   assert.ok(deletes > 0 && deletes === inMemoryDeletes, `every .delete( must be an in-memory one (${inMemoryDeletes}/${deletes})`)
-  assert.ok(!/from\('[^']+'\)[^;]*\.delete\(/.test(code), 'no Supabase delete on the page')
+  // A Supabase delete is a `.from('<table>')` chain ending in `.delete(`; JSX has few semicolons,
+  // so the chain is matched by its own shape rather than "anything up to a semicolon".
+  assert.ok(!/\.from\('[^']+'\)(\s*\.[A-Za-z]+\([^()]*\))*\s*\.delete\(/.test(code), 'no Supabase delete on the page')
 })
 
 test('an empty interaction queue with a proposal waiting is NOT "all caught up"', () => {

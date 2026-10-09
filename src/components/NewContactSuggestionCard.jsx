@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import PendingUpdateNotice from './PendingUpdateNotice'
 import { supabase } from '../lib/supabase'
 import { getAvatarColor, getInitials } from '../lib/avatarUtils'
 import { track } from '../lib/analytics'
@@ -44,7 +45,7 @@ function formatDate (iso) {
  * not inferred. `accept_new_contact_candidate` reads it from the stored row and ignores
  * any caller value, so an editable field here would be a lie about what gets saved.
  */
-export default function NewContactSuggestionCard ({ candidate, onResolved, onBusyChange }) {
+export default function NewContactSuggestionCard ({ candidate, onResolved, onBusyChange, pendingUpdate = null, onTakeUpdate }) {
   const [state, setState] = useState(() => initialReviewState(candidate))
   const [busy, setBusy] = useState(false)
   const [confirmDismiss, setConfirmDismiss] = useState(false)
@@ -258,6 +259,10 @@ export default function NewContactSuggestionCard ({ candidate, onResolved, onBus
           )}
 
           {error && <p role="alert" className="mt-2 text-[12px] text-danger">{error}</p>}
+
+          {/* A background update to THIS card while it is edited is held by the page; the
+              reviewer's values stay and the newer draft is offered as an explicit choice. */}
+          <PendingUpdateNotice pendingUpdate={pendingUpdate} busy={busy} onTake={() => onTakeUpdate?.(candidate.id)} />
 
           {!confirmDismiss ? (
             <div className="mt-3 flex flex-wrap items-center gap-2">

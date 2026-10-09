@@ -418,6 +418,7 @@ function invoke ({
     // The gates are injected ONLY here, exactly as the unit tests inject them. The
     // production constants stay null and this harness cannot change them.
     requiredConsent: REQUIRED,
+    requiredBackgroundConsent: consentVersion,
     ...(requestEntryMs === undefined ? {} : { requestEntryMs }),
     deps: { fetchImpl: provider(counts, opts), ...(now ? { now } : {}) },
   })

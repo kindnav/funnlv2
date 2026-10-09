@@ -375,6 +375,7 @@ async function runWorker (opts = {}) {
     graphFetchImpl: makeFetch(counts, opts),
     now: () => FIXED,
     subtle,
+    requiredBackgroundConsent: REQUIRED_CONTENT_CONSENT_VERSION,   // the row's version: re-consented under the current notice
   })
   return { res, body: await res.json(), ports, counts }
 }

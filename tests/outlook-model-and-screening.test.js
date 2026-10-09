@@ -577,6 +577,7 @@ async function runWorker (modelReply) {
   const res = await handleOutlookImportWorker(workerReq(), env(), {
     tokenUrl: 'https://login.invalid/token', select: ports.select, rpc: ports.rpc,
     graphFetchImpl: makeFetch(counts, modelReply), now: () => FIXED, subtle,
+    requiredBackgroundConsent: V,   // the row's version: re-consented under the current notice
   })
   return { res, body: await res.json(), ports, counts }
 }
