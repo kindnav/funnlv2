@@ -63,10 +63,11 @@ const URL_N = 'https://project.supabase.test/functions/v1/outlook-notifications'
 const SUBS = GRAPH_BASE + '/subscriptions'
 const API_KEY = 'sk-ant-fixture-not-a-real-key'
 
-// The versions. OLD is whatever the module requires for content today (the version the
-// current pilot connection recorded). NEW stands for the version the approved background
-// wording would derive to - invented here, never configured anywhere.
-const OLD = consent.REQUIRED_CONTENT_CONSENT_VERSION
+// The versions. OLD is a version a connection recorded under an earlier notice (the
+// content release); NEW is the version the run is REQUIRED to see. Both are injected into the
+// run through its test seams, so these cases hold whatever the module constants are today;
+// the module's own values are checked separately below.
+const OLD = 'ol-disc-e3e2b1714b453c2904e3ed08cb232097'
 const NEW = 'ol-disc-' + 'b'.repeat(32)
 assert.notStrictEqual(OLD, NEW)
 
@@ -238,13 +239,25 @@ const nothingHappened = (r, label) => {
 console.log('')
 console.log('the pure gate: closed while unconfigured, closed to stale or missing consent, open only to the exact version')
 await test('an unconfigured requirement (null, undefined, malformed) authorizes nothing', () => {
-  assert.strictEqual(consent.REQUIRED_BACKGROUND_CONSENT_VERSION, null, 'nothing is configured before the wording is approved')
-  for (const bad of [null, undefined, '', 'not-a-version', 'OL-DISC-' + 'a'.repeat(32)]) {
+  // CUT OVER 2026-10-09: the requirement now carries the published notice version, the same
+  // value as the other two requirements (one cutover, never one alone).
+  assert.strictEqual(consent.REQUIRED_BACKGROUND_CONSENT_VERSION, 'ol-disc-6d1ddd67f51d5b3bfd8d3801c50271a7')
+  assert.strictEqual(consent.REQUIRED_BACKGROUND_CONSENT_VERSION, consent.REQUIRED_CONTENT_CONSENT_VERSION)
+  assert.strictEqual(consent.REQUIRED_BACKGROUND_CONSENT_VERSION, consent.REQUIRED_THIRD_PARTY_CONSENT_VERSION)
+  // The gate still fails closed for any unconfigured or malformed requirement a caller passes.
+  for (const bad of [null, '', 'not-a-version', 'OL-DISC-' + 'a'.repeat(32)]) {
     const r = consent.backgroundOperationAllowed(OLD, bad)
     assert.strictEqual(r.ok, false, JSON.stringify(bad))
     assert.strictEqual(r.reason, 'background_consent_not_configured', JSON.stringify(bad))
   }
-  assert.deepStrictEqual(consent.backgroundOperationAllowed(OLD), { ok: false, reason: 'background_consent_not_configured' }, 'the module default is the unconfigured value')
+  // `undefined` is not "unconfigured": it selects the module default (now configured), against
+  // which the content-release consent is stale.
+  assert.deepStrictEqual(consent.backgroundOperationAllowed(OLD, undefined), { ok: false, reason: 'background_consent_missing' })
+  // The module default now admits exactly the published version; the content-release consent
+  // the pilot holds today is stale against it.
+  assert.deepStrictEqual(consent.backgroundOperationAllowed(consent.REQUIRED_BACKGROUND_CONSENT_VERSION), { ok: true, reason: 'consented' })
+  assert.deepStrictEqual(consent.backgroundOperationAllowed('ol-disc-e3e2b1714b453c2904e3ed08cb232097'), { ok: false, reason: 'background_consent_missing' }, 'the content-release consent is stale against the cut-over requirement')
+  assert.deepStrictEqual(consent.backgroundOperationAllowed(null), { ok: false, reason: 'background_consent_missing' }, 'missing consent fails closed')
 })
 await test('a configured requirement admits exactly its own version and refuses everything else', () => {
   assert.deepStrictEqual(consent.backgroundOperationAllowed(NEW, NEW), { ok: true, reason: 'consented' })

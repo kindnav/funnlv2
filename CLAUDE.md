@@ -1331,9 +1331,11 @@ makes its output discoverable. Full plan, latency target, measurement and next w
 **Rollout state (2026-10-09):** migration `20261009000000` APPLIED; `outlook-notifications` v1 and
 `outlook-import-worker` v40 DEPLOYED (verify_jwt=false, closures byte-identical to main); background
 disclosure wording PUBLISHED (notice version `ol-disc-6d1ddd67f51d5b3bfd8d3801c50271a7`, policy "Last updated" October 9, 2026);
-Vault secrets NOT yet present on the project; the three worker consent requirements and the server
-`OUTLOOK_DISCLOSURE_VERSION` still at the content-release value pending the cutover; worker flag
-absent; cron job inactive. Owner packet: `docs/outlook-background-activation-packet.md`.
+Vault secrets `outlook_worker_url` + `outlook_worker_secret` present (names verified); the three worker
+consent requirements AND the server `OUTLOOK_DISCLOSURE_VERSION` cut over to `ol-disc-6d1ddd67f51d5b3bfd8d3801c50271a7` on
+2026-10-09 (worker redeployed from merged main); the pilot connection still holds the content-release
+consent and must reconnect (step 6); worker flag absent; cron job inactive. Owner packet:
+`docs/outlook-background-activation-packet.md`.
 
 **How it works:**
 - `outlook-notifications` Edge Function (`verify_jwt=false`): Microsoft Graph's validation handshake
@@ -1349,8 +1351,9 @@ absent; cron job inactive. Owner packet: `docs/outlook-background-activation-pac
   after it completes, and pg_cron `outlook-worker-tick` (every minute, secrets from Vault,
   CREATED INACTIVE).
 - Consent gate for unattended operation: `REQUIRED_BACKGROUND_CONSENT_VERSION` in
-  `outlookContentConsent.js` is null and **closed while null** (every run released with
-  `background_consent_not_configured`; no subscription, no read). All three worker requirements
+  `outlookContentConsent.js` carries the published notice version (set 2026-10-09); while it was
+  null the gate was **closed** (every run released with `background_consent_not_configured`; no
+  subscription, no read), and it still fails closed for any unconfigured or malformed value. All three worker requirements
   (body, Anthropic, background) are digests of the whole notice and move to the same new value in
   one cutover with the browser and server `OUTLOOK_DISCLOSURE_VERSION` — never one alone.
 - UI: Suggestions rail item + mobile Review tab with a pending badge (gated by

@@ -275,10 +275,10 @@ export function disclosureFingerprint (paragraphs) {
 // paragraph 3 gained one sentence - Funnl asks Microsoft to tell its servers when new mail
 // arrives, so a check can start automatically within minutes while Funnl is closed. The
 // previous value, e3e2b1714b453c2904e3ed08cb232097, identified the content-release text
-// (October 6, 2026); it is what the three worker requirements still name until the separately
-// authorized cutover moves them to this value together (activation packet, step 5). Until
-// then a connection consented under THIS notice is refused by those gates as stale - by
-// design, so that no requirement is ever raised ahead of its approval.
+// (October 6, 2026). The three worker requirements were cut over to THIS value together on
+// October 9, 2026 (activation packet, step 5), after publication - so no requirement was
+// ever raised ahead of its approval, and a connection that consents under this notice
+// satisfies all three.
 export const DISCLOSURE_FINGERPRINT = '6d1ddd67f51d5b3bfd8d3801c50271a7'
 
 /**

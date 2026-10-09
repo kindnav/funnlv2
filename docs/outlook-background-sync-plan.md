@@ -1,7 +1,8 @@
 # Outlook background sync — implementation plan, activation plan and completion criteria
 
-Status: **PR #76 merged 2026-10-09 (`4bc50c8`); migration applied; both functions deployed; wording
-published (version `ol-disc-6d1ddd67f51d5b3bfd8d3801c50271a7`); Vault, cutover, consent, bootstrap, listener verification and
+Status: **PR #76 merged 2026-10-09 (`4bc50c8`); migration applied; both functions deployed; Vault
+secrets present; wording published (version `ol-disc-6d1ddd67f51d5b3bfd8d3801c50271a7`); server secret and all three worker
+requirements cut over to it, worker redeployed; pilot re-consent, bootstrap, listener verification and
 activation still pending** (base `main` =
 `f1c95bc7e01532f4fe9465b5faa5f8341b8827fa`, the PR #75 merge).
 
