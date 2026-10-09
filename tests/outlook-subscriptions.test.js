@@ -403,9 +403,11 @@ await test('without a notification URL the step is skipped and reported; nothing
 })
 
 console.log('')
-console.log('5. the background-operation consent gate: CLOSED while unset, closed to stale consent once set, open to the exact version')
+console.log('5. the background-operation consent gate: CLOSED when unset, closed to stale consent, open to the exact version')
 await test('the pure gate: an unset requirement authorizes nothing; a set version must match the recorded one exactly', () => {
-  assert.strictEqual(REQUIRED_BACKGROUND_CONSENT_VERSION, null, 'unset until the wording is published and re-consented')
+  // Cut over 2026-10-09: the requirement carries the published notice version, with the other two.
+  assert.strictEqual(REQUIRED_BACKGROUND_CONSENT_VERSION, 'ol-disc-6d1ddd67f51d5b3bfd8d3801c50271a7')
+  assert.strictEqual(REQUIRED_BACKGROUND_CONSENT_VERSION, REQUIRED_CONTENT_CONSENT_VERSION)
   assert.deepStrictEqual(backgroundOperationAllowed('anything', null), { ok: false, reason: 'background_consent_not_configured' }, 'unset is CLOSED, not open')
   const v = 'ol-disc-' + 'f'.repeat(32)
   assert.deepStrictEqual(backgroundOperationAllowed(v, v), { ok: true, reason: 'consented' })

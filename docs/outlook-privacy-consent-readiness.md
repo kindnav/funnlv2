@@ -126,9 +126,10 @@ produces a different version and the server's exact-string gate refuses the stal
 The derived version for this text is **`ol-disc-6d1ddd67f51d5b3bfd8d3801c50271a7`**
 (fingerprint `6d1ddd67f51d5b3bfd8d3801c50271a7`), **published October 9, 2026** (background-sync wording approved at
 PR #76 head 505523f). The previous content-release version `ol-disc-e3e2b1714b453c2904e3ed08cb232097`
-(October 6, 2026) is what the three worker requirements still name until the separately
-authorized cutover moves them to this value together. The paragraph below about `null`
-constants is historical (they were set on the content release).
+(October 6, 2026) was what the three worker requirements named until the cutover of
+2026-10-09 (activation packet step 5) moved them to this value together, with the server's
+`OUTLOOK_DISCLOSURE_VERSION`. The paragraphs below about `null` constants and an unset
+server variable are historical.
 The server's `OUTLOOK_DISCLOSURE_VERSION` is not set to it. What that variable holds
 today has **not been read from this branch**, and is not asserted here either way -
 see section 0, which records that it WAS configured in Production for the

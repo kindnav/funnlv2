@@ -563,8 +563,9 @@ separately authorized; approving the wording authorizes none of them.
 
 Status: **approved by the owner at PR #76 head 505523f and published October 9, 2026**
 (activation packet step 4). Derived version of the published notice: `ol-disc-6d1ddd67f51d5b3bfd8d3801c50271a7`.
-The three worker requirements still name the content-release version until the separately
-authorized cutover (step 5). No recorded consent is changed in place. The questions this section answers: does the background-sync slice
+The three worker requirements and the server `OUTLOOK_DISCLOSURE_VERSION` were cut over to
+that version on 2026-10-09 (step 5). No recorded consent is changed in place; the pilot
+reconnects under the published notice in step 6. The questions this section answers: does the background-sync slice
 (`docs/outlook-background-sync-plan.md`) store anything the published Outlook section does
 not already name, and does it change how reads run? Both answers are yes, narrowly.
 

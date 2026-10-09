@@ -1,13 +1,14 @@
 # Outlook background sync — owner packet: disclosure wording and ordered activation
 
-Status (2026-10-09): **steps 1, 2 and 4 done; step 3 open; steps 5-10 pending.** Step 1:
-migration `20261009000000` applied and catalog-verified. Step 2: PR #76 merged as `4bc50c8`
-(pinned to the approved head `505523f`), `outlook-notifications` v1 and `outlook-import-worker`
-v40 deployed, closures byte-identical. Step 3: the Vault on `jzybxhvgnksrwxfivdwt` still holds
-no rows - the entries saved through the dashboard were not found on this project; reconciliation
-of the dashboard URL is pending. Step 4: the section-2 wording is published; the published notice
-derives to `ol-disc-6d1ddd67f51d5b3bfd8d3801c50271a7`. No version configured anywhere yet, no subscription, no schedule
-active, no invocation made. Each remaining step is approved and performed in order.
+Status (2026-10-09): **steps 1-5 done; steps 6-10 pending.** Step 1: migration `20261009000000`
+applied and catalog-verified. Step 2: PR #76 merged as `4bc50c8` (pinned to the approved head
+`505523f`), `outlook-notifications` v1 and `outlook-import-worker` v40 deployed, closures
+byte-identical. Step 3: both Vault names (`outlook_worker_url`, `outlook_worker_secret`) present
+exactly once on `jzybxhvgnksrwxfivdwt`, independently verified at 18:17:17Z. Step 4: the section-2
+wording is published; the published notice derives to `ol-disc-6d1ddd67f51d5b3bfd8d3801c50271a7`. Step 5: the server
+`OUTLOOK_DISCLOSURE_VERSION` and all three worker requirements carry that value; the worker is
+redeployed from merged main. Not yet: pilot re-consent (step 6), bootstrap, listener verification,
+activation. No subscription, no schedule active, no invocation made.
 
 Source documents, which this packet summarizes and defers to on detail:
 `docs/outlook-content-disclosure-draft.md` section F (wording rationale) and

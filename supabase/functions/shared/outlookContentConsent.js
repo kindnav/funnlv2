@@ -67,16 +67,19 @@ export const CONTENT_CONSENT_CODES = Object.freeze([
  * to a guess would have asserted that somebody agreed to text never shown to
  * them. It is now the version derived from the approved notice.
  */
-// APPROVED AND SET. The owner approved the 23-paragraph notice and the Outlook
-// policy wording, and approved selected message-body processing. This is the
-// version derived from that exact text - see computeDisclosureVersion() in
-// src/lib/outlookDisclosure.js, which recomputes it from the paragraph array.
+// APPROVED AND SET; CUT OVER 2026-10-09 (activation packet step 5). The owner approved the
+// 23-paragraph notice and the Outlook policy wording with selected message-body processing
+// (October 6, 2026), and then the background-sync wording (October 9, 2026). This is the
+// version derived from the PUBLISHED text - see computeDisclosureVersion() in
+// src/lib/outlookDisclosure.js, which recomputes it from the paragraph array - and it is the
+// same value as the other two requirements and the server's OUTLOOK_DISCLOSURE_VERSION, per
+// the cutover rule at the top of this file.
 //
-// A connection must match this EXACTLY. It is a content digest, so there is no
-// ordering and no near-enough: the envelope-only pilot recorded
-// ol-disc-81fe8944fd2be59ac3c059c229b4d28e and must disconnect and reconnect,
-// because the two documents say opposite things about body reading.
-export const REQUIRED_CONTENT_CONSENT_VERSION = 'ol-disc-e3e2b1714b453c2904e3ed08cb232097'
+// A connection must match this EXACTLY. It is a content digest, so there is no ordering
+// and no near-enough: the envelope-only pilot (ol-disc-81fe8944fd2be59ac3c059c229b4d28e)
+// and the content-release consent (ol-disc-e3e2b1714b453c2904e3ed08cb232097) are both
+// stale against it and must disconnect and reconnect under the published notice.
+export const REQUIRED_CONTENT_CONSENT_VERSION = 'ol-disc-6d1ddd67f51d5b3bfd8d3801c50271a7'
 
 /**
  * The disclosure version an account must have consented to before any part of a
@@ -97,11 +100,11 @@ export const REQUIRED_CONTENT_CONSENT_VERSION = 'ol-disc-e3e2b1714b453c2904e3ed0
  * Approved and set, for the same reason as above: the notice the owner approved
  * discloses the third-party send explicitly, so this gate has a version to name.
  */
-// APPROVED AND SET, separately from the body gate even though both now carry the
-// same value. They stay two constants because they answer two questions, and a
-// later decision to stop sending anything to Anthropic while still reading
-// bodies must remain expressible by changing one of them.
-export const REQUIRED_THIRD_PARTY_CONSENT_VERSION = 'ol-disc-e3e2b1714b453c2904e3ed08cb232097'
+// APPROVED AND SET; CUT OVER 2026-10-09 with the other two, separately from the body
+// gate even though both carry the same value. They stay two constants because they
+// answer two questions, and a later decision to stop sending anything to Anthropic while
+// still reading bodies must remain expressible by changing one of them.
+export const REQUIRED_THIRD_PARTY_CONSENT_VERSION = 'ol-disc-6d1ddd67f51d5b3bfd8d3801c50271a7'
 
 /** Codes the background gate can return. Controlled, and safe to log. */
 export const BACKGROUND_CONSENT_CODES = Object.freeze([
@@ -114,25 +117,23 @@ export const BACKGROUND_CONSENT_CODES = Object.freeze([
  * mailbox UNATTENDED: keep a Microsoft change-notification subscription for it and read it
  * automatically (on a signal, or on the schedule) while the user is not using the app.
  *
- * NULL UNTIL THE BACKGROUND-SYNC WORDING IS PUBLISHED AND THE PILOT HAS RE-CONSENTED - AND
- * WHILE NULL THE GATE IS CLOSED. An unconfigured requirement authorizes nothing: no
- * subscription is created and no mailbox read happens, for any connection, because no
- * account can have agreed to wording that does not exist yet. (An earlier revision treated
- * null as "open, today's behaviour"; that let a deployed worker subscribe and read
- * unattended on the strength of a consent that never mentioned either.) The staged rollout
- * is unaffected: the worker flag stays off until the cutover below has happened, and the
- * run that this gate refuses is released untouched with a retry backoff, so nothing is
- * lost - it simply waits for consent.
+ * SET ON 2026-10-09 (activation packet step 5) to the version derived from the PUBLISHED
+ * background-sync notice (October 9, 2026), together with the other two requirements and the
+ * server's OUTLOOK_DISCLOSURE_VERSION - never one alone. It was null until then, and while
+ * null the gate was CLOSED: an unconfigured requirement authorizes nothing, because no
+ * account can have agreed to wording that does not exist yet (an earlier revision treated
+ * null as "open"; that let a deployed worker subscribe and read unattended on the strength
+ * of a consent that never mentioned either). backgroundOperationAllowed() keeps that
+ * fail-closed behaviour for any unconfigured or malformed value a test may pass.
  *
- * Once set - to the version derived from the APPROVED notice, never to a guess - a
- * connection whose recorded consent_policy_version equals it may be operated unattended;
- * one whose version differs is released with `background_consent_missing`, before any read
- * and before any subscription request, until the account disconnects and reconnects under
- * the new disclosure. Recorded consent is never upgraded in place. The cutover rule at the
- * top of this file applies: the same value goes into the other two requirements.
- * docs/outlook-background-sync-plan.md section 6 is the activation plan that sets this.
+ * A connection whose recorded consent_policy_version equals this value may be operated
+ * unattended; one whose version differs - the content-release consent the pilot holds
+ * today included - is released with `background_consent_missing`, before any read and
+ * before any subscription request, until the account disconnects and reconnects under the
+ * published notice. Recorded consent is never upgraded in place. The run this gate refuses
+ * is released untouched with a retry backoff, so nothing is lost - it waits for consent.
  */
-export const REQUIRED_BACKGROUND_CONSENT_VERSION = null
+export const REQUIRED_BACKGROUND_CONSENT_VERSION = 'ol-disc-6d1ddd67f51d5b3bfd8d3801c50271a7'
 
 /**
  * Pure: may this connection be operated unattended, given what it consented to?

@@ -55,19 +55,19 @@ test('the APPROVED content version is configured, and only it is allowed', () =>
   // from that exact text. What the guard protects has not changed: nothing but an
   // exact match opens the gate.
   assert.strictEqual(REQUIRED_CONTENT_CONSENT_VERSION,
-    'ol-disc-e3e2b1714b453c2904e3ed08cb232097',
-    'the configured version must be the one derived from the approved text')
+    'ol-disc-6d1ddd67f51d5b3bfd8d3801c50271a7',
+    'the configured version must be the one derived from the published text')
 
-  // CUTOVER PENDING (published 2026-10-09, activation packet step 4): the notice gained the
-  // background-sync sentence, so the shipped version MOVED ON while this requirement, by
-  // deliberate order, has not. The three worker requirements move to the published value
-  // together in the separately authorized step 5 - never one ahead of approval. Until then
-  // a connection that consents under the PUBLISHED notice is refused by this gate as stale.
-  assert.notStrictEqual(REQUIRED_CONTENT_CONSENT_VERSION, OUTLOOK_DISCLOSURE_VERSION,
-    'the published notice is ahead of the worker requirement until the cutover')
-  assert.strictEqual(contentProcessingAllowed(OUTLOOK_DISCLOSURE_VERSION).reason, 'content_consent_stale',
-    'consent under the newly published notice is refused until the cutover moves the requirement')
+  // CUT OVER 2026-10-09 (activation packet step 5): the published notice (step 4) and this
+  // requirement carry ONE value again. DERIVED, NOT TYPED - the constant must equal what the
+  // shipped paragraphs produce, or a recorded consent would name a document nobody saw.
+  assert.strictEqual(REQUIRED_CONTENT_CONSENT_VERSION, OUTLOOK_DISCLOSURE_VERSION,
+    'the configured version must match the notice the card actually renders')
   assert.ok(verifyDisclosureIntegrity(), 'and the notice must pass its own integrity check')
+  // The CONTENT-RELEASE consent (October 6) is now stale too: the pilot must reconnect.
+  const prior = contentProcessingAllowed('ol-disc-e3e2b1714b453c2904e3ed08cb232097')
+  assert.strictEqual(prior.allowed, false)
+  assert.strictEqual(prior.reason, 'content_consent_stale')
 
   // THE LIVE PILOT'S CONSENT IS STALE, not merely different: the envelope-only text
   // says Funnl sends nothing to Anthropic. It must reconnect.
@@ -154,9 +154,9 @@ test('both gates are configured, and the live pilot is STALE against both', () =
   // is stale against both - 'stale' rather than 'not_configured' is the whole point:
   // the gate is open in principle and that connection does not satisfy it.
   assert.strictEqual(REQUIRED_THIRD_PARTY_CONSENT_VERSION,
-    'ol-disc-e3e2b1714b453c2904e3ed08cb232097')
-  // Cutover pending, as for the content twin: the published notice is ahead of this requirement.
-  assert.notStrictEqual(REQUIRED_THIRD_PARTY_CONSENT_VERSION, OUTLOOK_DISCLOSURE_VERSION)
+    'ol-disc-6d1ddd67f51d5b3bfd8d3801c50271a7')
+  // Cut over with the content twin: the published notice and this requirement agree.
+  assert.strictEqual(REQUIRED_THIRD_PARTY_CONSENT_VERSION, OUTLOOK_DISCLOSURE_VERSION)
   // Two constants, deliberately, even carrying the same value: they answer two
   // questions, and turning the model path off while keeping body reading must stay
   // expressible by changing one of them.
