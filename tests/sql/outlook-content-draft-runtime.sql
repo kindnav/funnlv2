@@ -78,7 +78,9 @@ BEGIN
   ASSERT (SELECT count(*) FROM public.outlook_candidate_refs) = 0, 'outlook_candidate_refs not empty';
   ASSERT (SELECT count(*) FROM public.new_contact_candidates) = 0, 'new_contact_candidates not empty';
   ASSERT (SELECT count(*) FROM public.interaction_candidates WHERE source = 'outlook') = 0, 'outlook interaction candidates present';
-  ASSERT (SELECT count(*) FROM pg_extension WHERE extname = 'pg_cron') = 0, 'pg_cron must be absent';
+  -- 20261009000000 adds the scheduler for near-real-time syncing, CREATED INACTIVE: after a
+  -- clean apply pg_cron exists and no job is active until the rollout activates the tick.
+  ASSERT (SELECT count(*) FROM cron.job WHERE active) = 0, 'no ACTIVE cron job after a clean apply';
 END $$;
 
 BEGIN;

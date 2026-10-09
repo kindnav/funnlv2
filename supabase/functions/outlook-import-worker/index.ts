@@ -47,6 +47,11 @@ Deno.serve((req: Request) => {
     // writes the metadata candidate it writes now. It is read only AFTER both consent
     // gates pass against the connection's own recorded disclosure version.
     anthropicApiKey: Deno.env.get('ANTHROPIC_API_KEY') ?? null,
+    // Where Microsoft Graph POSTs change notifications: the deployed outlook-notifications
+    // function of this very project. Derived from SUPABASE_URL unless overridden, so no
+    // environment names a URL it does not own.
+    notificationUrl: Deno.env.get('OUTLOOK_NOTIFICATION_URL')
+      ?? (Deno.env.get('SUPABASE_URL') ? `${(Deno.env.get('SUPABASE_URL') ?? '').replace(/\/+$/, '')}/functions/v1/outlook-notifications` : null),
     keyVersion,
     scope: OUTLOOK_CANONICAL_SCOPES.join(' '),
   }, {

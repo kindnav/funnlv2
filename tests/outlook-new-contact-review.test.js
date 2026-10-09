@@ -585,13 +585,22 @@ test('the QUEUE only reads, and reads both tables', () => {
   assert.ok(code.includes("from('new_contact_candidates')"), 'the proposals must be listed')
   assert.ok(code.includes("from('interaction_candidates')"))
   assert.ok(code.includes('NCC_SELECT'))
-  // Only pending rows, from both.
-  assert.strictEqual([...code.matchAll(/\.eq\('status', 'pending'\)/g)].length, 2)
+  // Only pending rows, from both - the two page reads, and the two by-id reads the
+  // background refresh uses to merge arrivals and refreshed proposals into the loaded list.
+  assert.strictEqual([...code.matchAll(/\.eq\('status', 'pending'\)/g)].length, 4)
   // And no write of any kind on the page itself.
-  for (const forbidden of ['.insert(', '.update(', '.upsert(', '.delete(',
+  for (const forbidden of ['.insert(', '.update(', '.upsert(',
     'accept_new_contact_candidate']) {
     assert.ok(!code.includes(forbidden), `the page must not ${forbidden}`)
   }
+  // `.delete(` appears only on the page's own in-memory Maps and Sets (the refresh's
+  // known-signature, busy and held bookkeeping) - never on a Supabase query.
+  const deletes = [...code.matchAll(/\.delete\(/g)].length
+  const inMemoryDeletes = [...code.matchAll(/Ref\.current\.delete\(/g)].length
+  assert.ok(deletes > 0 && deletes === inMemoryDeletes, `every .delete( must be an in-memory one (${inMemoryDeletes}/${deletes})`)
+  // A Supabase delete is a `.from('<table>')` chain ending in `.delete(`; JSX has few semicolons,
+  // so the chain is matched by its own shape rather than "anything up to a semicolon".
+  assert.ok(!/\.from\('[^']+'\)(\s*\.[A-Za-z]+\([^()]*\))*\s*\.delete\(/.test(code), 'no Supabase delete on the page')
 })
 
 test('an empty interaction queue with a proposal waiting is NOT "all caught up"', () => {

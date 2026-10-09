@@ -20,6 +20,11 @@
 //     be. Its response is a Microsoft-SHAPED url, and the navigation to it is intercepted
 //     and blocked, so nothing leaves this machine.
 //
+// Sections 7-9 cover the background-sync slice: the Suggestions navigation and its badge,
+// the Settings sync status rendered from persisted rows, and a proposal that arrives while
+// the queue is open. Microsoft and the worker are NOT run here; the rows they would leave
+// are written directly, and the harness says so where it does it.
+//
 // RUN: node tests/local/outlook-pilot-browser.mjs
 
 import { spawn, execFileSync, spawnSync } from 'node:child_process'
@@ -307,9 +312,11 @@ class Page {
     throw new Error(`timed out waiting for: ${label}`)
   }
   /** A REAL mouse click at the element's centre, not a dispatched DOM event. */
-  async click (selectorOrText, { byText = false } = {}) {
+  async click (selectorOrText, { byText = false, within = null } = {}) {
+    const root = within ? `document.querySelector(${JSON.stringify(within)})` : 'document'
     const expr = byText
-      ? `const els=[...document.querySelectorAll('button,a,label,input')];
+      ? `const scope=${root}; if(!scope) return null;
+         const els=[...scope.querySelectorAll('button,a,label,input')];
          const el=els.find(e=>(e.innerText||e.value||'').trim().includes(${JSON.stringify(selectorOrText)}));
          if(!el) return null; el.scrollIntoView({block:'center'});
          const r=el.getBoundingClientRect(); return {x:r.x+r.width/2,y:r.y+r.height/2,tag:el.tagName};`
@@ -1235,6 +1242,402 @@ VALUES ('${PILOT_USER}','acct-2','consumers','personal','${PILOT_EMAIL}',
   // Leave no row behind for anything added after this.
   psql(`DELETE FROM public.microsoft_connections WHERE user_id='${PILOT_USER}';`,
     { tuplesOnly: false })
+
+  // ══ 7. Suggestions is reachable from the navigation, with the pending count ═══
+  // The queue used to be reachable only by URL or from a Dashboard entry that renders
+  // only when something is pending. A proposal written while Funnl was closed has to be
+  // discoverable: a rail item on desktop, a tab on mobile, both gated like the route.
+  console.log('\n7. Suggestions is reachable from the navigation, with the pending count')
+  const pendingMod = await import(pathToFileURL(join(ROOT, 'src/lib/pendingSuggestions.js')).href)
+  const pendingNow = () => Number(one(`SELECT (SELECT count(*) FROM public.interaction_candidates
+      WHERE user_id='${PILOT_USER}' AND status='pending')
+    + (SELECT count(*) FROM public.new_contact_candidates WHERE user_id='${PILOT_USER}' AND status='pending');`))
+  await page.goto(`${ORIGIN}/`)
+  await page.waitFor('!!document.querySelector(\'a[aria-label="Suggestions"]\')', 20000, 'the Suggestions rail item')
+  await sleep(800)   // the badge count is a separate RLS-scoped head request
+  const rail = await page.eval(`
+    const a = document.querySelector('a[aria-label="Suggestions"]')
+    const badge = a ? a.querySelector('[data-testid="suggestions-badge"]') : null
+    const all = [...document.querySelectorAll('a[href="/suggestions"]')]
+    const mobile = document.querySelector('nav[aria-label="Main navigation"] a[href="/suggestions"]')
+    return { href: a && a.getAttribute('href'), badge: badge ? badge.innerText.trim() : null,
+             links: all.length, mobileLabel: mobile ? mobile.getAttribute('aria-label') : null,
+             mobileHidden: mobile ? mobile.getClientRects().length === 0 : null }`)
+  check('the rail item links to /suggestions', rail.href === '/suggestions', JSON.stringify(rail))
+  const expectedBadge = pendingMod.badgeLabel(pendingNow())
+  check('its badge shows the pending count across BOTH queues (' + pendingNow() + ')', rail.badge === expectedBadge,
+    `badge=${rail.badge} expected=${expectedBadge}`)
+  check('the mobile Review tab is rendered too, hidden at desktop width by CSS',
+    rail.links >= 2 && typeof rail.mobileLabel === 'string' && rail.mobileLabel.startsWith('Suggestions') && rail.mobileHidden === true,
+    JSON.stringify(rail))
+  await page.click('a[aria-label="Suggestions"]')
+  await page.waitFor('location.pathname === "/suggestions"', 10000, 'navigation to the queue')
+  check('a real click on the rail item opens the queue - no direct URL needed',
+    await page.eval('return location.pathname') === '/suggestions')
+
+  // ══ 8. Settings shows the sync status from PERSISTED state ═══════════════
+  // Every line comes from a row: the sync state, the retry state, the connection flags,
+  // the subscription record. The rows are written here directly, which is exactly what the
+  // worker would leave behind; the worker itself is not run by this harness.
+  console.log('\n8. Settings shows the Outlook sync status from persisted state')
+  const CONN_ID = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
+  psql(`
+INSERT INTO public.microsoft_connections
+  (id, user_id, ms_account_id, ms_tenant_id, account_type, ms_email, scopes, status, consented_at, consent_policy_version)
+VALUES ('${CONN_ID}', '${PILOT_USER}', 'acct-3', 'consumers', 'personal', '${PILOT_EMAIL}',
+        ARRAY['Mail.Read','User.Read','offline_access'], 'active', now(), '${mod.OUTLOOK_DISCLOSURE_VERSION}');
+INSERT INTO public.outlook_sync_state
+  (connection_id, user_id, folder, sync_status, initial_import_done, last_success_at, last_attempt_at, last_run_complete)
+VALUES ('${CONN_ID}', '${PILOT_USER}', 'inbox',     'idle', true, now() - interval '5 minutes', now() - interval '5 minutes', true),
+       ('${CONN_ID}', '${PILOT_USER}', 'sentitems', 'idle', true, now() - interval '5 minutes', now() - interval '5 minutes', true);
+INSERT INTO public.outlook_subscriptions
+  (connection_id, user_id, subscription_id, client_state_hash, status, expires_at, last_notification_at)
+VALUES ('${CONN_ID}', '${PILOT_USER}', 'sub-browser', repeat('a', 64), 'active', now() + interval '2 days', now() - interval '5 minutes');`,
+  { tuplesOnly: false })
+  const statusBlock = async (expect, label) => {
+    await page.goto(`${ORIGIN}/settings`)
+    try {
+      await page.waitFor(`(() => { const el = document.querySelector('[data-testid="outlook-sync-status"]');
+        return !!el && new RegExp(${JSON.stringify(expect)}).test(el.innerText) })()`, 20000, label)
+    } catch (e) {
+      const diag = await page.eval(`const el = document.querySelector('[data-testid="outlook-sync-status"]');
+        return { block: el ? el.innerText : null, card: (document.body.innerText.match(/Outlook[^]*?(Disconnect Outlook|Connect Outlook)/) || [''])[0].slice(0, 600) }`)
+      console.error('    status block diagnostics: ' + JSON.stringify(diag))
+      throw e
+    }
+    return page.eval(`const el = document.querySelector('[data-testid="outlook-sync-status"]');
+      return { text: el.innerText, tone: el.getAttribute('data-tone'), live: el.getAttribute('aria-live') }`)
+  }
+  let st = await statusBlock('Up to date', 'the up-to-date status')
+  check('idle after a complete run reads "Up to date" (ok tone)', st.tone === 'ok', JSON.stringify(st))
+  check('it names the last successful sync FROM THE ROW: 5 minutes ago', /Last successful sync 5 minutes ago\./.test(st.text), st.text)
+  check('it says Funnl is listening for new mail, with the renewal from the subscription row',
+    /Listening for new mail \(renews in 2 days\)\./.test(st.text), st.text)
+  check('the status is announced politely', st.live === 'polite', JSON.stringify(st))
+  // A failed check with a scheduled retry: warn, with the code and the timing, still from rows.
+  psql(`UPDATE public.outlook_sync_state SET sync_status = 'error', last_error_code = 'graph_failed',
+          next_retry_at = now() + interval '20 minutes'
+        WHERE connection_id = '${CONN_ID}' AND folder = 'inbox';`, { tuplesOnly: false })
+  st = await statusBlock('did not finish', 'the retry status')
+  check('a scheduled retry is reported with its code and timing (warn tone)',
+    st.tone === 'warn' && /try again in 20 minutes \(graph_failed\)\./.test(st.text), JSON.stringify(st))
+  // The connection needs permission again: error tone, with the actionable instruction.
+  psql(`UPDATE public.microsoft_connections SET needs_reauth = true WHERE id = '${CONN_ID}';`, { tuplesOnly: false })
+  st = await statusBlock('Needs your permission again', 'the reauth status')
+  check('needs_reauth reads "Needs your permission again" (error tone) with the reconnect instruction',
+    st.tone === 'error' && /Disconnect Outlook/.test(st.text), JSON.stringify(st))
+  // New mail signalled, nothing running yet: the queued check is said, and nothing else is claimed.
+  psql(`UPDATE public.microsoft_connections SET needs_reauth = false, wake_requested_at = now(), wake_source = 'change',
+          wake_count = 1, last_wake_at = now() WHERE id = '${CONN_ID}';
+        UPDATE public.outlook_sync_state SET sync_status = 'idle', last_error_code = NULL, next_retry_at = NULL
+        WHERE connection_id = '${CONN_ID}';`, { tuplesOnly: false })
+  st = await statusBlock('A check is due', 'the due status')
+  check('a pending wake-up is NEVER "Up to date": it reads "A check is due" (info tone)',
+    /New mail was signalled and has not been checked yet\./.test(st.text) && st.tone === 'info' && !/Up to date/.test(st.text), JSON.stringify(st))
+  const automation = await page.eval(`const el = document.querySelector('[data-testid="outlook-automation"]'); return el ? { text: el.innerText, on: el.getAttribute('data-on') } : null`)
+  check('the activation line says automatic checks are NOT switched on (the tick is inactive in this database)',
+    automation !== null && automation.on === 'false' && /not switched on/.test(automation.text), JSON.stringify(automation))
+  check('and no "every 15 minutes" promise is made while it is off', !/15 minutes/.test(st.text), st.text)
+  // An INCOMPLETE last round is not "Up to date" either.
+  psql(`UPDATE public.microsoft_connections SET wake_requested_at = NULL, wake_source = NULL WHERE id = '${CONN_ID}';
+        UPDATE public.outlook_sync_state SET last_run_complete = false WHERE connection_id = '${CONN_ID}';`, { tuplesOnly: false })
+  st = await statusBlock('paused before finishing', 'the incomplete-round status')
+  check('an incomplete last round reads "A check is due" with the reason', /A check is due/.test(st.text) && st.tone === 'info', JSON.stringify(st))
+  psql(`UPDATE public.outlook_sync_state SET last_run_complete = true WHERE connection_id = '${CONN_ID}';`, { tuplesOnly: false })
+  const leaksSt = ['token', 'ciphertext', 'nonce', 'service_role', 'rpc', 'sub-browser', 'aaaaaaaa']
+    .filter((w) => st.text.toLowerCase().includes(w))
+  check('the status block reveals no identifier, hash or secret', leaksSt.length === 0, JSON.stringify(leaksSt))
+
+  // ══ 9. a proposal that ARRIVES while the queue is open becomes visible ════
+  // SIMULATED ARRIVAL: the background worker is not run here. The row it would write is
+  // inserted directly while the page is open; the page's bounded head-count poll (every
+  // 30 s while visible) must notice it, reload, announce it, and raise the badge.
+  console.log('\n9. a proposal arriving while the queue is open becomes visible without a reload')
+  await page.goto(`${ORIGIN}/suggestions`)
+  await page.waitFor('/Suggestions/.test(document.body.innerText)', 20000, 'the queue')
+  await sleep(1500)   // let the first poll record the baseline count
+  const ARRIVAL = 'Priya Arrival'
+  check('the arriving contact is not shown yet',
+    (await page.eval(`return document.body.innerText.includes(${JSON.stringify(ARRIVAL)})`)) === false)
+  const badgeBefore = pendingNow()
+  psql(`
+INSERT INTO public.contacts (user_id, name, email) VALUES ('${PILOT_USER}', '${ARRIVAL}', 'priya@fund.test');
+INSERT INTO public.interaction_candidates
+  (user_id, contact_id, source, source_fingerprint, proposed_type, proposed_interaction_date, status,
+   source_last_state, context_expires_at, proposed_notes, draft_summary, summary_evidence, extraction_status)
+SELECT '${PILOT_USER}', c.id, 'outlook', repeat('9', 63) || 'a', 'Email', current_date, 'pending', 'active',
+       now() + interval '30 days', 'Arrived while the queue was open.', 'Arrived while the queue was open.',
+       'explicit_body', 'ai_extracted'
+  FROM public.contacts c WHERE c.user_id = '${PILOT_USER}' AND c.name = '${ARRIVAL}';`, { tuplesOnly: false })
+  const t0 = Date.now()
+  let arrived = false
+  try {
+    await page.waitFor(`document.body.innerText.includes(${JSON.stringify(ARRIVAL)})`, 75000, 'the arrived proposal')
+    arrived = true
+  } catch { /* recorded below */ }
+  const waitedMs = Date.now() - t0
+  check('the new proposal appeared WITHOUT navigation or reload', arrived, `${waitedMs} ms`)
+  check('within one poll interval plus a margin (< 45 s)', arrived && waitedMs < 45000, `${waitedMs} ms`)
+  check('the page announced the arrival in its status banner',
+    await page.eval(`return document.body.innerText.includes(${JSON.stringify(pendingMod.NEW_SUGGESTIONS_MESSAGE)})`))
+  check('and it did so WITHOUT reloading the list: the loading state never showed again',
+    (await page.eval('return !/Loading suggestions/.test(document.body.innerText)')) === true)
+  await sleep(600)
+  const badgeAfter = await page.eval(`const b = document.querySelector('[data-testid="suggestions-badge"]'); return b ? b.innerText.trim() : null`)
+  check('and the rail badge rose with it', badgeAfter === pendingMod.badgeLabel(badgeBefore + 1),
+    `badge=${badgeAfter} expected=${pendingMod.badgeLabel(badgeBefore + 1)}`)
+  check('seeing the arrival saved NOTHING: no interaction exists for the arrived contact',
+    one(`SELECT count(*) FROM public.interactions WHERE user_id='${PILOT_USER}'
+      AND contact_id = (SELECT id FROM public.contacts WHERE user_id='${PILOT_USER}' AND name='${ARRIVAL}');`) === '0')
+  check('the arrived proposal is still pending, awaiting the user',
+    one(`SELECT count(*) FROM public.interaction_candidates WHERE user_id='${PILOT_USER}' AND source_fingerprint = repeat('9', 63) || 'a' AND status='pending';`) === '1')
+  // Leave no row behind.
+  psql(`DELETE FROM public.interaction_candidates WHERE user_id='${PILOT_USER}' AND source_fingerprint = repeat('9', 63) || 'a';
+        DELETE FROM public.contacts WHERE user_id='${PILOT_USER}' AND name='${ARRIVAL}';
+        DELETE FROM public.microsoft_connections WHERE id='${CONN_ID}';`, { tuplesOnly: false })
+  check('disconnect-style cleanup took the subscription record with the connection',
+    one(`SELECT count(*) FROM public.outlook_subscriptions WHERE connection_id='${CONN_ID}';`) === '0')
+
+  // ══ 10. refresh NEVER loses review work ═══════════════════════════════════
+  // REPRODUCED BEFORE THIS REVISION: the queue reloaded its first page on any count change,
+  // unmounting every card - typed edits, focus, an open dismissal confirmation and loaded
+  // pages were lost - and a refreshed proposal with an unchanged count was never noticed.
+  // The poll is triggered here the way a tab switch triggers it (a visibilitychange event),
+  // so each scenario proves the behaviour without waiting out the 30-second interval.
+  console.log('\n10. refresh never loses review work: arrivals during edits, a confirmation, loaded pages; a refreshed proposal')
+  const pokePoll = () => page.eval("document.dispatchEvent(new Event('visibilitychange')); return true")
+  const hex = (ch, last) => `repeat('${ch}', 63) || '${last}'`
+  const seedInteraction = (name, email, fpLast, date, notes, step) => psql(`
+INSERT INTO public.contacts (user_id, name, email) VALUES ('${PILOT_USER}', '${name}', '${email}');
+INSERT INTO public.interaction_candidates
+  (user_id, contact_id, source, source_fingerprint, proposed_type, proposed_interaction_date, status,
+   source_last_state, context_expires_at, proposed_notes, draft_summary, draft_follow_up, summary_evidence, extraction_status)
+SELECT '${PILOT_USER}', c.id, 'outlook', ${hex('d', fpLast)}, 'Email', ${date}, 'pending', 'active',
+       now() + interval '30 days', '${notes}', '${notes}', ${step === null ? 'NULL' : `'${step}'`}, 'explicit_body', 'ai_extracted'
+  FROM public.contacts c WHERE c.user_id = '${PILOT_USER}' AND c.name = '${name}';`, { tuplesOnly: false })
+  const seedProposal = (name, email, fpLast, date) => psql(`
+INSERT INTO public.new_contact_candidates
+  (user_id, source, status, person_fingerprint, episode_fingerprint, key_version,
+   proposed_email, proposed_name, proposed_name_evidence, proposed_name_confidence,
+   draft_summary, draft_follow_up, proposed_interaction_date, proposed_type,
+   retained_subject, extraction_status, context_expires_at)
+VALUES ('${PILOT_USER}', 'outlook', 'pending', ${hex('e', fpLast)}, ${hex('f', fpLast)}, 1,
+        '${email}', '${name}', 'explicit_signature', 'high',
+        'She offered to review your application.', 'Send the CV.', ${date}, 'Email',
+        'Summer analyst referral', 'ai_extracted', now() + interval '30 days');`, { tuplesOnly: false })
+  const interactionCards = () => page.eval("return [...document.querySelectorAll('button')].filter((b) => b.innerText.trim() === 'Edit details' || b.innerText.trim() === 'Done editing').length")
+
+  // A clean queue: one interaction suggestion to edit, one proposal to edit.
+  psql(`DELETE FROM public.outlook_candidate_refs WHERE user_id = '${PILOT_USER}';
+        DELETE FROM public.interaction_candidates WHERE user_id = '${PILOT_USER}';
+        DELETE FROM public.new_contact_candidates WHERE user_id = '${PILOT_USER}';`, { tuplesOnly: false })
+  seedInteraction('Hold Contact', 'hold@bank.test', '1', 'current_date', 'Hold note before arrival.', 'Hold step.')
+  seedProposal('Hold Person', 'holdperson@fund.test', '1', 'current_date')
+  // Cards are addressed by their own id: the new-contact card above the interaction card
+  // renders a notes textarea of its own, so "the first textarea" would be the wrong card
+  // (a harness defect found by this run, not a product one).
+  const cardSel = (id) => `[data-candidate-id="${id}"]`
+  const holdId = one(`SELECT ic.id FROM public.interaction_candidates ic JOIN public.contacts c ON c.id = ic.contact_id
+    WHERE ic.user_id='${PILOT_USER}' AND c.name='Hold Contact';`)
+  const HOLD = cardSel(holdId)
+
+  // ── 10a. an interaction card being EDITED keeps its typed values and focus through an arrival ──
+  await page.goto(`${ORIGIN}/suggestions`)
+  await page.waitFor('document.body.innerText.includes("Hold Contact")', 20000, 'the hold card')
+  await sleep(1200)   // the first poll records the baseline signature
+  await page.click('Edit details', { byText: true, within: HOLD })
+  await page.waitFor(`!!document.querySelector(${JSON.stringify(HOLD + ' textarea')})`, 8000, 'the note field')
+  await page.eval(`const el=document.querySelector(${JSON.stringify(HOLD + ' textarea')}); el.focus(); el.select(); return true`)
+  const TYPED_NOTE = 'Typed while the arrival landed.'
+  await page.typeKeys(TYPED_NOTE)
+  seedInteraction('Arrival One', 'arrival1@bank.test', '2', "current_date - 1", 'Arrived during an edit.', null)
+  await pokePoll()
+  let arrivedNow = true
+  try { await page.waitFor('document.body.innerText.includes("Arrival One")', 15000, 'the arrival while editing') } catch { arrivedNow = false }
+  check('10a: the arrival appeared while the edit was open', arrivedNow)
+  const afterA = await page.eval(`const t=document.querySelector(${JSON.stringify(HOLD + ' textarea')}); return { value: t ? t.value : null, focused: document.activeElement === t,
+    banner: document.body.innerText.includes(${JSON.stringify(pendingMod.NEW_SUGGESTIONS_MESSAGE)}), loading: /Loading suggestions/.test(document.body.innerText) }`)
+  check('10a: the typed note SURVIVED the arrival', afterA.value === TYPED_NOTE, JSON.stringify(afterA))
+  check('10a: focus stayed in the note field', afterA.focused === true, JSON.stringify(afterA))
+  check('10a: the arrival was announced and the list was not reloaded', afterA.banner === true && afterA.loading === false, JSON.stringify(afterA))
+  check('10a: no card was duplicated by the arrival (two interaction cards, one of them in edit mode)',
+    await page.eval(`return document.querySelectorAll('[data-card="interaction"]').length === 2 && document.querySelectorAll('[data-card="interaction"] textarea').length === 1`))
+  await page.click('Accept', { byText: true, within: HOLD })
+  await sleep(1200)
+  const savedA = one(`SELECT coalesce(notes,'NULL') FROM public.interactions i JOIN public.contacts c ON c.id = i.contact_id
+    WHERE i.user_id='${PILOT_USER}' AND c.name='Hold Contact';`)
+  check('10a: accepting saved the TYPED note (with its kept next step), not the original', savedA === TYPED_NOTE + '\n\nNext step: Hold step.', JSON.stringify(savedA))
+
+  // ── 10b. a new-contact card being edited keeps its typed name through an arrival, and saves it ──
+  const holdPersonId = one(`SELECT id FROM public.new_contact_candidates WHERE user_id='${PILOT_USER}' AND proposed_name='Hold Person';`)
+  const HOLD_PERSON = cardSel(holdPersonId)
+  await page.eval(`const el=document.querySelector(${JSON.stringify(HOLD_PERSON + ' input[type="text"]')}); el.focus(); el.select(); return true`)
+  const TYPED_NAME = 'Typed Person Name'
+  await page.typeKeys(TYPED_NAME)
+  seedProposal('Arrival Person', 'arrival2@fund.test', '2', "current_date - 1")
+  await pokePoll()
+  arrivedNow = true
+  try { await page.waitFor('document.body.innerText.includes("Arrival Person")', 15000, 'the proposal arrival while editing') } catch { arrivedNow = false }
+  check('10b: the proposal arrival appeared while the name was being edited', arrivedNow)
+  const afterB = await page.eval(`const i=document.querySelector(${JSON.stringify(HOLD_PERSON + ' input[type="text"]')}); return { value: i ? i.value : null, focused: document.activeElement === i }`)
+  check('10b: the typed name SURVIVED the arrival', afterB.value === TYPED_NAME, JSON.stringify(afterB))
+  check('10b: focus stayed in the name field', afterB.focused === true, JSON.stringify(afterB))
+  await page.click('Save contact & interaction', { byText: true, within: HOLD_PERSON })
+  await sleep(1500)
+  check('10b: accepting saved the TYPED name', one(`SELECT count(*) FROM public.contacts WHERE user_id='${PILOT_USER}' AND name='${TYPED_NAME}';`) === '1')
+
+  // ── 10c. an open DISMISSAL CONFIRMATION survives an arrival, with its focus ──
+  await page.click('Dismiss', { byText: true })
+  await page.waitFor('/Yes, dismiss/.test(document.body.innerText)', 8000, 'the confirmation')
+  seedInteraction('Arrival Three', 'arrival3@bank.test', '3', "current_date - 2", 'Arrived during a confirmation.', null)
+  await pokePoll()
+  arrivedNow = true
+  try { await page.waitFor('document.body.innerText.includes("Arrival Three")', 15000, 'the arrival during a confirmation') } catch { arrivedNow = false }
+  check('10c: the arrival appeared while a dismissal was being confirmed', arrivedNow)
+  const afterC = await page.eval(`const b=[...document.querySelectorAll('button')].find((x) => x.innerText.trim() === 'Yes, dismiss'); return { open: !!b, focused: !!b && document.activeElement === b }`)
+  check('10c: the confirmation is still open', afterC.open === true, JSON.stringify(afterC))
+  check('10c: focus stayed on the confirm button', afterC.focused === true, JSON.stringify(afterC))
+  await page.click('Cancel', { byText: true })
+  await sleep(300)
+  check('10c: cancelling dismissed nothing', one(`SELECT count(*) FROM public.interaction_candidates WHERE user_id='${PILOT_USER}' AND status='dismissed';`) === '0')
+
+  // ── 10d. pages loaded past the first are kept through an arrival ──
+  psql(`INSERT INTO public.contacts (user_id, name, email)
+        SELECT '${PILOT_USER}', 'Bulk ' || lpad(g::text, 2, '0'), 'bulk' || g || '@bank.test' FROM generate_series(1, 25) g;
+        INSERT INTO public.interaction_candidates
+          (user_id, contact_id, source, source_fingerprint, proposed_type, proposed_interaction_date, status,
+           source_last_state, context_expires_at, proposed_notes)
+        SELECT '${PILOT_USER}', c.id, 'outlook', lpad(substr(md5(c.name), 1, 20), 64, '0'), 'Email', current_date - 10 - (row_number() over ())::int, 'pending', 'active',
+               now() + interval '30 days', 'Bulk note.'
+          FROM public.contacts c WHERE c.user_id = '${PILOT_USER}' AND c.name LIKE 'Bulk %';`, { tuplesOnly: false })
+  await page.goto(`${ORIGIN}/suggestions`)
+  await page.waitFor('/Load more/.test(document.body.innerText)', 20000, 'a second page to load')
+  await sleep(1200)
+  const firstPage = await interactionCards()
+  await page.click('Load more', { byText: true })
+  await page.waitFor(`(() => [...document.querySelectorAll('button')].filter((b) => b.innerText.trim() === 'Edit details').length > ${firstPage})()`, 15000, 'the second page')
+  const loaded = await interactionCards()
+  check('10d: a second page loaded', loaded > firstPage, `first=${firstPage} loaded=${loaded}`)
+  seedInteraction('Arrival Four', 'arrival4@bank.test', '4', 'current_date', 'Arrived after paging.', null)
+  await pokePoll()
+  arrivedNow = true
+  try { await page.waitFor('document.body.innerText.includes("Arrival Four")', 15000, 'the arrival after paging') } catch { arrivedNow = false }
+  const afterD = await interactionCards()
+  check('10d: the arrival appeared and EVERY loaded card stayed (loaded + 1, not back to one page)', arrivedNow && afterD === loaded + 1, `before=${loaded} after=${afterD}`)
+
+  // ── 10e. a REFRESHED proposal (same id, newer updated_at) with an UNCHANGED pending count ──
+  const refreshedId = one(`SELECT ic.id FROM public.interaction_candidates ic JOIN public.contacts c ON c.id = ic.contact_id
+    WHERE ic.user_id='${PILOT_USER}' AND c.name='Arrival Four';`)
+  const countBeforeE = pendingNow()
+  psql(`UPDATE public.interaction_candidates SET proposed_notes = 'Refreshed by newer mail.', draft_summary = 'Refreshed by newer mail.', updated_at = now()
+        WHERE id = '${refreshedId}';`, { tuplesOnly: false })
+  check('10e: the pending count is unchanged by a refresh', pendingNow() === countBeforeE)
+  await pokePoll()
+  let refreshed = true
+  try { await page.waitFor('document.body.innerText.includes("Refreshed by newer mail.")', 15000, 'the refreshed note') } catch { refreshed = false }
+  check('10e: a refreshed proposal is noticed and shown with an unchanged count', refreshed)
+  check('10e: the refresh was announced', await page.eval(`return document.body.innerText.includes(${JSON.stringify(pendingMod.UPDATED_SUGGESTIONS_MESSAGE)})`))
+  // While a card is being EDITED its refresh is HELD, said so, and applied when editing ends.
+  const REFRESHED = cardSel(refreshedId)
+  await page.click('Edit details', { byText: true, within: REFRESHED })
+  await page.waitFor(`!!document.querySelector(${JSON.stringify(REFRESHED + ' textarea')})`, 8000, 'the note field')
+  await page.eval(`const el=document.querySelector(${JSON.stringify(REFRESHED + ' textarea')}); el.focus(); el.select(); return true`)
+  await page.typeKeys('Still typing here.')
+  psql(`UPDATE public.interaction_candidates SET proposed_notes = 'Refreshed again while editing.', draft_summary = 'Refreshed again while editing.', updated_at = now()
+        WHERE id = '${refreshedId}';`, { tuplesOnly: false })
+  await pokePoll()
+  await sleep(2500)
+  const held = await page.eval(`const t=document.querySelector(${JSON.stringify(REFRESHED + ' textarea')}); return { value: t ? t.value : null,
+    heldBanner: document.body.innerText.includes(${JSON.stringify(pendingMod.HELD_UPDATES_MESSAGE)}),
+    applied: document.body.innerText.includes('Refreshed again while editing.') }`)
+  check('10e: while editing, the refresh is HELD - the typed text is intact and the newer draft is not forced in', held.value === 'Still typing here.' && held.applied === false, JSON.stringify(held))
+  check('10e: and the page says an update is waiting', held.heldBanner === true, JSON.stringify(held))
+  // REPRODUCED BEFORE THIS REVISION: "Done editing" let the waiting draft in, which remounted
+  // the card and erased the typed note. Done editing finishes editing; it does not discard.
+  await page.click('Done editing', { byText: true, within: REFRESHED })
+  await sleep(1500)
+  const afterDone = await page.eval(`const card=document.querySelector(${JSON.stringify(REFRESHED)}); return {
+    typedShown: !!card && card.innerText.includes('Still typing here.'),
+    draftForcedIn: !!card && card.innerText.includes('Refreshed again while editing.'),
+    choiceOffered: !!card && [...card.querySelectorAll('button')].some((b) => b.innerText.trim() === 'Use newer draft'),
+    editing: !!card && [...card.querySelectorAll('button')].some((b) => b.innerText.trim() === 'Done editing') }`)
+  check('10e: after Done editing the TYPED note is still what the card shows', afterDone.typedShown === true && afterDone.editing === false, JSON.stringify(afterDone))
+  check('10e: the waiting draft was NOT forced in', afterDone.draftForcedIn === false, JSON.stringify(afterDone))
+  check('10e: the card offers the newer draft as an explicit choice instead', afterDone.choiceOffered === true, JSON.stringify(afterDone))
+  await page.click('Accept', { byText: true, within: REFRESHED })
+  await sleep(1500)
+  const savedE = one(`SELECT coalesce(notes,'NULL') FROM public.interactions i JOIN public.contacts c ON c.id = i.contact_id
+    WHERE i.user_id='${PILOT_USER}' AND c.name='Arrival Four';`)
+  check('10e: edit -> background refresh -> Done editing -> Accept saved the REVIEWER\u2019S note', savedE === 'Still typing here.', JSON.stringify(savedE))
+
+  // ── 10f. the NEW-CONTACT card: typed values survive a refresh of its own row and are what acceptance saves ──
+  const arrivalPersonId = one(`SELECT id FROM public.new_contact_candidates WHERE user_id='${PILOT_USER}' AND proposed_name='Arrival Person';`)
+  const ARRIVAL_PERSON = cardSel(arrivalPersonId)
+  await page.eval(`const el=document.querySelector(${JSON.stringify(ARRIVAL_PERSON + ' input[type="text"]')}); el.focus(); el.select(); return true`)
+  const TYPED_NAME_F = 'Renamed Person'
+  await page.typeKeys(TYPED_NAME_F)
+  await page.eval(`const el=document.querySelector(${JSON.stringify(ARRIVAL_PERSON + ' textarea')}); el.focus(); el.select(); return true`)
+  const TYPED_NOTE_F = 'My own note for the new person.'
+  await page.typeKeys(TYPED_NOTE_F)
+  psql(`UPDATE public.new_contact_candidates SET draft_summary = 'A newer summary for the new person.', updated_at = now()
+        WHERE id = '${arrivalPersonId}';`, { tuplesOnly: false })
+  await pokePoll()
+  await sleep(2500)
+  const heldF = await page.eval(`const card=document.querySelector(${JSON.stringify(ARRIVAL_PERSON)}); const i=card && card.querySelector('input[type="text"]'); const t=card && card.querySelector('textarea');
+    return { name: i ? i.value : null, note: t ? t.value : null, forced: !!card && card.innerText.includes('A newer summary for the new person.'),
+      choiceOffered: !!card && [...card.querySelectorAll('button')].some((b) => b.innerText.trim() === 'Use newer draft'),
+      heldBanner: document.body.innerText.includes(${JSON.stringify(pendingMod.HELD_UPDATES_MESSAGE)}) }`)
+  check('10f: the new-contact card keeps the typed name and note through a refresh of its row', heldF.name === TYPED_NAME_F && heldF.note === TYPED_NOTE_F && heldF.forced === false, JSON.stringify(heldF))
+  check('10f: the update is held, said so, and offered as a choice', heldF.heldBanner === true && heldF.choiceOffered === true, JSON.stringify(heldF))
+  await page.click('Save contact & interaction', { byText: true, within: ARRIVAL_PERSON })
+  await sleep(1500)
+  check('10f: acceptance saved the TYPED name and note', one(`SELECT count(*) FROM public.contacts c JOIN public.interactions i ON i.contact_id = c.id
+    WHERE c.user_id='${PILOT_USER}' AND c.name='${TYPED_NAME_F}' AND i.notes LIKE '${TYPED_NOTE_F}%';`) === '1')
+
+  // ── 10g. the EXPLICIT choice: "Use newer draft" replaces the typed values with the waiting draft ──
+  const arrivalOneId = one(`SELECT ic.id FROM public.interaction_candidates ic JOIN public.contacts c ON c.id = ic.contact_id
+    WHERE ic.user_id='${PILOT_USER}' AND c.name='Arrival One';`)
+  const ARRIVAL_ONE = cardSel(arrivalOneId)
+  await page.click('Edit details', { byText: true, within: ARRIVAL_ONE })
+  await page.waitFor(`!!document.querySelector(${JSON.stringify(ARRIVAL_ONE + ' textarea')})`, 8000, 'the note field')
+  await page.eval(`const el=document.querySelector(${JSON.stringify(ARRIVAL_ONE + ' textarea')}); el.focus(); el.select(); return true`)
+  await page.typeKeys('Typed, then replaced on purpose.')
+  psql(`UPDATE public.interaction_candidates SET proposed_notes = 'The newer draft, taken on purpose.', draft_summary = 'The newer draft, taken on purpose.', updated_at = now()
+        WHERE id = '${arrivalOneId}';`, { tuplesOnly: false })
+  await pokePoll()
+  await page.waitFor(`(() => { const c=document.querySelector(${JSON.stringify(ARRIVAL_ONE)}); return !!c && [...c.querySelectorAll('button')].some((b) => b.innerText.trim() === 'Use newer draft') })()`, 15000, 'the choice on the card')
+  await page.click('Use newer draft', { byText: true, within: ARRIVAL_ONE })
+  let replaced = true
+  try { await page.waitFor(`(() => { const c=document.querySelector(${JSON.stringify(ARRIVAL_ONE)}); return !!c && c.innerText.includes('The newer draft, taken on purpose.') && !c.innerText.includes('Typed, then replaced on purpose.') })()`, 8000, 'the newer draft, taken') } catch { replaced = false }
+  check('10g: choosing "Use newer draft" replaces the typed values with the waiting draft', replaced)
+  check('10g: and the banner no longer says an update is waiting', await page.eval(`return !document.body.innerText.includes(${JSON.stringify(pendingMod.HELD_UPDATES_MESSAGE)})`))
+
+  // ── 10h. a TRANSIENT full-row fetch failure is retried on the next poll, even with the signature unchanged ──
+  // Chrome blocks the by-id row fetch (the signature read has no id=in. filter, so it still
+  // succeeds); the arrival is therefore noticed but cannot be fetched. The checkpoint must NOT
+  // advance, so the next poll - with the signature unchanged - fetches and shows it.
+  await page.send('Network.setBlockedURLs', { urls: ['*interaction_candidates*id=in.*'] })
+  seedInteraction('Arrival Five', 'arrival5@bank.test', '5', 'current_date', 'Arrived during an outage.', null)
+  await pokePoll()
+  await sleep(3000)
+  check('10h: while the row fetch fails the arrival is not shown (nothing invented)', await page.eval(`return !document.body.innerText.includes('Arrival Five')`))
+  await page.send('Network.setBlockedURLs', { urls: [] })
+  await pokePoll()
+  let retried = true
+  try { await page.waitFor('document.body.innerText.includes("Arrival Five")', 15000, 'the arrival after the outage') } catch { retried = false }
+  check('10h: the next poll fetches it although the signature did not change again', retried)
+  // Scoped to this section's contacts: earlier sections accepted suggestions of their own.
+  const sectionTen = `(c.name IN ('Hold Contact', 'Arrival Four', ${JSON.stringify(TYPED_NAME).replace(/"/g, "'")}, ${JSON.stringify(TYPED_NAME_F).replace(/"/g, "'")}) OR c.name LIKE 'Arrival %' OR c.name LIKE 'Bulk %')`
+  check('10: nothing was created by refreshing: interactions are exactly the four accepted above',
+    one(`SELECT count(*) FROM public.interactions i JOIN public.contacts c ON c.id = i.contact_id
+      WHERE i.user_id='${PILOT_USER}' AND ${sectionTen};`) === '4')
+  check('10: the merely arrived, paged, refreshed-on-purpose and outage proposals saved nothing by themselves',
+    one(`SELECT count(*) FROM public.interactions i JOIN public.contacts c ON c.id = i.contact_id
+      WHERE i.user_id='${PILOT_USER}' AND (c.name IN ('Arrival One', 'Arrival Three', 'Arrival Five') OR c.name LIKE 'Bulk %');`) === '0')
+  // Leave no row behind.
+  psql(`DELETE FROM public.outlook_candidate_refs WHERE user_id = '${PILOT_USER}';
+        DELETE FROM public.interaction_candidates WHERE user_id = '${PILOT_USER}';
+        DELETE FROM public.new_contact_candidates WHERE user_id = '${PILOT_USER}';`, { tuplesOnly: false })
 
   console.log('\n── what was actually CLICKED in the browser ──')
   for (const c of clicked) console.log(`   ${c}`)

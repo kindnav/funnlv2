@@ -12,6 +12,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
+import { SUGGESTION_REVIEW_ENABLED } from '../lib/suggestionReview'
+import { usePendingSuggestionCount } from '../lib/usePendingSuggestionCount'
+import { badgeLabel } from '../lib/pendingSuggestions'
 import { settleQuery } from '../lib/supabaseResult'
 import { getAvatarColor, getInitials } from '../lib/avatarUtils'
 
@@ -66,6 +69,9 @@ function NavRail() {
   const [user, setUser] = useState(null)
   const [profile, setProfile] = useState(null)
   const [followUpCount, setFollowUpCount] = useState(0)
+  // Pending suggestions across both review queues. Zero, and no query, when the review
+  // surface is off - the same gate that decides whether /suggestions is mounted at all.
+  const pendingSuggestions = usePendingSuggestionCount(SUGGESTION_REVIEW_ENABLED)
 
   // First-session inline labels:
   // Show labels until first navigation, then collapse permanently.
@@ -224,6 +230,33 @@ function NavRail() {
             <circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>
           </svg>
         </RailItem>
+
+        {/* Suggestions: what connected sources found, reviewable before anything is saved.
+            Reachable from the rail so a proposal that arrived while Funnl was closed is
+            discoverable without a direct URL. Gated with the route it leads to. */}
+        {SUGGESTION_REVIEW_ENABLED && (
+          <RailItem
+            to="/suggestions"
+            label="Suggestions"
+            active={isActive('/suggestions')}
+            showLabel={showLabels}
+            badge={
+              badgeLabel(pendingSuggestions) ? (
+                <span
+                  className="absolute top-[2px] right-[2px] min-w-[15px] h-[15px] rounded-full flex items-center justify-center px-[3px] text-[8.5px] font-bold font-mono leading-none"
+                  style={{ background: 'var(--color-accent)', color: 'var(--color-ink)' }}
+                  data-testid="suggestions-badge"
+                >
+                  {badgeLabel(pendingSuggestions)}
+                </span>
+              ) : null
+            }
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke={iconColor('/suggestions')} strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M4 4h16v12H4z"/><path d="M4 10h5l1.5 2.5h3L15 10h5"/><path d="M8 20h8"/>
+            </svg>
+          </RailItem>
+        )}
 
         <RailItem to="/ai" label="Funnl AI" shortcut="G then A" active={isActive('/ai')} showLabel={showLabels}>
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none">

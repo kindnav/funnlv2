@@ -48,6 +48,7 @@ import { readFolderMetadata } from '../supabase/functions/shared/outlookMetadata
 import { makeRoundStore } from './harness/outlookRoundStore.js'
 import { MAX_PROVIDER_BODY_BYTES } from '../supabase/functions/shared/boundedJson.js'
 import { TOKEN_TIMEOUT_MS } from '../supabase/functions/shared/microsoftTokenExchange.js'
+const CONSENTED = 'ol-disc-' + '0'.repeat(32)   // the version these fixtures' connections consented under; injected as the background requirement
 
 let passed = 0, failed = 0
 const pending = []
@@ -762,7 +763,7 @@ function slowRun ({ pagesPerFolder, contextMs = 200_000, writeMs = 5_000, pageMs
     return {
       primaryEmail: ME, userId: U1, timeZone: 'UTC',
       contacts: [{ id: CONTACT, user_id: U1, email: OTHER }],
-      cursors: {}, accessToken: 'tok',
+      cursors: {}, accessToken: 'tok', consentVersion: CONSENTED,
       keyRing: { current: { keyBytes: new Uint8Array(32).fill(1), keyVersion: 1 } },
     }
   }
@@ -770,6 +771,7 @@ function slowRun ({ pagesPerFolder, contextMs = 200_000, writeMs = 5_000, pageMs
   const run = () => runOutlookImport({
     rpc: withRounds(rpc, makeRoundStore()),
     pilotUserId: U1,
+    requiredBackgroundConsent: CONSENTED,
     encryptCursor: ENCRYPT_CURSOR,
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext,
@@ -865,12 +867,13 @@ test('a run slow enough to need renewal DURING the writes still commits', async 
   const r = await runOutlookImport({
     rpc: withRounds(rpc, makeRoundStore()),
     pilotUserId: U1,
+    requiredBackgroundConsent: CONSENTED,
     encryptCursor: ENCRYPT_CURSOR,
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext: async () => ({
       primaryEmail: ME, userId: U1, timeZone: 'UTC',
       contacts: [{ id: CONTACT, user_id: U1, email: OTHER }],
-      cursors: {}, accessToken: 'tok',
+      cursors: {}, accessToken: 'tok', consentVersion: CONSENTED,
       keyRing: { current: { keyBytes: new Uint8Array(32).fill(1), keyVersion: 1 } },
     }),
     deps: { fetchImpl, now: () => clock },
@@ -900,6 +903,7 @@ test('the lease is renewed BEFORE context loading, not after', async () => {
   await runOutlookImport({
     rpc: withRounds(rpc, makeRoundStore()),
     pilotUserId: U1,
+    requiredBackgroundConsent: CONSENTED,
     encryptCursor: ENCRYPT_CURSOR,
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext: async () => {
@@ -943,12 +947,13 @@ test('a FAILED renewal stops the run and advances NEITHER cursor', async () => {
     const r = await runOutlookImport({
       rpc: withRounds(rpc, makeRoundStore()),
       pilotUserId: U1,
+      requiredBackgroundConsent: CONSENTED,
       encryptCursor: ENCRYPT_CURSOR,
       decryptCursor: DECRYPT_CURSOR,
       loadRunContext: async () => ({
         primaryEmail: 'me@x.test', userId: U1, timeZone: 'UTC',
         contacts: [{ id: CONTACT, user_id: U1, email: 'ava@bank.test' }],
-        cursors: {}, accessToken: 't',
+        cursors: {}, accessToken: 't', consentVersion: CONSENTED,
         keyRing: { current: { keyBytes: new Uint8Array(32), keyVersion: 1 } },
       }),
       deps: {
@@ -1075,7 +1080,7 @@ function contactPort (total, { calls = [], rowBytes = null } = {}) {
     }
     if (path.startsWith('microsoft_connections')) {
       return { data: [{ user_id: U1, ms_email: 'me@x.test', scopes: ['Mail.Read'],
-        token_expires_at: new Date(Date.now() + 7_200_000).toISOString() }], error: null }
+        token_expires_at: new Date(Date.now() + 7_200_000).toISOString(), consent_policy_version: CONSENTED }], error: null }
     }
     if (path.startsWith('outlook_sync_state')) return { data: [], error: null }
     if (path.startsWith('microsoft_tokens')) {
@@ -1189,6 +1194,7 @@ test('an overflowing set NEVER silently treats a tracked contact as unknown', as
   const r = await runOutlookImport({
     rpc: withRounds(rpc, makeRoundStore()),
     pilotUserId: U1,
+    requiredBackgroundConsent: CONSENTED,
     encryptCursor: ENCRYPT_CURSOR,
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext: loaderFor(contactPort(MAX_CONTACTS_LOADED + 1)),
@@ -1309,6 +1315,7 @@ function leaseScenario ({
   const run = () => runOutlookImport({
     rpc: withRounds(rpc, makeRoundStore()),
     pilotUserId: U1,
+    requiredBackgroundConsent: CONSENTED,
     encryptCursor: ENCRYPT_CURSOR,
     decryptCursor: DECRYPT_CURSOR,
     loadRunContext: async () => {
@@ -1317,7 +1324,7 @@ function leaseScenario ({
       return {
         primaryEmail: ME, userId: U1, timeZone: 'UTC',
         contacts: [{ id: CONTACT, user_id: U1, email: OTHER }],
-        cursors: {}, accessToken: 'tok',
+        cursors: {}, accessToken: 'tok', consentVersion: CONSENTED,
         keyRing: { current: { keyBytes: new Uint8Array(32).fill(1), keyVersion: 1 } },
       }
     },

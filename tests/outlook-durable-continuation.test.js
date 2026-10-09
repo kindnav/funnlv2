@@ -51,6 +51,7 @@ import { normalizeGraphPage } from '../supabase/functions/shared/outlookMessageN
 import {
   makeRoundStore, CONVERSATION_PAGE_SIZE as STORE_PAGE_SIZE,
 } from './harness/outlookRoundStore.js'
+const CONSENTED = 'ol-disc-' + '0'.repeat(32)   // the version these fixtures' connections consented under; injected as the background requirement
 
 let passed = 0, failed = 0
 const pending = []
@@ -139,7 +140,7 @@ function context () {
   return async () => ({
     primaryEmail: ME, userId: U1, timeZone: 'UTC',
     contacts: [{ id: CONTACT, user_id: U1, email: OTHER }],
-    cursors: {}, accessToken: 'tok', keyRing: KEY_RING,
+    cursors: {}, accessToken: 'tok', consentVersion: CONSENTED, keyRing: KEY_RING,
   })
 }
 
@@ -201,6 +202,7 @@ function harness ({ now, advance, writeCostMs = 0 } = {}) {
   const invoke = ({ fetchImpl, requestEntryMs }) => runOutlookImport({
     rpc,
     pilotUserId: U1,
+    requiredBackgroundConsent: CONSENTED,
     encryptCursor: ENCRYPT,
     decryptCursor: DECRYPT,
     loadRunContext: context(),
@@ -218,6 +220,7 @@ function harness ({ now, advance, writeCostMs = 0 } = {}) {
     setLease: (v) => { leaseLive = v },
     rpc,
     pilotUserId: U1,
+    requiredBackgroundConsent: CONSENTED,
     // Results ACROSS invocations, which is what a resumed finalisation has to be judged on.
     results: () => ({ ...results }),
     distinctWritten: () => pendingRows.size,
@@ -570,7 +573,8 @@ test('REPRODUCED: a context load longer than the budget is bounded, not killed',
   const mb = bigMailbox({ inboxPages: 2, sentPages: 2, inboundAt: 1, outboundAt: 1 })
   const r = await runOutlookImport({
     rpc: h.rpc,
-pilotUserId: U1,
+    pilotUserId: U1,
+    requiredBackgroundConsent: CONSENTED,
     encryptCursor: ENCRYPT,
     decryptCursor: DECRYPT,
     // The real loader checks the same deadline between its bounded steps; this stub stands
@@ -601,7 +605,8 @@ test('an invocation with no budget left does not even start the context load', a
   let loads = 0
   const r = await runOutlookImport({
     rpc: h.rpc,
-pilotUserId: U1,
+    pilotUserId: U1,
+    requiredBackgroundConsent: CONSENTED,
     encryptCursor: ENCRYPT,
     decryptCursor: DECRYPT,
     loadRunContext: async () => { loads += 1; return context()() },
@@ -1075,6 +1080,7 @@ function expiryHarness () {
     invoke: ({ fetchImpl }) => runOutlookImport({
       rpc,
       pilotUserId: U1,
+      requiredBackgroundConsent: CONSENTED,
       encryptCursor: ENCRYPT,
       decryptCursor: DECRYPT,
       loadRunContext: context(),

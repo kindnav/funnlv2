@@ -343,6 +343,7 @@ async function invoke (ports, fetchImpl, clock) {
     graphFetchImpl: fetchImpl,
     now: () => (clock ? clock.ms : FIXED),
     subtle,
+    requiredBackgroundConsent: REQUIRED_CONTENT_CONSENT_VERSION,   // the row's version: re-consented under the current notice
   })
   const body = await res.json()
   return { status: res.status, run: body && body.run }

@@ -122,6 +122,11 @@ const FUNCTION_JWT_SETTINGS = {
   // shape as gmail-sync-worker. It is additionally dormant behind two flags, checked
   // before the secret so a disabled endpoint cannot be used to probe it.
   'outlook-import-worker': 'false',
+  // Outlook background-sync slice. Microsoft Graph POSTs change notifications and the
+  // validation handshake here; it carries no Supabase JWT, so platform verification is
+  // off. Authentication is the per-subscription clientState, whose SHA-256 the database
+  // compares before any wake-up is recorded. Dormant behind OUTLOOK_INTEGRATION_ENABLED.
+  'outlook-notifications': 'false',
 }
 // Non-comment, non-blank settings lines of one [functions.<name>] section.
 function functionSectionSettings(name) {

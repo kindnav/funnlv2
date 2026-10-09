@@ -206,6 +206,7 @@ const KEY_RING = {
 }
 
 /** Everything one connection's run needs. Supplied, never queried by the run module. */
+const SEEDED_CONSENT = 'ol-disc-00000000000000000000000000000000'   // what the seeded connection recorded
 function contextLoader (contacts) {
   return async () => ({
     primaryEmail: ME,
@@ -216,6 +217,7 @@ function contextLoader (contacts) {
     cursors: { inbox: null, sentitems: null },
     accessToken: 'injected-fixture-token',
     keyRing: KEY_RING,
+    consentVersion: SEEDED_CONSENT,
   })
 }
 
@@ -292,6 +294,7 @@ async function main () {
   let run = await runOutlookImport({
     rpc: workerRpc(calls),
     pilotUserId: U1,
+    requiredBackgroundConsent: SEEDED_CONSENT,
     encryptCursor,
     decryptCursor,
     loadRunContext: contextLoader(contacts),
@@ -405,6 +408,7 @@ async function main () {
     const again = await runOutlookImport({
       rpc: workerRpc([]), encryptCursor, decryptCursor,
       pilotUserId: U1,
+      requiredBackgroundConsent: SEEDED_CONSENT,
       loadRunContext: contextLoader(contacts),
       deps: { fetchImpl: completeProvider([]) },
     })
@@ -492,6 +496,7 @@ async function main () {
     const again = await runOutlookImport({
       rpc: workerRpc([]), encryptCursor, decryptCursor,
       pilotUserId: U1,
+      requiredBackgroundConsent: SEEDED_CONSENT,
       loadRunContext: contextLoader(contacts),
       deps: { fetchImpl: completeProvider([]) },
     })
@@ -510,6 +515,7 @@ async function main () {
     const r1 = await runOutlookImport({
       rpc: workerRpc([]), encryptCursor, decryptCursor,
       pilotUserId: U1,
+      requiredBackgroundConsent: SEEDED_CONSENT,
       loadRunContext: contextLoader(fresh),
       deps: { fetchImpl: completeProvider([]) },
     })
@@ -525,6 +531,7 @@ async function main () {
     const r2 = await runOutlookImport({
       rpc: workerRpc([]), encryptCursor, decryptCursor,
       pilotUserId: U1,
+      requiredBackgroundConsent: SEEDED_CONSENT,
       loadRunContext: contextLoader(fresh),
       deps: { fetchImpl: completeProvider([]) },
     })
@@ -550,6 +557,7 @@ async function main () {
     const r = await runOutlookImport({
       rpc: workerRpc([]), encryptCursor, decryptCursor,
       pilotUserId: U1,
+      requiredBackgroundConsent: SEEDED_CONSENT,
       loadRunContext: contextLoader(fresh),
       deps: { fetchImpl: incompleteProvider([]) },
     })

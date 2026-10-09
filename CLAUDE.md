@@ -90,6 +90,10 @@ docs/
   phase-4-pilot-plan.md    Pilot objective, target group, core session tasks, primary funnel, activation/retention definitions, feedback process, interview questions, founder checklist, decision rules
   posthog-pilot-dashboard.md  Setup instructions for 12 PostHog insights: signup funnel, confirmation conversion trend, official activation funnel (email_confirmed → activation_completed), activation milestone diagnostic, first core-loop diagnostic, time to activation, WAU (Core product activity Action), follow-up loop, CSV adoption, AI adoption, 7-day retention (activation_completed cohort, 30%/25% thresholds), error monitoring
   pilot-feedback-guide.md  5-minute observation checklist, non-leading questions, post-session questions, severity system (P0–P3), feature request frequency rule
+  outlook-background-sync-plan.md  Background-sync slice: latency target, fixture vs live evidence, activation plan (section 6) with the one-value consent cutover, next workstreams
+  outlook-background-activation-packet.md  Owner packet: exact background-disclosure wording for approval + ordered activation with a gate per step, rollback, milestone, subsequent workstreams
+scripts/
+  outlook-worker-flag.ps1    Owner-run: OUTLOOK_IMPORT_WORKER_ENABLED status / enable / disable on Production via npx.cmd, each verified against the JSON secret inventory (UNVERIFIED/UNKNOWN never read as absent; names only, never values or digests); used only inside authorized windows. Offline behaviour test: tests/local/outlook-worker-flag-helper.test.ps1 (synthetic CLI, no credentials). Vault secrets go through the dashboard form - no credential-handling script exists.
 supabase/
   templates/
     confirm-signup.html    Custom HTML email template for signup confirmation. MUST be pasted into Supabase → Auth → Email Templates → Confirm signup. Uses {{ .ConfirmationURL }} for the confirmation link.
@@ -1312,3 +1316,48 @@ Note: `total_duration_ms` meaning changed from the prior version (where it measu
 ### Layer D spec — Stripe billing (later)
 
 When billing is ready: update `canUseAI()` to read Stripe subscription status instead of (or in addition to) `ai_enabled`. Because every AI feature calls `canUseAI()`, this is a one-place change. The `ai_enabled` column either becomes the fallback for manually-granted access or is retired. See Monetization section for timing.
+
+---
+
+## Outlook background sync (Draft PR, branch `feature/outlook-background-sync`, base `f1c95bc`)
+
+**Goal:** remove manual networking data entry. Funnl detects a two-way exchange whichever person
+started it, prepares a contact-plus-interaction or interaction proposal with both sides' context,
+and the user reviews before anything is saved. This slice makes the pipeline run on its own and
+makes its output discoverable. Full plan, latency target, measurement and next workstreams:
+`docs/outlook-background-sync-plan.md`. Disclosure wording for review: `docs/outlook-content-disclosure-draft.md` section F.
+
+**How it works (nothing applied or deployed yet):**
+- `outlook-notifications` Edge Function (`verify_jwt=false`): Microsoft Graph's validation handshake
+  and change notifications. A notification is a WAKE-UP only — the database matches the subscription
+  id and the SHA-256 of the clientState, records `wake_requested_at` on the connection, the endpoint
+  answers 202 and kicks the worker off the response path. No message content or id is read or kept.
+- The worker (`outlook-import-worker`) creates/renews ONE Graph subscription per connection
+  (`me/messages`, `created`, 3-day lifetime) under its lease — `outlookSubscriptions.js`,
+  recorded via `record_outlook_subscription_state` (fenced on the run id). Never fatal to the import.
+- Migration `20261009000000`: wake columns, `outlook_subscriptions`, the two RPCs,
+  `get_my_outlook_sync_status()` (authenticated), the reservation treating a pending wake-up as
+  due now (lease + backoff still apply), a trigger clearing a wake-up only when a run that started
+  after it completes, and pg_cron `outlook-worker-tick` (every minute, secrets from Vault,
+  CREATED INACTIVE).
+- Consent gate for unattended operation: `REQUIRED_BACKGROUND_CONSENT_VERSION` in
+  `outlookContentConsent.js` is null and **closed while null** (every run released with
+  `background_consent_not_configured`; no subscription, no read). All three worker requirements
+  (body, Anthropic, background) are digests of the whole notice and move to the same new value in
+  one cutover with the browser and server `OUTLOOK_DISCLOSURE_VERSION` — never one alone.
+- UI: Suggestions rail item + mobile Review tab with a pending badge (gated by
+  `SUGGESTION_REVIEW_ENABLED`); Settings sync status from persisted state only. The queue polls the
+  pending SIGNATURE (ids + updated_at) every 30 s while visible and merges card by card; a card
+  with unsaved changes keeps them (also after "Done editing") until accept, dismiss, or the
+  explicit "Use newer draft" choice; the signature checkpoint advances only after changed rows are
+  applied or held, so a failed row fetch is retried next poll.
+
+**Rollout order (not interchangeable; plan section 6):** apply migration → deploy
+`outlook-notifications` and `outlook-import-worker` from merged main → owner stores Vault secrets
+`outlook_worker_url` and `outlook_worker_secret` → publish the approved wording, derive the new
+version, carry it into browser + server + all three worker requirements, pilot reconnects →
+enable `OUTLOOK_IMPORT_WORKER_ENABLED` and run ONE controlled bootstrap invocation (a reserved run
+that creates the subscription; `none_due` proves nothing) → listener verification: an inbound
+message and a sent draft each record a wake AND trigger an automatic kicked run while the tick is
+still inactive → activate the cron job → live acceptance test (fresh two-way exchange → proposal
+while Funnl is closed → accepted in Funnl).

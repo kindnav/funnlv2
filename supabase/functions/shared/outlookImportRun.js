@@ -103,11 +103,12 @@ import {
   summarizeOneConversation, planContentWrite, summarizeContentStage, CONTENT_WRITE_RPCS,
   sanitizeContentReport, readConversationHandles,
 } from './outlookContentStage.js'
-import { contentPermissions } from './outlookContentConsent.js'
+import { contentPermissions, backgroundOperationAllowed, REQUIRED_BACKGROUND_CONSENT_VERSION } from './outlookContentConsent.js'
 import {
   recoverConversation, MAX_RECOVERIES_PER_INVOCATION, RECOVERY_ADMIT_MS,
 } from './outlookConversationRecovery.js'
 import { buildSelfIdentitySet, indexContactsByEmail } from './outlookParticipants.js'
+import { maintainSubscription, summarizeSubscriptionStep } from './outlookSubscriptions.js'
 
 /**
  * Lease length and due interval for one run. Bounded by the RPC's own checks, which
@@ -322,6 +323,10 @@ export const RUN_OUTCOMES = Object.freeze([
   // reported as advanced. The next run re-reads the same mail and the fingerprint
   // dedupe makes that idempotent.
   'release_failed',
+  // The connection's recorded consent does not cover UNATTENDED operation (background
+  // sync). Released untouched, with a backoff, before any read and before any subscription
+  // request; the account must reconnect under the current disclosure. Not a 200.
+  'consent_missing',
   'reserve_failed',      // the reservation RPC itself failed
   // The run lost its lease mid-pass: a renewal returned false, meaning another run
   // owns the connection now. Nothing is committed and no cursor is claimed.
@@ -479,6 +484,13 @@ export async function runOutlookImport (p) {
   const {
     rpc, encryptCursor, decryptCursor, loadRunContext, requestEntryMs, pilotUserId, deps,
     anthropicApiKey = null, requiredConsent = {},
+    // The change-notification subscription this run keeps alive: `select` reads the stored
+    // row (the worker's PostgREST port), `subscriptions.notificationUrl` is where Microsoft
+    // is told to POST. Either absent means the step is skipped and reported as skipped.
+    select = null, subscriptions = null,
+    // INJECTED ONLY BY TESTS, like requiredConsent: which disclosure version unattended
+    // operation demands. The worker never passes it, so the module constant decides.
+    requiredBackgroundConsent = REQUIRED_BACKGROUND_CONSENT_VERSION,
   } = p || {}
   if (typeof rpc !== 'function') throw new Error('rpc_not_injected')
   if (typeof encryptCursor !== 'function') throw new Error('encrypt_cursor_not_injected')
@@ -530,6 +542,14 @@ export async function runOutlookImport (p) {
 
   const connectionId = reserved.data.connection_id
   const runId = reserved.data.run_id
+  // THE WAKE-UP THAT MADE THIS RUN DUE, if one did. Reported as an age so the latency from
+  // Microsoft's signal to the start of the run is measurable; the timestamp itself never
+  // leaves the run. null when the run was due on the routine interval.
+  const wakeRequestedMs = Date.parse(reserved.data.wake_requested_at ?? '')
+  const wakeAgeSeconds = Number.isFinite(wakeRequestedMs)
+    ? Math.max(0, Math.round((clock() - wakeRequestedMs) / 1000))
+    : null
+  let subscriptionStep = null
 
   // A release that THROWS must not take the run's reporting with it: the outcome is
   // then simply unknown, which is what 'release_failed' says.
@@ -703,6 +723,40 @@ export async function runOutlookImport (p) {
         cursorsAdvanced: 0,
       }
     }
+
+    // ── THE BACKGROUND-OPERATION CONSENT GATE ────────────────────────────────
+    // CLOSED while REQUIRED_BACKGROUND_CONSENT_VERSION is null (today): an unconfigured
+    // requirement authorizes neither a subscription nor a read, for any connection. Once the
+    // background-sync disclosure is published and the constant set, a connection consented
+    // under an older disclosure is released here - nothing read, nothing subscribed - until
+    // it reconnects; one consented under the current notice proceeds. Checked AFTER the
+    // context load so it reads the row's own recorded version, and BEFORE the subscription
+    // step and the delta read, which are what it governs. The release carries the gate's
+    // controlled reason and the retry backoff, so the row is simply tried again later.
+    const background = backgroundOperationAllowed(context.consentVersion, requiredBackgroundConsent)
+    if (!background.ok) {
+      await release('idle', false, null, background.reason, RETRY_BACKOFF_SECONDS)
+      return {
+        outcome: 'consent_missing',
+        reason: background.reason,
+        connectionId,
+        intended: 0,
+        accepted: 0,
+        created: 0,
+        cursorsAdvanced: 0,
+      }
+    }
+
+    // ── THE CHANGE-NOTIFICATION SUBSCRIPTION, kept alive under the lease ─────
+    // Created on the first run, renewed when it is about to expire or Microsoft asked for
+    // reauthorization, recreated when Microsoft removed it (outlookSubscriptions.js). A
+    // handful of bounded requests on the invocation budget, recorded through an RPC fenced
+    // on this run id, and NEVER fatal to the import: a mailbox that cannot be subscribed is
+    // still read on the routine interval, and the outcome says so in the report.
+    subscriptionStep = await maintainConnectionSubscription({
+      select, rpc, connectionId, runId, accessToken: context.accessToken, deps, budgetAllows,
+      now: clock, subscriptions,
+    })
 
     // ── where did the last invocation get to? ────────────────────────────────
     await ensureLease(PROGRESS_STEP_MS)
@@ -1575,6 +1629,10 @@ export async function runOutlookImport (p) {
     // Why the round stored no retrieval handle, when it stored none.
     handleReason: slice.handleReason ?? null,
     handlesStored: slice.totals.handlesStored ?? 0,
+    // What the run did about the change-notification subscription, and how old the
+    // wake-up that made it due was. Both are the measurable half of near-real-time.
+    subscription: subscriptionStep,
+    wakeAgeSeconds,
   }
 
   // ── the round did not finish for a reason that forfeits every cursor ──────
@@ -1715,6 +1773,55 @@ export async function runOutlookImport (p) {
  * fingerprint in particular is a stable per-user identifier for one exchange, so
  * logging it would build a durable record of who someone talks to.
  */
+/**
+ * The subscription step of one run: read the stored row through the worker's PostgREST
+ * port, let outlookSubscriptions.js decide and act, and record the result through the
+ * fenced RPC. Every failure becomes a controlled outcome; nothing here throws into the run.
+ */
+export async function maintainConnectionSubscription ({ select, rpc, connectionId, runId, accessToken, deps, budgetAllows, now, subscriptions }) {
+  const notificationUrl = isPlainObject(subscriptions) && typeof subscriptions.notificationUrl === 'string'
+    ? subscriptions.notificationUrl : null
+  if (notificationUrl === null || typeof select !== 'function') {
+    return { action: 'none', outcome: 'skipped_no_url', code: null, expiresAt: null }
+  }
+  let row = null
+  try {
+    const res = await select(`outlook_subscriptions?connection_id=eq.${connectionId}`
+      + '&select=subscription_id,status,expires_at,client_state_hash')
+    if (res?.error || !Array.isArray(res?.data)) {
+      return { action: 'none', outcome: 'record_failed', code: null, expiresAt: null }
+    }
+    row = isPlainObject(res.data[0]) ? res.data[0] : null
+  } catch {
+    return { action: 'none', outcome: 'record_failed', code: null, expiresAt: null }
+  }
+  const persist = async (state) => {
+    const saved = await rpc('record_outlook_subscription_state', {
+      p_connection_id: connectionId,
+      p_run_id: runId,
+      p_status: state.status,
+      p_subscription_id: state.subscriptionId ?? null,
+      p_resource: state.resource ?? null,
+      p_change_type: state.changeType ?? null,
+      p_client_state_hash: state.clientStateHash ?? null,
+      p_expires_at: state.expiresAt ?? null,
+      p_error_code: state.errorCode ?? null,
+    })
+    return !saved?.error && saved?.data?.result === 'recorded'
+  }
+  try {
+    return await maintainSubscription({
+      row, accessToken, deps, budgetAllows, now, notificationUrl,
+      lifecycleNotificationUrl: typeof subscriptions.lifecycleNotificationUrl === 'string'
+        ? subscriptions.lifecycleNotificationUrl : notificationUrl,
+      persist,
+    })
+  } catch {
+    // Nothing from the thrown value is read: it can carry a URL or a provider message.
+    return { action: 'none', outcome: 'create_failed', code: 'transport_error', expiresAt: null }
+  }
+}
+
 export function summarizeRun (result) {
   if (!isPlainObject(result)) return { outcome: 'released_error' }
   return {
@@ -1763,5 +1870,10 @@ export function summarizeRun (result) {
     // Re-checked rather than spread, because this function is the last boundary before
     // a response body and its contract above is that it names what it emits.
     content: sanitizeContentReport(result.content),
+    // THE SUBSCRIPTION STEP and THE WAKE-UP AGE: controlled action/outcome/code strings and
+    // one integer. Together with the candidate's created_at they are how the latency target
+    // (docs/outlook-background-sync-plan.md) is measured.
+    subscription: summarizeSubscriptionStep(result.subscription),
+    wake_age_seconds: Number.isInteger(result.wakeAgeSeconds) ? result.wakeAgeSeconds : null,
   }
 }

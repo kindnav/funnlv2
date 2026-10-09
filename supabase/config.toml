@@ -477,3 +477,12 @@ verify_jwt = false
 # comparison, so a disabled endpoint cannot be used to probe the secret.
 [functions.outlook-import-worker]
 verify_jwt = false
+
+# outlook-notifications is the endpoint Microsoft Graph POSTs change notifications to, and
+# the one it validates when a subscription is created. Microsoft carries no Funnl JWT, so
+# platform JWT verification is disabled; authentication is the per-subscription clientState
+# (its SHA-256 is compared in the database before any wake-up is recorded) and the
+# subscription id. It is dormant unless OUTLOOK_INTEGRATION_ENABLED is exactly 'true', and
+# it never reads a message: a notification is a wake-up signal for the delta pipeline.
+[functions.outlook-notifications]
+verify_jwt = false

@@ -57,6 +57,7 @@ import {
 import { GRAPH_BASE } from '../supabase/functions/shared/outlookGraphTransport.js'
 import { CONTACT_PAGE_SIZE } from '../supabase/functions/shared/outlookRunContext.js'
 import { makeRoundStore } from './harness/outlookRoundStore.js'
+const CONSENTED = 'ol-disc-' + '0'.repeat(32)   // the version these fixtures' connections consented under; injected as the background requirement
 
 let passed = 0, failed = 0
 function check (name, cond, detail = '') {
@@ -108,7 +109,7 @@ async function makePorts () {
   const select = async (path) => {
     reads.push(path)
     if (path.startsWith('microsoft_connections?')) {
-      return { data: [{ user_id: PILOT, ms_email: ME, scopes: ['Mail.Read', 'User.Read'], token_expires_at: expires }], error: null }
+      return { data: [{ user_id: PILOT, ms_email: ME, scopes: ['Mail.Read', 'User.Read'], token_expires_at: expires, consent_policy_version: CONSENTED }], error: null }
     }
     if (path.startsWith('contacts?')) {
       // One page, shorter than CONTACT_PAGE_SIZE, so the loader stops after it.
@@ -233,9 +234,10 @@ console.log('CASE A: no fetch anywhere - the pre-fix condition')
   const ports = await makePorts()
   const graph = makeGraphFixture()
   const res = await withGlobalFetch(undefined, () =>
-    // PRODUCTION-SHAPED deps: exactly what index.ts passes, and nothing more.
+    // PRODUCTION-SHAPED deps: exactly what index.ts passes - no fetch of either name - plus
+    // the test-only consent requirement, which touches no fetch wiring.
     handleOutlookImportWorker(workerReq(), env(),
-      { tokenUrl: 'https://login.invalid/token', select: ports.select, rpc: ports.rpc }))
+      { tokenUrl: 'https://login.invalid/token', select: ports.select, rpc: ports.rpc, requiredBackgroundConsent: CONSENTED }))
   const body = await res.json()
   check('the invocation answers 503', res.status === 503, `status=${res.status}`)
   check('the outcome is released_error', body?.run?.outcome === 'released_error',
@@ -275,7 +277,7 @@ console.log('CASE B: a local Graph fixture as the PLATFORM fetch, still none inj
   const graph = makeGraphFixture()
   const res = await withGlobalFetch(graph.impl, () =>
     handleOutlookImportWorker(workerReq(), env(),
-      { tokenUrl: 'https://login.invalid/token', select: ports.select, rpc: ports.rpc }))
+      { tokenUrl: 'https://login.invalid/token', select: ports.select, rpc: ports.rpc, requiredBackgroundConsent: CONSENTED }))
   const body = await res.json()
   check('the invocation answers 200', res.status === 200,
     `status=${res.status} body=${JSON.stringify(body).slice(0, 200)}`)
@@ -316,7 +318,7 @@ console.log('the injected forms still take precedence over the platform fetch')
   const res = await withGlobalFetch(platform.impl, () =>
     handleOutlookImportWorker(workerReq(), env(), {
       tokenUrl: 'https://login.invalid/token', select: ports.select, rpc: ports.rpc,
-      graphFetchImpl: injected.impl,
+      graphFetchImpl: injected.impl, requiredBackgroundConsent: CONSENTED,
     }))
   const body = await res.json()
   check('an injected graphFetchImpl is used', injected.urls.length > 0 && body?.run?.outcome === 'committed',

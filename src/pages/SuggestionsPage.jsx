@@ -14,7 +14,13 @@ import { SUGGESTION_EVENTS, suggestionEventProps } from '../lib/suggestionAnalyt
 import { dismissConfirmFocusTarget } from '../lib/dismissConfirmFocus'
 import InteractionSourceBadge from '../components/InteractionSourceBadge'
 import NewContactSuggestionCard from '../components/NewContactSuggestionCard'
+import PendingUpdateNotice from '../components/PendingUpdateNotice'
 import { NCC_SELECT } from '../lib/newContactReview'
+import {
+  fetchPendingSignature, diffPendingSignature, mergeQueueRows, cardKey, nextSignatureCheckpoint, busyExcept,
+  SUGGESTIONS_REFRESH_INTERVAL_MS, SUGGESTIONS_CHANGED_EVENT,
+  NEW_SUGGESTIONS_MESSAGE, UPDATED_SUGGESTIONS_MESSAGE, HELD_UPDATES_MESSAGE,
+} from '../lib/pendingSuggestions'
 
 const CARD = 'bg-card border border-line-1 rounded-2xl p-[18px]'
 const SECTION_LABEL = 'block mb-[10px] font-mono text-[8.5px] font-semibold tracking-[1.5px] text-muted uppercase'
@@ -27,7 +33,7 @@ function formatDate(iso) {
 }
 
 // One reviewable candidate. Owns its edit fields, single-flight busy state, and outcome.
-function CandidateCard({ candidate, onResolved }) {
+function CandidateCard({ candidate, onResolved, onBusyChange, pendingUpdate = null, onTakeUpdate }) {
   const name = candidate.contacts?.name || 'Unknown contact'
   const company = candidate.contacts?.company || ''
   const role = candidate.contacts?.role || ''
@@ -63,19 +69,36 @@ function CandidateCard({ candidate, onResolved }) {
     else if (target === 'dismiss') dismissBtnRef.current?.focus()
   }, [confirmDismiss])
 
-  // Close the confirmation and flag that focus must return to the Dismiss button.
-  function closeConfirm() {
-    restoreFocusRef.current = true
-    setConfirmDismiss(false)
-  }
-
-  const edited = editing && (
+  // DIRTY means the reviewer changed something the save will carry. It is independent of the
+  // edit fields being open: "Done editing" closes the fields and keeps the values, so a dirty
+  // card stays dirty until acceptance, dismissal, or the explicit choice to take a newer draft.
+  // (REPRODUCED BEFORE THIS: Done editing let a waiting draft in, which remounted the card
+  // and erased the typed note.)
+  const dirty = (
     type !== candidate.proposed_type ||
     date !== candidate.proposed_interaction_date ||
     (notes || '') !== (candidate.proposed_notes || '') ||
     (nextStep || '') !== (candidate.draft_follow_up || '') ||
     followUpDate !== ''
   )
+  // BUSY means the reviewer is in the middle of something on this card: editing, holding
+  // unsaved changes, deciding a dismissal, or waiting on Accept/Dismiss. The page holds
+  // background updates to a busy card and applies them only when it frees up, so typed
+  // values, focus and the open confirmation survive a refresh. Reported on every change so
+  // the page's set stays exact.
+  const busyNow = editing || dirty || confirmDismiss || busy
+  useEffect(() => {
+    if (typeof onBusyChange === 'function') onBusyChange(candidate.id, busyNow)
+  }, [busyNow, candidate.id, onBusyChange])
+  useEffect(() => () => { if (typeof onBusyChange === 'function') onBusyChange(candidate.id, false) }, [candidate.id, onBusyChange])
+
+  // Close the confirmation and flag that focus must return to the Dismiss button.
+  function closeConfirm() {
+    restoreFocusRef.current = true
+    setConfirmDismiss(false)
+  }
+
+  const edited = dirty
 
   async function handleAccept() {
     if (busy) return                                   // prevent double submission
@@ -131,7 +154,7 @@ function CandidateCard({ candidate, onResolved }) {
   }
 
   return (
-    <div className={CARD}>
+    <div className={CARD} data-card="interaction" data-candidate-id={candidate.id}>
       <div className="flex items-start gap-3">
         <div className="flex-none w-10 h-10 rounded-lg flex items-center justify-center font-display font-bold text-[14px]"
              style={{ background: getAvatarColor(name), color: 'var(--color-paper)' }} aria-hidden="true">
@@ -149,8 +172,8 @@ function CandidateCard({ candidate, onResolved }) {
               <InteractionSourceBadge source={candidate.source} />
             </div>
           )}
-          {!editing && candidate.proposed_notes && (
-            <p className="mt-2 text-[12px] text-muted leading-relaxed line-clamp-2">{candidate.proposed_notes}</p>
+          {!editing && notes && (
+            <p className="mt-2 text-[12px] text-muted leading-relaxed line-clamp-2">{notes}</p>
           )}
           {/* The suggested next step and the provenance, shown the way the new-person card
               shows them. Both come from the same draft as the note; neither is editable here,
@@ -201,6 +224,8 @@ function CandidateCard({ candidate, onResolved }) {
           )}
 
           {error && <p role="alert" className="mt-2 text-[12px] text-danger">{error}</p>}
+
+          <PendingUpdateNotice pendingUpdate={pendingUpdate} busy={busy} onTake={() => onTakeUpdate?.(candidate.id)} />
 
           {/* Actions */}
           {!confirmDismiss ? (
@@ -341,6 +366,177 @@ export default function SuggestionsPage() {
     loadInitial()
   }, [loadInitial])
 
+  // WHILE THE QUEUE IS OPEN, notice what changes in the background - WITHOUT disturbing the
+  // reviewer. Proposals are written by a server process while Funnl may be closed, or open on
+  // this very page; a pending proposal can also be REFRESHED by newer mail (same id, newer
+  // updated_at), or resolved from another tab. The simplest supported way to see all three is
+  // a bounded read of the pending SIGNATURE (ids + updated_at of both queues) every
+  // SUGGESTIONS_REFRESH_INTERVAL_MS while the tab is visible, and once more when it becomes
+  // visible again; no realtime channel, no publication or RLS change.
+  //
+  // What a difference does is decided card by card (mergeQueueRows), never by reloading the
+  // list: arrivals are inserted in queue order, a refreshed proposal is swapped in under a new
+  // key so it remounts with its new draft, a resolved one is removed - UNLESS that card is
+  // BUSY (editing, confirming a dismissal, or mid-accept), in which case the update is HELD
+  // and applied when the card frees up, and the banner says so. Loaded pages past the first
+  // are untouched; the page's own accept/dismiss update the known signature so they never
+  // read as a change.
+  //
+  // REPRODUCED BEFORE THIS: the first revision reloaded the first page on any count change,
+  // unmounting every card - typed edits, focus, an open confirmation and loaded pages were
+  // all lost - and a refreshed proposal with an unchanged count was never noticed.
+  const knownRef = useRef(null)                 // Map id -> { kind, updatedAt } of the last signature CHECKPOINT
+  const busyRef = useRef(new Set())             // ids whose card is busy right now
+  const heldRef = useRef(new Map())             // id -> { id, row | null } waiting for a busy card
+  const [busyVersion, setBusyVersion] = useState(0)
+  const [heldVersion, setHeldVersion] = useState(0)   // bumped whenever heldRef changes, so cards re-render their notice
+  // Snapshots of the two lists, kept in step by effects AFTER each render. The merge plan is
+  // computed from a snapshot, outside any state updater, so an updater never has to run
+  // synchronously or assign anything for the page to learn what was held. A busy id always
+  // names a MOUNTED card, which is therefore always present in the snapshot - so the held set
+  // computed from it is exact even when React has queued or batched an update.
+  const itemsRef = useRef([])
+  const proposalsRef = useRef([])
+  useEffect(() => { itemsRef.current = items }, [items])
+  useEffect(() => { proposalsRef.current = proposals }, [proposals])
+  const onBusyChange = useCallback((id, isBusy) => {
+    const was = busyRef.current.has(id)
+    if (isBusy) busyRef.current.add(id); else busyRef.current.delete(id)
+    if (was !== isBusy) setBusyVersion((v) => v + 1)
+  }, [])
+
+  /** Fetch full rows for ids, by kind, with the same selects the queues use. */
+  const fetchRows = useCallback(async (entries) => {
+    const ids = { interaction: [], new_contact: [] }
+    for (const e of entries) if (ids[e.kind]) ids[e.kind].push(e.id)
+    const [a, b] = await Promise.all([
+      ids.interaction.length
+        ? supabase.from('interaction_candidates').select(CANDIDATE_SELECT).eq('status', 'pending').in('id', ids.interaction)
+        : Promise.resolve({ data: [], error: null }),
+      ids.new_contact.length
+        ? supabase.from('new_contact_candidates').select(NCC_SELECT).eq('status', 'pending').in('id', ids.new_contact)
+        : Promise.resolve({ data: [], error: null }),
+    ])
+    if (a?.error || b?.error) return null
+    return {
+      interaction: (a.data || []).map((r) => ({ ...r, kind: 'interaction' })),
+      new_contact: (b.data || []).map((r) => ({ ...r, kind: 'new_contact' })),
+    }
+  }, [])
+
+  /**
+   * Apply one merge to one queue; returns what was held. The plan is computed PURELY from the
+   * list snapshot; the state updater stays pure as well (it re-plans from `prev` when the
+   * snapshot it was planned against is no longer current) and assigns nothing outside itself.
+   * `busy` may be narrowed (busyExcept) when the reviewer explicitly released one card.
+   */
+  const applyMerge = useCallback((listRef, setter, { added = [], changed = [], removedIds = [] }, busy = busyRef.current) => {
+    const snapshot = listRef.current
+    const planned = mergeQueueRows({ list: snapshot, added, changed, removedIds, busy })
+    setter((prev) => (prev === snapshot
+      ? planned.list
+      : mergeQueueRows({ list: prev, added, changed, removedIds, busy }).list))
+    return planned.held
+  }, [])
+
+  /** Record held updates; the version bump lets each card show its notice. */
+  const holdUpdates = useCallback((held) => {
+    if (held.length === 0) return
+    for (const h of held) heldRef.current.set(h.id, h)
+    setHeldVersion((v) => v + 1)
+  }, [])
+
+  /**
+   * THE EXPLICIT CHOICE: the reviewer pressed "Use newer draft" (or "Remove from list") on a
+   * card whose update was held. Only that card is released from the busy set for this one
+   * merge; every other busy card keeps its hold.
+   */
+  const takeHeldUpdate = useCallback((id) => {
+    const h = heldRef.current.get(id)
+    if (!h) return
+    heldRef.current.delete(id)
+    setHeldVersion((v) => v + 1)
+    const change = h.row ? { changed: [h.row] } : { removedIds: [id] }
+    const released = busyExcept(busyRef.current, id)
+    if (h.row ? h.row.kind === 'new_contact' : proposalsRef.current.some((r) => r.id === id)) {
+      applyMerge(proposalsRef, setProposals, change, released)
+    } else {
+      applyMerge(itemsRef, setItems, change, released)
+    }
+    if (heldRef.current.size === 0) setBanner('')
+  }, [applyMerge])
+
+  useEffect(() => {
+    if (!SUGGESTION_REVIEW_ENABLED) return undefined
+    let cancelled = false
+    let inFlight = false
+    const poll = async () => {
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return
+      if (inFlight) return
+      inFlight = true
+      try {
+        const fresh = await fetchPendingSignature(supabase)
+        if (cancelled || fresh === null) return
+        if (knownRef.current === null) { knownRef.current = nextSignatureCheckpoint(null, fresh, true); return }   // first observation
+        const diff = diffPendingSignature(knownRef.current, fresh)
+        if (diff.added.length === 0 && diff.changed.length === 0 && diff.removed.length === 0) return
+        // The full rows for what changed. A FAILED fetch leaves the checkpoint where it is, so
+        // the same difference is seen - and fetched - again on the next poll, even when the
+        // signature has not moved in between. The checkpoint advances only below, after the
+        // rows have been applied or held.
+        const rows = await fetchRows([...diff.added, ...diff.changed])
+        if (cancelled) return
+        if (rows === null) { knownRef.current = nextSignatureCheckpoint(knownRef.current, fresh, false); return }
+        const byKind = (kind, entries) => entries.filter((e) => e.kind === kind).map((e) => e.id)
+        const pick = (list, ids) => list.filter((r) => ids.includes(r.id))
+        const heldA = applyMerge(itemsRef, setItems, {
+          added: pick(rows.interaction, byKind('interaction', diff.added)),
+          changed: pick(rows.interaction, byKind('interaction', diff.changed)),
+          removedIds: byKind('interaction', diff.removed),
+        })
+        const heldB = applyMerge(proposalsRef, setProposals, {
+          added: pick(rows.new_contact, byKind('new_contact', diff.added)),
+          changed: pick(rows.new_contact, byKind('new_contact', diff.changed)),
+          removedIds: byKind('new_contact', diff.removed),
+        })
+        holdUpdates([...heldA, ...heldB])
+        knownRef.current = nextSignatureCheckpoint(knownRef.current, fresh, true)
+        if (heldA.length + heldB.length > 0) setBanner(HELD_UPDATES_MESSAGE)
+        else if (diff.added.length > 0) setBanner(NEW_SUGGESTIONS_MESSAGE)
+        else if (diff.changed.length > 0) setBanner(UPDATED_SUGGESTIONS_MESSAGE)
+        window.dispatchEvent(new Event(SUGGESTIONS_CHANGED_EVENT))
+      } finally {
+        inFlight = false
+      }
+    }
+    const timer = setInterval(poll, SUGGESTIONS_REFRESH_INTERVAL_MS)
+    document.addEventListener('visibilitychange', poll)
+    poll()
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+      document.removeEventListener('visibilitychange', poll)
+    }
+  }, [fetchRows, applyMerge, holdUpdates])
+
+  // A HELD update is applied the moment its card is no longer busy - which, for a card with
+  // unsaved changes, is only after acceptance or dismissal (both of which also clear the hold)
+  // or the reviewer's explicit choice above. A card that merely closed its edit fields with
+  // nothing changed, or cancelled a dismissal, frees up here.
+  useEffect(() => {
+    if (heldRef.current.size === 0) return
+    const ready = [...heldRef.current.values()].filter((h) => !busyRef.current.has(h.id))
+    if (ready.length === 0) return
+    for (const h of ready) heldRef.current.delete(h.id)
+    setHeldVersion((v) => v + 1)
+    const changedI = ready.filter((h) => h.row && h.row.kind === 'interaction').map((h) => h.row)
+    const changedN = ready.filter((h) => h.row && h.row.kind === 'new_contact').map((h) => h.row)
+    const removed = ready.filter((h) => h.row === null).map((h) => h.id)
+    applyMerge(itemsRef, setItems, { added: [], changed: changedI, removedIds: removed })
+    applyMerge(proposalsRef, setProposals, { added: [], changed: changedN, removedIds: removed })
+    if (heldRef.current.size === 0) setBanner(changedI.length + changedN.length > 0 ? UPDATED_SUGGESTIONS_MESSAGE : '')
+  }, [busyVersion, applyMerge])
+
   /** One more page of PROPOSALS, on its own cursor and its own single-flight. */
   const loadMoreProposals = useCallback(async () => {
     if (loadingProposalsRef.current) return
@@ -421,7 +617,17 @@ export default function SuggestionsPage() {
     setItems((prev) => prev.filter((c) => c.id !== id))
     setProposals((prev) => prev.filter((c) => c.id !== id))
     setBanner(message)
+    // The queue knows this row is gone; the poll must not read the drop as a change, and
+    // the navigation badge should drop with it.
+    if (knownRef.current instanceof Map) knownRef.current.delete(id)
+    busyRef.current.delete(id)
+    if (heldRef.current.delete(id)) setHeldVersion((v) => v + 1)
+    window.dispatchEvent(new Event(SUGGESTIONS_CHANGED_EVENT))
   }
+
+  // heldVersion exists to re-render this component when heldRef changes (the cards read
+  // their notice from the ref during render); it carries no other meaning.
+  void heldVersion
 
   // Flag off → render nothing (route is also flag-gated).
   if (!SUGGESTION_REVIEW_ENABLED) return null
@@ -477,9 +683,13 @@ export default function SuggestionsPage() {
                   whether someone enters the network at all, which is a bigger call
                   than logging one more interaction against a contact that exists. */}
               {proposals.map((c) => (
-                <NewContactSuggestionCard key={c.id} candidate={c} onResolved={handleResolved} />
+                <NewContactSuggestionCard key={cardKey(c)} candidate={c} onResolved={handleResolved} onBusyChange={onBusyChange}
+                                          pendingUpdate={heldRef.current.get(c.id) ?? null} onTakeUpdate={takeHeldUpdate} />
               ))}
-              {items.map((c) => <CandidateCard key={c.id} candidate={c} onResolved={handleResolved} />)}
+              {items.map((c) => (
+                <CandidateCard key={cardKey(c)} candidate={c} onResolved={handleResolved} onBusyChange={onBusyChange}
+                               pendingUpdate={heldRef.current.get(c.id) ?? null} onTakeUpdate={takeHeldUpdate} />
+              ))}
             </div>
             {anyMore && (
               <div className="mt-4 text-center">

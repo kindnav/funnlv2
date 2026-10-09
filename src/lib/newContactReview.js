@@ -29,7 +29,7 @@ export const NCC_SELECT = [
   'id', 'source', 'status',
   'proposed_email', 'proposed_name', 'proposed_name_evidence', 'proposed_name_confidence',
   'draft_summary', 'draft_follow_up', 'proposed_interaction_date', 'proposed_type',
-  'retained_subject', 'extraction_status', 'created_at',
+  'retained_subject', 'extraction_status', 'created_at', 'updated_at',
 ].join(', ')
 
 /** The interaction types the DB CHECK accepts. */

@@ -29,6 +29,25 @@
 // decide whether the run happens at all; this decides only whether a run that is
 // already permitted may read message content.
 
+// ── THE CUTOVER RULE, which binds all three requirements below ─────────────────
+//
+// Every disclosure version is a digest of the ENTIRE notice (computeDisclosureVersion in
+// src/lib/outlookDisclosure.js). The three requirements in this module are compared to the
+// stored version by exact equality, each on its own. So when the notice changes for ANY
+// reason - the background-sync paragraph included - a connection that reconnects under the
+// new text records the NEW version, and a requirement left at the OLD version then fails for
+// that connection: `content_consent_stale`, `third_party_consent_stale`. Raising only the
+// background requirement would therefore open unattended operation while closing body
+// reading and the Anthropic path for the very account that just re-consented.
+//
+// The rule: a published notice change moves the browser-derived version, the server's
+// OUTLOOK_DISCLOSURE_VERSION, and ALL THREE constants here to the same new value, in the
+// same cutover (docs/outlook-background-sync-plan.md section 6, steps B-C). The constants
+// stay three separate values because they answer three separate questions and a later
+// decision may legitimately move one without the others - but a notice change is not that
+// decision. Nothing here chooses the new value: it is derived from the approved wording,
+// after approval.
+
 /** Codes this gate can return. Controlled, and safe to log. */
 export const CONTENT_CONSENT_CODES = Object.freeze([
   'content_consent_not_configured',  // no required version is configured for this check
@@ -83,6 +102,51 @@ export const REQUIRED_CONTENT_CONSENT_VERSION = 'ol-disc-e3e2b1714b453c2904e3ed0
 // later decision to stop sending anything to Anthropic while still reading
 // bodies must remain expressible by changing one of them.
 export const REQUIRED_THIRD_PARTY_CONSENT_VERSION = 'ol-disc-e3e2b1714b453c2904e3ed08cb232097'
+
+/** Codes the background gate can return. Controlled, and safe to log. */
+export const BACKGROUND_CONSENT_CODES = Object.freeze([
+  'background_consent_not_configured',   // no requirement is configured: nobody can have consented
+  'background_consent_missing',          // the connection records no version, or a different one
+])
+
+/**
+ * The disclosure version an account must have consented to before Funnl may operate its
+ * mailbox UNATTENDED: keep a Microsoft change-notification subscription for it and read it
+ * automatically (on a signal, or on the schedule) while the user is not using the app.
+ *
+ * NULL UNTIL THE BACKGROUND-SYNC WORDING IS PUBLISHED AND THE PILOT HAS RE-CONSENTED - AND
+ * WHILE NULL THE GATE IS CLOSED. An unconfigured requirement authorizes nothing: no
+ * subscription is created and no mailbox read happens, for any connection, because no
+ * account can have agreed to wording that does not exist yet. (An earlier revision treated
+ * null as "open, today's behaviour"; that let a deployed worker subscribe and read
+ * unattended on the strength of a consent that never mentioned either.) The staged rollout
+ * is unaffected: the worker flag stays off until the cutover below has happened, and the
+ * run that this gate refuses is released untouched with a retry backoff, so nothing is
+ * lost - it simply waits for consent.
+ *
+ * Once set - to the version derived from the APPROVED notice, never to a guess - a
+ * connection whose recorded consent_policy_version equals it may be operated unattended;
+ * one whose version differs is released with `background_consent_missing`, before any read
+ * and before any subscription request, until the account disconnects and reconnects under
+ * the new disclosure. Recorded consent is never upgraded in place. The cutover rule at the
+ * top of this file applies: the same value goes into the other two requirements.
+ * docs/outlook-background-sync-plan.md section 6 is the activation plan that sets this.
+ */
+export const REQUIRED_BACKGROUND_CONSENT_VERSION = null
+
+/**
+ * Pure: may this connection be operated unattended, given what it consented to?
+ * Fails closed on an unconfigured or malformed requirement, on a missing stored version, and
+ * on any stored version other than the exact required one.
+ * @returns {{ok: true, reason: 'consented'} | {ok: false, reason: string}}
+ */
+export function backgroundOperationAllowed (storedVersion, required = REQUIRED_BACKGROUND_CONSENT_VERSION) {
+  if (!isDisclosureVersion(required)) return { ok: false, reason: 'background_consent_not_configured' }
+  if (!isDisclosureVersion(storedVersion) || storedVersion.trim() !== required.trim()) {
+    return { ok: false, reason: 'background_consent_missing' }
+  }
+  return { ok: true, reason: 'consented' }
+}
 
 /** The shape a disclosure version has: the derived `ol-disc-<32 hex>` form. */
 const VERSION_RE = /^ol-disc-[0-9a-f]{32}$/
