@@ -263,8 +263,15 @@ export async function runOne (exchange, apiKey, { dryRun, fetchImpl, timeoutMs }
   // Both default to what a real run uses; the owner-facing run injects neither.
   const doFetch = typeof fetchImpl === 'function' ? fetchImpl : fetch
   const deadlineMs = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : DRAFT_TIMEOUT_MS
+  // DISPLAY NAME, EXACTLY AS PRODUCTION PASSES IT. outlookContentPass.js sends
+  // `known ? null : party.displayName`: a known contact is already named in the CRM, so its
+  // request carries no display name at all, and only an unknown person's does - that name is
+  // the evidence the model is allowed to propose a NAME from. Passing one in both modes, as
+  // this did, meant the known-contact sample was judged against a request the worker never
+  // sends.
+  const displayName = exchange.mode === 'known_contact' ? null : exchange.displayName
   const body = buildDraftRequest({
-    mode: exchange.mode, displayName: exchange.displayName, subject: exchange.subject,
+    mode: exchange.mode, displayName, subject: exchange.subject,
     messages: exchange.messages, allowedDates: exchange.allowedDates,
   })
   const size = JSON.stringify(body).length

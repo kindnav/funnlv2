@@ -130,10 +130,95 @@ are two distinct questions, and they are answered at different times:
    than any fixture — forwarded chains, mixed languages, partial quoting, signatures, exchanges
    that are half logistics. That verification is step 7, after rollout.
 
-Until the helper has been run the honest statement is: the ceiling and the instructions changed,
-and the writing has not been observed *yet* — not that it cannot be.
+**The helper has now been run.** Question 1 above has its first answer, recorded in section 4a:
+the model writes useful detailed notes, and it made two specific errors — one unsupported
+meeting claim and one broadened caution. Four prompt rules were added in response, two for
+those faults and two preventive. Section 4a states plainly which is which.
 
-## 4a. The quality check, in practice
+So the honest summary is now three-layered, and the layers must not be blurred:
+
+| Layer | What it establishes | Status |
+|---|---|---|
+| Fixtures and SQL (the paragraphs above) | a detailed note survives the whole path intact | **done** |
+| One real-model run over four synthetic exchanges | the model writes useful notes; two specific failure modes exist | **done — section 4a** |
+| The next real-model run, after the four new rules | whether the rules actually fix those failure modes | **not done** — the rules were written after the samples and have not been tested against the model |
+| The pilot, on real mail | whether any of this holds on messy real threads | **not done** — rollout step 7 |
+
+## 4a. The first real model samples, and what changed because of them
+
+The owner ran `scripts/outlook-note-quality-check.mjs` against the real model over the four
+synthetic exchanges. **This is the first model evidence this workstream has**, and everything
+above it in section 4 remains fixture evidence. Four observations were recorded, and no more:
+
+| Observation | Verdict |
+|---|---|
+| The notes carried the substance of the exchanges — topics, advice, offers, commitments, dates | **Working.** This is what the 2,000-character allowance was for, and it delivered. |
+| One **unsupported meeting claim**: outreach sent after an event was written as the two people having *met* there | **Fault.** Nothing in the messages said they met. |
+| One **broadened caution**: hesitancy about a single unresolved question became advice against a whole programme | **Fault.** The caution had one narrow subject and was widened into a recommendation. |
+| One **accurate short note**: the brief exchange stayed brief and correct | **Working.** The length-follows-the-exchange instruction held. |
+
+Both faults share a shape, and it is the one that matters most here: each is a fluent,
+plausible sentence that a reviewer cannot falsify without re-reading the source mail. They are
+not formatting errors or truncation — the code saw nothing wrong, because there is nothing
+mechanically wrong with them.
+
+### What was added
+
+Four rules, in a new `RECORD IT AS IT HAPPENED` section of `SYSTEM_CONTRACT`. **Two answer the
+observed faults; two are preventive hardening requested alongside them.** That distinction is
+recorded deliberately, because a precaution written down as a measurement is how a document
+starts lying.
+
+| Rule | Origin |
+|---|---|
+| **(a) An event is not a meeting.** Writing after a panel, info session, careers fair, talk or conference is not meeting, and neither is attending the same event. A *stated* meeting, call or coffee chat is still recorded plainly. | **Observed fault.** |
+| **(b) Keep quantities, conditions and timing as stated.** Numbers, durations, counts, thresholds and deadlines are not rounded, generalized, merged or dropped, and something offered on a condition does not become an outright offer. | **Preventive.** The twenty-minute example (being ready to *defend* a piece of work for twenty minutes is not being ready to *discuss* it) is the concrete case named in the request, not a logged defect. |
+| **(c) Keep caution attached to what it was about.** Uncertainty records the one question, requirement, date or eligibility rule it applies to, and is never widened into a judgement about a whole programme, firm, team, desk or plan. "I need to check whether X is allowed" never becomes advice against X. | **Observed fault.** |
+| **(d) A routine acknowledgement stays short.** One plain sentence, with no narrative framing about the relationship or the exchange, no restating one fact in different words, and no describing the conversation instead of recording it. | **Preventive.** |
+
+Everything the rules were added *around* is unchanged: the detail instructions, the
+2,000-character ceiling, and every safety rule (untrusted data, no inference from a domain or
+name, null over a guess, no address or URL, sensitive-topic deferral, paraphrase not quote,
+human review).
+
+### What was deliberately NOT built
+
+**No semantic-validation framework.** A checker cannot distinguish "they met at the info
+session" from "she wrote after the info session" without the source mail, and if it had the
+source mail it would be doing the model's job with less capability. The chosen mechanism is
+prompt guidance plus the reviewer who already sees every draft before anything is saved.
+`tests/outlook-detailed-notes.test.js` enforces that choice: a control fails if a future change
+adds a validation code or checker that claims to verify meaning.
+
+### Two consequences worth naming
+
+**The helper was not matching production.** `outlookContentPass.js` passes
+`displayName: known ? null : party.displayName` — a known contact is already named in the CRM,
+so its request carries no provider display name, and only an unknown person's does. The helper
+was passing one in both modes, which means **the known-contact samples above were produced from
+a request the worker never sends.** Now aligned, and asserted from the built request rather
+than from the source: the display-name marker must be absent in `known_contact` and present in
+`new_contact`.
+
+**The request ceiling moved again, 24,000 → 26,000.** The four rules are about 1,900 more
+characters of *fixed* overhead in every request, which took the measured worst case to 22,772
+and left only 1,228 characters of margin against the ≥ 2,000 the corrections suite requires.
+That suite is what caught it. **The mailbox content sent is unchanged** — same bounded text,
+same minimization, same address scan. The response ceiling is untouched, because it is derived
+from the field bounds and those did not move.
+
+### What this evidence is, and is not
+
+It **is** the first demonstration that the model writes useful detailed notes from this prompt,
+and the first identification of the specific ways it goes wrong. It is **not** evidence that
+the four rules fix those ways: the rules were written after the samples and have not been run
+against the model. The next quality-check run is what tests them, and it is still **step 1 of
+the rollout** — before publication and before the migration.
+
+It is also not evidence about real mail. These are four invented exchanges, written to be
+clean. Real threads are messier, and only the pilot answers that.
+
+## 4b. The quality check, in practice
 
 ```
 node scripts/outlook-note-quality-check.mjs --dry-run   # offline: builds all four requests, no key, no network
@@ -178,6 +263,9 @@ not understanding; the wording hint flags novelty, not falsehood. The checks exi
 attention — read each note against the messages above it and decide. If the notes pad, repeat,
 misattribute or assert something the messages do not, revise the prompt in
 `SYSTEM_CONTRACT` and run it again. That loop is the point of having this before rollout.
+
+**It has been run once already** — see section 4a for what that produced. The four accuracy
+rules were added after it, so a second run is what tests them, and that run has not happened.
 
 **What it never touches.** No mailbox, no pilot data, no database, no Supabase call, no file
 written. The key is typed at a hidden prompt, travels only in the real header builder, is never
@@ -245,7 +333,7 @@ covers reading these messages and writing a summary from them.
 
 | # | Step | Gate before the next |
 |---|---|---|
-| 1 | **Run the quality check** — `node scripts/outlook-note-quality-check.mjs`, owner-run, real model, synthetic exchanges, no mailbox | The owner has read four real generated notes beside their source messages and accepts the writing. If it pads, repeats, misattributes or invents, the prompt is revised and this step repeats — *before* anything is applied |
+| 1 | **Re-run the quality check** - `node scripts/outlook-note-quality-check.mjs`, owner-run, real model, synthetic exchanges, no mailbox. It has run ONCE (section 4a); the four accuracy rules were added after that run, so this run is the first test of them | The owner has read four real generated notes beside their source messages and accepts the writing. Specifically: no meeting claimed that the messages do not state, caution no wider than its subject, quantities and conditions intact, and the short exchange still short. If any fails, the prompt is revised and this step repeats - *before* anything is applied |
 | 2 | Owner approves section 5 wording and decides the version question | Sign-off on the exact text |
 | 3 | Publish the policy change (5a + 5b) and merge it | `/privacy` live with the new number; if the owner chose the notice route instead, the version cutover from the activation packet runs here first |
 | 4 | Apply `20261010180000` | Ledger shows it applied; three CHECKs read 2,000; both producers one overload, worker-only, `SECURITY DEFINER`, empty search path, bodies otherwise unchanged; the acceptance RPCs untouched |

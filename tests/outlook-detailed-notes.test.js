@@ -21,7 +21,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import {
-  BOUNDS, DRAFT_MAX_TOKENS, DRAFT_FAILURE_CODES, SYSTEM_CONTRACT,
+  BOUNDS, DRAFT_MAX_TOKENS, DRAFT_FAILURE_CODES, VALIDATION_CODES, SYSTEM_CONTRACT,
   buildDraftRequest, validateDraftResponse, parseDraftPayload,
   interactionDraftSchema, newContactSchema, MAX_REQUEST_CHARS, MAX_RESPONSE_CHARS,
 } from '../supabase/functions/shared/outlookDraftContract.js'
@@ -122,12 +122,17 @@ test('the request still fits its ceiling with a full six-message exchange', () =
   }))
   const body = buildDraftRequest({ mode: 'known_contact', displayName: 'Priya', subject: 'Summer analyst', messages, allowedDates: DATES })
   assert.strictEqual(body.max_tokens, 2048)
-  // The request ceiling MOVED with the fixed prompt/schema overhead this change added
-  // (20,000 -> 24,000); the amount of user content sent is bounded by the sanitizer and did
-  // not move. The worst case and its margin are re-measured in
-  // tests/outlook-content-corrections.test.js.
+  // The request ceiling MOVED TWICE with the fixed prompt/schema overhead, 20,000 -> 24,000
+  // for the detail instruction and 24,000 -> 26,000 for the four accuracy rules added after
+  // the first real model samples. The amount of USER CONTENT sent never moved: it is bounded
+  // by the sanitizer. The worst case and its >= 2,000 margin are re-measured in
+  // tests/outlook-content-corrections.test.js, which is what caught the second increase.
+  //
+  // This probe passes a displayName in known_contact mode, which production does NOT do
+  // (outlookContentPass.js sends null there). That makes it a conservative over-estimate of
+  // the real known-contact worst case, which is the right direction for a ceiling check.
   assert.ok(JSON.stringify(body).length <= MAX_REQUEST_CHARS, 'a full exchange still fits the request ceiling')
-  assert.strictEqual(MAX_REQUEST_CHARS, 24000)
+  assert.strictEqual(MAX_REQUEST_CHARS, 26000)
   // And the RESPONSE keeps its own, far tighter bound: widening the request must not widen
   // what is accepted back.
   // DERIVED from the field bounds times the worst-case JSON escape expansion, so it cannot
@@ -311,6 +316,171 @@ test('the reviewer can always edit and save the longest generated note', () => {
   const ncc = read('src/lib/newContactReview.js')
   assert.ok(/REVIEW_NOTES_MAX = 10000/.test(cal) && /notes: 10000/.test(ncc))
   assert.ok(BOUNDS.summary < 10000, 'the generated note fits the reviewed allowance with room to edit')
+})
+
+// == ACCURACY CONTROLS for the four rules added after the FIRST REAL MODEL SAMPLES ==========
+//
+// READ THIS BEFORE TRUSTING ANYTHING BELOW. These are FIXTURE CONTROLS, not model evidence.
+//
+// WHAT THE FIRST REAL RUN ACTUALLY SHOWED, four observations and no more:
+//   * useful detailed notes - the substance of the exchanges came through;
+//   * ONE unsupported meeting claim - outreach after an event written as the two people
+//     having met there;
+//   * ONE broadened caution - hesitancy about a single unresolved question widened into
+//     advice against a whole programme;
+//   * one accurate short note - the brief exchange stayed brief and correct.
+// Rules (a) and (c) answer those two faults. Rules (b) and (d) - quantities, conditions and
+// timing; routine acknowledgements stay short - are PREVENTIVE HARDENING asked for alongside,
+// not failures that were observed. The twenty-minute example in rule (b) is the concrete case
+// named in that request, not a logged defect. Keeping that distinction is the point: a
+// precaution recorded as a measurement is how a doc starts lying.
+//
+// The response is PROMPT GUIDANCE plus HUMAN REVIEW - deliberately NOT a semantic validator,
+// which could not tell a true sentence from a plausible one either.
+//
+// So each control proves one of exactly two things, and says which:
+//   INSTRUCTION  - the rule ships, in terms specific enough for a model to act on.
+//   PIPELINE     - a correctly written note carrying that kind of detail survives the real
+//                  parser, validator and bounds unchanged, so the path cannot be blamed.
+// Whether the model OBEYS is answered only by rerunning scripts/outlook-note-quality-check.mjs
+// against the provider and reading the notes. Three controls below assert that a WRONG note
+// validates exactly as happily as a right one - that is not a gap in the tests, it is the
+// honest shape of the system, and it is why the reviewer exists.
+
+const CONTRACT = SYSTEM_CONTRACT
+// The contract wraps its rules across lines with indentation, so every INSTRUCTION control
+// below reads this flattened view. Matching the raw string is how the first version of these
+// controls failed on "careers fair" while the prompt said exactly that.
+const FLAT = CONTRACT.replace(/\s+/g, ' ')
+
+// Round-trips a note through the real parser and the real validator, both modes, and returns
+// the summary exactly as it survived. Byte-for-byte, so a control cannot pass on a note the
+// path quietly altered.
+const roundTrip = (summary, mode = 'known_contact') => {
+  const payload = mode === 'new_contact' ? proposal({ summary }) : draft({ summary })
+  const parsed = parseDraftPayload({ stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify(payload) }] })
+  assert.strictEqual(parsed.ok, true, `parser refused: ${parsed.code}`)
+  const checked = validateDraftResponse(parsed.parsed, ctx(mode))
+  assert.strictEqual(checked.ok, true, `validator refused: ${checked.code}`)
+  const out = mode === 'new_contact' ? checked.suggestion : checked.draft
+  return out.summary
+}
+
+test('INSTRUCTION: an event is not a meeting, and a stated meeting is still recorded', () => {
+  assert.ok(/AN EVENT IS NOT A MEETING/.test(CONTRACT), 'the rule is named')
+  for (const word of ['panel', 'info session', 'careers fair', 'talk', 'conference']) {
+    assert.ok(FLAT.includes(word), `the rule names the ${word} case`)
+  }
+  // The forbidden inference is spelled out, not merely hinted at.
+  assert.ok(/met, spoke, were introduced or connected there unless a message says they did/i.test(FLAT),
+    'all four false-meeting verbs are named, and the condition that licenses them')
+  assert.ok(/attending the same event, is not meeting/i.test(FLAT),
+    'and it says plainly that attending the same event is not meeting')
+  // It must NOT overcorrect into refusing to record real meetings.
+  assert.ok(/does state a meeting, a call or a coffee chat, record it/i.test(FLAT),
+    'a stated meeting is still recorded plainly')
+})
+
+test('PIPELINE: event-outreach wording and a stated meeting both survive untouched', () => {
+  const outreach = 'Priya wrote following the autumn info session to flag that the internal '
+    + 'deadline for the summer cohort is 24 October, three weeks earlier than the public one.'
+  assert.strictEqual(roundTrip(outreach), outreach, 'the careful wording is not altered')
+  const meeting = 'Over a coffee chat on campus Priya went through the summer cohort timeline '
+    + 'and said the screening call is competency-based rather than technical.'
+  assert.strictEqual(roundTrip(meeting), meeting, 'an explicitly stated meeting is recorded as one')
+  assert.strictEqual(roundTrip(meeting, 'new_contact'), meeting, 'and in the new-contact schema too')
+})
+
+test('NOT VERIFIED: the code cannot tell a false meeting claim from a true one', () => {
+  // One of the TWO faults actually observed in the first real samples. It validates cleanly, because no
+  // mechanical check can reach it: both sentences are well-formed prose of legal length with a
+  // legal evidence code. This is the limit the prompt and the reviewer cover, asserted here
+  // rather than left implied.
+  const invented = 'Priya and the user met at the autumn info session and discussed the summer cohort timeline.'
+  assert.strictEqual(roundTrip(invented), invented,
+    'an unsupported meeting claim is accepted by the validator - only a human catches it')
+})
+
+test('INSTRUCTION: quantities, conditions and timing are kept as stated', () => {
+  assert.ok(/KEEP QUANTITIES, CONDITIONS AND TIMING AS STATED/.test(CONTRACT), 'the rule is named')
+  for (const kind of ['Numbers', 'durations', 'counts', 'thresholds', 'deadlines']) {
+    assert.ok(FLAT.includes(kind), `the rule names ${kind}`)
+  }
+  // The concrete example from the observed failure, and the condition clause.
+  assert.ok(/defend a piece of work for twenty minutes is not the same as being ready to discuss it/i.test(FLAT),
+    'the twenty-minute example is stated concretely')
+  assert.ok(/not round them, generalize them, merge them or drop them/i.test(FLAT), 'all four losses are forbidden')
+  assert.ok(/offered on a condition into something offered outright/i.test(FLAT),
+    'and a condition may not become an unconditional offer')
+})
+
+test('PIPELINE: a note dense with quantities survives byte for byte, escaped or not', () => {
+  const dense = 'Ben said to be ready to defend one piece of work end to end for twenty minutes, '
+    + 'to bring two examples of working to a deadline, and that the summer analyst role posts on '
+    + '3 November - about three weeks earlier than last year. He will flag the application only '
+    + 'once a one-page summary arrives, which is due by 28 October.'
+  assert.strictEqual(roundTrip(dense), dense, 'every quantity survives the path')
+  assert.strictEqual(roundTrip(dense, 'new_contact'), dense, 'in both modes')
+  // And through a fully escaped provider body, the encoding that broke the response bound.
+  const esc = escapeNonAscii(JSON.stringify(draft({ summary: dense + ' Notes in 日本語 too.' })))
+  const r = parseDraftPayload({ stop_reason: 'end_turn', content: [{ type: 'text', text: esc }] })
+  assert.strictEqual(r.ok, true, `escaped body refused: ${r.code}`)
+  assert.ok(validateDraftResponse(r.parsed, ctx('known_contact')).draft.summary.includes('twenty minutes'),
+    'the quantity survives JSON escaping as well')
+})
+
+test('INSTRUCTION: caution stays attached to what it was about', () => {
+  assert.ok(/KEEP CAUTION ATTACHED TO WHAT IT WAS ABOUT/.test(CONTRACT), 'the rule is named')
+  // The scope it must stay inside, and the scopes it must never widen to.
+  for (const narrow of ['one unresolved question', 'one requirement', 'one date', 'one eligibility rule']) {
+    assert.ok(FLAT.includes(narrow), `the rule names the narrow scope "${narrow}"`)
+  }
+  assert.ok(/Never widen it into a judgement about a whole programme, firm, team, desk or plan/i.test(FLAT),
+    'and forbids widening to a whole programme, firm, team, desk or plan')
+  assert.ok(/need to check whether X is allowed" into advice against X/i.test(FLAT),
+    'the observed failure mode is named exactly')
+  assert.ok(/An unresolved question is open, not discouraging/i.test(FLAT), 'and the distinction is stated')
+})
+
+test('PIPELINE: narrowly scoped caution survives, and so does the broadened version', () => {
+  const narrow = 'Priya does not yet know whether applying to the spring insight week in parallel '
+    + 'rules you out of the summer round, and will confirm. She was otherwise positive about the '
+    + 'summer cohort and offered to put your name to the programme lead.'
+  assert.strictEqual(roundTrip(narrow), narrow, 'the correctly scoped note is unchanged')
+  // The other observed fault. Also unreachable mechanically.
+  const broadened = 'Priya advised against the spring insight week and suggested focusing elsewhere.'
+  assert.strictEqual(roundTrip(broadened), broadened,
+    'a broadened caution is accepted by the validator - only a human catches it')
+})
+
+test('INSTRUCTION: a routine acknowledgement stays short', () => {
+  assert.ok(/A ROUTINE ACKNOWLEDGEMENT STAYS SHORT/.test(CONTRACT), 'the rule is named')
+  assert.ok(/is one plain sentence/i.test(FLAT), 'the target length is explicit')
+  assert.ok(/not add narrative framing/i.test(FLAT), 'narrative framing is forbidden')
+  assert.ok(/not restate one fact in different words/i.test(FLAT), 'restatement is forbidden')
+  assert.ok(/not describe the conversation instead of recording what it said/i.test(FLAT),
+    'and describing the exchange instead of recording it is forbidden')
+})
+
+test('PIPELINE: a one-sentence acknowledgement is a valid note', () => {
+  // The fourth rule must not make a short note illegal: the length floor is 1 character.
+  const brief = 'You thanked Ava for the coffee chat and she asked to be kept posted.'
+  assert.strictEqual(roundTrip(brief), brief)
+  assert.strictEqual(validateDraftResponse(draft({ summary: 'x' }), ctx('known_contact')).ok, true,
+    'the shortest possible note is still legal')
+})
+
+test('NO SEMANTIC VALIDATOR WAS ADDED - the rules are prompt guidance plus review', () => {
+  // Scope guard. If a future change tries to enforce these rules in code, it will add a
+  // failure code or a checker, and this fails - which is the moment to re-decide deliberately
+  // rather than drift into a framework that cannot work.
+  const contract = read('supabase/functions/shared/outlookDraftContract.js')
+  for (const invented of ['meeting_claim', 'unsupported_claim', 'quantity_', 'caution_', 'semantic']) {
+    assert.ok(!contract.includes(invented), `no semantic check named ${invented}`)
+  }
+  assert.strictEqual(DRAFT_FAILURE_CODES.length, 18, 'the failure-code list is unchanged')
+  assert.deepStrictEqual([...VALIDATION_CODES].filter((c) => /meet|quantit|caution|scope/i.test(c)), [],
+    'and no validation code pretends to check meaning')
 })
 
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed`)

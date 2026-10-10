@@ -68,14 +68,46 @@ test('the fixtures are invented and carry no address, so the privacy guard has n
   }
 })
 
+// The display name EXACTLY as the worker passes it: null for a known contact, the provider's
+// name for an unknown person. Used by every control below so none of them measures a request
+// production would not send.
+const prodDisplayName = (e) => (e.mode === 'known_contact' ? null : e.displayName)
+
 test('every exchange builds a bounded request that passes the real minimization guard', () => {
   for (const e of EXCHANGES) {
-    const body = buildDraftRequest({ mode: e.mode, displayName: e.displayName, subject: e.subject,
+    const body = buildDraftRequest({ mode: e.mode, displayName: prodDisplayName(e), subject: e.subject,
       messages: e.messages, allowedDates: e.allowedDates })
     const size = JSON.stringify(body).length
     assert.ok(size <= MAX_REQUEST_CHARS, `${e.id} serializes to ${size}`)
     const min = assertRequestMinimization(body, { addresses: ['pilot@example.test'], names: [], ids: [] })
     assert.ok(!min || min.ok !== false, `${e.id} was withheld: ${min && min.category}`)
+  }
+})
+
+test('the display name is passed exactly as the production caller passes it', () => {
+  // outlookContentPass.js: `displayName: known ? null : (party.ok ? party.displayName : null)`.
+  // A known contact is already named in the CRM, so its request carries NO provider display
+  // name; only an unknown person's does, because that name is the evidence the model may
+  // propose a NAME from. The helper passed one in BOTH modes, so the known-contact note was
+  // judged against a request the worker never sends.
+  const pass = readFileSync(join(ROOT, 'supabase/functions/shared/outlookContentPass.js'), 'utf8')
+  assert.ok(/displayName: known \? null :/.test(pass), 'the production rule is still what we are matching')
+  assert.ok(CODE.includes("exchange.mode === 'known_contact' ? null : exchange.displayName"),
+    'the helper computes it the same way')
+
+  // Proven from the BUILT REQUEST, not just the source. The display-name line is a fixed
+  // marker, so its presence or absence is decisive.
+  const MARKER = 'CONTACT display name as recorded by the mail provider:'
+  for (const e of EXCHANGES) {
+    const body = buildDraftRequest({ mode: e.mode, displayName: prodDisplayName(e), subject: e.subject,
+      messages: e.messages, allowedDates: e.allowedDates })
+    const serialized = JSON.stringify(body)
+    if (e.mode === 'known_contact') {
+      assert.ok(!serialized.includes(MARKER), `${e.id}: a known contact must carry no provider display name`)
+    } else {
+      assert.ok(serialized.includes(MARKER), `${e.id}: an unknown person must carry one`)
+      assert.ok(serialized.includes(e.displayName), `${e.id}: and it must be the provider's name`)
+    }
   }
 })
 

@@ -229,14 +229,21 @@ export const MAX_DRAFT_RESPONSE_BYTES = 256 * 1024
 // sanitizer's worst case - six inbound messages, MAX_EPISODE_CHARS of text and a 600-character
 // signature each - the new-contact body serializes to 20,853 characters. Under the old 20,000
 // ceiling that exchange would have been refused `request_too_large` and drafted nothing, so
-// the ceiling moves with the overhead that caused it. 24,000 leaves about 3,100 characters of
-// margin, and tests/outlook-content-corrections.test.js re-measures the worst case against it
-// so a future prompt or schema edit that eats the margin fails there rather than in production.
+// the ceiling moves with the overhead that caused it.
+//
+// MOVED AGAIN for the same reason. The four accuracy rules added after the first real model
+// samples (an event is not a meeting; keep quantities, conditions and timing; keep caution
+// attached to its subject; a routine acknowledgement stays short) are another ~1,900
+// characters of FIXED overhead, which took the worst case to 22,772 and left only 1,228
+// characters of margin. 26,000 restores about 3,200. tests/outlook-content-corrections.test.js
+// re-measures the worst case AND requires >= 2,000 free, so a future prompt or schema edit that
+// eats the margin fails there rather than refusing a real exchange in production - which is
+// exactly how this increase was found.
 //
 // NOTE WHAT DID NOT CHANGE: the amount of USER CONTENT sent. That is bounded independently by
 // MAX_TEXT_CHARS, MAX_EPISODE_CHARS and MAX_EPISODE_MESSAGES in the sanitizer, none of which
 // this touches.
-export const MAX_REQUEST_CHARS = 24_000
+export const MAX_REQUEST_CHARS = 26_000
 
 // THE RESPONSE's own ceiling is MAX_RESPONSE_CHARS, declared with the field bounds it is
 // derived from, below.
@@ -345,6 +352,30 @@ export const SYSTEM_CONTRACT = [
   'given; offers made, and by whom; commitments either side made; named dates, deadlines',
   'and events; agreed next steps; and questions left unresolved. Name the people,',
   'companies, roles, teams and programmes that the messages name.',
+  '',
+  'RECORD IT AS IT HAPPENED. Detail is only worth having if it is faithful. Each of these four',
+  'mistakes reads as a perfectly reasonable sentence, which is exactly why a reviewer is',
+  'unlikely to catch it. Avoiding them matters more than writing more.',
+  'a. AN EVENT IS NOT A MEETING. When someone writes after a panel, info session, careers',
+  '   fair, talk or conference, do not say the two people met, spoke, were introduced or',
+  '   connected there unless a message says they did. Writing after an event, or attending the',
+  '   same event, is not meeting. Say what the messages support: that they got in touch',
+  '   following it. Where a message does state a meeting, a call or a coffee chat, record it',
+  '   plainly as that.',
+  'b. KEEP QUANTITIES, CONDITIONS AND TIMING AS STATED. Numbers, durations, counts,',
+  '   thresholds, deadlines and the conditions attached to them carry the usefulness of the',
+  '   note - being ready to defend a piece of work for twenty minutes is not the same as being',
+  '   ready to discuss it. Do not round them, generalize them, merge them or drop them, and do',
+  '   not turn something offered on a condition into something offered outright.',
+  'c. KEEP CAUTION ATTACHED TO WHAT IT WAS ABOUT. When someone is uncertain, hesitant or',
+  '   cautious, record the specific thing it applies to - one unresolved question, one',
+  '   requirement, one date, one eligibility rule. Never widen it into a judgement about a',
+  '   whole programme, firm, team, desk or plan, and never turn "I need to check whether X',
+  '   is allowed" into advice against X. An unresolved question is open, not discouraging.',
+  'd. A ROUTINE ACKNOWLEDGEMENT STAYS SHORT. A thank-you, a confirmation or a brief "keep me',
+  '   posted" is one plain sentence. Do not add narrative framing about the relationship, the',
+  '   exchange or its significance, do not restate one fact in different words, and do not',
+  '   describe the conversation instead of recording what it said.',
   '',
   `LENGTH FOLLOWS THE EXCHANGE. Up to ${BOUNDS.summary} characters are available. Use what the`,
   'exchange supports and no more: a two-line thank-you is one sentence; an exchange covering',
