@@ -25,7 +25,7 @@
 
 import assert from 'node:assert'
 import { readFileSync, existsSync } from 'node:fs'
-import { pathToFileURL } from 'node:url'
+import { pathToFileURL, fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
@@ -121,7 +121,7 @@ async function loadModuleUrl (abs) {
 }
 
 async function loadCard () {
-  const abs = resolve(dirname(new URL(import.meta.url).pathname.slice(1)), '..',
+  const abs = resolve(dirname(fileURLToPath(import.meta.url)), '..',
     'src/components/NewContactSuggestionCard.jsx')
   return import(await loadModule(abs))
 }

@@ -46,6 +46,7 @@ const blankFolder = () => ({
   pending_delta_key_version: null,
   delta_link_ciphertext: null,
   delta_link_nonce: null,
+  initial_import_done: false,
 })
 
 export function makeRoundStore ({ clock } = {}) {
@@ -67,6 +68,7 @@ export function makeRoundStore ({ clock } = {}) {
   const committedOf = (f) => ({
     delta_link_ciphertext: folders[f].delta_link_ciphertext,
     delta_link_nonce: folders[f].delta_link_nonce,
+    initial_import_done: folders[f].initial_import_done,
   })
   /** The EARLIER of the two folder deadlines governs, so a disagreement fails to expired. */
   const roundExpired = () => {
@@ -120,8 +122,15 @@ export function makeRoundStore ({ clock } = {}) {
     }
 
     if (name === 'reset_outlook_round') {
-      // Exactly like the SQL: the round goes AS A UNIT, the COMMITTED cursor does not.
+      // Ordinary resets retain committed cursors. Only an explicit committed-token
+      // rejection discards both of them, as the forward migration does.
       discardRound()
+      if (args?.p_reason === 'committed_delta_rejected') {
+        for (const f of GRAPH_FOLDERS) {
+          folders[f].delta_link_ciphertext = null
+          folders[f].delta_link_nonce = null
+        }
+      }
       return { data: { result: 'reset' }, error: null }
     }
 
@@ -334,6 +343,7 @@ export function makeRoundStore ({ clock } = {}) {
       const committed = {
         delta_link_ciphertext: folders[f].delta_link_ciphertext,
         delta_link_nonce: folders[f].delta_link_nonce,
+        initial_import_done: true,
       }
       folders[f] = { ...blankFolder(), ...committed }
     }

@@ -963,6 +963,36 @@ export async function runOutlookImport (p) {
     stops,
   }
 
+  // ── 3a. a committed deltaLink was explicitly rejected by Microsoft ────────
+  // Reset BOTH folders and the shared partial round under the existing lease fence.
+  // The next invocation uses the ordinary bounded discovery builder, never Graph's
+  // Location header. Saved suggestions and deduplication references are not reset.
+  if (slice.cursorRejected?.kind === 'committed_delta_link') {
+    let reset = 'not_attempted'
+    try {
+      await ensureLease(PROGRESS_STEP_MS)
+      const r = await rpc('reset_outlook_round', {
+        p_connection_id: connectionId,
+        p_run_id: runId,
+        p_reason: 'committed_delta_rejected',
+      })
+      reset = r?.error ? 'rpc_error' : (r?.data?.result ?? 'unknown')
+    } catch {
+      reset = 'reset_threw'
+    }
+    roundReset = reset
+    const restarted = reset === 'reset'
+    await release(restarted ? 'idle' : 'error', false, null,
+      restarted ? null : 'committed_delta_reset_failed',
+      restarted ? CONTINUE_BACKOFF_SECONDS : RETRY_BACKOFF_SECONDS)
+    return {
+      ...nothingWritten,
+      outcome: restarted ? 'restart_required' : 'incomplete',
+      reason: restarted ? 'committed_delta_rejected' : 'committed_delta_reset_failed',
+      roundReset: reset,
+    }
+  }
+
   // ── 3a. a SAVED nextLink was rejected: the controlled restart ──────────────
   // The round's saved position is worthless now, but the COMMITTED cursor still marks a
   // position that genuinely was ingested, so it is left exactly as it is. The next round
@@ -1210,8 +1240,13 @@ export async function runOutlookImport (p) {
       // committed cursor) already sees the whole thread and asks nothing extra. Recovery
       // needs a stored handle, so this - like the one-sided recovery - exists only while
       // the content stage is on.
-      const deltaRound = GRAPH_FOLDERS.some((f) =>
-        typeof context.cursors?.[f] === 'string' && context.cursors[f].length > 0)
+      // Clearing a rejected cursor does not turn a previously synced mailbox into
+      // a first import. Keep canonical thread recovery on during the catch-up read,
+      // including continuations, so a later first-visible message cannot change identity.
+      const deltaRound = reserved.data.inbox_initial_import_done === true
+        || reserved.data.sentitems_initial_import_done === true
+        || GRAPH_FOLDERS.some((f) =>
+          typeof context.cursors?.[f] === 'string' && context.cursors[f].length > 0)
       const decisions = []
       for (const row of rows) {
         const one = finalizeConversation(row, (iso) => localDateFor(iso, context.timeZone),

@@ -462,6 +462,7 @@ test('applied migrations are unmodified; the only addition is the forward scope 
     // Background sync: the wake-up signal, the subscription record, the notification RPC,
     // the status RPC and the INACTIVE pg_cron tick. DROP/CREATE of the reservation again.
     '20261009000000_outlook_change_notifications.sql',
+    '20261010050349_recover_rejected_outlook_delta_cursors.sql',
   ]
   assert.deepStrictEqual(files.slice(-UNAPPLIED.length), UNAPPLIED,
     'the unapplied forward migrations must be the newest, in this order')
