@@ -329,7 +329,23 @@ exactly as in `docs/outlook-background-activation-packet.md` steps 4–6. **Reco
 policy page only, no version change, no re-consent**, because the consent the pilot gave already
 covers reading these messages and writing a summary from them.
 
-## 6. Ordered rollout (owner-authorized; nothing done here)
+## 6. Ordered rollout — **COMPLETED 2026-10-10**
+
+Every step below was owner-authorized and executed. What is live, and what each step proved, is
+recorded in the rollout report; the table is kept as the record of the order that was followed.
+
+| Step | State |
+|---|---|
+| Real-model quality check, run 2 | **passed** — meeting error absent, broadened caution absent, quantities and conditions preserved, short exchange stayed short (four synthetic exchanges; not a claim about all mail) |
+| Policy wording approved and published | **live** — `/privacy` shows the 2,000-character limit and the detailed-draft paragraph, "Last updated: October 10, 2026". Notice and consent version deliberately unchanged |
+| Migration `20261010180000` applied | **applied** — three CHECKs at 2,000, both producers re-issued, acceptance RPCs untouched at 10,000 |
+| PR #82 merged pinned to `baf26db` | **merged** |
+| `outlook-import-worker` deployed from merged main | **v51** — 29-file import closure, byte-identical to main |
+| Background sync re-verified | **healthy** — cron active, post-deploy ticks succeeded, flag, Vault, credentials and consent untouched |
+
+The original ordering constraints, kept because they explain *why* the order was this:
+
+
 
 | # | Step | Gate before the next |
 |---|---|---|
@@ -346,12 +362,23 @@ worker will send a prompt inviting a 2,000-character note into columns that stil
 and every such draft would be refused with `invalid_notes` — the run would complete and write
 nothing. Publishing before applying (steps 2 → 3) keeps the policy true at every moment.
 
-**Rollback.** Re-apply the previous bounds (a one-line reverse migration restoring 200 in the
-three CHECKs and both producers) and redeploy the worker from the reverted source. Stored notes
-already longer than 200 would then violate the restored CHECK, so a rollback after live traffic
-must either keep the wider column bound while reverting only the prompt and the validator — the
-safer order — or shorten the affected rows first. Reverting the prompt and `BOUNDS.summary`
-alone needs no migration and is the recommended rollback.
+**Rollback — one supported procedure.** Revert the **worker's behaviour** and **keep the
+database's wider bounds**:
+
+1. Revert the prompt section and `BOUNDS.summary` in `outlookDraftContract.js` (and the request
+   ceiling, if desired) on `main`.
+2. Redeploy **only** `outlook-import-worker` from the reverted source.
+
+That is the whole rollback. **No migration runs, and no stored note is touched.** New drafts go
+back to being short; every note already saved stays exactly as it is, and the reviewed-note
+allowance of 10,000 is unaffected either way.
+
+**Do not narrow the column bounds back to 200.** Once live traffic has produced notes longer
+than 200, a reverse migration restoring that CHECK would fail against the existing rows, or
+would require shortening real user data first — destroying content the user accepted. The wider
+bound is permanently safe to leave in place: it is a ceiling, and a reverted worker simply stops
+approaching it. An earlier version of this section listed the reverse migration first; that was
+the wrong order and is corrected here.
 
 ## 7. What this does not deliver
 
