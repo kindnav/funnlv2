@@ -14,7 +14,8 @@ configuration (worker flag present, `outlook-worker-tick` active, worker v49).
 
 ## 1. What the generated note should contain
 
-One prose paragraph recording, **only where the selected messages state them**:
+One prose paragraph recording the following — **instructed to use only what the selected
+messages state**:
 
 - what was discussed, and why it mattered;
 - concrete advice given;
@@ -25,6 +26,16 @@ One prose paragraph recording, **only where the selected messages state them**:
 - questions left unresolved.
 
 With the people, companies, roles, teams and programmes the messages name.
+
+**What "grounded" means here, precisely.** Staying inside what the messages say is an
+*instruction to the model* plus a *reviewer responsibility* — it is not a guarantee the system
+can make. The code enforces what code can see: length, control characters, URLs and addresses,
+the date allowlist, the evidence pairing, and the sensitive-topic rule, each refusing the whole
+draft rather than trimming it. It cannot detect a fluent, plausible sentence that the messages
+do not support; `tests/outlook-detailed-notes.test.js` asserts exactly that limit rather than
+implying otherwise. Two things reduce the risk: the prompt forbids it in specific terms, and
+every note reaches the user as an editable draft that nothing saves until they accept it. The
+honest claim is "instructed and reviewable", never "verified true".
 
 **Length follows the exchange.** Up to 2,000 characters are available; the prompt instructs the
 model to use what the exchange supports and no more — a two-line thank-you is one sentence, a
@@ -48,7 +59,8 @@ both producers, which buys little and is deliberately out of scope here.
 | Reviewer's own note | 10,000 (unchanged) | Every generated draft therefore fits the editor and both acceptance paths with room to expand. |
 | Next step | 160 (unchanged) | It is one action, not a paragraph. |
 | Output budget | 2,048 tokens | A 2,000-character note is ~500 tokens; the budget must also carry the next step, the name triple, the evidence enums and the JSON envelope. Thinking stays disabled, so the whole allowance is visible output. |
-| Request ceiling | 20,000 chars (unchanged) | The exchange sent to the model is already bounded at 4,000 characters per message and 12,000 per episode. |
+| Request ceiling | 20,000 → **24,000** chars | It had to move: the longer instructions and schema descriptions are *fixed* overhead in every request, and at the sanitizer's worst case the body measured 20,853 characters. **The mailbox content sent is unchanged** — still bounded at 4,000 characters per message and 12,000 per episode, with the same minimization and address scan. What grew is Funnl's own instructions, not the amount of the user's mail. |
+| Response ceiling | **15,680** chars, derived | Counts *serialized* characters, so it is sized for JSON escaping: the field bounds (2,000 + 160 + 120) times the six characters a fully-escaped `\uXXXX` sequence costs, plus an envelope allowance. Derived from the bounds so it cannot drift from them. The *decoded* field limits are unchanged. |
 
 A response cut off by the output budget now reports `model_truncated` rather than
 `unparseable_json`: either way nothing is stored — a partial note is never a draft — but an
@@ -96,13 +108,62 @@ PostgREST + the real run): both fixture model replies now return detailed multi-
 and the harness asserts the stored draft is the model's note byte for byte — through the
 validator, the pass, the producer RPC and the column CHECK — and that acceptance preserves it.
 
-**Not demonstrated, and not claimed.** Nothing here measures what the model actually writes.
-Every note above is a fixture chosen to exercise the pipeline, so this PR is evidence that a
-detailed note *survives the whole path intact*, not that the model produces a good one. Note
-quality — does it capture the advice and the commitment, does it stay inside what the messages
-say, does a short exchange really get a short note — can only be judged on live exchanges from
-the pilot mailbox, after the rollout below. Until then the honest statement is: the ceiling and
-the instructions changed; the writing has not been observed.
+**Not demonstrated by any of the above.** Nothing in the three paragraphs above measures what
+the model actually writes. Every note in them is a fixture chosen to exercise the pipeline, so
+they are evidence that a detailed note *survives the whole path intact*, not that the model
+produces a good one.
+
+**How the writing gets assessed, and when.** Not "only after rollout" — that was wrong. There
+are two distinct questions, and they are answered at different times:
+
+1. **Does the model write well?** Answerable *now*, before anything is applied, with real model
+   calls against synthetic exchanges. `scripts/outlook-note-quality-check.mjs` is the
+   owner-run helper for exactly that: it drives this head's real builder, prompt, parser and
+   validator over four invented exchanges — a multi-topic existing-contact conversation, a
+   new-person exchange carrying advice, an offer and a commitment, one dense with named dates
+   and unresolved questions, and a short exchange — then prints each generated note beside its
+   source messages with mechanical checks for coverage, attribution, unsupported wording,
+   repetition and length. No mailbox, no pilot data, no Production change. The owner reads the
+   output and judges the writing. **This is a gate before rollout, not after it** (section 6,
+   step 1).
+2. **Does it behave on real mail?** Only the pilot can answer that: real threads are messier
+   than any fixture — forwarded chains, mixed languages, partial quoting, signatures, exchanges
+   that are half logistics. That verification is step 7, after rollout.
+
+Until the helper has been run the honest statement is: the ceiling and the instructions changed,
+and the writing has not been observed *yet* — not that it cannot be.
+
+## 4a. The quality check, in practice
+
+```
+node scripts/outlook-note-quality-check.mjs --dry-run   # offline: builds all four requests, no key, no network
+node scripts/outlook-note-quality-check.mjs             # real model: hidden key prompt, four requests
+```
+
+**What it does.** For each of the four invented exchanges it builds the request with this head's
+own `buildDraftRequest`, checks the size against `MAX_REQUEST_CHARS`, runs the real
+`assertRequestMinimization`, sends **one** request (no retries), reads the response with the
+bounded reader, and runs the real `parseDraftPayload` and `validateDraftResponse`. Then it
+prints the source messages, the generated note, and five mechanical checks.
+
+| Check | What it reports |
+|---|---|
+| coverage | Which facts stated in the exchange's own messages the note mentions, and which it dropped. Each fixture declares its facts, and a test asserts every declared fact really is stated in that exchange. |
+| attribution | Whether the note reverses who offered or committed to something — the error a reader cannot detect without the source. |
+| length | Characters against the bound, against the source's own size, and for the short exchange against the length a one-or-two-sentence note should not exceed. |
+| repetition | Repeated sentences and repeated six-word runs. |
+| wording not in the source | Content words with no root in the messages. A **hint**, printed for a human to read: a legitimate paraphrase introduces words too. |
+
+**What it cannot do.** It cannot tell you whether the note is *good*. Coverage counts phrases,
+not understanding; the wording hint flags novelty, not falsehood. The checks exist to direct
+attention — read each note against the messages above it and decide. If the notes pad, repeat,
+misattribute or assert something the messages do not, revise the prompt in
+`SYSTEM_CONTRACT` and run it again. That loop is the point of having this before rollout.
+
+**What it never touches.** No mailbox, no pilot data, no database, no Supabase call, no file
+written. The key is typed at a hidden prompt, travels only in the real header builder, is never
+printed or logged, and is cleared when the run ends. `tests/outlook-note-quality-check.test.js`
+asserts those properties, and the dry run exercises the whole report path offline.
 
 ## 5. Disclosure — wording prepared, not published
 
@@ -128,15 +189,17 @@ next-step fields".
 
 > The drafted summary records what the exchange was about — the topics, any advice or offer, the
 > commitments and dates either side named, the agreed next step and anything left unresolved —
-> in Funnl's own words, drawn only from the messages it read. It is a draft: you can edit every
-> word of it before anything is saved, and your own version may be longer.
+> in Funnl's own words, written from the messages it read. Funnl instructs the AI to use only
+> what those messages say, and checks the draft automatically for things it can check, but an
+> AI can still get a detail wrong: the summary is a draft, you can edit every word of it before
+> anything is saved, and nothing is added to your network until you accept it.
 
 ### 5c. For the owner to confirm
 
 | Question | Recommendation |
 |---|---|
 | Does the longer note need its own disclosure, or only the number? | **Only the number, plus 5b.** No new category of data is read or stored — the same field, from the same messages, under the same consent. 5b is included because "a summary" and "a detailed record of what was said" are different things to a reader, and the honest description is the longer one. |
-| Does this change what reaches Anthropic? | **No.** The request is unchanged: the same bounded message text, the same minimization and address scan. Only the response may be longer. The existing paragraph about what Anthropic receives stays exactly as published. |
+| Does this change what reaches Anthropic? | **No new mailbox content.** What is sent *from your mail* is unchanged: the same bounded message text and signature, under the same minimization and address scan. The request is larger, but only because Funnl's own instructions to the AI are longer; the response may be longer too. The published paragraph describing what Anthropic receives stays exactly as it is, because what it describes has not changed. |
 | Retention | Unchanged. The draft is erased on dismissal and on terminal states exactly as today. |
 
 The notice paragraphs rendered at consent time do not state the 200-character number, so
@@ -152,12 +215,13 @@ covers reading these messages and writing a summary from them.
 
 | # | Step | Gate before the next |
 |---|---|---|
-| 1 | Owner approves section 5 wording and decides the version question | Sign-off on the exact text |
-| 2 | Publish the policy change (5a + 5b) and merge it | `/privacy` live with the new number; if the owner chose the notice route instead, the version cutover from the activation packet runs here first |
-| 3 | Apply `20261010180000` | Ledger shows it applied; three CHECKs read 2,000; both producers one overload, worker-only, `SECURITY DEFINER`, empty search path, bodies otherwise unchanged; the acceptance RPCs untouched |
-| 4 | Merge this PR pinned, let Vercel deploy | No frontend behaviour depends on it — the editors already accept 10,000 — so this is a no-op for the UI |
-| 5 | Deploy **only** `outlook-import-worker` from merged main | Downloaded closure byte-identical; the worker now sends the new prompt and budget |
-| 6 | Observe the next real exchanges | **The model-quality evidence this PR does not have:** read the first live detailed notes against the messages they came from, and check a short exchange produced a short note |
+| 1 | **Run the quality check** — `node scripts/outlook-note-quality-check.mjs`, owner-run, real model, synthetic exchanges, no mailbox | The owner has read four real generated notes beside their source messages and accepts the writing. If it pads, repeats, misattributes or invents, the prompt is revised and this step repeats — *before* anything is applied |
+| 2 | Owner approves section 5 wording and decides the version question | Sign-off on the exact text |
+| 3 | Publish the policy change (5a + 5b) and merge it | `/privacy` live with the new number; if the owner chose the notice route instead, the version cutover from the activation packet runs here first |
+| 4 | Apply `20261010180000` | Ledger shows it applied; three CHECKs read 2,000; both producers one overload, worker-only, `SECURITY DEFINER`, empty search path, bodies otherwise unchanged; the acceptance RPCs untouched |
+| 5 | Merge this PR pinned, let Vercel deploy | No frontend behaviour depends on it — the editors already accept 10,000 — so this is a no-op for the UI |
+| 6 | Deploy **only** `outlook-import-worker` from merged main | Downloaded closure byte-identical; the worker now sends the new prompt and budget |
+| 7 | Observe the next real exchanges | **Real-mail behaviour**, which no fixture and no synthetic check can establish: read the first live notes against the threads they came from, and check a short exchange produced a short note |
 
 Order matters in one direction only: **the migration must precede the worker deploy**, or the
 worker will send a prompt inviting a 2,000-character note into columns that still refuse one,

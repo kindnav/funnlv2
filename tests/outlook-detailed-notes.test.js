@@ -130,9 +130,9 @@ test('the request still fits its ceiling with a full six-message exchange', () =
   assert.strictEqual(MAX_REQUEST_CHARS, 24000)
   // And the RESPONSE keeps its own, far tighter bound: widening the request must not widen
   // what is accepted back.
-  assert.strictEqual(MAX_RESPONSE_CHARS, 8000)
-  assert.ok(MAX_RESPONSE_CHARS > BOUNDS.summary + BOUNDS.followUp + BOUNDS.name + 500,
-    'the response bound must still admit the largest valid draft')
+  // DERIVED from the field bounds times the worst-case JSON escape expansion, so it cannot
+  // drift away from them - see the regression below for why that matters.
+  assert.strictEqual(MAX_RESPONSE_CHARS, (BOUNDS.summary + BOUNDS.followUp + BOUNDS.name) * 6 + 2000)
   assert.ok(MAX_RESPONSE_CHARS < MAX_REQUEST_CHARS, 'and must not simply inherit the request ceiling')
 })
 
@@ -209,6 +209,54 @@ test('unparseable JSON that stopped on max_tokens is model_truncated, not unpars
   const ok = parseDraftPayload(whole)
   assert.strictEqual(ok.ok, true); assert.strictEqual(ok.stopReason, 'max_tokens')
   assert.strictEqual(ok.parsed.summary, COMMITMENTS)
+})
+
+console.log('\nthe response ceiling counts SERIALIZED characters, so it is sized for JSON escaping')
+
+// REPRODUCED BEFORE THE FIX. The first response ceiling was 8,000, reasoned from the DECODED
+// field bounds (2,000 + 160 + 120 is under 2,600) and then applied to the serialized text. A
+// provider that emits fully-escaped JSON writes every non-ASCII character as a six-character
+// escape, so this exact note - 2,000 valid characters, inside every field bound once decoded -
+// serialized to 12,127 characters and was refused `malformed_response`: a correct note thrown
+// away by a bound that measured the wrong thing.
+const BS = String.fromCharCode(92)
+const escapeNonAscii = (t) => t.split('').map((ch) => (ch.charCodeAt(0) < 128
+  ? ch : BS + 'u' + ch.charCodeAt(0).toString(16).padStart(4, '0'))).join('')
+const JA_NOTE = '夏期アナリスト採用について話しました。'.repeat(200).slice(0, 2000)
+
+test('a valid 2,000-character non-ASCII note emitted as fully-escaped JSON parses and validates - both schemas', () => {
+  assert.strictEqual(JA_NOTE.length, 2000)
+  const cases = [
+    ['known_contact', draft({ summary: JA_NOTE }), (v) => v.draft],
+    ['new_contact', proposal({ summary: JA_NOTE, name: 'ナイル', follow_up: '資料を金曜日までに送る。' }), (v) => v.suggestion],
+  ]
+  for (const [mode, payload, pick] of cases) {
+    const serialized = escapeNonAscii(JSON.stringify(payload))
+    assert.ok(serialized.length > 12000, `${mode}: the fixture must actually be escaped (${serialized.length})`)
+    assert.ok(serialized.length <= MAX_RESPONSE_CHARS, `${mode}: ${serialized.length} serialized characters must fit the ceiling`)
+    const r = parseDraftPayload({ stop_reason: 'end_turn', content: [{ type: 'text', text: serialized }] })
+    assert.strictEqual(r.ok, true, `${mode}: parse refused it as ${r.code}`)
+    const v = validateDraftResponse(r.parsed, ctx(mode))
+    assert.strictEqual(v.ok, true, `${mode}: ${v.code}`)
+    // THE DECODED LIMIT IS WHAT COUNTS, and it is unchanged: 2,000 characters of real text.
+    assert.strictEqual(pick(v).summary, JA_NOTE)
+    assert.strictEqual(pick(v).summary.length, 2000)
+  }
+})
+
+test('the worst case the field bounds permit still fits, and a genuinely oversized response is still refused', () => {
+  // Every character of every free-text field escaped: the ceiling is derived to admit exactly this.
+  const worst = (BOUNDS.summary + BOUNDS.followUp + BOUNDS.name) * 6
+  assert.ok(MAX_RESPONSE_CHARS > worst, `${MAX_RESPONSE_CHARS} must exceed the ${worst}-character worst case`)
+  assert.ok(MAX_RESPONSE_CHARS - worst >= 1000, 'with room for keys, enums and provider whitespace')
+  // And the bound still bites: a response past it is refused rather than buffered and parsed.
+  const huge = '{"result":"interaction_draft","summary":"' + 'x'.repeat(MAX_RESPONSE_CHARS) + '"}'
+  assert.strictEqual(parseDraftPayload({ stop_reason: 'end_turn', content: [{ type: 'text', text: huge }] }).code, 'malformed_response')
+  // A decoded note past the FIELD bound is still refused by the validator, escaped or not.
+  const overField = escapeNonAscii(JSON.stringify(draft({ summary: JA_NOTE + '。' })))
+  const r = parseDraftPayload({ stop_reason: 'end_turn', content: [{ type: 'text', text: overField }] })
+  assert.strictEqual(r.ok, true, 'it is within the serialized ceiling')
+  assert.strictEqual(validateDraftResponse(r.parsed, ctx('known_contact')).code, 'too_long', 'but over the decoded field bound')
 })
 
 console.log('\nthe database path carries the same number, and nothing else moved')

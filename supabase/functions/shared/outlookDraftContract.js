@@ -213,10 +213,12 @@ export const DRAFT_MAX_RETRIES = 2
 /**
  * Hard ceiling on the provider's RESPONSE, enforced against the streamed bytes.
  *
- * A draft is a few thousand characters of JSON at most; DRAFT_MAX_TOKENS caps the
- * generation at 2048 tokens. 256 KiB is therefore still an enormous allowance and
+ * A draft is at most ~15,700 characters of JSON even when a provider escapes every
+ * character of the longest permitted fields (see MAX_RESPONSE_CHARS), and DRAFT_MAX_TOKENS
+ * caps the generation at 2048 tokens. 256 KiB is therefore still an enormous allowance and
  * anything past it is not a draft - it is a misrouted or hostile response, and buffering
- * it whole is how a bounded call becomes an unbounded one.
+ * it whole is how a bounded call becomes an unbounded one. This is the STREAMED read bound;
+ * MAX_RESPONSE_CHARS is the parser's.
  */
 export const MAX_DRAFT_RESPONSE_BYTES = 256 * 1024
 // WHOLE SERIALIZED BODY CEILING.
@@ -236,12 +238,8 @@ export const MAX_DRAFT_RESPONSE_BYTES = 256 * 1024
 // this touches.
 export const MAX_REQUEST_CHARS = 24_000
 
-// THE RESPONSE's own ceiling, deliberately separate and far tighter. The largest VALID draft
-// is a 2,000-character summary, a 160-character next step, a 120-character name, a handful of
-// enums and the JSON envelope - under 2,600 characters. Reusing the request ceiling here would
-// have meant that widening the request (above) silently widened what is accepted back, which
-// is the opposite of what a bound is for.
-export const MAX_RESPONSE_CHARS = 8_000
+// THE RESPONSE's own ceiling is MAX_RESPONSE_CHARS, declared with the field bounds it is
+// derived from, below.
 
 // Field bounds — these MIRROR the applied CHECK constraints in 20260921000000 exactly.
 // Structured outputs does NOT enforce `maxLength`/`minLength` (unsupported keywords in
@@ -267,6 +265,28 @@ export const BOUNDS = Object.freeze({
   tag: 40,
   maxTags: 5,
 })
+
+// THE RESPONSE's own ceiling, deliberately separate from the request's: widening the request
+// (above) must not silently widen what is accepted back.
+//
+// IT COUNTS SERIALIZED CHARACTERS, SO IT IS SIZED FOR JSON ESCAPING. The first version of this
+// constant was 8,000 - reasoned from the DECODED field bounds (a 2,000-character summary, a
+// 160-character next step, a 120-character name: under 2,600 characters) and then applied to
+// the serialized text. A provider that emits fully-escaped JSON writes every non-ASCII
+// character as a six-character \uXXXX sequence, so a valid 2,000-character note in Japanese
+// serializes to 12,127 characters and was refused `malformed_response` - a correct note
+// discarded by a bound that measured the wrong thing. The ceiling is therefore DERIVED from the
+// same field bounds times the worst-case escape expansion, which is why it cannot drift away
+// from them again.
+//
+// The DECODED limits are untouched: checkText still measures the parsed string, so a note is
+// still 2,000 characters of actual text however the provider chose to encode it. The streamed
+// read stays bounded by MAX_DRAFT_RESPONSE_BYTES, far below this.
+const JSON_ESCAPE_WORST_CASE_PER_CHAR = 6        // one character as \uXXXX
+const RESPONSE_ENVELOPE_ALLOWANCE = 2_000        // keys, enums, braces, provider whitespace
+export const MAX_RESPONSE_CHARS =
+  (BOUNDS.summary + BOUNDS.followUp + BOUNDS.name) * JSON_ESCAPE_WORST_CASE_PER_CHAR
+  + RESPONSE_ENVELOPE_ALLOWANCE
 
 // Evidence / confidence enums — exactly the applied CHECK constraint values.
 export const NAME_EVIDENCE = Object.freeze(['provider_metadata', 'explicit_signature', 'explicit_body'])

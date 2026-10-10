@@ -94,6 +94,7 @@ docs/
   outlook-background-activation-packet.md  Owner packet: exact background-disclosure wording for approval + ordered activation with a gate per step, rollback, milestone, subsequent workstreams
   outlook-detailed-ai-notes.md  Detailed AI notes workstream: what the generated note must record, why 2,000 characters, the end-to-end changes, fixture-versus-model-quality evidence, prepared policy wording, ordered rollout (migration BEFORE worker deploy) and rollback
 scripts/
+  outlook-note-quality-check.mjs  Owner-run BEFORE the detailed-notes rollout: this head's real builder/prompt/parser/validator over four invented exchanges, ONE real model request each (no retries), hidden key prompt, bounded read; prints each note beside its source with coverage/attribution/length/repetition/unsupported-wording checks. `--dry-run` builds everything offline with no key and no network.
   outlook-worker-flag.ps1    Owner-run: OUTLOOK_IMPORT_WORKER_ENABLED status / enable / disable on Production via npx.cmd, each verified against the JSON secret inventory (UNVERIFIED/UNKNOWN never read as absent; names only, never values or digests); used only inside authorized windows. Offline behaviour test: tests/local/outlook-worker-flag-helper.test.ps1 (synthetic CLI, no credentials). Vault secrets go through the dashboard form - no credential-handling script exists.
 supabase/
   templates/
