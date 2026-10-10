@@ -218,13 +218,13 @@ DO $$
 DECLARE u1 uuid := (SELECT uid FROM fx WHERE u = 'U1'); m1 uuid := (SELECT mconn FROM fx WHERE u = 'U1');
         u2 uuid := (SELECT uid FROM fx WHERE u = 'U2'); ok boolean;
 BEGIN
-  -- summary over 200 chars
+  -- summary over its bound (200 at this migration; 2,000 since 20261010180000)
   ok := false;
   BEGIN
     INSERT INTO public.new_contact_candidates (user_id, person_fingerprint, episode_fingerprint, proposed_email, proposed_interaction_date, context_expires_at, draft_summary)
-      VALUES (u1, pg_temp.fpx('x1'), pg_temp.fpx('x1e'), 'x@example.invalid', current_date, now() + interval '1 day', repeat('a', 201));
+      VALUES (u1, pg_temp.fpx('x1'), pg_temp.fpx('x1e'), 'x@example.invalid', current_date, now() + interval '1 day', repeat('a', 2001));
   EXCEPTION WHEN check_violation THEN ok := true; END;
-  ASSERT ok, 'summary > 200 accepted';
+  ASSERT ok, 'summary over the draft bound accepted';
   -- URL inside summary
   ok := false;
   BEGIN

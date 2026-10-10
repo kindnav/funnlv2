@@ -134,10 +134,11 @@ BEGIN
            WHERE id = (res->>'candidate_id')::uuid) = DATE '2026-10-02',
     'the date still refreshes';
 
-  -- An over-long note is REFUSED, not trimmed.
+  -- An over-long note is REFUSED, not trimmed (the generated-note bound is 2,000
+  -- since 20261010180000; the reviewer's own note has its own, larger allowance).
   res := public.upsert_outlook_interaction_candidate(
     conn, run, cid, repeat('a', 64), repeat('b', 64), 1::smallint,
-    'Email', DATE '2026-10-02', NULL, repeat('x', 201));
+    'Email', DATE '2026-10-02', NULL, repeat('x', 2001));
   ASSERT res->>'result' = 'invalid_notes', 'an over-long note must be refused: ' || res::text;
 END $$;
 

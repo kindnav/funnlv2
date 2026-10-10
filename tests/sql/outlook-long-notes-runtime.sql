@@ -126,12 +126,13 @@ BEGIN
   res := public.accept_new_contact_candidate(ncc2, 'Second Person', p_interaction_notes => repeat('z', 10000));
   ASSERT res ->> 'result' = 'accepted', '10,000 exactly accepted: ' || res::text;
 
-  -- ── the provider-draft columns are NOT widened ───────────────────────────────────────────
+  -- ── the provider-draft columns keep their OWN (smaller) bound: 2,000 since 20261010180000,
+  --    which is the AI draft's allowance, not the reviewer's 10,000 ───────────────────────────
   BEGIN
     INSERT INTO public.interaction_candidates
       (user_id, contact_id, source, source_fingerprint, proposed_type, proposed_interaction_date, status, source_last_state, context_expires_at, proposed_notes)
-    VALUES (u1, c1, 'outlook', repeat('9', 64), 'Email', current_date, 'pending', 'active', now() + interval '30 days', repeat('q', 201));
-    RAISE EXCEPTION 'draft column accepted 201';
+    VALUES (u1, c1, 'outlook', repeat('9', 64), 'Email', current_date, 'pending', 'active', now() + interval '30 days', repeat('q', 2001));
+    RAISE EXCEPTION 'draft column accepted 2001';
   EXCEPTION WHEN check_violation THEN NULL;
   END;
 
