@@ -36,7 +36,7 @@ function PrivacyPage() {
             <span className="font-display font-bold text-[20px] text-hi">Funnl</span>
           </div>
           <h1 className="font-display text-[32px] font-bold text-hi tracking-[-0.5px] mb-3">Privacy Policy</h1>
-          <p className="text-[14px] text-low">Last updated: October 9, 2026</p>
+          <p className="text-[14px] text-low">Last updated: October 10, 2026</p>
           <div className="mt-4 px-4 py-3 bg-elevated border border-line-1 rounded-xl">
             <p className="text-[13.5px] text-muted leading-relaxed">
               This policy explains, in plain language, what Funnl collects, how it is used, who processes it, and how to remove it.
@@ -183,7 +183,10 @@ function PrivacyPage() {
             not legal advice, and is not evidence that outside
             counsel reviewed or approved this policy.
 
-            MANDATORY AT PUBLICATION: the date above is October 9, 2026. If the merge
+            MANDATORY AT PUBLICATION: the date above is October 10, 2026 - the New York
+            date on which the detailed-draft wording (the 2,000-character summary limit and
+            the paragraph describing what the draft records) was published. October 9, 2026
+            was the background-sync publication and is now history. If the merge
             that publishes this section happens on any later day, the "Last updated"
             date MUST be changed again in that same commit.
             tests/privacy-policy-outlook.test.js pins the conditional framing and the
@@ -318,9 +321,15 @@ function PrivacyPage() {
                 <li>your Microsoft authorization, stored only as encrypted values with a key version, never in your browser;</li>
                 <li>a per-folder synchronization position, itself stored encrypted because Microsoft's position markers embed provider state,
                   plus timestamps, retry state and short result codes;</li>
-                <li>for a draft about someone already in your contacts: a summary of at most 200 characters, an optional suggested next step of
+                <li>for a draft about someone already in your contacts: a summary of at most 2,000 characters, an optional suggested next step of
                   at most 160 characters, a code saying whether the summary came from the message body or only the subject, a code saying whether
                   the draft was produced deterministically or with AI, and review state;</li>
+                <li>The drafted summary records what the exchange was about — the topics, any advice or offer, the
+                  commitments and dates either side named, the agreed next step and anything left unresolved —
+                  in Funnl's own words, written from the messages it read. Funnl instructs the AI to use only
+                  what those messages say, and checks the draft automatically for things it can check, but an
+                  AI can still get a detail wrong: the summary is a draft, you can edit every word of it before
+                  anything is saved, and nothing is added to your network until you accept it;</li>
                 <li>for a suggested new contact: the proposed email address and the proposed name — each length-limited, and the name stored with
                   a code recording where it came from — <code>provider_metadata</code> for the display name your mail provider shows, or
                   <code>explicit_signature</code> when the name came from an explicit signature in the person's own message — and a
