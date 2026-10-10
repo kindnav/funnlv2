@@ -239,7 +239,7 @@ test('no column can hold raw content: no body/snippet/html/mime/attachment/heade
   assert.ok(!/delta_link\s+text/.test(SQL), 'delta link only as ciphertext')
   assert.ok(/delta_link_ciphertext\s+text/.test(SQL) && /delta_link_nonce\s+text/.test(SQL) && /delta_key_version\s+smallint/.test(SQL))
 })
-test('draft_summary <= 200 chars, draft_follow_up <= 160, retained_subject <= 160, all control-free; no URL in plain-text fields', () => {
+test('draft_summary <= 200 chars at THIS migration (2,000 since 20261010180000), draft_follow_up <= 160, retained_subject <= 160, all control-free; no URL in plain-text fields', () => {
   for (const t of ['interaction_candidates', 'new_contact_candidates']) {
     const src = t === 'new_contact_candidates' ? tableDdl(t) : SQL
     assert.ok(/char_length\(draft_summary\) BETWEEN 1 AND 200\s+AND draft_summary !~ '\[\[:cntrl:\]\]' AND draft_summary !~\* '\(https\?:\|www\\\.\)'/.test(src), `${t} summary`)

@@ -269,6 +269,12 @@ test('the write RPCs enforce exactly the applied column bounds', () => {
   const w = read('supabase/migrations/20261006000000_outlook_content_note_and_new_contact_write.sql')
   assert.ok(w.includes("char_length(v_notes) > 200"), 'the note ceiling is enforced')
   assert.ok(w.includes("char_length(v_sum) > 200"), 'the summary ceiling is enforced')
+  // CURRENT NUMBERS. Those files are historical; 20261010180000 widens the generated-note
+  // ceiling to 2,000 in the column CHECKs and in both producer RPCs, and leaves the
+  // follow-up, subject, control-character and URL rules exactly as asserted above.
+  const fwd = read('supabase/migrations/20261010180000_detailed_ai_interaction_notes.sql')
+  assert.ok(fwd.includes('char_length(v_notes) > 2000') && fwd.includes('char_length(v_sum) > 2000'))
+  assert.ok(fwd.includes("v_notes ~ '[[:cntrl:]]'") && fwd.includes('char_length(v_follow) > 160'))
   assert.ok(w.includes("char_length(v_follow) > 160"), 'the follow-up ceiling is enforced')
   assert.ok(w.includes("char_length(v_subj) > 160"), 'the subject ceiling is enforced')
 })

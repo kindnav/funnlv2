@@ -120,7 +120,7 @@ test('no sampling parameter is sent - Sonnet 5 rejects non-default values', () =
   }
   // The contract that actually delivers consistency is still in place.
   assert.strictEqual(body.model, 'claude-sonnet-5')
-  assert.strictEqual(body.max_tokens, 1024)
+  assert.strictEqual(body.max_tokens, 2048)
   assert.deepStrictEqual(body.thinking, { type: 'disabled' })
   assert.strictEqual(body.output_config.format.type, 'json_schema')
   assert.strictEqual(body.system, SYSTEM_CONTRACT)
@@ -184,7 +184,7 @@ test('the rest of the request contract is unchanged by the thinking addition', (
     ['max_tokens', 'messages', 'model', 'output_config', 'system', 'thinking'],
     'exactly the expected top-level keys')
   assert.strictEqual(body.model, 'claude-sonnet-5')
-  assert.strictEqual(body.max_tokens, 1024)
+  assert.strictEqual(body.max_tokens, 2048)
   assert.strictEqual(body.max_tokens, DRAFT_MAX_TOKENS)
   assert.strictEqual(body.system, SYSTEM_CONTRACT)
   assert.strictEqual(body.messages.length, 1)
@@ -527,8 +527,13 @@ test('length bounds are enforced in CODE because the schema cannot express them'
 })
 
 test('the code bounds match the applied CHECK constraints exactly', () => {
+  // The APPLIED 20260921 migration bounded the generated summary at 200; 20261010180000
+  // widens it to 2,000 for detailed notes, and the contract mirrors the current number.
   assert.ok(MIGRATION.includes('char_length(draft_summary) BETWEEN 1 AND 200'))
-  assert.strictEqual(BOUNDS.summary, 200)
+  assert.strictEqual(BOUNDS.summary, 2000)
+  const FORWARD = readFileSync(new URL('../supabase/migrations/20261010180000_detailed_ai_interaction_notes.sql', import.meta.url), 'utf8')
+  assert.ok(FORWARD.includes('char_length(draft_summary) BETWEEN 1 AND 2000'), 'and the widened CHECK carries the same number')
+  assert.ok(FORWARD.includes('char_length(v_notes) > 2000') && FORWARD.includes('char_length(v_sum) > 2000'), 'as do both producer RPCs')
   assert.ok(MIGRATION.includes('char_length(draft_follow_up) BETWEEN 1 AND 160'))
   assert.strictEqual(BOUNDS.followUp, 160)
   assert.ok(MIGRATION.includes('char_length(proposed_name) BETWEEN 1 AND 120'))

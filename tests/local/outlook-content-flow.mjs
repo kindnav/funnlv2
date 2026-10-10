@@ -227,6 +227,25 @@ const BODIES = {
 const ENVELOPES = Object.fromEntries(
   [KNOWN_IN, KNOWN_OUT, NEW_IN, NEW_OUT].map((m) => [m.id, m]))
 
+// THE DETAILED NOTES the fixture model returns. One prose paragraph each, no line breaks and
+// no URL (the generated-note rules), carrying the topics, the advice, the offer, the named
+// dates, the next steps and the open question of each exchange - 2026-10-10's workstream.
+// Both are over 200 characters, so neither could have been stored before 20261010180000.
+const KNOWN_CONTACT_NOTE = 'She put your name forward for the spring insight week and wants '
+  + 'a short call on Tuesday morning about the credit desk. She said the team values '
+  + 'candidates who can talk through a trade idea end to end rather than recite products, '
+  + 'and advised reading the desk commentary before the call. She offered to introduce you '
+  + 'to a second-year analyst on the same desk afterwards. You agreed to send your '
+  + 'availability for the insight week and to prepare two questions about credit. Left open: '
+  + 'whether the call is with her or with the desk head.'
+const NEW_CONTACT_NOTE = 'She put your application in front of the analyst programme lead '
+  + 'and asked for an updated CV by Friday, plus your track preference. She explained the '
+  + 'summer cohort screens on a competency call before any technical stage, and advised '
+  + 'preparing examples of working to a deadline. She offered to flag the application '
+  + 'internally once the CV arrives, and mentioned the markets track suits the modelling '
+  + 'work you described better than coverage. Left open: whether the insight week can run in '
+  + 'parallel with the summer application.'
+
 const okRes = (body) => ({ status: 200, headers: { get: () => null }, json: async () => body })
 const finalPage = (folder, items) => ({
   value: items,
@@ -302,8 +321,10 @@ function provider (counts, opts = {}) {
           name: 'Priya Nair',
           name_evidence: 'explicit_signature',
           name_confidence: 'high',
-          summary: 'She put your application in front of the analyst programme lead '
-            + 'and asked for an updated CV by Friday, plus your track preference.',
+          // DETAILED, and deliberately far past the old 200-character ceiling: this is the
+          // shape the workstream exists to produce, and the harness checks it survives the
+          // validator, the producer RPC, the column CHECK and acceptance byte for byte.
+          summary: NEW_CONTACT_NOTE,
           summary_evidence: 'explicit_body',
           follow_up: 'Send the updated CV and confirm the markets track.',
           interaction_date: '2026-09-22',
@@ -311,8 +332,7 @@ function provider (counts, opts = {}) {
       }
       return modelResponse(opts.knownPayload ?? {
         result: 'interaction_draft',
-        summary: 'She put your name forward for the spring insight week and wants a '
-          + 'short call on Tuesday morning about the credit desk.',
+        summary: KNOWN_CONTACT_NOTE,
         summary_evidence: 'explicit_body',
         follow_up: 'Send your insight-week availability and prepare credit questions.',
         interaction_date: '2026-09-21',
@@ -625,6 +645,17 @@ async function main () {
     // It is a summary of the BODY, not of the subject line.
     assert.ok(/insight week/i.test(note), note)
     assert.ok(/credit/i.test(note), note)
+    // DETAILED, AND STORED WHOLE. The producer RPC and the column CHECK accept the model's
+    // full note; nothing trims it on the way in. Under the old 200-character ceiling this
+    // same note was refused outright (`invalid_notes`), which is why the ceiling moved.
+    assert.strictEqual(note, KNOWN_CONTACT_NOTE, 'the stored draft must be the model note, byte for byte')
+    assert.ok(note.length > 200, `a detailed note is the point: ${note.length} characters`)
+    const CTRL = new RegExp('[' + String.fromCharCode(0) + '-' + String.fromCharCode(31) + ']')
+    assert.ok(note.length <= 2000 && !CTRL.test(note), 'and it obeys the generated-note rules')
+    // The substance is there: advice, an offer, an agreed next step, an open question.
+    for (const fact of [/values candidates/i, /offered to introduce/i, /agreed to send/i, /Left open/i]) {
+      assert.ok(fact.test(note), `${fact} must survive into the stored draft`)
+    }
     assert.ok(!/Following up after the info session/.test(note),
       'the subject must not be passed off as a summary')
     assert.ok(note.length > 60, `a real sentence, not a label: ${note}`)
@@ -644,6 +675,8 @@ async function main () {
     // And the interaction travels WITH it.
     assert.ok(/analyst programme/i.test(p.draft_summary), p.draft_summary)
     assert.ok(/CV/.test(p.draft_summary))
+    assert.strictEqual(p.draft_summary, NEW_CONTACT_NOTE, 'the proposal carries the model note, byte for byte')
+    assert.ok(p.draft_summary.length > 200, `${p.draft_summary.length} characters`)
     assert.strictEqual(p.draft_follow_up, 'Send the updated CV and confirm the markets track.')
     assert.strictEqual(p.proposed_interaction_date, '2026-09-22')
     assert.strictEqual(p.proposed_type, 'Email')

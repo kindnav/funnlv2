@@ -41,7 +41,13 @@ export const ANTHROPIC_VERSION = '2023-06-01'   // current version per the API r
 // Quality-sensitive, user-visible extraction: a wrong company or role is immediately
 // obvious to the person reviewing the draft. Single constant, easy to change.
 export const DRAFT_MODEL = 'claude-sonnet-5'
-export const DRAFT_MAX_TOKENS = 1024
+// The whole allowance is visible output (thinking is disabled below), and the note is now
+// the substantial part of it: a 2,000-character summary is roughly 500 tokens, plus the
+// next step, the name triple, the evidence enums and the JSON envelope. 1,024 left no
+// headroom once the note could be detailed - a response that runs out mid-JSON is refused
+// as `model_truncated` rather than stored half-written, which is correct but useless, so
+// the budget is sized for the longest note the bound allows.
+export const DRAFT_MAX_TOKENS = 2048
 // NO SAMPLING PARAMETERS. Claude Sonnet 5 returns a 400 on every request that sends a
 // non-default `temperature`, `top_p` or `top_k` - and that holds even with thinking
 // disabled - so none is sent. Consistency does not come from a sampling knob anyway:
@@ -177,6 +183,7 @@ export const DRAFT_FAILURE_CODES = Object.freeze([
   'malformed_response',       // a 200 whose body could not be used
   'unparseable_json',         // text blocks that were not JSON
   'empty_provider_response',  // a 200 with no text block at all
+  'model_truncated',          // a 200 that stopped on max_tokens with unusable JSON
   // the call was never made, or not completed, for a local reason
   'request_too_large',        // the serialized request exceeded its ceiling
   'budget_exhausted',         // no room for a first attempt
@@ -206,20 +213,56 @@ export const DRAFT_MAX_RETRIES = 2
 /**
  * Hard ceiling on the provider's RESPONSE, enforced against the streamed bytes.
  *
- * A draft is a few hundred characters of JSON; DRAFT_MAX_TOKENS caps the generation
- * at 1024 tokens. 256 KiB is therefore an enormous allowance and anything past it is
- * not a draft - it is a misrouted or hostile response, and buffering it whole is how
- * a bounded call becomes an unbounded one.
+ * A draft is at most ~15,700 characters of JSON even when a provider escapes every
+ * character of the longest permitted fields (see MAX_RESPONSE_CHARS), and DRAFT_MAX_TOKENS
+ * caps the generation at 2048 tokens. 256 KiB is therefore still an enormous allowance and
+ * anything past it is not a draft - it is a misrouted or hostile response, and buffering
+ * it whole is how a bounded call becomes an unbounded one. This is the STREAMED read bound;
+ * MAX_RESPONSE_CHARS is the parser's.
  */
 export const MAX_DRAFT_RESPONSE_BYTES = 256 * 1024
-export const MAX_REQUEST_CHARS = 20_000         // whole serialized body ceiling
+// WHOLE SERIALIZED BODY CEILING.
+//
+// MEASURED, not guessed. The body is the bounded exchange plus FIXED overhead: the system
+// contract, the JSON schema and the envelope. The detail instruction and the longer summary
+// descriptions (2026-10-10) added about 1,800 characters of that fixed overhead, and at the
+// sanitizer's worst case - six inbound messages, MAX_EPISODE_CHARS of text and a 600-character
+// signature each - the new-contact body serializes to 20,853 characters. Under the old 20,000
+// ceiling that exchange would have been refused `request_too_large` and drafted nothing, so
+// the ceiling moves with the overhead that caused it.
+//
+// MOVED AGAIN for the same reason. The four accuracy rules added after the first real model
+// samples (an event is not a meeting; keep quantities, conditions and timing; keep caution
+// attached to its subject; a routine acknowledgement stays short) are another ~1,900
+// characters of FIXED overhead, which took the worst case to 22,772 and left only 1,228
+// characters of margin. 26,000 restores about 3,200. tests/outlook-content-corrections.test.js
+// re-measures the worst case AND requires >= 2,000 free, so a future prompt or schema edit that
+// eats the margin fails there rather than refusing a real exchange in production - which is
+// exactly how this increase was found.
+//
+// NOTE WHAT DID NOT CHANGE: the amount of USER CONTENT sent. That is bounded independently by
+// MAX_TEXT_CHARS, MAX_EPISODE_CHARS and MAX_EPISODE_MESSAGES in the sanitizer, none of which
+// this touches.
+export const MAX_REQUEST_CHARS = 26_000
+
+// THE RESPONSE's own ceiling is MAX_RESPONSE_CHARS, declared with the field bounds it is
+// derived from, below.
 
 // Field bounds — these MIRROR the applied CHECK constraints in 20260921000000 exactly.
 // Structured outputs does NOT enforce `maxLength`/`minLength` (unsupported keywords in
 // the supported JSON Schema subset), so these MUST be enforced here in code. That is
 // the single most important reason this validator exists at all.
 export const BOUNDS = Object.freeze({
-  summary: 200,          // ncc_summary_bounds / interaction_candidates_draft_summary_bounds
+  // THE GENERATED NOTE. 200 characters could hold a label for an exchange ("She replied
+  // about the insight week") but not its substance, so a user who wanted to remember what
+  // was actually said had to retype it - the opposite of the product's purpose. 2,000
+  // characters hold the topics, the advice, the offers, the commitments, the named dates,
+  // the next steps and the open questions of a bounded six-message exchange, and sit well
+  // inside the 10,000 the REVIEWER may write (20261010120000), so every generated draft
+  // fits the editor and the acceptance path. Mirrors the widened
+  // ncc_summary_bounds / interaction_candidates_draft_summary_bounds / ..._notes_len
+  // (20261010180000). The model is told to use only what the exchange supports.
+  summary: 2000,
   followUp: 160,         // ncc_follow_up_bounds / ..._draft_follow_up_bounds
   name: 120,             // ncc_name_bounds
   company: 120,          // ncc_company_bounds
@@ -229,6 +272,28 @@ export const BOUNDS = Object.freeze({
   tag: 40,
   maxTags: 5,
 })
+
+// THE RESPONSE's own ceiling, deliberately separate from the request's: widening the request
+// (above) must not silently widen what is accepted back.
+//
+// IT COUNTS SERIALIZED CHARACTERS, SO IT IS SIZED FOR JSON ESCAPING. The first version of this
+// constant was 8,000 - reasoned from the DECODED field bounds (a 2,000-character summary, a
+// 160-character next step, a 120-character name: under 2,600 characters) and then applied to
+// the serialized text. A provider that emits fully-escaped JSON writes every non-ASCII
+// character as a six-character \uXXXX sequence, so a valid 2,000-character note in Japanese
+// serializes to 12,127 characters and was refused `malformed_response` - a correct note
+// discarded by a bound that measured the wrong thing. The ceiling is therefore DERIVED from the
+// same field bounds times the worst-case escape expansion, which is why it cannot drift away
+// from them again.
+//
+// The DECODED limits are untouched: checkText still measures the parsed string, so a note is
+// still 2,000 characters of actual text however the provider chose to encode it. The streamed
+// read stays bounded by MAX_DRAFT_RESPONSE_BYTES, far below this.
+const JSON_ESCAPE_WORST_CASE_PER_CHAR = 6        // one character as \uXXXX
+const RESPONSE_ENVELOPE_ALLOWANCE = 2_000        // keys, enums, braces, provider whitespace
+export const MAX_RESPONSE_CHARS =
+  (BOUNDS.summary + BOUNDS.followUp + BOUNDS.name) * JSON_ESCAPE_WORST_CASE_PER_CHAR
+  + RESPONSE_ENVELOPE_ALLOWANCE
 
 // Evidence / confidence enums — exactly the applied CHECK constraint values.
 export const NAME_EVIDENCE = Object.freeze(['provider_metadata', 'explicit_signature', 'explicit_body'])
@@ -280,6 +345,48 @@ export const SYSTEM_CONTRACT = [
   '6. Do not quote the email. Summaries must be your own neutral paraphrase.',
   '7. Every proposal is a DRAFT a human will review, edit and approve. Nothing you return',
   '   is saved automatically.',
+  '',
+  'WHAT THE SUMMARY MUST RECORD. The person reading it is remembering this conversation',
+  'months later, so write the substance of the exchange, not a label for it. Where the',
+  'messages state them, include: what was discussed and why it mattered; concrete advice',
+  'given; offers made, and by whom; commitments either side made; named dates, deadlines',
+  'and events; agreed next steps; and questions left unresolved. Name the people,',
+  'companies, roles, teams and programmes that the messages name.',
+  '',
+  'RECORD IT AS IT HAPPENED. Detail is only worth having if it is faithful. Each of these four',
+  'mistakes reads as a perfectly reasonable sentence, which is exactly why a reviewer is',
+  'unlikely to catch it. Avoiding them matters more than writing more.',
+  'a. AN EVENT IS NOT A MEETING. When someone writes after a panel, info session, careers',
+  '   fair, talk or conference, do not say the two people met, spoke, were introduced or',
+  '   connected there unless a message says they did. Writing after an event, or attending the',
+  '   same event, is not meeting. Say what the messages support: that they got in touch',
+  '   following it. Where a message does state a meeting, a call or a coffee chat, record it',
+  '   plainly as that.',
+  'b. KEEP QUANTITIES, CONDITIONS AND TIMING AS STATED. Numbers, durations, counts,',
+  '   thresholds, deadlines and the conditions attached to them carry the usefulness of the',
+  '   note - being ready to defend a piece of work for twenty minutes is not the same as being',
+  '   ready to discuss it. Do not round them, generalize them, merge them or drop them, and do',
+  '   not turn something offered on a condition into something offered outright.',
+  'c. KEEP CAUTION ATTACHED TO WHAT IT WAS ABOUT. When someone is uncertain, hesitant or',
+  '   cautious, record the specific thing it applies to - one unresolved question, one',
+  '   requirement, one date, one eligibility rule. Never widen it into a judgement about a',
+  '   whole programme, firm, team, desk or plan, and never turn "I need to check whether X',
+  '   is allowed" into advice against X. An unresolved question is open, not discouraging.',
+  'd. A ROUTINE ACKNOWLEDGEMENT STAYS SHORT. A thank-you, a confirmation or a brief "keep me',
+  '   posted" is one plain sentence. Do not add narrative framing about the relationship, the',
+  '   exchange or its significance, do not restate one fact in different words, and do not',
+  '   describe the conversation instead of recording what it said.',
+  '',
+  `LENGTH FOLLOWS THE EXCHANGE. Up to ${BOUNDS.summary} characters are available. Use what the`,
+  'exchange supports and no more: a two-line thank-you is one sentence; an exchange covering',
+  'several topics needs several. Never pad, never repeat yourself, never add generic',
+  'networking advice, and never state a detail the messages do not. A short accurate note is',
+  'always better than a long one carrying anything invented - rule 2 and rule 3 govern every',
+  'sentence of it, and an unsupported detail is the one failure a reviewer cannot correct',
+  'because they cannot tell it from a supported one.',
+  '',
+  'FORM. One paragraph of plain prose. No line breaks, no bullet characters, no headings and',
+  'no quoting - the reviewer adds structure when they edit it.',
   '',
   'Return "ignore" when the exchange carries no networking value (pure logistics, an',
   'automated notification, an empty pleasantry). Return "defer" when you cannot tell, when',
@@ -338,7 +445,7 @@ export function interactionDraftSchema(allowedDates) {
     required: ['result', 'summary', 'summary_evidence', 'follow_up', 'interaction_date'],
     properties: {
       result: { type: 'string', enum: ['interaction_draft', 'ignore', 'defer'] },
-      summary: nullableString(`Neutral paraphrase of what this exchange was about. At most ${BOUNDS.summary} characters. No URLs. Null unless result is interaction_draft.`),
+      summary: nullableString(`Detailed neutral note of what this exchange was about: the topics discussed, concrete advice, offers, commitments, named dates, agreed next steps and unresolved questions - only where the messages state them. One paragraph, no line breaks, no quoting. At most ${BOUNDS.summary} characters; write only as much as the exchange supports. Null unless result is interaction_draft.`),
       summary_evidence: nullableEnum(SUMMARY_EVIDENCE, 'explicit_body when the summary comes from the message text; subject_only when only the subject supported it.'),
       follow_up: nullableString(`A concrete next step the user could take, at most ${BOUNDS.followUp} characters, only if the text states one. Otherwise null.`),
       interaction_date: nullableEnum(allowedDates, 'The date of the exchange. Must be one of the supplied values.'),
@@ -383,7 +490,7 @@ export function newContactSchema(allowedDates) {
       name: nullableString(`Explicitly stated name. At most ${BOUNDS.name} characters. No URLs. Null if not stated.`),
       name_evidence: nullableEnum(NAME_EVIDENCE, 'Where the name was stated. Required exactly when name is non-null.'),
       name_confidence: nullableEnum(CONFIDENCE, 'Required exactly when name is non-null.'),
-      summary: nullableString(`Neutral paraphrase of the exchange. At most ${BOUNDS.summary} characters. No URLs.`),
+      summary: nullableString(`Detailed neutral note of the exchange: the topics discussed, concrete advice, offers, commitments, named dates, agreed next steps and unresolved questions - only where the messages state them. One paragraph, no line breaks, no quoting. At most ${BOUNDS.summary} characters; write only as much as the exchange supports.`),
       summary_evidence: nullableEnum(SUMMARY_EVIDENCE),
       follow_up: nullableString(`A concrete next step, at most ${BOUNDS.followUp} characters, only if stated. Otherwise null.`),
       interaction_date: nullableEnum(allowedDates),
@@ -694,9 +801,16 @@ export function parseDraftPayload(json) {
   }
   if (texts.length === 0) return { ok: false, code: 'empty_provider_response' }
   const joined = texts.join('').trim()
-  if (joined.length === 0 || joined.length > MAX_REQUEST_CHARS) return { ok: false, code: 'malformed_response' }
+  if (joined.length === 0 || joined.length > MAX_RESPONSE_CHARS) return { ok: false, code: 'malformed_response' }
   let parsed
-  try { parsed = JSON.parse(joined) } catch { return { ok: false, code: 'unparseable_json' } }
+  try { parsed = JSON.parse(joined) } catch {
+    // THE OUTPUT BUDGET, NAMED. Unparseable JSON that stopped on `max_tokens` is a
+    // response cut off mid-write, not a malformed one: the fix is the budget, not the
+    // schema, and an operator reading `unparseable_json` for a run of long exchanges
+    // would have no way to tell. Either way nothing is stored - a partial note is never
+    // a draft - and the caller's deferral is unchanged.
+    return { ok: false, code: json.stop_reason === 'max_tokens' ? 'model_truncated' : 'unparseable_json' }
+  }
   return { ok: true, parsed, stopReason: typeof json.stop_reason === 'string' ? json.stop_reason : null }
 }
 

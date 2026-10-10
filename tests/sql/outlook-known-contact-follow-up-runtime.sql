@@ -250,9 +250,9 @@ BEGIN
   res := public.upsert_outlook_interaction_candidate(conn, run, cid, repeat('7', 64), repeat('8', 64), 1::smallint, 'Email', DATE '2026-10-01', NULL,
     'A note.', NULL, NULL, 'guessed');
   ASSERT res->>'result' = 'invalid_extraction_status', 'bad extraction status: ' || res::text;
-  -- an over-long note is still refused as before
+  -- an over-long note is still refused as before (bound 2,000 since 20261010180000)
   res := public.upsert_outlook_interaction_candidate(conn, run, cid, repeat('7', 64), repeat('8', 64), 1::smallint, 'Email', DATE '2026-10-01', NULL,
-    repeat('y', 201), NULL, NULL, NULL);
+    repeat('y', 2001), NULL, NULL, NULL);
   ASSERT res->>'result' = 'invalid_notes', 'over-long note: ' || res::text;
   ASSERT (SELECT count(*) FROM public.interaction_candidates WHERE user_id = u) = before, 'a refused write stores nothing';
 END $$;

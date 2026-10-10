@@ -1234,8 +1234,12 @@ test('A REQUEST THAT CANNOT BE BUILT is its own code, not a privacy refusal', ()
     assert.strictEqual(threw, message, label + ' -> ' + threw)
   }
 
-  // 2. THE WORST CASE THE SANITIZER PERMITS NOW FITS, on both paths. If either schema
-  //    grows back toward the ceiling this fails, which is the point.
+  // 2. THE WORST CASE THE SANITIZER PERMITS STILL FITS, on both paths, and the MARGIN is
+  //    asserted too. The detail instruction and the longer summary descriptions
+  //    (20261010180000's companion change) added ~1,800 characters of FIXED overhead and
+  //    pushed the worst case to 20,853, over the old 20,000 ceiling - this test is what
+  //    caught it. The ceiling moved to 24,000; if a future prompt or schema edit eats the
+  //    remaining margin, this fails here rather than refusing a real exchange in production.
   const NL = String.fromCharCode(10)
   const SIGFILL = 'Ventures Partners LLP, Level 12, Harbour Exchange, London. '
   const per = Math.floor(MAX_EPISODE_CHARS / MAX_EPISODE_MESSAGES)
@@ -1263,6 +1267,9 @@ test('A REQUEST THAT CANNOT BE BUILT is its own code, not a privacy refusal', ()
     const size = JSON.stringify(built).length
     assert.ok(size <= MAX_REQUEST_CHARS,
       mode + ' serializes to ' + size + ', over the ' + MAX_REQUEST_CHARS + ' ceiling')
+    assert.ok(MAX_REQUEST_CHARS - size >= 2000,
+      mode + ' leaves only ' + (MAX_REQUEST_CHARS - size) + ' characters of margin: raise the'
+      + ' ceiling with the overhead, or shorten the prompt')
   }
 
   // 3. AND IF IT IS EVER REACHED, the code is its own and it is terminal: no write, no

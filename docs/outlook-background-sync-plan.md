@@ -227,13 +227,22 @@ it in Funnl; `wake_age_seconds` and the SQL above record the latency.
 
 ## 7. Next workstreams, with completion criteria (not in this slice)
 
-**A. Detailed conversation notes.** *Status 2026-10-10: NOT done.* What shipped separately is the
-**user-written** reviewed note: both editors, client validation and both acceptance RPCs accept up
-to 10,000 characters with paragraphs, line breaks and tabs, saved exactly into `interactions.notes`.
-The **AI-generated draft** that seeds the editor is still bounded at 200 characters
-(`interaction_candidates.proposed_notes`, `new_contact_candidates.draft_summary`, the draft
-contract) and still summarizes rather than records facts; nothing about the editor change
-completes this item. Done when the drafted note states the concrete facts
+**A. Detailed conversation notes.** *Status 2026-10-10: IN PROGRESS, prepared and unapplied.*
+Two separate things, and only one of them has shipped:
+
+- **The user-written reviewed note — DEPLOYED** (`20261010120000`): both editors, client
+  validation and both acceptance RPCs accept up to 10,000 characters with paragraphs, line
+  breaks and tabs, saved exactly into `interactions.notes`.
+- **The AI-generated draft — PREPARED, NOT APPLIED.** `docs/outlook-detailed-ai-notes.md` and
+  migration `20261010180000` raise the generated-note ceiling from 200 to 2,000 characters
+  across the prompt, schema, output budget, validator, three column CHECKs and both producer
+  RPCs, and instruct the model to record the topics, advice, offers, commitments, named dates,
+  next steps and open questions the messages state. Every note tested is a FIXTURE: the
+  evidence is that a detailed note survives the whole path intact, not that the model writes a
+  good one. Nothing is applied, deployed or published; the policy wording and the ordered
+  rollout await owner approval.
+
+This item is done when the drafted note states the concrete facts
 of the exchange — who offered what, dates and places named, commitments made, the next
 step — each traceable to the message text (evidence codes extended to name what each fact
 rests on), with the reviewer able to see and edit the whole of it on the card and in the

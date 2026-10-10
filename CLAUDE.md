@@ -92,7 +92,9 @@ docs/
   pilot-feedback-guide.md  5-minute observation checklist, non-leading questions, post-session questions, severity system (P0–P3), feature request frequency rule
   outlook-background-sync-plan.md  Background-sync slice: latency target, fixture vs live evidence, activation plan (section 6) with the one-value consent cutover, next workstreams
   outlook-background-activation-packet.md  Owner packet: exact background-disclosure wording for approval + ordered activation with a gate per step, rollback, milestone, subsequent workstreams
+  outlook-detailed-ai-notes.md  Detailed AI notes workstream: what the generated note must record, why 2,000 characters, the end-to-end changes, fixture-versus-model-quality evidence, prepared policy wording, ordered rollout (migration BEFORE worker deploy) and rollback
 scripts/
+  outlook-note-quality-check.mjs  Owner-run BEFORE the detailed-notes rollout: this head's real builder/prompt/parser/validator over four invented exchanges, ONE real model request each (no retries), hidden key prompt, bounded read; prints each note beside its source with coverage/attribution/length/repetition/unsupported-wording checks. `--dry-run` builds everything offline with no key and no network.
   outlook-worker-flag.ps1    Owner-run: OUTLOOK_IMPORT_WORKER_ENABLED status / enable / disable on Production via npx.cmd, each verified against the JSON secret inventory (UNVERIFIED/UNKNOWN never read as absent; names only, never values or digests); used only inside authorized windows. Offline behaviour test: tests/local/outlook-worker-flag-helper.test.ps1 (synthetic CLI, no credentials). Vault secrets go through the dashboard form - no credential-handling script exists.
 supabase/
   templates/
@@ -1344,9 +1346,15 @@ Owner packet: `docs/outlook-background-activation-packet.md`.
 up to 10,000 characters with paragraphs, line breaks and tabs, in both suggestion editors (8-row
 resizable textarea, character counter, over-limit message, no silent truncation), saved exactly into
 `interactions.notes` by both acceptance RPCs (PR #80). The AI-GENERATED draft that seeds those editors
-is still a 200-character summary (`interaction_candidates.proposed_notes`, `new_contact_candidates
-.draft_summary`, the draft contract) - detailed, grounded AI notes that preserve conversation context
-and reduce manual entry are the NEXT product workstream and are NOT delivered by the editor change.
+is still a 200-character summary IN PRODUCTION (`interaction_candidates.proposed_notes`,
+`new_contact_candidates.draft_summary`, the draft contract). The workstream that changes this is
+PREPARED AND UNAPPLIED: `docs/outlook-detailed-ai-notes.md` + migration `20261010180000` raise the
+generated note to 2,000 characters across the prompt, schema, output budget, validator, three
+column CHECKs and both producer RPCs, with the request ceiling raised 20,000 -> 24,000 for the
+larger fixed prompt overhead and a separate, tighter 8,000-character response bound. All of its
+evidence is fixture-based: a detailed note is shown to survive the whole path intact, NOT to be
+written well - that needs live exchanges after rollout. Policy wording (the published "at most 200
+characters" sentence) is drafted for owner approval, not published.
 
 **How it works:**
 - `outlook-notifications` Edge Function (`verify_jwt=false`): Microsoft Graph's validation handshake
