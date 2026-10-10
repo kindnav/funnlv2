@@ -463,6 +463,9 @@ test('applied migrations are unmodified; the only addition is the forward scope 
     // the status RPC and the INACTIVE pg_cron tick. DROP/CREATE of the reservation again.
     '20261009000000_outlook_change_notifications.sql',
     '20261010050349_recover_rejected_outlook_delta_cursors.sql',
+    // Thorough user-written notes: both acceptance RPCs re-issued with the reviewed-note bound
+    // at 10,000 characters (multiline), bodies otherwise identical; no column widened.
+    '20261010120000_long_reviewed_interaction_notes.sql',
   ]
   assert.deepStrictEqual(files.slice(-UNAPPLIED.length), UNAPPLIED,
     'the unapplied forward migrations must be the newest, in this order')

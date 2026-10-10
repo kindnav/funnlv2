@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import PendingUpdateNotice from './PendingUpdateNotice'
+import NoteCounter from './NoteCounter'
 import { supabase } from '../lib/supabase'
 import { getAvatarColor, getInitials } from '../lib/avatarUtils'
 import { track } from '../lib/analytics'
@@ -247,9 +248,11 @@ export default function NewContactSuggestionCard ({ candidate, onResolved, onBus
                        disabled={busy} className={FIELD} />
               </label>
               <label className={`${LABEL} sm:col-span-2`}>Note
+                {/* No maxLength: an over-long paste is kept, shown as over, refused on save. */}
                 <textarea value={state.interactionNotes} onChange={set('interactionNotes')}
-                          disabled={busy} rows={3} maxLength={NCC_BOUNDS.notes}
-                          className={`${FIELD} resize-none`} />
+                          disabled={busy} rows={8} aria-describedby={`ncc-note-counter-${candidate.id}`}
+                          className={`${FIELD} leading-relaxed resize-y min-h-[120px]`} />
+                <span id={`ncc-note-counter-${candidate.id}`}><NoteCounter length={(state.interactionNotes || '').length} max={NCC_BOUNDS.notes} /></span>
               </label>
               <label className={LABEL}>Follow up on
                 <input type="date" value={state.followUpDate} onChange={set('followUpDate')}

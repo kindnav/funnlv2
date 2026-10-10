@@ -15,6 +15,7 @@ import { dismissConfirmFocusTarget } from '../lib/dismissConfirmFocus'
 import InteractionSourceBadge from '../components/InteractionSourceBadge'
 import NewContactSuggestionCard from '../components/NewContactSuggestionCard'
 import PendingUpdateNotice from '../components/PendingUpdateNotice'
+import NoteCounter from '../components/NoteCounter'
 import { NCC_SELECT } from '../lib/newContactReview'
 import {
   fetchPendingSignature, diffPendingSignature, mergeQueueRows, cardKey, nextSignatureCheckpoint, busyExcept,
@@ -173,7 +174,7 @@ function CandidateCard({ candidate, onResolved, onBusyChange, pendingUpdate = nu
             </div>
           )}
           {!editing && notes && (
-            <p className="mt-2 text-[12px] text-muted leading-relaxed line-clamp-2">{notes}</p>
+            <p className="mt-2 text-[12px] text-muted leading-relaxed whitespace-pre-wrap break-words line-clamp-6">{notes}</p>
           )}
           {/* The suggested next step and the provenance, shown the way the new-person card
               shows them. Both come from the same draft as the note; neither is editable here,
@@ -206,8 +207,12 @@ function CandidateCard({ candidate, onResolved, onBusyChange, pendingUpdate = nu
                        className="mt-1 w-full bg-input border border-line-2 rounded-lg px-2 py-[7px] text-[13px] text-hi" />
               </label>
               <label className="text-[11px] text-muted">Note
-                <textarea value={notes} onChange={(e) => setNotes(e.target.value)} disabled={busy} rows={2} maxLength={REVIEW_NOTES_MAX}
-                          className="mt-1 w-full bg-input border border-line-2 rounded-lg px-2 py-[7px] text-[13px] text-hi resize-none" />
+                {/* No maxLength: a pasted note that runs past the limit is kept as typed, shown as
+                    over by the counter, and refused on accept - never cut silently. */}
+                <textarea value={notes} onChange={(e) => setNotes(e.target.value)} disabled={busy} rows={8}
+                          aria-describedby={`note-counter-${candidate.id}`}
+                          className="mt-1 w-full bg-input border border-line-2 rounded-lg px-2 py-[7px] text-[13px] text-hi leading-relaxed resize-y min-h-[120px]" />
+                <span id={`note-counter-${candidate.id}`}><NoteCounter length={notes.length} max={REVIEW_NOTES_MAX} /></span>
               </label>
               {/* The next step is saved as part of the interaction note when kept; clearing it
                   drops it. The follow-up date is optional and is the reviewer's choice. */}

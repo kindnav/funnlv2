@@ -14,7 +14,10 @@ export const REVIEW_PAGE_SIZE = 20
 // input, the candidate row, and the created interaction all agree. Compared with
 // String.length (UTF-16 code units) on the client, which is always >= the DB's
 // char_length (code points) — so the client never lets through a value the DB rejects.
-export const REVIEW_NOTES_MAX = 200
+// The REVIEWED note - what the user writes or edits before accepting. 10,000 characters,
+// multiline, saved straight into interactions.notes (text). Distinct from the 200-character
+// provider draft (interaction_candidates.proposed_notes), which only seeds the editor.
+export const REVIEW_NOTES_MAX = 10000
 // The suggested next step a reviewer keeps, edits or removes before accepting. Matches
 // interaction_candidates_draft_follow_up_bounds (char_length <= 160) and the accept RPC's
 // own check, so the input, the draft column and the saved note agree.
@@ -74,7 +77,7 @@ const ACCEPT_RESULTS = {
   expired:                        { message: 'This suggestion has expired.',                     tone: 'info',    removeFromQueue: true },
   invalid_type:                   { message: 'Pick a valid interaction type.',                   tone: 'error',   removeFromQueue: false },
   invalid_date:                   { message: 'Pick a valid date.',                               tone: 'error',   removeFromQueue: false },
-  invalid_notes:                  { message: 'Note is too long (200 characters max).',           tone: 'error',   removeFromQueue: false },
+  invalid_notes:                  { message: 'Note is too long (10,000 characters max).',        tone: 'error',   removeFromQueue: false },
   invalid_follow_up:              { message: 'Next step is too long (160 characters max).',      tone: 'error',   removeFromQueue: false },
   invalid_follow_up_date:         { message: 'Pick a valid follow-up date, or leave it blank.',  tone: 'error',   removeFromQueue: false },
   conflict:                       { message: 'That changed while you were reviewing. Try again.', tone: 'error',   removeFromQueue: false },

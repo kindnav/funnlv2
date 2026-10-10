@@ -31,7 +31,7 @@ import { spawn, execFileSync, spawnSync } from 'node:child_process'
 import { createServer as createHttp } from 'node:http'
 import { createServer as createHttps } from 'node:https'
 import { readFileSync, existsSync, mkdirSync, rmSync, readdirSync } from 'node:fs'
-import { createHmac, randomBytes } from 'node:crypto'
+import { createHmac, randomBytes, createHash } from 'node:crypto'
 import { join, extname } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { tmpdir } from 'node:os'
@@ -346,6 +346,12 @@ class Page {
       await this.send('Input.dispatchKeyEvent', { type: 'keyUp', text: ch })
     }
     await sleep(100)
+  }
+  /** A block of text inserted at the caret (or over the selection) the way a paste lands:
+   *  one input event, newlines and tabs intact. Used for long multiline notes. */
+  async insertText (text) {
+    await this.send('Input.insertText', { text })
+    await sleep(150)
   }
   /** A real Backspace keystroke, `n` times. */
   async backspace (n = 1) {
@@ -1635,6 +1641,98 @@ VALUES ('${PILOT_USER}', 'outlook', 'pending', ${hex('e', fpLast)}, ${hex('f', f
     one(`SELECT count(*) FROM public.interactions i JOIN public.contacts c ON c.id = i.contact_id
       WHERE i.user_id='${PILOT_USER}' AND (c.name IN ('Arrival One', 'Arrival Three', 'Arrival Five') OR c.name LIKE 'Bulk %');`) === '0')
   // Leave no row behind.
+  psql(`DELETE FROM public.outlook_candidate_refs WHERE user_id = '${PILOT_USER}';
+        DELETE FROM public.interaction_candidates WHERE user_id = '${PILOT_USER}';
+        DELETE FROM public.new_contact_candidates WHERE user_id = '${PILOT_USER}';`, { tuplesOnly: false })
+
+  // ══ 11. THOROUGH user-written notes: long, multiline, through both editors, while the queue refreshes ═══
+  // The reviewed note is the user's record of the conversation. It may run to 10,000 characters
+  // with paragraphs, line breaks and tabs; it survives a background arrival mid-edit and
+  // "Done editing"; acceptance saves exactly the typed text (checked by digest against the
+  // database); an over-long paste is kept, flagged by the counter and REFUSED on accept - never
+  // cut; the AI draft that seeded the editor stays 200 characters and is a separate workstream.
+  console.log('\n11. thorough user-written notes: long multiline text through both editors, exact on acceptance')
+  const NL = String.fromCharCode(10), TAB = String.fromCharCode(9)
+  const paragraph = 'We talked through the summer analyst process and what the desk actually values in a first-year. '.repeat(12)
+  const LONG_NOTE = paragraph + NL + NL + 'Next steps:' + NL + TAB + '- send the CV by Friday' + NL + TAB + '- confirm the markets track with her' + NL + NL + paragraph + 'End of note.'
+  const md5 = (t) => createHash('md5').update(t, 'utf8').digest('hex')
+  psql(`DELETE FROM public.outlook_candidate_refs WHERE user_id = '${PILOT_USER}';
+        DELETE FROM public.interaction_candidates WHERE user_id = '${PILOT_USER}';
+        DELETE FROM public.new_contact_candidates WHERE user_id = '${PILOT_USER}';`, { tuplesOnly: false })
+  seedInteraction('Long Note Contact', 'longnote@bank.test', 'c', 'current_date', 'Short AI draft.', 'Step kept.')
+  seedProposal('Long Person', 'longperson@fund.test', 'c', 'current_date')
+  const longId = one(`SELECT ic.id FROM public.interaction_candidates ic JOIN public.contacts c ON c.id = ic.contact_id
+    WHERE ic.user_id='${PILOT_USER}' AND c.name='Long Note Contact';`)
+  const LONG = cardSel(longId)
+  await page.goto(`${ORIGIN}/suggestions`)
+  await page.waitFor('document.body.innerText.includes("Long Note Contact")', 20000, 'the long-note card')
+  await sleep(1200)
+
+  // 11a. existing-contact card: a long multiline note, an arrival mid-edit, Done editing, Accept.
+  await page.click('Edit details', { byText: true, within: LONG })
+  await page.waitFor(`!!document.querySelector(${JSON.stringify(LONG + ' textarea')})`, 8000, 'the note field')
+  const taMeta = await page.eval(`const t=document.querySelector(${JSON.stringify(LONG + ' textarea')}); const cs=getComputedStyle(t); return { rows: t.rows, resize: cs.resize, maxLength: t.maxLength, counter: (document.querySelector(${JSON.stringify(LONG + ' [data-testid="note-counter"]')})||{}).innerText }`)
+  check('11a: the editor is a larger, vertically resizable textarea with no silent maxLength', taMeta.rows >= 6 && taMeta.resize === 'vertical' && (taMeta.maxLength === -1 || taMeta.maxLength >= 10000), JSON.stringify(taMeta))
+  check('11a: a character counter states the count against the 10,000 limit', /\d[\d,]* \/ 10,000 characters/.test(taMeta.counter || ''), JSON.stringify(taMeta.counter))
+  await page.eval(`const el=document.querySelector(${JSON.stringify(LONG + ' textarea')}); el.focus(); el.select(); return true`)
+  await page.insertText(LONG_NOTE)
+  const typedL = await page.eval(`const t=document.querySelector(${JSON.stringify(LONG + ' textarea')}); return { len: t.value.length, same: t.value === ${JSON.stringify(LONG_NOTE)}, counter: document.querySelector(${JSON.stringify(LONG + ' [data-testid="note-counter"]')}).innerText }`)
+  check('11a: the long multiline note (paragraphs, tabs) is in the field exactly', typedL.same === true && typedL.len === LONG_NOTE.length, JSON.stringify({ len: typedL.len }))
+  check('11a: the counter follows it', typedL.counter.startsWith(LONG_NOTE.length.toLocaleString('en-US') + ' / 10,000'), typedL.counter)
+  seedInteraction('Arrival Long', 'arrivallong@bank.test', 'd', "current_date - 1", 'Arrived mid-edit.', null)
+  await pokePoll()
+  let arrivedL = true
+  try { await page.waitFor('document.body.innerText.includes("Arrival Long")', 15000, 'the arrival during the long edit') } catch { arrivedL = false }
+  const afterArrival = await page.eval(`const t=document.querySelector(${JSON.stringify(LONG + ' textarea')}); return t ? t.value === ${JSON.stringify(LONG_NOTE)} : null`)
+  check('11a: the arrival landed and the long note survived it untouched', arrivedL && afterArrival === true, JSON.stringify({ arrivedL, afterArrival }))
+  await page.click('Done editing', { byText: true, within: LONG })
+  await sleep(600)
+  const collapsedL = await page.eval(`const c=document.querySelector(${JSON.stringify(LONG)}); return { shown: !!c && c.innerText.includes('End of note.') === false ? c.innerText.includes('Next steps:') : true, preWrap: !!c && [...c.querySelectorAll('p')].some((p) => getComputedStyle(p).whiteSpace.startsWith('pre')) }`)
+  check('11a: after Done editing the card shows the typed note with its line structure preserved', collapsedL.shown === true && collapsedL.preWrap === true, JSON.stringify(collapsedL))
+  await page.click('Accept', { byText: true, within: LONG })
+  await sleep(1500)
+  const savedDigest = one(`SELECT md5(i.notes) FROM public.interactions i JOIN public.contacts c ON c.id = i.contact_id WHERE i.user_id='${PILOT_USER}' AND c.name='Long Note Contact';`)
+  const savedLen = one(`SELECT char_length(i.notes) FROM public.interactions i JOIN public.contacts c ON c.id = i.contact_id WHERE i.user_id='${PILOT_USER}' AND c.name='Long Note Contact';`)
+  const expectedA = LONG_NOTE + NL + NL + 'Next step: Step kept.'
+  check('11a: acceptance saved EXACTLY the typed note plus the kept next step (digest and length match; nothing truncated)', savedDigest === md5(expectedA) && Number(savedLen) === expectedA.length, JSON.stringify({ savedLen, expected: expectedA.length }))
+
+  // 11b. new-contact card: an over-long paste is kept, flagged and refusedL without a write; then a long note saves exactly.
+  const longPersonId = one(`SELECT id FROM public.new_contact_candidates WHERE user_id='${PILOT_USER}' AND proposed_name='Long Person';`)
+  const LPERSON = cardSel(longPersonId)
+  await page.eval(`const el=document.querySelector(${JSON.stringify(LPERSON + ' textarea')}); el.focus(); el.select(); return true`)
+  await page.insertText('x'.repeat(10001))
+  const overL = await page.eval(`const t=document.querySelector(${JSON.stringify(LPERSON + ' textarea')}); const c=document.querySelector(${JSON.stringify(LPERSON + ' [data-testid="note-counter"]')}); return { len: t.value.length, overL: c.getAttribute('data-over'), text: c.innerText }`)
+  check('11b: an over-long paste is kept in full (not cut) and the counter says it is over the limit', overL.len === 10001 && overL.overL === 'true' && /Over the 10,000-character limit by 1/.test(overL.text), JSON.stringify(overL))
+  const contactsBefore = one(`SELECT count(*) FROM public.contacts WHERE user_id='${PILOT_USER}' AND name='Long Person';`)
+  await page.click('Save contact & interaction', { byText: true, within: LPERSON })
+  await sleep(1200)
+  const refusedL = await page.eval(`const c=document.querySelector(${JSON.stringify(LPERSON)}); const a=c && c.querySelector('[role="alert"]'); return { alert: a ? a.innerText : null, still: !!c }`)
+  check('11b: saving is refused with the limit message and the card stays', refusedL.still === true && /too long/i.test(refusedL.alert || ''), JSON.stringify(refusedL))
+  check('11b: the refusal wrote nothing', one(`SELECT count(*) FROM public.contacts WHERE user_id='${PILOT_USER}' AND name='Long Person';`) === contactsBefore && contactsBefore === '0')
+  await page.eval(`const el=document.querySelector(${JSON.stringify(LPERSON + ' textarea')}); el.focus(); el.select(); return true`)
+  const LONG_NOTE_B = 'Met at the growth-fund breakfast.' + NL + NL + TAB + '- she offered to review the application' + NL + TAB + '- summer slot funding still open' + NL + NL + paragraph
+  await page.insertText(LONG_NOTE_B)
+  // a refresh of this proposal's own row while it is being edited is HELD, not forced in
+  psql(`UPDATE public.new_contact_candidates SET draft_summary = 'A newer AI draft arrived.', updated_at = now() WHERE id = '${longPersonId}';`, { tuplesOnly: false })
+  await pokePoll(); await sleep(2500)
+  const heldB = await page.eval(`const t=document.querySelector(${JSON.stringify(LPERSON + ' textarea')}); return { same: t.value === ${JSON.stringify(LONG_NOTE_B)}, forced: document.body.innerText.includes('A newer AI draft arrived.') }`)
+  check('11b: a refreshed draft mid-edit does not displace the long note', heldB.same === true && heldB.forced === false, JSON.stringify(heldB))
+  await page.click('Save contact & interaction', { byText: true, within: LPERSON })
+  await sleep(1500)
+  const digestB = one(`SELECT md5(i.notes) FROM public.interactions i JOIN public.contacts c ON c.id = i.contact_id WHERE c.user_id='${PILOT_USER}' AND c.name='Long Person';`)
+  // The new-contact client trims leading/trailing whitespace from every field before sending (it
+  // always has); interior line breaks and tabs are untouched. The fixture ends in a space, so the
+  // saved text is the typed text trimmed at its edges - compared here by digest, nothing truncated.
+  check('11b: acceptance saved EXACTLY the typed multiline note for the new contact (edge whitespace trimmed, interior structure intact)',
+    digestB === md5(LONG_NOTE_B.trim()) && Number(one(`SELECT char_length(i.notes) FROM public.interactions i JOIN public.contacts c ON c.id = i.contact_id WHERE c.user_id='${PILOT_USER}' AND c.name='Long Person';`)) === LONG_NOTE_B.trim().length,
+    JSON.stringify({ digestB, expected: md5(LONG_NOTE_B.trim()) }))
+
+  // 11c. the saved note is displayed in full, with its structure, on the contact page
+  const longContactId = one(`SELECT id FROM public.contacts WHERE user_id='${PILOT_USER}' AND name='Long Note Contact';`)
+  await page.goto(`${ORIGIN}/contacts/${longContactId}`)
+  await page.waitFor('document.body.innerText.includes("End of note.")', 20000, 'the saved note on the contact page')
+  const shownFull = await page.eval(`const ps=[...document.querySelectorAll('p')].filter((p) => p.innerText.includes('End of note.')); return { count: ps.length, preWrap: ps.some((p) => getComputedStyle(p).whiteSpace.startsWith('pre')), hasSteps: ps.some((p) => p.innerText.includes('Next steps:') && p.innerText.includes('Next step: Step kept.')) }`)
+  check('11c: the contact page shows the whole note, line structure and next step intact', shownFull.count >= 1 && shownFull.preWrap === true && shownFull.hasSteps === true, JSON.stringify(shownFull))
   psql(`DELETE FROM public.outlook_candidate_refs WHERE user_id = '${PILOT_USER}';
         DELETE FROM public.interaction_candidates WHERE user_id = '${PILOT_USER}';
         DELETE FROM public.new_contact_candidates WHERE user_id = '${PILOT_USER}';`, { tuplesOnly: false })

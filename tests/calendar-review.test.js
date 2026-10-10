@@ -21,10 +21,10 @@ test('ingestion flag: only exact "true" enables', () => {
     assert.strictEqual(calendarIngestionEnabled(v), false, `${JSON.stringify(v)} must be disabled`)
   }
 })
-test('six interaction types + bounded page size + notes cap matches schema (200)', () => {
+test('six interaction types + bounded page size + reviewed-note cap (10,000, saved into interactions.notes)', () => {
   assert.deepStrictEqual(INTERACTION_TYPES, ['Coffee chat', 'Email', 'Event', 'Call', 'Message', 'Other'])
   assert.ok(REVIEW_PAGE_SIZE > 0 && REVIEW_PAGE_SIZE <= 50)
-  assert.strictEqual(REVIEW_NOTES_MAX, 200)   // must equal interaction_candidates_notes_len bound
+  assert.strictEqual(REVIEW_NOTES_MAX, 10000)   // the REVIEWED note; the 200-char draft column is separate
 })
 test('CANDIDATE_SELECT never selects provider/sensitive fields', () => {
   for (const bad of ['source_fingerprint', 'user_id', 'interaction_id', 'google_', 'event_id', 'connection_id']) {
@@ -42,8 +42,10 @@ test('valid overrides pass; invalid rejected with controlled codes', () => {
   assert.strictEqual(validateOverrides({ type: 'Bad' }).code, 'invalid_type')
   assert.strictEqual(validateOverrides({ date: '2026-8-1' }).code, 'invalid_date')
   assert.strictEqual(validateOverrides({ date: 'nope' }).code, 'invalid_date')
-  assert.deepStrictEqual(validateOverrides({ notes: 'x'.repeat(200) }), { ok: true })   // 200 ok
-  assert.strictEqual(validateOverrides({ notes: 'x'.repeat(201) }).code, 'invalid_notes') // 201 too long
+  assert.deepStrictEqual(validateOverrides({ notes: 'x'.repeat(10000) }), { ok: true })   // 10,000 ok
+  assert.strictEqual(validateOverrides({ notes: 'x'.repeat(10001) }).code, 'invalid_notes') // 10,001 too long
+  const NL = String.fromCharCode(10), TAB = String.fromCharCode(9)
+  assert.deepStrictEqual(validateOverrides({ notes: 'Para one.' + NL + NL + TAB + '- a list item' + NL + 'Para two.' }), { ok: true }, 'paragraphs, tabs and line breaks are a note')
   assert.deepStrictEqual(validateOverrides({ notes: null }), { ok: true })
 })
 

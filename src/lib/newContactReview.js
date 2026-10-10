@@ -50,10 +50,10 @@ export const NCC_BOUNDS = Object.freeze({
   howMet: 120,
   linkedin: 255,
   relationshipNote: 500,
-  // The INTERACTION note, which is `interaction_candidates.proposed_notes`-shaped and
-  // therefore 200, not 500. A reviewer who pastes a long note gets told so here
-  // rather than after a round trip.
-  notes: 200,
+  // The INTERACTION note the reviewer writes: 10,000 characters, multiline, saved straight
+  // into interactions.notes (text). The 200-character provider draft only seeds it. A
+  // reviewer who pastes past the limit is told so here rather than after a round trip.
+  notes: 10000,
   tags: 20,
   tag: 60,
 })
@@ -66,6 +66,14 @@ export const NCC_BOUNDS = Object.freeze({
 // byte-level scan of this file is part of the test suite.
 const CONTROL_RE = new RegExp(
   '[' + String.fromCharCode(0) + '-' + String.fromCharCode(31)
+       + String.fromCharCode(127) + ']')
+// The NOTE may carry tabs (9), line feeds (10) and carriage returns (13): paragraphs and
+// lists are the point of a thorough note. Every other control character is still refused.
+// Built from char codes for the same reason as CONTROL_RE.
+const NOTE_CONTROL_RE = new RegExp(
+  '[' + String.fromCharCode(0) + '-' + String.fromCharCode(8)
+       + String.fromCharCode(11) + String.fromCharCode(12)
+       + String.fromCharCode(14) + '-' + String.fromCharCode(31)
        + String.fromCharCode(127) + ']')
 const LINKEDIN_RE = /^https:\/\/(www\.)?linkedin\.com\/in\/[A-Za-z0-9_%.-]+\/?$/
 
@@ -132,7 +140,7 @@ export function validateProposal (o = {}) {
       return { ok: false, code: 'invalid_date' }
     }
     const notes = blankToNull(o.interactionNotes)
-    if (notes !== null && (notes.length > NCC_BOUNDS.notes || CONTROL_RE.test(notes))) {
+    if (notes !== null && (notes.length > NCC_BOUNDS.notes || NOTE_CONTROL_RE.test(notes))) {
       return { ok: false, code: 'invalid_notes' }
     }
     const follow = blankToNull(o.followUpDate)
@@ -198,7 +206,7 @@ const ACCEPT_OUTCOMES = Object.freeze({
   invalid_relationship_note: { removeFromQueue: false, message: 'That note is too long (up to 500 characters).' },
   invalid_type: { removeFromQueue: false, message: 'Choose an interaction type from the list.' },
   invalid_date: { removeFromQueue: false, message: 'Enter a valid interaction date.' },
-  invalid_notes: { removeFromQueue: false, message: 'That note is too long (up to 200 characters).' },
+  invalid_notes: { removeFromQueue: false, message: 'That note is too long (up to 10,000 characters) or contains an unsupported character.' },
   invalid_follow_up_date: { removeFromQueue: false, message: 'Enter a valid follow-up date, or leave it blank.' },
   invalid_email: { removeFromQueue: true, message: 'This suggestion is missing an email address.' },
 })

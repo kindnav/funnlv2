@@ -218,7 +218,7 @@ supabase/
 | `user_id` | uuid | FK → auth.users, default auth.uid() |
 | `type` | text | One of: Coffee chat, Email, Event, Call, Message, Other |
 | `interaction_date` | date NOT NULL | |
-| `notes` | text | Freeform — the heart of the app |
+| `notes` | text | Freeform — the heart of the app. A reviewed Outlook/Calendar suggestion note may be up to 10,000 characters with paragraphs, line breaks and tabs (both acceptance RPCs since migration `20261010120000`); the 200-character provider draft only seeds the editor. |
 | `follow_up_date` | date | Optional — drives dashboard and sidebar badge |
 | `outreach_status` | text | Optional — one of: awaiting_response \| responded \| meeting_booked \| no_response \| declined. Named CHECK constraint `interactions_outreach_status_check`. Migration applied to production 2026-07-24. |
 | `follow_up_completed_at` | timestamptz | Nullable — set to current UTC timestamp when a follow-up is marked Done or completed via Log Result. Cleared to NULL on Undo or Snooze. Used by `/followups` to classify rows into the "Recently Completed" section (within 7 local calendar days). Migration applied to production 2026-07-29. |
