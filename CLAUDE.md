@@ -1342,19 +1342,50 @@ re-consented, subscription active, Vault names present; `OUTLOOK_IMPORT_WORKER_E
 due). Rollback: `cron.alter_job(1, active := false)` then `scripts/outlook-worker-flag.ps1 disable`.
 Owner packet: `docs/outlook-background-activation-packet.md`.
 
-**Notes - what is deployed versus what is not.** The USER-WRITTEN reviewed note is long and structured:
-up to 10,000 characters with paragraphs, line breaks and tabs, in both suggestion editors (8-row
-resizable textarea, character counter, over-limit message, no silent truncation), saved exactly into
-`interactions.notes` by both acceptance RPCs (PR #80). The AI-GENERATED draft that seeds those editors
-is still a 200-character summary IN PRODUCTION (`interaction_candidates.proposed_notes`,
-`new_contact_candidates.draft_summary`, the draft contract). The workstream that changes this is
-PREPARED AND UNAPPLIED: `docs/outlook-detailed-ai-notes.md` + migration `20261010180000` raise the
-generated note to 2,000 characters across the prompt, schema, output budget, validator, three
-column CHECKs and both producer RPCs, with the request ceiling raised 20,000 -> 24,000 for the
-larger fixed prompt overhead and a separate, tighter 8,000-character response bound. All of its
-evidence is fixture-based: a detailed note is shown to survive the whole path intact, NOT to be
-written well - that needs live exchanges after rollout. Policy wording (the published "at most 200
-characters" sentence) is drafted for owner approval, not published.
+**Notes - both halves are now LIVE.** The USER-WRITTEN reviewed note is long and structured: up to
+10,000 characters with paragraphs, line breaks and tabs, in both suggestion editors (8-row resizable
+textarea, character counter, over-limit message, no silent truncation), saved exactly into
+`interactions.notes` by both acceptance RPCs (PR #80, migration `20261010120000`).
+
+The AI-GENERATED draft that seeds those editors is now a **2,000-character detailed note** (PR #82,
+merged `ff461a0` pinned to reviewed head `baf26db`; migration `20261010180000` applied 2026-10-10;
+`outlook-import-worker` **v51** deployed from merged main, 29-file import closure byte-identical).
+It changed together across the prompt, both schemas, the output budget (`DRAFT_MAX_TOKENS` 2048),
+the validator (`BOUNDS.summary` 2000), three column CHECKs and both producer RPCs. The acceptance
+RPCs were NOT touched - they already allowed 10,000, so every generated draft fits the editor.
+Request ceiling moved 20,000 -> 24,000 -> **26,000** for fixed prompt overhead only (the mailbox
+content sent is unchanged); the response ceiling is **derived**, `(summary+followUp+name)*6 + 2000`
+= 15,680, after a real bug where a valid 2,000-character Japanese note serialized to 12,127
+characters and was refused.
+
+**The prompt carries four accuracy rules** in a `RECORD IT AS IT HAPPENED` section, written from real
+model samples: (a) an event is not a meeting; (b) keep quantities, conditions and timing as stated;
+(c) keep caution attached to what it was about; (d) a routine acknowledgement stays short. (a) and (c)
+answer faults actually observed; (b) and (d) are preventive. **There is deliberately NO
+semantic-validation framework** - a checker cannot tell "they met at the info session" from "she
+wrote after the info session" without the source mail. A test control FAILS if a future change adds
+a validation code or checker claiming to verify meaning. The helper also passes `displayName` exactly
+as `outlookContentPass.js` does (`known ? null : party.displayName`).
+
+**Evidence, stated precisely.** Two owner-run real-model checks over FOUR SYNTHETIC exchanges
+(`scripts/outlook-note-quality-check.mjs`). Run 1: useful detailed notes, one unsupported meeting
+claim, one broadened caution, one accurate short note. Run 2 (after the four rules, reviewed and
+passed): meeting error absent, broadened caution absent, quantities and conditions preserved, short
+exchange stayed short. **This is not evidence of accuracy on all mail** - the exchanges were written
+to be clean. The outstanding product check is reading NATURALLY GENERATED PILOT notes against their
+source exchanges for detail, attribution and unsupported claims.
+
+**Policy.** `/privacy` publishes the 2,000-character limit plus a paragraph saying what the draft
+records, that an AI can still get a detail wrong, and that the summary is an editable draft saved
+only on acceptance ("Last updated: October 10, 2026", PR #83). The **just-in-time notice and the
+derived consent version are unchanged** (`ol-disc-6d1ddd67f51d5b3bfd8d3801c50271a7`) - no re-consent.
+What reaches Anthropic from the mail did not change; only Funnl's own instructions got longer.
+
+**Rollback - one supported procedure.** Revert the prompt section and `BOUNDS.summary` in
+`outlookDraftContract.js` on `main`, then redeploy **only** `outlook-import-worker`. No migration
+runs and no stored note is touched. **Do not narrow the column bounds back to 200**: live notes
+longer than 200 would make that reverse migration fail or require destroying accepted user content.
+The wider bound is a ceiling and is permanently safe to leave in place.
 
 **How it works:**
 - `outlook-notifications` Edge Function (`verify_jwt=false`): Microsoft Graph's validation handshake
