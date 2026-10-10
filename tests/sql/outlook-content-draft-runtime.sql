@@ -672,7 +672,7 @@ BEGIN
   ASSERT v ->> 'result' = 'invalid_linkedin_url', 'bad linkedin accepted';
   v := public.accept_new_contact_candidate(r.nc_pend, 'Ada Example', p_interaction_type => 'Telegram');
   ASSERT v ->> 'result' = 'invalid_type', 'bad type accepted';
-  v := public.accept_new_contact_candidate(r.nc_pend, 'Ada Example', p_interaction_notes => repeat('n', 201));
+  v := public.accept_new_contact_candidate(r.nc_pend, 'Ada Example', p_interaction_notes => repeat('n', 10001));  -- reviewed-note bound is 10,000 since 20261010120000
   ASSERT v ->> 'result' = 'invalid_notes', 'long notes accepted';
   ASSERT (SELECT count(*) FROM public.contacts WHERE user_id = u1) = 1, 'validation wrote a contact';
 

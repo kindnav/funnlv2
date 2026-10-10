@@ -295,13 +295,18 @@ test('the INTERACTION is optional, and only checked when it is included', () => 
   }
 })
 
-test('the interaction note is bounded at 200, matching the interaction column', () => {
+test('the interaction note is bounded at 10,000 and may carry paragraphs, line breaks and tabs; other fields still refuse them', () => {
   const base = initialReviewState(ROW)
-  assert.strictEqual(NCC_BOUNDS.notes, 200)
-  assert.deepStrictEqual(validateProposal({ ...base, interactionNotes: 'x'.repeat(200) }), { ok: true })
-  assert.strictEqual(validateProposal({ ...base, interactionNotes: 'x'.repeat(201) }).code, 'invalid_notes')
-  assert.ok(MIGRATION.includes('char_length(v_notes) > 200'),
-    'and the server bounds it at the same number')
+  assert.strictEqual(NCC_BOUNDS.notes, 10000)
+  assert.deepStrictEqual(validateProposal({ ...base, interactionNotes: 'x'.repeat(10000) }), { ok: true })
+  assert.strictEqual(validateProposal({ ...base, interactionNotes: 'x'.repeat(10001) }).code, 'invalid_notes')
+  const NL = String.fromCharCode(10), TAB = String.fromCharCode(9), CR = String.fromCharCode(13), BEL = String.fromCharCode(7)
+  assert.deepStrictEqual(validateProposal({ ...base, interactionNotes: 'One.' + NL + NL + TAB + '- item' + CR + NL + 'Two.' }), { ok: true })
+  assert.strictEqual(validateProposal({ ...base, interactionNotes: 'bad' + BEL + 'char' }).code, 'invalid_notes', 'other control characters are still refused')
+  assert.strictEqual(validateProposal({ ...base, name: 'Two' + NL + 'Lines' }).code, 'invalid_name', 'the name still refuses a line break')
+  assert.strictEqual(validateProposal({ ...base, company: 'Acme' + TAB + 'Inc' }).code, 'invalid_company', 'company still refuses a tab')
+  const FORWARD = read('supabase/migrations/20261010120000_long_reviewed_interaction_notes.sql')
+  assert.ok(FORWARD.includes('char_length(v_notes) > 10000'), 'and the server bounds it at the same number')
 })
 
 test('a follow-up date is optional but must be a date when given', () => {

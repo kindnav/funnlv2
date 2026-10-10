@@ -63,12 +63,15 @@ test('accept: contact ownership re-checked (locked FOR KEY SHARE); never accepts
   // interaction insert uses the candidate's contact + v_uid, never a caller value
   assert.ok(/INSERT INTO public\.interactions \(contact_id, user_id, type, interaction_date, notes\)[\s\S]*?VALUES \(v_cand\.contact_id, v_uid,/.test(accept))
 })
-test('accept: only pending+active source creates an interaction; type/date/notes validated at schema bound (200)', () => {
+test('accept: only pending+active source creates an interaction; type/date/notes validated (200 at this migration; 10,000 since 20261010120000)', () => {
   assert.ok(/v_cand\.source_last_state <> 'active'[\s\S]*?'invalidated'/.test(accept))
   assert.ok(/v_type NOT IN \('Coffee chat', 'Email', 'Event', 'Call', 'Message', 'Other'\)[\s\S]*?'invalid_type'/.test(accept))
   assert.ok(/v_date IS NULL[\s\S]*?'invalid_date'/.test(accept))
-  assert.ok(/char_length\(v_notes\) > 200[\s\S]*?'invalid_notes'/.test(accept))
+  assert.ok(/char_length\(v_notes\) > 200[\s\S]*?'invalid_notes'/.test(accept), 'this historical migration bounded the note at 200')
   assert.ok(!/> 2000/.test(accept), 'stale 2000 bound must be gone')
+  // The CURRENT bound lives in the forward migration and is pinned by tests/long-notes-migration.test.js.
+  const forward = readFileSync(join(ROOT, 'supabase/migrations/20261010120000_long_reviewed_interaction_notes.sql'), 'utf8')
+  assert.ok(/char_length\(v_notes\) > 10000[\s\S]*?'invalid_notes'/.test(forward))
 })
 test('accept: concurrent-delete / lock-cycle mapped to controlled codes, never a raw SQL error', () => {
   // ownership lock + write are wrapped so FK/deadlock/serialization become result codes

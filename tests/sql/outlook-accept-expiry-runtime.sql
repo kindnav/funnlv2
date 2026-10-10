@@ -287,7 +287,7 @@ BEGIN
   ASSERT (public.accept_interaction_candidate(cand, 'Telepathy', current_date, NULL)
             ->> 'result') = 'invalid_type';
   ASSERT (public.accept_interaction_candidate(cand, 'Email', current_date,
-            repeat('x', 201)) ->> 'result') = 'invalid_notes';
+            repeat('x', 10001)) ->> 'result') = 'invalid_notes';   -- reviewed-note bound is 10,000 since 20261010120000
   ASSERT (SELECT count(*) FROM public.interactions WHERE user_id = u1) = 0,
     'a validation refusal must write nothing';
   ASSERT (SELECT status FROM public.interaction_candidates WHERE id = cand) = 'pending';
