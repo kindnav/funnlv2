@@ -253,6 +253,8 @@ supabase/
 - `supabase/migrations/20260713185900_harden_handle_new_user.sql` — revokes EXECUTE on `public.handle_new_user()` from `PUBLIC`, `anon`, and `authenticated`. Applied to production 2026-07-13 via `supabase db push`. Post-migration verification: PUBLIC absent from explicit ACL; `anon` and `authenticated` effective execute = false; trigger `on_auth_user_created` still enabled; function owner, SECURITY DEFINER, and search_path unchanged. Requires a real signup/profile creation test to confirm trigger path is unaffected.
 - `supabase/migrations/20260721000000_add_outreach_status.sql` — adds nullable `outreach_status text` column to `public.interactions` with named CHECK constraint `interactions_outreach_status_check` (five allowed values). Applied to production 2026-07-24 via `supabase db push --linked`. Column verified: text, nullable YES, no default. Constraint verified: correct five-value check, NULL permitted. Existing 5 interaction rows unaffected (all `outreach_status = NULL`). RLS and all four ownership policies verified unchanged.
 - `supabase/migrations/20260729000000_add_followup_completion.sql` — adds nullable `follow_up_completed_at timestamptz`, `follow_up_previous_date date`, and `follow_up_completion_method text` columns to `public.interactions`, with named CHECK constraint `interactions_follow_up_completion_method_check` (allowed values: `mark_done`, `log_result`). Applied to production 2026-07-29. Powers the "Recently Completed" section, Undo, and completion-method tracking on `/followups`.
+- `supabase/migrations/20261010120000_long_reviewed_interaction_notes.sql` — **Applied to production 2026-10-10.** Re-issues `accept_interaction_candidate` and `accept_new_contact_candidate` with the REVIEWED note bound raised 200 → 10,000 characters (tab/LF/CR admitted in the note; every other control character and every other field unchanged); signatures and grants restated; no column widened. Merged as PR #80 (`87f5d7d2fe10a2ee8611e3dde030ec840d4c55a9`).
+- `supabase/migrations/20261010050349_recover_rejected_outlook_delta_cursors.sql` — **Applied to production 2026-10-10.** `reset_outlook_round` gains one marked block: reason `committed_delta_rejected` clears both committed delta cursors (explicit 410/400 token rejection only); ordinary resets retain them. Merged as PR #79 (`c750aa5`); worker v49 deployed.
 - `supabase/migrations/20261009000000_outlook_change_notifications.sql` — Outlook background sync: wake-up columns on `microsoft_connections`, `outlook_subscriptions` (RLS on, no user policy), `wake_cutoff_at`, the notification RPCs (single and batch), `record_outlook_subscription_state`, `get_my_outlook_sync_status()` (authenticated), the reservation treating a pending wake as due, the consume trigger, and pg_cron `outlook-worker-tick` created INACTIVE. **Applied to production 2026-10-09** (ledger: nothing pending) and catalog-verified: four worker RPCs one overload each, SECURITY DEFINER, service_role-only.
 - `supabase/migrations/20260727000000_add_pro_trials.sql` — creates `public.pro_trials` table with explicit REVOKE/GRANT hardening (no INSERT/UPDATE/DELETE for authenticated), updates `handle_new_user()` to also create a trial eligibility row on signup (auto-confirmed accounts start trial immediately; normal flow starts with NULL/NULL), adds `on_email_confirmed` DB trigger (`AFTER UPDATE OF email_confirmed_at ON auth.users`) that activates the trial on the NULL→non-NULL transition, and creates two RPCs: `start_my_pro_trial()` (SECURITY DEFINER, recovery mechanism only) and `get_my_pro_access_status()` (SECURITY INVOKER, server-authoritative entitlement using DB clock). All functions use `SET search_path = ''` with fully qualified object names. **NOT YET APPLIED to production** — branch `review/pro-trial-7-days`, Draft PR #23 pending. Do not apply without explicit approval.
 
@@ -1328,14 +1330,23 @@ and the user reviews before anything is saved. This slice makes the pipeline run
 makes its output discoverable. Full plan, latency target, measurement and next workstreams:
 `docs/outlook-background-sync-plan.md`. Disclosure wording for review: `docs/outlook-content-disclosure-draft.md` section F.
 
-**Rollout state (2026-10-09):** migration `20261009000000` APPLIED; `outlook-notifications` v1 and
-`outlook-import-worker` v40 DEPLOYED (verify_jwt=false, closures byte-identical to main); background
-disclosure wording PUBLISHED (notice version `ol-disc-6d1ddd67f51d5b3bfd8d3801c50271a7`, policy "Last updated" October 9, 2026);
-Vault secrets `outlook_worker_url` + `outlook_worker_secret` present (names verified); the three worker
-consent requirements AND the server `OUTLOOK_DISCLOSURE_VERSION` cut over to `ol-disc-6d1ddd67f51d5b3bfd8d3801c50271a7` on
-2026-10-09 (worker redeployed from merged main); the pilot connection still holds the content-release
-consent and must reconnect (step 6); worker flag absent; cron job inactive. Owner packet:
-`docs/outlook-background-activation-packet.md`.
+**Rollout state (2026-10-10): LIVE, unattended, single pilot account.** Migrations `20261009000000`,
+`20261010050349` and `20261010120000` APPLIED; `outlook-notifications` v1 and `outlook-import-worker` v49
+DEPLOYED (verify_jwt=false, closures byte-identical to main); background disclosure PUBLISHED (notice
+version `ol-disc-6d1ddd67f51d5b3bfd8d3801c50271a7`, policy "Last updated" October 9, 2026); server
+`OUTLOOK_DISCLOSURE_VERSION` and all three worker consent requirements at that version; pilot
+re-consented, subscription active, Vault names present; `OUTLOOK_IMPORT_WORKER_ENABLED` PRESENT and
+`outlook-worker-tick` ACTIVE since 2026-10-10 05:49Z (first tick: committed; later ticks none_due until
+due). Rollback: `cron.alter_job(1, active := false)` then `scripts/outlook-worker-flag.ps1 disable`.
+Owner packet: `docs/outlook-background-activation-packet.md`.
+
+**Notes - what is deployed versus what is not.** The USER-WRITTEN reviewed note is long and structured:
+up to 10,000 characters with paragraphs, line breaks and tabs, in both suggestion editors (8-row
+resizable textarea, character counter, over-limit message, no silent truncation), saved exactly into
+`interactions.notes` by both acceptance RPCs (PR #80). The AI-GENERATED draft that seeds those editors
+is still a 200-character summary (`interaction_candidates.proposed_notes`, `new_contact_candidates
+.draft_summary`, the draft contract) - detailed, grounded AI notes that preserve conversation context
+and reduce manual entry are the NEXT product workstream and are NOT delivered by the editor change.
 
 **How it works:**
 - `outlook-notifications` Edge Function (`verify_jwt=false`): Microsoft Graph's validation handshake
