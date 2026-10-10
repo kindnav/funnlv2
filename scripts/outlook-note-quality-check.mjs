@@ -30,7 +30,7 @@
 import {
   buildDraftRequest, buildDraftHeaders, assertRequestMinimization, parseDraftPayload,
   validateDraftResponse, ANTHROPIC_MESSAGES_URL, MAX_REQUEST_CHARS, BOUNDS, DRAFT_MODEL,
-  DRAFT_MAX_TOKENS,
+  DRAFT_MAX_TOKENS, DRAFT_TIMEOUT_MS,
 } from '../supabase/functions/shared/outlookDraftContract.js'
 import { readJsonBounded, MAX_PROVIDER_BODY_BYTES } from '../supabase/functions/shared/boundedJson.js'
 
@@ -256,7 +256,13 @@ async function readHiddenLine (prompt) {
 }
 
 // ── one exchange, one request ────────────────────────────────────────────────────────────────
-async function runOne (exchange, apiKey, { dryRun }) {
+export async function runOne (exchange, apiKey, { dryRun, fetchImpl, timeoutMs } = {}) {
+  // INJECTABLE ONLY FOR TESTS. A behavioural test has to drive this real request path -
+  // header builder, bounded read, parser, validator - without a provider call, and the
+  // deadline has to be provable in milliseconds rather than by waiting out 30 seconds.
+  // Both default to what a real run uses; the owner-facing run injects neither.
+  const doFetch = typeof fetchImpl === 'function' ? fetchImpl : fetch
+  const deadlineMs = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : DRAFT_TIMEOUT_MS
   const body = buildDraftRequest({
     mode: exchange.mode, displayName: exchange.displayName, subject: exchange.subject,
     messages: exchange.messages, allowedDates: exchange.allowedDates,
@@ -272,13 +278,44 @@ async function runOne (exchange, apiKey, { dryRun }) {
   if (dryRun) return { body, size, note: null, dry: true }
 
   // ONE request. No retry, no loop.
-  const res = await fetch(ANTHROPIC_MESSAGES_URL, {
-    method: 'POST', headers: buildDraftHeaders(apiKey), body: JSON.stringify(body), redirect: 'error',
-  })
-  const read = await readJsonBounded(res, MAX_PROVIDER_BODY_BYTES)
-  if (!read.ok) throw new Error(`bounded read failed: ${read.reason}`)
+  //
+  // ONE CONTROLLER FOR THE WHOLE EXCHANGE - headers AND body. The declared timeout used to
+  // reach no request at all: no signal was passed, so DRAFT_TIMEOUT_MS bounded nothing and a
+  // silent provider would have hung this run indefinitely. Passing it only to fetch would be
+  // half a fix, because fetch settles when the HEADERS arrive - a provider that answers
+  // promptly and then trickles the body forever would still pin the run. The controller
+  // therefore stays alive through readJsonBounded, which aborts the underlying stream, and is
+  // cleared in `finally` so a finished exchange leaves no pending timer behind.
+  const controller = new AbortController()
+  const timer = setTimeout(() => { try { controller.abort() } catch { /* already gone */ } }, deadlineMs)
+  let res, read
+  try {
+    res = await doFetch(ANTHROPIC_MESSAGES_URL, {
+      method: 'POST', headers: buildDraftHeaders(apiKey), body: JSON.stringify(body),
+      redirect: 'error', signal: controller.signal,
+    })
+    // STILL INSIDE THE DEADLINE, deliberately.
+    read = await readJsonBounded(res, MAX_PROVIDER_BODY_BYTES)
+  } catch (e) {
+    // This script's own words. The provider's message, the response body, the request content
+    // and the key never reach the output.
+    const timedOut = e && (e.name === 'AbortError' || e.name === 'TimeoutError')
+    throw new Error(timedOut
+      ? `no response within ${deadlineMs}ms`
+      : 'the request failed before a response arrived')
+  } finally {
+    clearTimeout(timer)
+  }
+  if (!read.ok) {
+    throw new Error(read.reason === 'response_body_timeout'
+      ? `the response body stalled past ${deadlineMs}ms`
+      : `bounded read failed: ${read.reason}`)
+  }
   if (res.status !== 200) throw new Error(`provider status ${res.status}`)
-  const parsed = parseDraftPayload(read.json)
+  // readJsonBounded returns { ok, value }. This read `read.json` - undefined on every reply -
+  // so the real parser refused every valid 200 as `malformed_response` and the check could
+  // never have produced a note to judge.
+  const parsed = parseDraftPayload(read.value)
   if (!parsed.ok) throw new Error(`parser refused the response: ${parsed.code}`)
   const checked = validateDraftResponse(parsed.parsed, { mode: exchange.mode, allowedDates: exchange.allowedDates })
   if (checked.ok !== true) throw new Error(`validator refused the draft: ${checked.code}`)
@@ -330,6 +367,35 @@ function report (exchange, result) {
     && rep.sentences.length === 0 && rep.phrases.length === 0
 }
 
+// ── the run: every exchange, and it STOPS at the first failure ───────────────────────────────
+// A transport, HTTP, read, parser or validator failure is a problem with the key, the contract
+// or the provider - not with one exchange. Three further requests cannot diagnose it, so the
+// run stops and says where. `reportFn` is injectable so a test can assert the stop without the
+// report's output; a mechanical check FINDING is not a failure and does not stop anything,
+// because the point of the run is to read all four notes.
+export async function runSuite (opts = {}) {
+  const { apiKey = '', dryRun = false, fetchImpl, timeoutMs } = opts
+  const exchanges = Array.isArray(opts.exchanges) ? opts.exchanges : EXCHANGES
+  const reportFn = typeof opts.reportFn === 'function' ? opts.reportFn : report
+  let clean = true
+  let completed = 0
+  for (const exchange of exchanges) {
+    let result
+    try {
+      result = await runOne(exchange, apiKey, { dryRun, fetchImpl, timeoutMs })
+    } catch (e) {
+      // The message is this script's own; provider bodies, request content and the key never
+      // reach it.
+      console.error(`\n${exchange.id}: FAILED - ${e.message}`)
+      console.error('STOPPED. No further requests were sent.')
+      return { clean: false, stoppedAt: exchange.id, completed }
+    }
+    completed++
+    if (!reportFn(exchange, result)) clean = false
+  }
+  return { clean, stoppedAt: null, completed }
+}
+
 async function main () {
   const dryRun = process.argv.includes('--dry-run')
   console.log(dryRun
@@ -340,26 +406,21 @@ async function main () {
     apiKey = (await readHiddenLine('Anthropic API key (not echoed): ')).trim()
     if (!apiKey) { console.error('no key entered; nothing was sent'); process.exit(2) }
   }
-  let clean = true
+  let outcome
   try {
-    for (const exchange of EXCHANGES) {
-      let result
-      try { result = await runOne(exchange, apiKey, { dryRun }) } catch (e) {
-        // The message is this script's own; provider bodies and the key never reach it.
-        console.error(`\n${exchange.id}: FAILED - ${e.message}`)
-        clean = false
-        continue
-      }
-      if (!report(exchange, result)) clean = false
-    }
+    outcome = await runSuite({ apiKey, dryRun })
   } finally {
     apiKey = ''
   }
   console.log(`\n${'─'.repeat(78)}`)
-  console.log(dryRun
-    ? 'Dry run complete: all four requests build, fit the ceiling and pass minimization.'
-    : `Mechanical checks ${clean ? 'raised nothing' : 'raised something above'}. The writing is YOUR judgement: read each note against its source messages before approving the rollout.`)
-  process.exit(clean ? 0 : 1)
+  if (outcome.stoppedAt) {
+    console.log(`Stopped at ${outcome.stoppedAt} after ${outcome.completed} of ${EXCHANGES.length} exchanges. Nothing further was sent; fix the cause and run again.`)
+  } else {
+    console.log(dryRun
+      ? 'Dry run complete: all four requests build, fit the ceiling and pass minimization.'
+      : `Mechanical checks ${outcome.clean ? 'raised nothing' : 'raised something above'}. The writing is YOUR judgement: read each note against its source messages before approving the rollout.`)
+  }
+  process.exit(outcome.clean ? 0 : 1)
 }
 
 // Importable for tests without running anything.

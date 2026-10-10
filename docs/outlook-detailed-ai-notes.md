@@ -146,6 +146,25 @@ own `buildDraftRequest`, checks the size against `MAX_REQUEST_CHARS`, runs the r
 bounded reader, and runs the real `parseDraftPayload` and `validateDraftResponse`. Then it
 prints the source messages, the generated note, and five mechanical checks.
 
+**The request path, after repair.** The first version of this helper could not have produced a
+note at all. Three faults, each now fixed and each covered by a behavioural test:
+
+* **The parser was handed the wrong field.** `readJsonBounded` returns `{ ok, value }`; the
+  helper read `read.json`, which is `undefined` on every reply, so the real parser refused every
+  valid HTTP 200 as `malformed_response`. The first exchange would have failed and no note would
+  ever have been printed.
+* **The declared deadline bounded nothing.** `DRAFT_TIMEOUT_MS` was imported and never applied:
+  no signal reached the request, so a silent provider would have hung the run indefinitely. One
+  `AbortController` now covers **the fetch and the complete body read** - passing it only to
+  fetch would be half a fix, because fetch settles when the headers arrive and a provider that
+  then trickles the body would still pin the run - and the timer is cleared in `finally`, so a
+  finished exchange leaves no pending abort behind.
+* **A failure moved on to the next request.** A transport, HTTP, read, parser or validator
+  failure is a problem with the key, the contract or the provider, not with one exchange; three
+  further requests cannot diagnose it. The run now **stops at the first failure** and says where.
+  A mechanical check *finding* is not a failure and stops nothing, because the point of the run
+  is to read all four notes.
+
 | Check | What it reports |
 |---|---|
 | coverage | Which facts stated in the exchange's own messages the note mentions, and which it dropped. Each fixture declares its facts, and a test asserts every declared fact really is stated in that exchange. |
@@ -162,8 +181,19 @@ misattribute or assert something the messages do not, revise the prompt in
 
 **What it never touches.** No mailbox, no pilot data, no database, no Supabase call, no file
 written. The key is typed at a hidden prompt, travels only in the real header builder, is never
-printed or logged, and is cleared when the run ends. `tests/outlook-note-quality-check.test.js`
-asserts those properties, and the dry run exercises the whole report path offline.
+printed or logged, and is cleared when the run ends. Failure output is this script's own wording:
+the provider's message, the response body and the request content never reach it.
+
+**How that is proven.** `tests/outlook-note-quality-check.test.js` (27 tests) does two different
+things. It scans the source for the safety properties - one request per exchange, no retry loop,
+the bounded read, redirects refused, the hidden key never logged - and it **drives the real
+request path offline with an injected fetch**: a valid 200 reaches parsing and validation in both
+`known_contact` and `new_contact` modes, through a streamed body and a whole one; headers that
+never arrive and a body that never arrives are both aborted at the deadline; a finished exchange
+leaves no pending abort; and a transport, HTTP, parser or validator failure each stop the run
+after exactly one request. Reverting the `read.value` fix fails six of them. The earlier suite
+scanned source and called pure functions only, which is precisely why a broken request path
+passed it - a source scan cannot tell whether the path *works*.
 
 ## 5. Disclosure — wording prepared, not published
 
