@@ -33,7 +33,7 @@
 import assert from 'node:assert'
 import { makeRoundStore } from './harness/outlookRoundStore.js'
 import { readFileSync, existsSync } from 'node:fs'
-import { pathToFileURL } from 'node:url'
+import { pathToFileURL, fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
@@ -107,7 +107,7 @@ const codeOnly = (src) => src.split(String.fromCharCode(10))
 // Bare and relative specifiers are rewritten to absolute URLs because a data: module
 // cannot resolve either. No file is written and nothing in src/ is touched.
 async function loadComponent (relPath) {
-  const abs = resolve(dirname(new URL(import.meta.url).pathname.slice(1)), '..', relPath)
+  const abs = resolve(dirname(fileURLToPath(import.meta.url)), '..', relPath)
   const out = await transformWithOxc(readFileSync(abs, 'utf8'), abs,
     { lang: 'jsx', jsx: { runtime: 'automatic' } })
   const code = out.code.replace(/(from\s*)"([^"]+)"/g, (m, kw, spec) => {

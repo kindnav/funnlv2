@@ -151,7 +151,7 @@ const DECRYPT = async (ct) => String(ct).replace(/^CT:/, '')
  * One connection, many invocations. The store and the call log persist across them, which
  * is the whole point: invocation N+1 must find what invocation N wrote.
  */
-function harness ({ now, advance, writeCostMs = 0 } = {}) {
+function harness ({ now, advance, writeCostMs = 0, cursorsFromStore = false } = {}) {
   const store = makeRoundStore()
   const calls = []
   let leaseLive = true
@@ -205,7 +205,10 @@ function harness ({ now, advance, writeCostMs = 0 } = {}) {
     requiredBackgroundConsent: CONSENTED,
     encryptCursor: ENCRYPT,
     decryptCursor: DECRYPT,
-    loadRunContext: context(),
+    loadRunContext: cursorsFromStore
+      ? async () => ({ ...await context()(), cursors: Object.fromEntries(GRAPH_FOLDERS.map((f) =>
+        [f, store.folders[f].delta_link_ciphertext ? String(store.folders[f].delta_link_ciphertext).replace(/^CT:/, '') : null])) })
+      : context(),
     requestEntryMs,
     deps: { fetchImpl, now },
   })
@@ -1657,6 +1660,106 @@ test('the migration says the accumulator is round-scoped and promises nothing mo
     || /no retention window is promised/.test(MIGRATION))
   assert.ok(/does NOT\s*\n?-- yet name this record/.test(MIGRATION)
     || /does NOT[\s\S]{0,80}name this record/.test(MIGRATION))
+})
+
+// Explicit provider rejections only: these are fixtures, not a claim that the pilot's
+// currently valid cursors have expired. Both folders form one atomic round.
+for (const [status, code] of [[410, 'resyncRequired'], [400, 'syncStateNotFound']]) {
+  test(`rejected committed cursor (${status}) restarts and replay refreshes one suggestion`, async () => {
+    const h = harness({ cursorsFromStore: true })
+    const mb = bigMailbox({ inboxPages: 1, sentPages: 1, inboundAt: 1, outboundAt: 1 })
+    const first = await h.invoke({ fetchImpl: mb.fetchImpl })
+    assert.equal(first.outcome, 'committed')
+    assert.equal(h.distinctWritten(), 1)
+    const rejected = async (url) => url.includes('$deltatoken=')
+      ? { status, headers: { get: () => 'https://untrusted.invalid/' }, json: async () => ({ error: { code } }) }
+      : mb.fetchImpl(url)
+    const restart = await h.invoke({ fetchImpl: rejected })
+    assert.equal(restart.outcome, 'restart_required')
+    assert.equal(restart.reason, 'committed_delta_rejected')
+    assert.equal(restart.roundReset, 'reset')
+    assert.equal(restart.cursorsAdvanced, 0)
+    assert.equal(h.writes().length, 1)
+    assert.ok(GRAPH_FOLDERS.every((f) => h.store.folders[f].delta_link_ciphertext === null))
+    assert.equal(h.releases().at(-1).args.p_run_complete, false)
+    assert.equal(h.releases().at(-1).args.p_retry_backoff_seconds, CONTINUE_BACKOFF_SECONDS)
+    const replay = await h.invoke({ fetchImpl: rejected })
+    assert.equal(replay.outcome, 'committed')
+    assert.equal(replay.cursorsAdvanced, 2)
+    assert.equal(h.distinctWritten(), 1)
+    assert.equal(h.results().refreshed, 1)
+    assert.ok(mb.served.every(({ url }) => url.startsWith(GRAPH_BASE)))
+  })
+}
+
+test('failed committed-cursor reset preserves tokens and writes nothing', async () => {
+  const h = harness({ cursorsFromStore: true })
+  for (const f of GRAPH_FOLDERS) {
+    h.store.folders[f].delta_link_ciphertext = `CT:${GRAPH_BASE}/me/mailFolders/${f}/messages/delta?$deltatoken=old`
+    h.store.folders[f].delta_link_nonce = 'N'
+  }
+  h.store.refuse('reset_outlook_round', 'stale_run')
+  const result = await h.invoke({ fetchImpl: async () => ({
+    status: 410, headers: { get: () => null }, json: async () => ({ error: { code: 'resyncRequired' } }),
+  }) })
+  assert.equal(result.outcome, 'incomplete')
+  assert.equal(result.reason, 'committed_delta_reset_failed')
+  assert.equal(result.roundReset, 'stale_run')
+  assert.equal(h.writes().length, 0)
+  assert.ok(GRAPH_FOLDERS.every((f) => h.store.folders[f].delta_link_ciphertext !== null))
+})
+
+test('ordinary provider failure never discards committed cursors', async () => {
+  const h = harness({ cursorsFromStore: true })
+  for (const f of GRAPH_FOLDERS) {
+    h.store.folders[f].delta_link_ciphertext = `CT:${GRAPH_BASE}/me/mailFolders/${f}/messages/delta?$deltatoken=old`
+    h.store.folders[f].delta_link_nonce = 'N'
+  }
+  await h.invoke({ fetchImpl: async () => ({
+    status: 500, headers: { get: () => null }, json: async () => ({ error: { code: 'InternalServerError' } }),
+  }) })
+  assert.ok(!h.calls.some((c) => c.name === 'reset_outlook_round'))
+  assert.ok(GRAPH_FOLDERS.every((f) => h.store.folders[f].delta_link_ciphertext !== null))
+  assert.equal(h.writes().length, 0)
+})
+
+
+test('catch-up after token rejection checkpoints across invocations without skipping pages', async () => {
+  const h = harness({cursorsFromStore:true})
+  const mb = bigMailbox({inboxPages:25,sentPages:25,inboundAt:22,outboundAt:18})
+  for(const f of GRAPH_FOLDERS) {
+    h.store.folders[f].delta_link_ciphertext = `CT:${GRAPH_BASE}/me/mailFolders/${f}/messages/delta?$deltatoken=expired`
+    h.store.folders[f].delta_link_nonce = 'N'
+  }
+  const fetchImpl = async(url)=>url.includes('$deltatoken=expired')
+    ? {status:410,headers:{get:()=>null},json:async()=>({error:{code:'resyncRequired'}})}
+    : mb.fetchImpl(url)
+  assert.equal((await h.invoke({fetchImpl})).outcome,'restart_required')
+  let result
+  for(let n=0;n<10;n++) {
+    result = await h.invoke({fetchImpl})
+    if(result.outcome === 'committed') break
+    assert.equal(result.outcome,'continued')
+    assert.equal(result.cursorsAdvanced,0)
+  }
+  assert.equal(result.outcome,'committed')
+  assert.equal(result.cursorsAdvanced,2)
+  assert.equal(h.distinctWritten(),1)
+  assert.equal(mb.served.length,50)
+  for(const f of GRAPH_FOLDERS) assert.equal(mb.served.filter(x=>x.folder===f).length,25)
+})
+
+
+test('forward reset migration changes only the marked cursor-clearing block', () => {
+  // Line endings are normalized on both sides: a checkout with autocrlf carries CRLF in one
+  // file and LF in the other, and the comparison is about the SQL, not the newline bytes.
+  const lf = (t) => t.replace(/\r\n/g, '\n')
+  const forward = lf(read('supabase/migrations/20261010050349_recover_rejected_outlook_delta_cursors.sql'))
+  const migration = lf(MIGRATION)
+  const start = 'CREATE OR REPLACE FUNCTION public.reset_outlook_round('
+  const old = migration.slice(migration.indexOf(start), migration.indexOf('\n\n\n-- ', migration.indexOf(start))).trim()
+  const body = forward.slice(forward.indexOf(start)).replace(/         -- >>> committed-delta recovery[\s\S]*?         -- <<< committed-delta recovery\n/, '').trim()
+  assert.equal(body, old)
 })
 
 await Promise.all(pending)

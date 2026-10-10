@@ -154,8 +154,8 @@ export async function readFolderContinued (p) {
 
   // Whether the link we are about to use came from a SAVED position. It decides what an
   // 'invalid cursor' means: a rejected saved nextLink is recoverable by resetting the
-  // round, while a rejected committed deltaLink is a different (and still unsolved)
-  // problem, so the two are reported separately.
+  // round while preserving committed cursors. A rejected committed deltaLink requires
+  // the run's fenced resynchronization reset, so the two are reported separately.
   const resuming = typeof resumeLink === 'string' && resumeLink.length > 0
   let link = resuming ? resumeLink : null
   let usingCommittedDelta = false

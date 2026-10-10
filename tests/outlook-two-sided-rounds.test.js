@@ -193,7 +193,11 @@ async function makePorts ({ contacts }) {
   }
   const rpc = async (name, args) => {
     if (name === 'reserve_due_outlook_connection') {
-      return { data: { result: 'reserved', connection_id: CONN, user_id: PILOT, run_id: 'run-1' }, error: null }
+      return { data: {
+        result: 'reserved', connection_id: CONN, user_id: PILOT, run_id: 'run-1',
+        inbox_initial_import_done: store.folders.inbox.initial_import_done,
+        sentitems_initial_import_done: store.folders.sentitems.initial_import_done,
+      }, error: null }
     }
     if (name === 'renew_outlook_sync_lease') return { data: true, error: null }
     if (name === 'upsert_outlook_interaction_candidate' || name === 'upsert_new_contact_candidate') {
@@ -1132,6 +1136,41 @@ await test('the card lets the reviewer keep, edit or clear the step, choose a da
 })
 
 console.log('')
+
+// Rejected committed tokens are fixtures, not a diagnosis of the pilot's valid cursors.
+for (const party of [KNOWN, STRANGER]) {
+  for (const decided of [false, true]) {
+    await test(`committed-token recovery preserves ${party === KNOWN ? 'known' : 'new'} ${decided ? 'terminal' : 'pending'} identity`, async () => {
+      const s = scenario({party,order:'me_first',inboxRounds:['in'],sentRounds:['out']})
+      const ports = await makePorts({contacts:[{id:KNOWN_CONTACT,user_id:PILOT,email:KNOWN}]})
+      const counts = newCounts()
+      const fetchImpl = makeFetch({...s,counts,model:MODEL})
+      const first = await invoke(ports,fetchImpl)
+      assert.equal(first.run.created,1)
+      const fp = ports.candidates[0].args.p_episode_fingerprint
+      const saved = JSON.stringify(ports.candidates[0])
+      if(decided) ports.decide(fp)
+      const rejecting = async (url,init) => String(url).includes('$deltatoken=R1')
+        ? {status:410,headers:{get:()=>null},json:async()=>({error:{code:'resyncRequired'}})}
+        : fetchImpl(url,init)
+      const restart = await invoke(ports,rejecting)
+      assert.equal(restart.run.outcome,'restart_required',summarize(restart))
+      assert.equal(restart.run.reason,'committed_delta_rejected')
+      assert.equal(restart.run.cursors_advanced,0)
+      assert.equal(ports.candidates.length,1)
+      assert.equal(JSON.stringify(ports.candidates[0]),saved)
+      const replay = await invoke(ports,rejecting)
+      assert.equal(replay.run.outcome,'committed',summarize(replay))
+      assert.equal(replay.run.created,0)
+      assert.equal(replay.run.write_results[decided?'exists_terminal':'refreshed'],1)
+      assert.equal(replay.run.content.recovery_outcomes.recovered,1)
+      assert.equal(ports.candidates.length,2)
+      assert.equal(ports.candidates[1].args.p_episode_fingerprint,fp)
+      assert.equal(replay.run.cursors_advanced,2)
+    })
+  }
+}
+
 console.log((passed + failed) + ' tests: ' + passed + ' passed, ' + failed + ' failed')
 console.log('')
 if (failed > 0) process.exit(1)
