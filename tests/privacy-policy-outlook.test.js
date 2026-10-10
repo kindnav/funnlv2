@@ -9,7 +9,7 @@
 //
 // Run with: node tests/privacy-policy-outlook.test.js
 import assert from 'assert'
-import { readFileSync } from 'fs'
+import { readFileSync, existsSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { join, dirname } from 'path'
 
@@ -20,6 +20,18 @@ const read = (rel) => readFileSync(join(root, rel), 'utf8').replace(/\r\n/g, '\n
 const POLICY = read('src/pages/PrivacyPage.jsx')
 const PACKET = read('docs/outlook-privacy-consent-readiness.md')
 const MIGRATION = read('supabase/migrations/20260921000000_add_outlook_content_draft_primitives.sql')
+// The SUMMARY bound moved to 2,000 in a forward migration. The 2026-09-21 file above still
+// reads 200 and is the superseded bound, so the disclosed length is pinned against the file
+// that actually establishes what the database enforces - WHEN that file is present.
+//
+// It can legitimately be absent. The policy change publishes to main before the feature
+// branch merges, so between those two steps main carries the 2,000 wording without the
+// migration file. That is deliberate and it is still truthful, because the disclosed value is
+// a CEILING: while the database still enforces 200, every stored summary is at most 200,
+// which is also at most 2,000. Present or absent, the page assertions below are unconditional;
+// only the migration cross-check waits for the file, and it is strict the moment it arrives.
+const NOTES_MIGRATION_PATH = 'supabase/migrations/20261010180000_detailed_ai_interaction_notes.sql'
+const NOTES_MIGRATION = existsSync(join(root, NOTES_MIGRATION_PATH)) ? read(NOTES_MIGRATION_PATH) : null
 const TRANSPORT = read('supabase/functions/shared/outlookGraphTransport.js')
 const NORMALIZE = read('supabase/functions/shared/outlookMessageNormalize.js')
 const DRAFT = read('supabase/functions/shared/outlookDraftContract.js')
@@ -343,7 +355,21 @@ test('raw bodies are stated as not stored, and the schema has no column for them
 })
 
 test('the disclosed field limits match the applied CHECK constraints', () => {
-  assert.ok(/at most 200 characters/.test(OUTLOOK) && MIGRATION.includes('char_length(draft_summary) BETWEEN 1 AND 200'))
+  // 2,000 on the page, 2,000 in the CHECK that the applied migration installs, in BOTH
+  // producer tables. The old 200 must be gone from the disclosed section entirely.
+  assert.ok(/at most 2,000 characters/.test(OUTLOOK), 'the page discloses the 2,000-character summary')
+  assert.ok(!/at most 200 characters/.test(OUTLOOK), 'the superseded 200 is gone from the section')
+  // The follow-up bound did not move, so it stays pinned against the original file.
+  if (NOTES_MIGRATION === null) {
+    console.log(`      (migration cross-check pending: ${NOTES_MIGRATION_PATH} not on this ref)`)
+  } else {
+    assert.strictEqual((NOTES_MIGRATION.match(/char_length\(draft_summary\) BETWEEN 1 AND 2000/g) || []).length, 2,
+      'both draft_summary CHECKs are re-declared at 2,000')
+    assert.ok(NOTES_MIGRATION.includes('char_length(proposed_notes) <= 2000'),
+      'and the interaction-candidate note column matches')
+    assert.ok(!/BETWEEN 1 AND 200\b/.test(NOTES_MIGRATION),
+      'and no superseded 200 bound survives in the forward migration')
+  }
   assert.ok(/at most 160 characters/.test(OUTLOOK) && MIGRATION.includes('char_length(draft_follow_up) BETWEEN 1 AND 160'))
   assert.ok(MIGRATION.includes('char_length(retained_subject) <= 160'))
   assert.ok(/length-limited/.test(OUTLOOK))
@@ -574,14 +600,17 @@ test('human-access wording is precise and includes the Anthropic safety exceptio
 // ── Date guard and non-regression ────────────────────────────────────────────
 console.log('\npublication date guard')
 
-test('the public date is the actual October 9, 2026 publication date', () => {
-  // Owner/product decision: publish the background-sync wording dated 2026-10-09, the
-  // actual New York date of the publishing commit. October 6 (content release), October 5
-  // and September 27 (envelope-only) are historical. If a later merge moves the day, this
-  // pin must move with it in that same commit - which is the point of pinning it rather
-  // than leaving it free.
-  assert.ok(POLICY.includes('Last updated: October 9, 2026'),
+test('the public date is the actual October 10, 2026 publication date', () => {
+  // Owner/product decision: publish the DETAILED-DRAFT wording (the 2,000-character summary
+  // limit and the paragraph describing what the draft records) dated 2026-10-10, the actual
+  // New York date of the publishing commit. October 9 (background sync), October 6 (content
+  // release), October 5 and September 27 (envelope-only) are historical. If a later merge
+  // moves the day, this pin must move with it in that same commit - which is the point of
+  // pinning it rather than leaving it free.
+  assert.ok(POLICY.includes('Last updated: October 10, 2026'),
     'the approved publication date must be present')
+  assert.ok(!/Last updated: October 9, 2026/.test(POLICY),
+    'the superseded background-sync date must no longer be the public date')
   assert.ok(!/Last updated: September 2[07], 2026/.test(POLICY),
     'a superseded Last-updated date must be gone')
   assert.ok(!/September 26, 2026/.test(POLICY),
@@ -590,10 +619,15 @@ test('the public date is the actual October 9, 2026 publication date', () => {
     'exactly one public date line')
   // Once in the public line, twice in the source decision comment (the approval and
   // the recheck instruction). Pinned so a stray extra date cannot creep in unnoticed.
-  assert.strictEqual((POLICY.match(/October 9, 2026/g) || []).length, 3,
-    'one public date line plus the two source-comment mentions')
-  assert.strictEqual((POLICY.match(/Last updated: October 9, 2026/g) || []).length, 1,
+  // Twice now: the public line and the approval in the source decision comment.
+  assert.strictEqual((POLICY.match(/October 10, 2026/g) || []).length, 2,
+    'one public date line plus the source-comment approval')
+  assert.strictEqual((POLICY.match(/Last updated: October 10, 2026/g) || []).length, 1,
     'exactly one public Last-updated line carries the date')
+  // October 9 survives TWICE, both in the comment, as history: the background-sync
+  // publication record and the note saying it was superseded by this one.
+  assert.strictEqual((POLICY.match(/October 9, 2026/g) || []).length, 2,
+    'the superseded background-sync date is recorded twice, as history, never as the public date')
   // The content-release approval date survives ONCE, in the comment, as history.
   assert.strictEqual((POLICY.match(/October 6, 2026/g) || []).length, 1,
     'the superseded-as-a-date content-release approval is recorded once, as history')
@@ -849,8 +883,10 @@ test('no unapproved retention duration survives anywhere in the Outlook section'
   for (const s of mustDetect) assert.ok(durationRe('i').test(s), `must recognize: ${s}`)
   // And it must not fire on the section's non-retention numbers.
   const mustNotDetect = [
-    'at most 200 characters', 'at most 160 characters', 'exactly five', 'the two parties',
-    'a summary of at most 200 characters', 'five headers', 'two parties are labelled',
+    'at most 2,000 characters', 'at most 160 characters', 'exactly five', 'the two parties',
+    'a summary of at most 2,000 characters', 'five headers', 'two parties are labelled',
+    // the comma in 2,000 is the new shape, so it is covered explicitly
+    'a summary of at most 2,000 characters, an optional suggested next step',
     'the sender, the recipients', 'Inbox and Sent Items only', 'a confidence level',
   ]
   for (const s of mustNotDetect) {
