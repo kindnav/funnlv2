@@ -189,6 +189,10 @@ export const CONTENT_REPORT_COUNTS = Object.freeze([
   // CONVERSATION RECOVERY: how many one-sided threads the round asked Outlook about, how
   // many came back two-sided, and how many envelopes that took. Counts only.
   'recoveries_attempted', 'recoveries_two_sided', 'recovered_messages',
+  // AND how many of those needed a SECOND, windowed attempt because the thread is longer
+  // than one bounded page. Reported so "bounded, not endless" is measurable rather than
+  // asserted: it can never exceed recoveries_attempted.
+  'recovery_retries',
 ])
 
 /**
@@ -717,6 +721,7 @@ export function summarizeContentStage (counts) {
     recoveries_attempted: Number.isInteger(c.recoveriesAttempted) ? c.recoveriesAttempted : 0,
     recoveries_two_sided: Number.isInteger(c.recoveriesTwoSided) ? c.recoveriesTwoSided : 0,
     recovered_messages: Number.isInteger(c.recoveredMessages) ? c.recoveredMessages : 0,
+    recovery_retries: Number.isInteger(c.recoveryRetries) ? c.recoveryRetries : 0,
     recovery_outcomes: clean(c.recoveryOutcomes, RECOVERY_OUTCOME_CODES),
   }
 }

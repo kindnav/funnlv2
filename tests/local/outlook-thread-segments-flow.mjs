@@ -59,6 +59,7 @@ const ME = 'student@getfunnl.test'
 const KNOWN = 'ava@bank.test'            // already a contact
 const STRANGER = 'priya@fund.test'       // not in Funnl
 const LEGACY_NEW = 'noor@firm.test'      // not in Funnl, becomes one via acceptance
+const LONG_NEW = 'dana@house.test'       // the same, on a thread with a back-catalogue
 const JWT_SECRET = randomBytes(32).toString('hex')   // per run; never printed
 
 const APPROVED = 'ol-disc-' + 'a'.repeat(32)
@@ -589,7 +590,8 @@ async function main () {
     test, psql, one, num, rows, thread, world, newCounts, round, makeDue, seed, ownContacts,
     refRows, coveredFor, pendingInteractions, pendingNewContacts, storedInteractions,
     RING_V1, RING_V2, draftFor, NOTES, applySegments, acceptInteraction, acceptNewContact,
-    http, TOK, U1, ME, KNOWN, STRANGER, LEGACY_NEW, MAX_RECOVERY_MESSAGES_PER_FOLDER,
+    http, TOK, U1, ME, KNOWN, STRANGER, LEGACY_NEW, LONG_NEW,
+    MAX_RECOVERY_MESSAGES_PER_FOLDER,
     assert, SEGMENTS_MIGRATION, shippedRound,
   })
   void ctx

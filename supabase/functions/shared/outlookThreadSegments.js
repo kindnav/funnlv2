@@ -208,6 +208,37 @@ export function decideSegment (p) {
 }
 
 /**
+ * The floor for ONE MORE bounded attempt, after an unbounded listing came back truncated.
+ *
+ * WHY A SEPARATE FUNCTION. The ordinary floor refuses to exist without settled coverage, on
+ * purpose: completing a one-sided thread means finding a half that may be OLDER than anything
+ * this round saw, and a floor would hide it. That reasoning holds for the FIRST attempt. It
+ * does not hold once the provider has answered "there is more of this thread than one page" -
+ * at that point an unwindowed request cannot succeed however many times it is made, and the
+ * choice is between a bounded window and losing the exchange for good.
+ *
+ * WHAT IT IS MADE OF, and nothing else: instants the run legitimately holds.
+ *   * the earliest message THIS ROUND stored for the thread;
+ *   * the pending segment's own span start, so a refresh re-lists its whole exchange;
+ *   * the durable unpaired hint, so a half discovered in an earlier round is still reachable.
+ * It is NEVER derived from a reviewer's date, and it claims no membership: it only narrows a
+ * listing. What the narrowed listing actually returns is what gets claimed.
+ *
+ * @returns {string|null} an ISO instant to filter at or after, or null if nothing is known
+ */
+export function truncatedRetryFloorIso (p) {
+  const iso = (v) => (typeof v === 'string' && v.length > 0 ? v : null)
+  const seen = (Array.isArray(p?.messages) ? p.messages : [])
+    .map((m) => iso(m?.timestampIso))
+    .filter((t) => t !== null)
+    .sort()
+  const candidates = [seen[0] ?? null, iso(p?.pendingFromIso), iso(p?.earliestUnpairedIso)]
+    .filter((t) => t !== null)
+  if (candidates.length === 0) return null
+  return candidates.reduce((lo, t) => (t.localeCompare(lo) < 0 ? t : lo), candidates[0])
+}
+
+/**
  * The lower bound for a bounded recovery listing of this thread.
  *
  * WHY A FLOOR IS NEEDED AT ALL. The recovery listing is one page per folder, capped at
@@ -230,8 +261,11 @@ export function recoveryFloorIso (p) {
   const iso = (v) => (typeof v === 'string' && v.length > 0 ? v : null)
   const through = iso(p?.coverageThroughIso)
   // NO SETTLED COVERAGE MEANS NO FLOOR. A first pass, or a thread nobody has decided, wants
-  // the whole conversation - which is the request that shipped.
-  if (through === null) return null
+  // the whole conversation - which is the request that shipped. `truncatedRetry` is the ONE
+  // exception, and it is not a first pass: the unbounded attempt has already been made and
+  // came back carrying @odata.nextLink, so asking for the whole conversation again would
+  // give the same answer. See truncatedRetryFloorIso.
+  if (through === null) return p?.truncatedRetry === true ? truncatedRetryFloorIso(p) : null
 
   const seen = (Array.isArray(p?.messages) ? p.messages : [])
     .map((m) => iso(m?.timestampIso))

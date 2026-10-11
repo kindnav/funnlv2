@@ -262,7 +262,12 @@ export async function recoverConversation (p) {
     if (!res?.ok) return retryOrSettle(lookupFailure(res?.code), stats)
     const page = readConversationLookupPage(res.json)
     if (page.ok !== true) return retry('recovery_fetch_failed', stats)
-    if (page.truncated) return settled('recovery_truncated', stats)
+    if (page.truncated) {
+      // THE KEY GOES BACK WITH THE TRUNCATION, so the caller's one bounded retry can reuse
+      // it instead of making the same envelope GET a second time. Memory only, like every
+      // other place this value appears.
+      return { ...settled('recovery_truncated', stats), conversationKey: conversationId }
+    }
     // The SAME normalizer the delta read uses: it refuses a body it was not supposed to
     // receive, drops drafts and malformed envelopes, and attaches the folder.
     const norm = normalizeGraphPage(page.items, folder)

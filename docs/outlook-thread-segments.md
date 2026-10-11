@@ -56,14 +56,24 @@ All four are refused as a half-written claim by `ocr_coverage_together`: the set
 the provenance arrive together or not at all, and a coverage set always requires its thread.
 
 And one new table, `public.outlook_thread_recovery`: **one row per thread**, holding
-`earliest_unpaired_at` - the earliest instant of an uncovered message this connection has seen
-and could not pair. It exists for the one case no column can serve, because that case has no
+
+| column | what it is |
+|---|---|
+| `unpaired` | a bounded list of `{fp, at}` PAIRS - the message fingerprint and the instant of each uncovered message this connection has seen and could not pair. At most `MAX_UNPAIRED_HINT_PAIRS` = 25 per thread; over the bound the OLDEST pairs are kept, because the oldest is what a recovery window has to reach, and what was shed is reported as `dropped` rather than silently lost. |
+| `earliest_unpaired_at` | derived from `unpaired`, for the recovery floor |
+
+It holds the fingerprints and not just the instant because the hint must be **resolved**: the
+coverage write that covers a pair deletes it, in the same transaction. A hint that was only an
+instant could only ever be LOWERED, which was reproduced as harmful - the window kept reaching
+back over settled history until the single bounded page overflowed and the thread was abandoned
+`recovery_truncated`. It exists for the one case no column can serve, because that case has no
 candidate to hang state on. RLS on, no policy, worker-only, cascading from the connection.
 
 No new category of data. The conversation fingerprint and the message fingerprints are the same
 keyed one-way values the round already computes, and no body, header, subject, address or
-Microsoft identifier is stored. What is new is a **timestamp per thread** and a **span** per
-segment, which the disclosure in section 8 now names.
+Microsoft identifier is stored. What is new is a **span** per segment and, per thread, a
+**bounded list of message fingerprints with their instants** for mail still waiting to be
+paired - which the disclosure in section 8 now names.
 
 **Growth is bounded but not pruned.** Each segment adds at most 50 fingerprints, about 3 KB.
 A thread with a hundred settled segments would hold roughly 300 KB of provenance. No pruning is
@@ -269,10 +279,12 @@ with:
 > same thread can be recognised as new. Accepting or dismissing a suggestion settles that
 > exchange; if you and the same person exchange messages again in that thread, Funnl prepares a
 > new suggestion for the new messages only, and the interaction you already accepted is never
-> changed. Where Funnl has seen a message it could not yet pair with a reply, it also keeps the
-> time of the earliest such message for that conversation, so the two halves can still be
-> brought together when the reply arrives in a later check. These times are stored against your
-> account; none of them is a message, an address or a subject line.
+> changed. Where Funnl has seen a message it could not yet pair with a reply, it also keeps a
+> short list for that conversation of those messages' fingerprints and the time of each - at
+> most twenty-five of them - so the two halves can still be brought together when the reply
+> arrives in a later check, and so each entry can be removed once its message has been
+> accounted for. These fingerprints and times are stored against your account; none of them is
+> a message, an address or a subject line.
 
 The rest of the bullet is unchanged, including "Funnl does not store Microsoft message or
 conversation identifiers, mailbox addresses, or subject lines in these provenance records", which
@@ -361,7 +373,7 @@ and tears down its own containers.
 | Rotation, known contact | A first exchange is proposed and ACCEPTED through the real acceptance RPC with a reviewer-edited note. The key is rotated with the previous key still accepted. A later two-way exchange produces exactly ONE new pending suggestion, drafted from the later exchange; coverage reaches four messages; a replay refreshes that one row; the accepted interaction and its note are byte-identical (length and digest compared). |
 | Rotation, unknown person | The same through `upsert_new_contact_candidate` and `accept_new_contact_candidate`, which also makes the person a contact - so the later exchange crosses the anchor-form transition and the key change at once. |
 | Legacy initialization | The pre-feature proposal is written by the **shipped worker**, loaded from a git worktree at `main`, against a database with this migration HELD BACK - then accepted through the real acceptance RPC. The migration is applied to the database that already holds those rows. Both anchor forms are present, and one accepted proposal's person is now a contact. Through the handler the threads are BASELINED (`coverage_baselined`, `coverage_source = 'legacy_baseline'`, no suggestion, no model call), and only mail arriving after the baseline becomes a suggestion. |
-| Legacy history beyond the page cap | A thread with more history than `MAX_RECOVERY_MESSAGES_PER_FOLDER` in one folder, with the fixture honouring the conversation clause, the per-folder instant window, `$top` and `@odata.nextLink`. The settled exchange is proposed, the later one is captured, every lookup carries a floor and stays within the page bound, and neither the back-catalogue nor the settled exchange is sent to the model again. |
+| Legacy history beyond the page cap | A GENUINE long legacy thread, for the known-contact path AND for a person who became a contact when their proposal was accepted. The original candidate is written by the shipped worker with the migration withheld and accepted through the real acceptance RPC; the thread then holds `MAX_RECOVERY_MESSAGES_PER_FOLDER + 5` inbound messages of back-catalogue in one folder, with the fixture honouring the conversation clause, the per-folder instant window, `$top` and `@odata.nextLink`. One unwindowed listing overflows; ONE windowed retry completes the thread; the continuation is absorbed explicitly (coverage naming exactly the two messages the window returned); a replay refreshes rather than duplicates; and a second continuation in a later completed round is captured exactly once. Neither the back-catalogue nor the accepted exchange reaches the model in either round. |
 | Rotation composed with a decision during drafting | The reviewer ACCEPTS (and, separately, DISMISSES) between the coverage read and the producer write, staged by a hook on the real RPC call. The real producer answers `coverage_moved`, which is not in `WRITE_OK`: no cursor advances and nothing is written. The next attempt - same page, cursor never moved - captures the genuinely new exchange ONCE, the decided row is still the decided row, and the model is sent only the new exchange. |
 
 **The model request is inspected, not assumed**, in every group: the captured Anthropic body
@@ -403,6 +415,12 @@ producers byte-identical to the applied versions apart from marked blocks with o
 trailing comma pinned explicitly, the hint merge shedding the newest pair rather than the
 oldest, and the comparison aliases reaching no stored column.
 
+### Why the earlier Gate 2 proved nothing
+
+It created the original candidate with THIS branch's worker AFTER the migration, so the thread
+already had `coverage_source = 'draft'` coverage and a conversation fingerprint. The legacy path
+was never on trial, and the defect below sat underneath it.
+
 ### Defects reproduced and fixed
 
 Each was reproduced first - the first three against the real functions, which is how they were
@@ -442,7 +460,33 @@ found at all - and the fix is what the evidence above now holds.
    was lost. The claim now resolves against every value the thread is on record under,
    **settled and pending**, so the overlap is visible and the producer answers
    `coverage_moved`: the cursor is forfeited and the next attempt drafts only the new part.
-8. **A genuine legacy row was never found.** It has no conversation fingerprint, so it is
+8. **A LONG legacy thread could never log another interaction, and committed anyway.** Its
+   refs row has no conversation fingerprint, so the coverage read cannot find it; with no
+   settled instant `recoveryFloorIso` offers no floor, which is deliberate - a first pass must
+   be able to find a half OLDER than anything this round saw. With no floor the one bounded page
+   per folder is spent on the back-catalogue, the page returns `@odata.nextLink`, recovery
+   settles `recovery_truncated` and the round COMMITS. Reproduced against the real functions for
+   both continuations: `entry_skipped { recovery_truncated: 2 }`, `cursors_advanced: 2`, nothing
+   recovered, nothing written. Permanent.
+
+   Fixed with ONE more bounded attempt (`truncatedRetryFloorIso`): when the unbounded listing
+   comes back truncated, the listing is asked again, once, windowed to a floor made only of
+   instants the run already holds - the earliest message this round stored, the pending
+   segment's own span start, the durable unpaired hint. Never a reviewer's date, never a larger
+   page, and never more than one retry: a second truncation settles exactly as the first did.
+   The window cannot reach the accepted exchange, because it starts at what this round saw, and
+   what it returns is claimed explicitly by the write that follows. `recovery_retries` is
+   reported so the bound is measurable rather than asserted, and the truncated answer carries
+   the conversation key back so the retry makes no second envelope GET.
+
+   **The limit, stated:** the pre-feature refs row itself stays uninitialized. It cannot be
+   LOCATED - no conversation fingerprint, and its episode anchor is the first message of an
+   exchange the back-catalogue hides, which no bounded window reaches. Nothing pretends
+   otherwise; it is left exactly as the shipped worker wrote it. What makes the thread work
+   again is that the continuation gets its own coverage row under the thread's conversation
+   fingerprint, and every later segment is decided from that.
+
+9. **A genuine SHORT legacy row was never found.** It has no conversation fingerprint, so it is
    matched only on its own episode anchor - the thread's first message, which a delta round
    never delivered. Reproduced with a proposal written by the shipped worker: the thread
    looked brand new, mail that was already a logged interaction was summarized again, and the
@@ -452,6 +496,15 @@ found at all - and the fix is what the evidence above now holds.
    baseline is given the same set - without that the known-contact thread initialized and the
    accepted-proposal thread did not, because the form the worker computes now is not the form
    an older proposal was written under.
+
+10. **A failed identity resolution was unreportable.** The run emitted `identity_unresolved`,
+    which is not in `DEFERRAL_CLASS`, so `sanitizeContentReport` DROPPED it: the round stopped
+    without committing and the report said nothing about why. It is now `fetch_failed` - "a
+    transient Graph failure, or a moved message", which is exactly what it is, and retryable.
+    A control in `tests/outlook-content-stall.test.js` now scans every literal the run passes
+    to `bumpDeferral`, in any call shape, and fails if one is outside the vocabulary; a second
+    control shows the sanitized output keeping `fetch_failed` and still dropping an unknown
+    code.
 
 ### Not demonstrated
 

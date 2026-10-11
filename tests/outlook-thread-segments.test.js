@@ -12,7 +12,7 @@ import { dirname, join } from 'node:path'
 import {
   MAX_SEGMENT_COVERAGE, normalizeCoverage, orderMessages, uncoveredMessages,
   decideSegment, recoveryFloorIso, coverageForSegment, segmentIsTwoSided, unpairedHintIso,
-  MAX_UNPAIRED_HINT_PAIRS,
+  MAX_UNPAIRED_HINT_PAIRS, truncatedRetryFloorIso,
 } from '../supabase/functions/shared/outlookThreadSegments.js'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -281,6 +281,49 @@ test('the hint-pair bound is ONE number, shared with the function that enforces 
     'the run trims to the shared constant, not to a literal')
   assert.ok(!/\.slice\(0, 25\)/.test(RUN),
     'and no literal 25 survives in the run')
+})
+
+test('the retry floor is made ONLY of instants the run already holds', () => {
+  // It exists because an unwindowed listing came back carrying @odata.nextLink: asking for
+  // the whole conversation again cannot succeed. A LEGACY thread has no settled instant at
+  // all - its refs row carries no conversation fingerprint - so without this the thread is
+  // abandoned `recovery_truncated` for ever, which was reproduced against the real functions.
+  assert.strictEqual(truncatedRetryFloorIso({
+    messages: [msg(A, '2026-09-20T09:00:00Z'), msg(B, '2026-09-20T15:00:00Z')],
+  }), '2026-09-20T09:00:00Z', 'the earliest message THIS ROUND saw')
+
+  assert.strictEqual(truncatedRetryFloorIso({
+    messages: [msg(A, '2026-09-20T09:00:00Z')],
+    pendingFromIso: '2026-09-18T09:00:00Z',
+  }), '2026-09-18T09:00:00Z', 'a pending segment re-lists its own whole exchange')
+
+  assert.strictEqual(truncatedRetryFloorIso({
+    messages: [msg(A, '2026-09-20T09:00:00Z')],
+    pendingFromIso: '2026-09-18T09:00:00Z',
+    earliestUnpairedIso: '2026-09-12T09:00:00Z',
+  }), '2026-09-12T09:00:00Z', 'and a half discovered in an earlier round stays reachable')
+})
+
+test('it INVENTS nothing: with nothing known there is no floor', () => {
+  assert.strictEqual(truncatedRetryFloorIso({}), null)
+  assert.strictEqual(truncatedRetryFloorIso({ messages: [] }), null)
+  assert.strictEqual(truncatedRetryFloorIso({ messages: [msg(A, '')] }), null,
+    'a message with no instant contributes nothing')
+  assert.strictEqual(truncatedRetryFloorIso(null), null)
+})
+
+test('the ORDINARY floor still refuses to exist without settled coverage', () => {
+  // That refusal is the point: completing a one-sided thread means finding a half that may
+  // be OLDER than anything this round saw, and a floor would hide it. The retry floor is
+  // reachable only through the explicit truncatedRetry flag.
+  const seen = { messages: [msg(A, '2026-09-20T09:00:00Z')] }
+  assert.strictEqual(recoveryFloorIso(seen), null, 'no settled instant, no floor')
+  assert.strictEqual(recoveryFloorIso({ ...seen, truncatedRetry: true }),
+    '2026-09-20T09:00:00Z', 'unless the unbounded attempt has already been refused')
+  const SRC_CODE = SRC.split(String.fromCharCode(10))
+    .filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join(String.fromCharCode(10))
+  assert.ok(!/proposed_interaction_date|interaction_date|reviewer/i.test(SRC_CODE),
+    'and no floor is ever derived from a reviewer date')
 })
 
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed`)

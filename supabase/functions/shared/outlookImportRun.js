@@ -106,7 +106,7 @@ import {
 import { contentPermissions, backgroundOperationAllowed, REQUIRED_BACKGROUND_CONSENT_VERSION } from './outlookContentConsent.js'
 import {
   decideSegment, normalizeCoverage, recoveryFloorIso, coverageForSegment, segmentIsTwoSided,
-  uncoveredMessages, MAX_UNPAIRED_HINT_PAIRS, orderMessages,
+  uncoveredMessages, MAX_UNPAIRED_HINT_PAIRS, orderMessages, truncatedRetryFloorIso,
 } from './outlookThreadSegments.js'
 import {
   conversationVariants, episodeVariants, withMessageVariants, resolveClaim,
@@ -1104,7 +1104,7 @@ export async function runOutlookImport (p) {
     bodiesRead: 0, modelCalls: 0,
     // CONVERSATION RECOVERY: one-sided threads asked about, how many came back two-sided,
     // and the envelopes it took. Counts only; the outcomes map below carries the codes.
-    recoveriesAttempted: 0, recoveriesTwoSided: 0, recoveredMessages: 0,
+    recoveriesAttempted: 0, recoveriesTwoSided: 0, recoveredMessages: 0, recoveryRetries: 0,
     deferred: Object.create(null), ignored: Object.create(null),
     // WHICH CATEGORY the privacy guard objected to, when it did. Controlled labels
     // only; the offending value is never returned by the guard and is never read here.
@@ -1476,7 +1476,13 @@ export async function runOutlookImport (p) {
           if (ident.outcome === 'retry') {
             // Transient, or out of budget: preserve the work by stopping WITHOUT passing
             // this conversation. The next invocation re-lists from the committed cursor.
-            bumpDeferral(ident.reason === 'budget_exhausted' ? 'budget_exhausted' : 'identity_unresolved')
+            //
+            // REPORTED IN THE CONTROLLED VOCABULARY. An earlier revision emitted
+            // `identity_unresolved`, which is not in DEFERRAL_CLASS, so sanitizeContentReport
+            // DROPPED it: the run stopped and the report said nothing about why. A transient
+            // failure on this envelope GET is a `fetch_failed` - "a transient Graph failure,
+            // or a moved message" - which is exactly what it is, and it is retryable.
+            bumpDeferral(ident.reason === 'budget_exhausted' ? 'budget_exhausted' : 'fetch_failed')
             outOfBudget = true
             break
           }
@@ -1617,6 +1623,62 @@ export async function runOutlookImport (p) {
               // Nothing from the thrown value is read: it can carry a URL, an address or a
               // provider message. Retryable, so nothing is settled for it.
               rec = { outcome: 'retry', reason: 'recovery_fetch_failed', stats: {} }
+            }
+
+            // ── ONE MORE BOUNDED ATTEMPT, when the thread is longer than a page ──────
+            // The provider has answered "there is more of this thread than one page". An
+            // unwindowed request cannot succeed however often it is repeated, so the choice
+            // is a bounded window or losing the exchange for good - and for a LEGACY thread
+            // it is for good, permanently: its refs row carries no conversation fingerprint,
+            // so the coverage read never finds it, so there is never a settled instant to
+            // floor the listing with. Reproduced against the real functions with the
+            // original candidate written by the shipped worker: every continuation settled
+            // `recovery_truncated` while the round committed, for ever.
+            //
+            // The retry floor is made only of instants the run legitimately holds (see
+            // truncatedRetryFloorIso) - never a reviewer's date - and it claims nothing: it
+            // narrows a listing, and what the narrowed listing returns is what the following
+            // write claims. ONE retry, inside the same recovery cap and the same budget
+            // admission; a truncated retry settles `recovery_truncated` exactly as before.
+            if (rec.outcome === 'settled' && rec.reason === 'recovery_truncated') {
+              const retryFloor = truncatedRetryFloorIso({
+                messages: (storedForFloor ?? []).map((h) => ({ timestampIso: h.sentAt })),
+                pendingFromIso: cov?.pendingFromIso ?? null,
+                earliestUnpairedIso: cov?.earliestUnpairedIso ?? null,
+              })
+              if (retryFloor !== null && budgetAllows(RECOVERY_ADMIT_MS + WRITE_STEP_RESERVE_MS)) {
+                content.recoveryRetries = (content.recoveryRetries || 0) + 1
+                await ensureLease(PROGRESS_STEP_MS + RECOVERY_ADMIT_MS)
+                let again
+                try {
+                  const knownKey = conversationKey
+                    ?? (typeof rec.conversationKey === 'string' ? rec.conversationKey : null)
+                  again = await recoverConversation({
+                    row: decision.recover,
+                    // The truncated answer carried the key back, so the retry does NOT
+                    // repeat the envelope GET: one identity request per conversation.
+                    ...(knownKey === null ? {} : { conversationId: knownKey }),
+                    sinceIso: retryFloor,
+                    handles: stored.handles,
+                    decryptHandle: ({ ciphertext, nonce }) => decryptCursor(ciphertext, nonce),
+                    accessToken: context.accessToken,
+                    deps,
+                    budgetAllows,
+                    selfSet,
+                    contactIndex,
+                    connectionId,
+                    keyRing: context.keyRing,
+                    produceHandles: produceRecoveryHandles,
+                    localDateFor: (iso) => localDateFor(iso, context.timeZone),
+                  })
+                } catch {
+                  again = { outcome: 'retry', reason: 'recovery_fetch_failed', stats: {} }
+                }
+                // The retry's answer REPLACES the truncated one, whatever it is: a second
+                // truncation settles the same way the first did, and a transient failure is
+                // still preserved for the next invocation.
+                rec = again
+              }
             }
           }
           const code = rec.outcome === 'recovered' ? 'recovered' : rec.reason
