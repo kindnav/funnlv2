@@ -2008,8 +2008,11 @@ export async function runOutlookImport (p) {
           // and without this split the accepted message went to the model and the coverage
           // row claimed all three.
           let segment = decided.segment
-          if (typeof cov?.threadBaselineFromIso === 'string') {
-            const split = splitAtKnowledgeFloor(segment, cov.threadBaselineFromIso)
+          // THE FIXED INITIALIZATION BOUNDARY, never the absorbed span's minimum. Using the
+          // minimum was reproduced as a defect: absorbing one older message lowered it, and a
+          // different accepted message in the interval that opened was then drafted.
+          if (typeof cov?.threadBaselineBoundaryIso === 'string') {
+            const split = splitAtKnowledgeFloor(segment, cov.threadBaselineBoundaryIso)
             if (split.older.length > 0) {
               const code = await absorbWindow({
                 cfp, messages: split.older, cfps: conversationLookupFingerprints,

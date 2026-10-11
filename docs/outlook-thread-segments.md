@@ -61,6 +61,21 @@ And one new table, `public.outlook_thread_recovery`: **one row per thread**, hol
 |---|---|
 | `unpaired` | a bounded list of `{fp, at}` PAIRS - the message fingerprint and the instant of each uncovered message this connection has seen and could not pair. At most `MAX_UNPAIRED_HINT_PAIRS` = 25 per thread; over the bound the OLDEST pairs are kept, because the oldest is what a recovery window has to reach, and what was shed is reported as `dropped` rather than silently lost. |
 | `earliest_unpaired_at` | derived from `unpaired`, for the recovery floor |
+| `baseline_fingerprints` | the messages a bounded window ABSORBED for a thread whose settled coverage cannot be established at all. Bounded by the same 50 a segment is; over the bound the call is REFUSED rather than trimmed, because dropping a fingerprint would make an absorbed message look new again. This is what makes an absorbed message COVERED. |
+| `baseline_boundary_at` | **the historical suppression boundary**, set ONCE when the baseline is initialized and never moved. The eligibility cutoff: below it a message may belong to the pre-feature accepted exchange and is never drafted. |
+| `baseline_from_at`, `baseline_through_at` | the MEASURED span of what has been absorbed. Expands in both directions and decides no eligibility; the upper end narrows a later recovery listing. |
+
+**The boundary is not the span's minimum, and conflating them was a defect.** Absorbing an older
+message expands what is absorbed; it establishes nothing about the interval that message opened
+up. Reproduced against the real functions: with the span's minimum used as the cutoff, a
+*different* accepted message sitting between the new minimum and initialization counted as new
+and reached the model. See defect 13.
+
+**A row may hold a baseline and no hint, or a hint and no baseline, or both.** `otr_not_empty`
+refuses a row with neither; `otr_unpaired_together` and `otr_baseline_together` refuse a half-
+written one. A fully resolved hint clears its two columns rather than deleting a row that
+carries a baseline, and the merge treats an absent hint as an empty collection - both of those
+were defects (7 and 14).
 
 It holds the fingerprints and not just the instant because the hint must be **resolved**: the
 coverage write that covers a pair deletes it, in the same transaction. A hint that was only an
@@ -376,6 +391,8 @@ and tears down its own containers.
 | Legacy history beyond the page cap | A GENUINE long legacy thread, for the known-contact path AND for a person who became a contact when their proposal was accepted. The original candidate is written by the shipped worker with the migration withheld and accepted through the real acceptance RPC; the thread then holds `MAX_RECOVERY_MESSAGES_PER_FOLDER + 5` inbound messages of back-catalogue in one folder, with the fixture honouring the conversation clause, the per-folder instant window, `$top` and `@odata.nextLink`. One unwindowed listing overflows; ONE windowed retry completes the thread; the window is ABSORBED (no suggestion, no model call, recorded as a thread baseline naming exactly the two messages it returned); a replay of it produces nothing and no second baseline; and the NEXT exchange is captured exactly once with neither the back-catalogue nor anything absorbed in its request. |
 | Retry admission failure | The injected clock advances 19 s on the envelope GET and 19 s on the first truncated listing - each request inside its own deadline, the invocation unable to admit the narrowed retry. The result is a retryable `budget_exhausted` recovery outcome, no cursor advances, the conversation is left unpassed, and the next invocation is served the same page and processes that exchange exactly once. The exchange after it is then suggested. |
 | Delta re-delivering an accepted message | The next delta page carries the accepted exchange's last inbound message again beside a genuinely new pair, with the original accepted anchor outside the narrowed window. The re-delivered message never reaches the model and is absorbed into the thread baseline; the genuinely new pair is still captured exactly once in the same round, its coverage claiming the new pair only. |
+| The first hint on a baseline-only row | A thread carrying a baseline and no hint sees one unanswered half, timed AFTER baseline initialization and BEFORE its latest settled segment. The hint is recorded beside the baseline (which is preserved), the reply arrives in the next completed round, and both halves reach ONE draft exactly once - then the hint is resolved back to a baseline-only row rather than deleting it. |
+| The suppression boundary is fixed | A pre-feature accepted exchange of FOUR messages. One is temporarily out of the tracked folders; a different, EARLIER one is re-delivered beside a fresh exchange, which expands the absorbed span downward while the boundary stays put; then the absent message returns beside another fresh pair. The returned accepted message never reaches the model, both fresh exchanges are captured once, and the boundary is unmoved throughout. |
 | Rotation composed with a decision during drafting | The reviewer ACCEPTS (and, separately, DISMISSES) between the coverage read and the producer write, staged by a hook on the real RPC call. The real producer answers `coverage_moved`, which is not in `WRITE_OK`: no cursor advances and nothing is written. The next attempt - same page, cursor never moved - captures the genuinely new exchange ONCE, the decided row is still the decided row, and the model is sent only the new exchange. |
 
 **The model request is inspected, not assumed**, in every group: the captured Anthropic body
@@ -555,6 +572,33 @@ found at all - and the fix is what the evidence above now holds.
     outcome that leaves the conversation unpassed, so the next invocation is served the same
     page and processes that exchange exactly once. An actually completed second truncated
     lookup still settles deterministically, as before.
+
+13. **The absorbed span's minimum was used as the eligibility cutoff.**
+    `baseline_outlook_thread_window` lowered `baseline_from_at` whenever it absorbed something
+    older, and the worker read that minimum as its knowledge floor. Absorbing one older
+    message establishes nothing about the interval it opens: reproduced against the real
+    functions with a four-message pre-feature accepted exchange, one message temporarily out
+    of the tracked folders and a different, earlier one re-delivered - the first absorption
+    lowered the floor, and when the absent message returned it counted as at-or-after the
+    floor and entered the model request.
+
+    `baseline_boundary_at` is now a separate column, set once at initialization with
+    `COALESCE` rather than `LEAST` so no later call can move it, and it is what
+    `splitAtKnowledgeFloor` reads. The span still expands in both directions and decides
+    nothing. Fingerprint membership is untouched: the absorbed set is still what makes a
+    message covered. Across ring variants the reader takes the EARLIEST boundary, so a thread
+    cannot become more permissive after a rotation.
+
+14. **The first hint on a baseline-only row was dropped silently.** The merge read
+    `unpaired || EXCLUDED.unpaired`, and on a baseline-only row the left side is NULL; in
+    jsonb `NULL || x` is NULL, so the aggregate came back NULL and the function answered `ok`
+    with both hint columns still NULL. Reproduced against the real function, end to end: no
+    hint survived, recovery never reached back for the earlier half, both rounds committed and
+    no suggestion was produced. The merge now treats an absent hint as an empty collection,
+    and - because the same statement must satisfy `otr_unpaired_together` - it is computed
+    into a variable so the pairs and their derived instant are written together. Writing the
+    pairs and leaving the instant to a following statement was itself reproduced, as
+    `hint_write_failed`.
 
 ### Not demonstrated
 

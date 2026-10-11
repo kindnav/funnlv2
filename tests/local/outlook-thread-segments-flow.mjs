@@ -45,6 +45,10 @@ import {
   GRAPH_BASE, MAX_RECOVERY_MESSAGES_PER_FOLDER,
 } from '../../supabase/functions/shared/outlookGraphTransport.js'
 import { ANTHROPIC_MESSAGES_URL } from '../../supabase/functions/shared/outlookDraftContract.js'
+import { computeFingerprintSet } from '../../supabase/functions/shared/emailFingerprint.js'
+import {
+  buildConversationFingerprintFields,
+} from '../../supabase/functions/shared/outlookRoundState.js'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const PG = 'funnl-seg-pg'
@@ -61,6 +65,7 @@ const STRANGER = 'priya@fund.test'       // not in Funnl
 const LEGACY_NEW = 'noor@firm.test'      // not in Funnl, becomes one via acceptance
 const LONG_NEW = 'dana@house.test'       // the same, on a thread with a back-catalogue
 const LONG_SLOW = 'omar@desk.test'       // a long thread used only for budget starvation
+const BOUNDARY = 'lena@floor.test'       // a long thread for the suppression boundary
 const JWT_SECRET = randomBytes(32).toString('hex')   // per run; never printed
 
 const APPROVED = 'ol-disc-' + 'a'.repeat(32)
@@ -309,6 +314,10 @@ function provider ({ world: w, counts, state, draftFor, clock }) {
         hasOrderBy: qp(u, '$orderby') !== null })
       const all = Object.values(w.envelopes)
         .filter((e) => e.conversationId === conv && w.folderOf[e.id] === folder)
+        // TEMPORARILY OUT OF THE TRACKED FOLDERS. A message can leave Inbox or Sent Items -
+        // moved to a user folder, archived - and come back later. While it is out, the
+        // conversation listing simply does not return it.
+        .filter((e) => !(state.hidden && state.hidden.has(e.id)))
         .filter((e) => state.always.has(e.id) || state.seen.has(e.id))
         .filter((e) => geAt === null || String(e[geProp] ?? '').localeCompare(geAt) >= 0)
         .sort((a, b) => String(a.sentDateTime).localeCompare(String(b.sentDateTime)))
@@ -335,6 +344,21 @@ function provider ({ world: w, counts, state, draftFor, clock }) {
         `${GRAPH_BASE}/me/mailFolders/${folder}/messages/delta?$deltatoken=C${folder}-${k + 1}`,
     })
   }
+}
+
+/**
+ * ONE thread's conversation fingerprint, computed with the REAL builders.
+ *
+ * A test that needs to read a specific row of outlook_thread_recovery has to address it by
+ * the same value the worker writes, and the only honest way to get that is to compute it the
+ * way the worker does - the connection id from the database, the raw conversation key from
+ * the fixture, through buildConversationFingerprintFields and the real key ring.
+ */
+async function conversationFingerprintOf (conv, ring = RING_V1) {
+  const connectionId = one(`SELECT id FROM public.microsoft_connections WHERE user_id='${U1}';`)
+  const set = await computeFingerprintSet(
+    buildConversationFingerprintFields({ connectionId, conversationKey: conv }), ring)
+  return set.writeFingerprint
 }
 
 // ── the run context, and one invocation ──────────────────────────────────────
@@ -489,11 +513,13 @@ const coveredFor = (cfp) => (one(`
   .split(',').filter(Boolean)
 
 const pendingInteractions = () => rows(`
-  SELECT id, status, left(coalesce(proposed_notes,''), 10), source_fingerprint
+  -- The note's LEADING TOKEN, which is the fixture's tag ('FIRST-NOTE', 'FRESH1-NOTE').
+  -- A fixed-width prefix cut the longer tags and padded the shorter ones with prose.
+  SELECT id, status, split_part(coalesce(proposed_notes,''), ' ', 1), source_fingerprint
     FROM public.interaction_candidates WHERE user_id='${U1}' ORDER BY created_at;`)
 
 const pendingNewContacts = () => rows(`
-  SELECT id, status, left(coalesce(draft_summary,''), 10), episode_fingerprint
+  SELECT id, status, split_part(coalesce(draft_summary,''), ' ', 1), episode_fingerprint
     FROM public.new_contact_candidates WHERE user_id='${U1}' ORDER BY created_at;`)
 
 // The note is multi-line by design, and psql -At would split one row across lines, so the
@@ -527,15 +553,25 @@ const NOTES = {
     + 'example. You said you would be there. Left open: whether the desk head attends.',
   SIXTH: 'SIXTH-NOTE She asked about your preferred start date and you said September. '
     + 'Left open: whether that fits the cohort calendar.',
+  GAP: 'GAP-NOTE You asked whether the panel feedback had come back and she replied that it '
+    + 'had, with one note about the modelling section. Left open: when the written version '
+    + 'arrives.',
+  FRESH1: 'FRESH1-NOTE She confirmed the referral went in and asked for your transcript. You '
+    + 'said you would send it this week. Left open: the deadline.',
+  FRESH2: 'FRESH2-NOTE She asked which office you would prefer and you said the city desk. '
+    + 'Left open: whether a rotation is possible.',
 }
 
 function draftFor (body) {
   const isNew = body.indexOf('new_contact_suggestion') >= 0
   // Chosen from the BODY TAGS the request carries, which is all the request has.
-  const which = /SIXTH-/.test(body) ? 'SIXTH'
-    : /FOURTH-/.test(body) ? 'FOURTH'
-      : /THIRD-/.test(body) ? 'THIRD'
-        : /LATER-/.test(body) ? 'LATER' : 'FIRST'
+  const which = /FRESH2-/.test(body) ? 'FRESH2'
+    : /FRESH1-/.test(body) ? 'FRESH1'
+      : /GAP-/.test(body) ? 'GAP'
+        : /SIXTH-/.test(body) ? 'SIXTH'
+          : /FOURTH-/.test(body) ? 'FOURTH'
+            : /THIRD-/.test(body) ? 'THIRD'
+              : /LATER-/.test(body) ? 'LATER' : 'FIRST'
   const base = {
     summary: NOTES[which],
     summary_evidence: 'explicit_body',
@@ -621,9 +657,9 @@ async function main () {
     test, psql, one, num, rows, thread, world, newCounts, round, makeDue, seed, ownContacts,
     refRows, coveredFor, pendingInteractions, pendingNewContacts, storedInteractions,
     RING_V1, RING_V2, draftFor, NOTES, applySegments, acceptInteraction, acceptNewContact,
-    http, TOK, U1, ME, KNOWN, STRANGER, LEGACY_NEW, LONG_NEW, LONG_SLOW,
+    http, TOK, U1, ME, KNOWN, STRANGER, LEGACY_NEW, LONG_NEW, LONG_SLOW, BOUNDARY,
     MAX_RECOVERY_MESSAGES_PER_FOLDER,
-    assert, SEGMENTS_MIGRATION, shippedRound,
+    assert, SEGMENTS_MIGRATION, shippedRound, conversationFingerprintOf,
   })
   void ctx
 

@@ -7,12 +7,14 @@
 export async function run (h) {
   const {
     test, thread, world, newCounts, round, seed, psql, num, rows, refRows, U1,
+    conversationFingerprintOf,
     pendingInteractions, pendingNewContacts, storedInteractions, RING_V1, RING_V2, draftFor,
     NOTES, applySegments, acceptInteraction, acceptNewContact, http, TOK, shippedRound,
-    ME, KNOWN, STRANGER, LEGACY_NEW, LONG_NEW, LONG_SLOW,
+    ME, KNOWN, STRANGER, LEGACY_NEW, LONG_NEW, LONG_SLOW, BOUNDARY,
     MAX_RECOVERY_MESSAGES_PER_FOLDER, assert,
   } = h
 
+  let boundaryCfpValue = null
   const open = (list) => list.filter((r) => r[1] === 'pending')
   // How many THREAD-LEVEL baselines exist. Thread state, not candidate state: it is
   // what a thread whose history cannot be located has instead of a coverage row.
@@ -28,6 +30,8 @@ export async function run (h) {
   // `episode:new-contact` for someone who was not.
   // ══════════════════════════════════════════════════════════════════════════
   psql(seed(), { tuplesOnly: false })
+  // Computed with the REAL builders, so a test addresses the same row the worker writes.
+  boundaryCfpValue = await conversationFingerprintOf('conv-long-boundary')
 
   const legacyKnown = thread({ party: KNOWN, conv: 'conv-legacy-known', turns: [
     ['them', '2026-09-01T09:00:00Z', 'FIRST-IN good to meet you at the panel on Tuesday.'],
@@ -72,6 +76,11 @@ export async function run (h) {
   longTurns.push(['me', '2026-10-04T15:00:00Z', 'FOURTH-OUT thank you, I will be there.'])
   longTurns.push(['them', '2026-10-18T09:00:00Z', 'SIXTH-IN one last question about the start date.'])
   longTurns.push(['me', '2026-10-18T15:00:00Z', 'SIXTH-OUT September, if that still works.'])
+  // THE GAP PAIR, for the baseline-only hint gate: the unanswered half is AFTER baseline
+  // initialization (2026-09-20) and BEFORE the latest settled segment (2026-09-27), which is
+  // exactly the interval a lost hint makes unreachable.
+  longTurns.push(['me', '2026-09-24T09:00:00Z', 'GAP-OUT did the panel feedback come back?'])
+  longTurns.push(['them', '2026-09-25T09:00:00Z', 'GAP-IN it did - one note on the modelling.'])
   const longThread = thread({ party: KNOWN, conv: 'conv-long-legacy', turns: longTurns })
   // THE SAME SHAPE for someone who was a STRANGER when the proposal was accepted, so the
   // long-history case is composed with the anchor-form transition.
@@ -79,6 +88,22 @@ export async function run (h) {
   // AND one more, reserved for the budget-starvation gate: a long legacy thread that has
   // never been completed, so its first listing still overflows and there is a retry to starve.
   const longSlowThread = thread({ party: LONG_SLOW, conv: 'conv-long-slow', turns: longTurns })
+  // AND the boundary thread: the same back-catalogue, but a pre-feature accepted exchange of
+  // FOUR messages at four instants, so one can be hidden and a different, earlier one
+  // re-delivered. Its baseline is initialized by a window at 2026-09-20.
+  const bTurns = longTurns.slice(0, HISTORY).concat([
+    ['me', '2026-09-01T09:00:00Z', 'ACC-A0 thank you for the introduction.'],
+    ['them', '2026-09-02T09:00:00Z', 'ACC-A1 glad to help - here is the team contact.'],
+    ['them', '2026-09-03T09:00:00Z', 'ACC-A2 one more name you should speak to.'],
+    ['me', '2026-09-04T09:00:00Z', 'ACC-A3 noted, I will write to them both.'],
+    ['them', '2026-09-20T09:00:00Z', 'BASE-IN the panel is being scheduled now.'],
+    ['me', '2026-09-20T15:00:00Z', 'BASE-OUT thank you, I will keep the week free.'],
+    ['them', '2026-10-01T09:00:00Z', 'FRESH1-IN the referral went in, can you send a transcript?'],
+    ['me', '2026-10-01T15:00:00Z', 'FRESH1-OUT yes, this week.'],
+    ['them', '2026-10-08T09:00:00Z', 'FRESH2-IN which office would you prefer?'],
+    ['me', '2026-10-08T15:00:00Z', 'FRESH2-OUT the city desk, if there is room.'],
+  ])
+  const boundaryThread = thread({ party: BOUNDARY, conv: 'conv-long-boundary', turns: bTurns })
   const longHist = longThread.ids.slice(0, HISTORY)
   const longFirst = longThread.ids.slice(HISTORY, HISTORY + 2)
   const longCont1 = longThread.ids.slice(HISTORY + 2, HISTORY + 4)   // LATER pair
@@ -96,14 +121,25 @@ export async function run (h) {
   const sFirst = longSlowThread.ids.slice(HISTORY, HISTORY + 2)
   const sCont1 = longSlowThread.ids.slice(HISTORY + 2, HISTORY + 4)
   const sCont2 = longSlowThread.ids.slice(HISTORY + 4, HISTORY + 6)
+  const nGapOut = [longNewThread.ids[HISTORY + 10]]
+  const nGapIn = [longNewThread.ids[HISTORY + 11]]
+  const bHist = boundaryThread.ids.slice(0, HISTORY)
+  const bAccepted = boundaryThread.ids.slice(HISTORY, HISTORY + 4)
+  const bInit = boundaryThread.ids.slice(HISTORY + 4, HISTORY + 6)
+  const bFresh1 = boundaryThread.ids.slice(HISTORY + 6, HISTORY + 8)
+  const bFresh2 = boundaryThread.ids.slice(HISTORY + 8, HISTORY + 10)
+  const reDelivered = boundaryThread.ids[HISTORY + 1]   // ACC-A1, the EARLIER one
+  const hiddenAccepted = boundaryThread.ids[HISTORY + 2] // ACC-A2, temporarily out of folders
+  let boundaryAt = null
+  const boundaryCfp = () => boundaryCfpValue
 
   const legacyWorld = world(legacyKnown, legacyNew, longThread, longNewThread,
-    longSlowThread)
+    longSlowThread, boundaryThread)
   const legacyState = {
     schedule: [
       // pre-migration: the original exchange of all three threads
       legacyKnown.ids.slice(0, 2).concat(legacyNew.ids.slice(0, 2))
-        .concat(longFirst).concat(nFirst).concat(sFirst),
+        .concat(longFirst).concat(nFirst).concat(sFirst).concat(bAccepted),
       legacyKnown.ids.slice(2, 4).concat(legacyNew.ids.slice(2, 4)),
       legacyKnown.ids.slice(4).concat(legacyNew.ids.slice(4)),
       longCont1.concat(nCont1),
@@ -114,9 +150,16 @@ export async function run (h) {
       sCont1,
       sCont2,                     //          and then the exchange after it, suggested
       [longAcceptedInbound, ...longCont4],  // Gate 2c: an accepted message RE-DELIVERED
+      nGapOut,                    // Gate 2d: one unanswered half on a BASELINE-ONLY row
+      nGapIn,                     //          its reply, in the next completed round
+      bInit,                      // Gate 2e: initialize the boundary thread's baseline
+      [reDelivered, ...bFresh1],  //          an EARLIER accepted message + a fresh exchange
+      [hiddenAccepted, ...bFresh2], //        the absent accepted message returns + a pair
     ],
     seen: new Set(),
-    always: new Set([...longHist, ...nHist, ...sHist]),
+    always: new Set([...longHist, ...nHist, ...sHist, ...bHist]),
+    // ACC-A2 is temporarily out of the tracked folders; Gate 2e puts it back.
+    hidden: new Set([hiddenAccepted]),
   }
   const legacyCounts = newCounts()
 
@@ -125,11 +168,11 @@ export async function run (h) {
       state: legacyState, ring: RING_V1, draftFor })
     await test('the SHIPPED worker proposes all four, with no coverage columns in existence', () => {
       assert.strictEqual(r.run.outcome, 'committed', JSON.stringify(r.report))
-      assert.strictEqual(r.run.accepted, 5, JSON.stringify(r.report))
+      assert.strictEqual(r.run.accepted, 6, JSON.stringify(r.report))
       assert.strictEqual(open(pendingInteractions()).length, 2,
         'the known contact, and the long thread which is also a known contact')
-      assert.strictEqual(open(pendingNewContacts()).length, 3,
-        'the unknown person, and two on long threads')
+      assert.strictEqual(open(pendingNewContacts()).length, 4,
+        'the unknown person, and three on long threads')
       assert.strictEqual(
         num("SELECT count(*) FROM information_schema.columns WHERE table_name='outlook_candidate_refs' AND column_name='covered_message_fingerprints';"),
         0, 'the coverage column must not exist yet, or these are not pre-feature rows')
@@ -148,8 +191,8 @@ export async function run (h) {
     }
 
     await test('all four are accepted, and BOTH unknown people are NOW CONTACTS', () => {
-      assert.strictEqual(storedInteractions().length, 5, 'five interactions exist')
-      for (const addr of [LEGACY_NEW, LONG_NEW, LONG_SLOW]) {
+      assert.strictEqual(storedInteractions().length, 6, 'six interactions exist')
+      for (const addr of [LEGACY_NEW, LONG_NEW, LONG_SLOW, BOUNDARY]) {
         assert.strictEqual(num(`SELECT count(*) FROM public.contacts WHERE email='${addr}';`),
           1, 'acceptance created the contact for ' + addr)
       }
@@ -165,7 +208,7 @@ export async function run (h) {
 
   await test('the pre-feature rows are genuine legacy rows: no thread, no coverage', () => {
     const refs = refRows()
-    assert.strictEqual(refs.length, 5, JSON.stringify(refs))
+    assert.strictEqual(refs.length, 6, JSON.stringify(refs))
     for (const r of refs) {
       assert.strictEqual(r[1], '-', 'conversation_fingerprint must be NULL: ' + JSON.stringify(r))
       assert.strictEqual(Number(r[2]), 0, 'no coverage: ' + JSON.stringify(r))
@@ -337,7 +380,7 @@ export async function run (h) {
       // which later segments are decided against.
       // THREE: the two long threads this gate drove, and the one Gate 2b has not reached yet.
       const stillLegacy = refRows().filter((r) => r[1] === '-' && Number(r[2]) === 0)
-      assert.strictEqual(stillLegacy.length, 3,
+      assert.strictEqual(stillLegacy.length, 4,
         'every long legacy row is untouched: ' + JSON.stringify(refRows()))
       const unchanged = refRows().filter((r) => !refsBefore.has(r[1] + '|' + r[4]))
       assert.strictEqual(unchanged.length, 0, 'and no candidate refs row was written at all')
@@ -543,8 +586,200 @@ export async function run (h) {
     await test('and the accepted interactions and their notes are unchanged', () => {
       assert.deepStrictEqual(storedInteractions(), accepted)
     })
+
+    // Decided, so the gates below start from a clean pending slate.
+    for (const row of open(pendingInteractions())) {
+      await acceptInteraction(row[0], NOTES.SIXTH + '\n\nMine: noted.')
+    }
   }
 
+  console.log('\nGATE 2d: the first hint on a BASELINE-ONLY row must survive')
+  // ══════════════════════════════════════════════════════════════════════════
+  // REPRODUCED against the real function: record_outlook_thread_recovery merged
+  // `unpaired || EXCLUDED.unpaired`, and on a baseline-only row the left side is NULL. In
+  // jsonb `NULL || x` is NULL, so the aggregate came back NULL, the function answered `ok`,
+  // and both hint columns stayed NULL. The first unpaired half on such a thread was dropped
+  // silently - recovery never reached back for it, both rounds committed, and no suggestion
+  // was ever produced.
+  {
+    const accepted = storedInteractions()
+
+    // ── the unanswered half: AFTER baseline initialization, BEFORE the latest settled
+    //    segment. Exactly the interval where a missing hint loses the exchange.
+    const half = await round({ world: legacyWorld, counts: legacyCounts, state: legacyState,
+      ring: RING_V1, draftFor })
+
+    await test('the unanswered half is RECORDED on the baseline-only row', () => {
+      assert.strictEqual(half.run.outcome, 'committed', JSON.stringify(half.report))
+      assert.strictEqual(half.report.created, 0, 'one side is not an exchange')
+      const got = rows(`SELECT array_length(baseline_fingerprints, 1),
+                               coalesce(jsonb_array_length(unpaired), 0),
+                               coalesce(earliest_unpaired_at::text, '-')
+                          FROM public.outlook_thread_recovery
+                         WHERE user_id='${U1}' AND conversation_fingerprint = (
+                           SELECT conversation_fingerprint FROM public.outlook_thread_recovery
+                            WHERE user_id='${U1}' AND baseline_fingerprints IS NOT NULL
+                              AND unpaired IS NOT NULL LIMIT 1);`)
+      assert.strictEqual(got.length, 1,
+        'a row carrying BOTH a baseline and a hint must exist: '
+        + JSON.stringify(rows(`SELECT coalesce(array_length(baseline_fingerprints,1),0),
+                                      coalesce(jsonb_array_length(unpaired),0)
+                                 FROM public.outlook_thread_recovery
+                                WHERE user_id='${U1}';`)))
+      assert.ok(Number(got[0][0]) >= 1, 'the baseline is preserved: ' + JSON.stringify(got[0]))
+      assert.strictEqual(Number(got[0][1]), 1, 'and the hint holds the one unpaired message')
+      assert.notStrictEqual(got[0][2], '-', 'with its derived instant')
+    })
+
+    // ── the reply, in the next COMPLETED round ──────────────────────────────
+    const pair = await round({ world: legacyWorld, counts: legacyCounts, state: legacyState,
+      ring: RING_V1, draftFor })
+
+    await test('both halves reach ONE draft, exactly once', () => {
+      assert.strictEqual(pair.run.outcome, 'committed', JSON.stringify(pair.report))
+      const i = open(pendingInteractions())
+      assert.strictEqual(i.length, 1,
+        'one suggestion: ' + JSON.stringify(pendingInteractions())
+        + ' | ' + JSON.stringify(pair.report))
+      assert.strictEqual(i[0][2], 'GAP-NOTE')
+      const sent = legacyCounts.modelBodies[legacyCounts.modelBodies.length - 1]
+      assert.ok(sent.indexOf('GAP-OUT') >= 0,
+        'the half from the EARLIER round must be present - this is what the hint is for')
+      assert.ok(sent.indexOf('GAP-IN') >= 0, 'and the reply from this round')
+      for (const tag of ['HIST-0', 'FIRST-OUT', 'FIRST-IN', 'LATER-IN', 'LATER-OUT',
+        'THIRD-IN', 'THIRD-OUT']) {
+        assert.ok(sent.indexOf(tag) < 0, tag + ' is settled or absorbed and must not be sent')
+      }
+    })
+
+    await test('the hint is then RESOLVED back to a baseline-only row', () => {
+      const n = num(`SELECT count(*) FROM public.outlook_thread_recovery
+                      WHERE user_id='${U1}' AND unpaired IS NOT NULL;`)
+      assert.strictEqual(n, 0, 'no hint survives its own resolution')
+      const b = num(`SELECT count(*) FROM public.outlook_thread_recovery
+                      WHERE user_id='${U1}' AND baseline_fingerprints IS NOT NULL;`)
+      assert.ok(b >= 1, 'and the baseline rows are still there, not deleted with the hints')
+    })
+
+    await test('the accepted interactions and their reviewed notes are unchanged', () => {
+      assert.deepStrictEqual(storedInteractions(), accepted)
+    })
+
+    for (const row of open(pendingInteractions())) {
+      await acceptInteraction(row[0], NOTES.GAP + '\n\nMine: noted.')
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  console.log('\nGATE 2e: the suppression boundary is fixed at INITIALIZATION')
+  // ══════════════════════════════════════════════════════════════════════════
+  // A genuine pre-feature accepted exchange of FOUR messages. One of them is temporarily out
+  // of the tracked folders; a different, EARLIER one is re-delivered beside a fresh exchange;
+  // then the absent one comes back beside another fresh pair.
+  //
+  // REPRODUCED: the first absorption lowered `baseline_from_at`, the worker used that
+  // minimum as its cutoff, and the returned accepted message - which sits between the new
+  // minimum and the initialization instant - counted as new and entered the model request.
+  {
+    const accepted = storedInteractions()
+
+    // ── 1. initialize this thread's forward-only baseline ───────────────────
+    const init = await round({ world: legacyWorld, counts: legacyCounts, state: legacyState,
+      ring: RING_V1, draftFor })
+    await test('the long thread initializes its baseline, and the boundary is recorded', () => {
+      assert.strictEqual(init.run.outcome, 'committed', JSON.stringify(init.report))
+      assert.ok((init.report.entry_skipped || {}).coverage_baselined >= 1,
+        'the window is absorbed: ' + JSON.stringify(init.report))
+      const got = rows(`SELECT baseline_boundary_at::text, baseline_from_at::text
+                          FROM public.outlook_thread_recovery
+                         WHERE user_id='${U1}' AND conversation_fingerprint='${boundaryCfp()}';`)
+      assert.strictEqual(got.length, 1, 'a baseline row exists for this thread')
+      assert.strictEqual(got[0][0], got[0][1],
+        'at initialization the boundary IS the span start: ' + JSON.stringify(got[0]))
+      boundaryAt = got[0][0]
+      assert.ok(boundaryAt.indexOf('2026-09-20') === 0,
+        'and it is the initializing window, not any accepted message: ' + boundaryAt)
+    })
+
+    // ── 2. an EARLIER accepted message is re-delivered beside a fresh exchange ─
+    const first = await round({ world: legacyWorld, counts: legacyCounts, state: legacyState,
+      ring: RING_V1, draftFor })
+
+    await test('the re-delivered accepted message is absorbed, and the fresh pair drafted', () => {
+      assert.strictEqual(first.run.outcome, 'committed', JSON.stringify(first.report))
+      const i = open(pendingInteractions())
+      assert.strictEqual(i.length, 1,
+        'one suggestion: ' + JSON.stringify(pendingInteractions())
+        + ' | ' + JSON.stringify(first.report))
+      assert.strictEqual(i[0][2], 'FRESH1-NOTE')
+      const sent = legacyCounts.modelBodies[legacyCounts.modelBodies.length - 1]
+      assert.ok(sent.indexOf('FRESH1-IN') >= 0 && sent.indexOf('FRESH1-OUT') >= 0)
+      for (const tag of ['ACC-A0', 'ACC-A1', 'ACC-A2', 'ACC-A3', 'BASE-IN', 'BASE-OUT']) {
+        assert.ok(sent.indexOf(tag) < 0, tag + ' is accepted or absorbed and must not be sent')
+      }
+    })
+
+    await test('the SPAN expanded but the BOUNDARY did not move', () => {
+      const got = rows(`SELECT baseline_boundary_at::text, baseline_from_at::text
+                          FROM public.outlook_thread_recovery
+                         WHERE user_id='${U1}' AND conversation_fingerprint='${boundaryCfp()}';`)
+      assert.strictEqual(got[0][0], boundaryAt,
+        'the boundary is set ONCE, at initialization: ' + JSON.stringify(got[0]))
+      assert.ok(got[0][1] < got[0][0],
+        'while the measured span now reaches further back: ' + JSON.stringify(got[0]))
+    })
+
+    await acceptInteraction(open(pendingInteractions())[0][0],
+      NOTES.FRESH1 + '\n\nMine: noted.')
+    const accepted2 = storedInteractions()
+
+    // ── 3. the temporarily absent accepted message RETURNS, beside another pair ─
+    legacyState.hidden.delete(hiddenAccepted)
+    const back = await round({ world: legacyWorld, counts: legacyCounts, state: legacyState,
+      ring: RING_V1, draftFor })
+
+    await test('the RETURNED accepted message never reaches the model', () => {
+      assert.strictEqual(back.run.outcome, 'committed', JSON.stringify(back.report))
+      const sent = legacyCounts.modelBodies[legacyCounts.modelBodies.length - 1]
+      // THE DEFECT, precisely: ACC-A2 sits between the lowered span minimum and the
+      // initialization boundary. With the span's minimum as the cutoff it was drafted.
+      assert.ok(sent.indexOf('ACC-A2') < 0,
+        'the returned accepted message must NOT be drafted again')
+      for (const tag of ['ACC-A0', 'ACC-A1', 'ACC-A3', 'BASE-IN', 'BASE-OUT',
+        'FRESH1-IN', 'FRESH1-OUT']) {
+        assert.ok(sent.indexOf(tag) < 0, tag + ' must not be sent again')
+      }
+      assert.ok(sent.indexOf('FRESH2-IN') >= 0 && sent.indexOf('FRESH2-OUT') >= 0,
+        'and the genuinely fresh pair IS drafted')
+    })
+
+    await test('the fresh exchange is captured once, claiming only its own messages', () => {
+      const i = open(pendingInteractions())
+      assert.strictEqual(i.length, 1,
+        'one suggestion: ' + JSON.stringify(pendingInteractions()))
+      assert.strictEqual(i[0][2], 'FRESH2-NOTE')
+      const fresh = refRows().filter((r) => Number(r[2]) === 2 && r[3] === 'draft')
+      assert.ok(fresh.length >= 1, 'its coverage names two messages: ' + JSON.stringify(fresh))
+    })
+
+    await test('the returned message is absorbed, and the boundary STILL has not moved', () => {
+      const got = rows(`SELECT baseline_boundary_at::text,
+                               array_length(baseline_fingerprints, 1)
+                          FROM public.outlook_thread_recovery
+                         WHERE user_id='${U1}' AND conversation_fingerprint='${boundaryCfp()}';`)
+      assert.strictEqual(got[0][0], boundaryAt, 'fixed at initialization, for good')
+      assert.ok(Number(got[0][1]) >= 4,
+        'and the absorbed set grew to take it in: ' + JSON.stringify(got[0]))
+    })
+
+    await test('every accepted interaction and reviewed note is unchanged', () => {
+      assert.deepStrictEqual(storedInteractions(), accepted2)
+      assert.strictEqual(accepted2.length, accepted.length + 1,
+        'only the one the reviewer accepted in this gate was added')
+    })
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
   // ══════════════════════════════════════════════════════════════════════════
   // ══════════════════════════════════════════════════════════════════════════
   // ══════════════════════════════════════════════════════════════════════════

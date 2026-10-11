@@ -131,10 +131,18 @@ export function normalizeCoverage (raw) {
     // The baseline, visible on its own: coverage that no draft describes.
     threadBaseline,
     threadBaselineThroughIso: iso(r.thread_baseline_through_at),
-    // THE START OF CONTINUOUS KNOWLEDGE for a thread whose history cannot be located. Below
-    // it, a message may belong to the pre-feature accepted exchange and must not be drafted;
-    // at or above it, everything was absorbed, covered, or genuinely new. Null for every
-    // thread that never needed a narrowed window, so ordinary delayed discovery is untouched.
+    // THE HISTORICAL SUPPRESSION BOUNDARY: fixed when the baseline was initialized and never
+    // moved. Below it, a message may belong to the pre-feature accepted exchange and must not
+    // be drafted; at or above it, everything was absorbed, covered, or genuinely new. Null for
+    // every thread that never needed a narrowed window, so ordinary delayed discovery is
+    // untouched.
+    //
+    // NOT the absorbed span's minimum. Reproduced against the real functions: absorbing an
+    // older message lowered that minimum, and a DIFFERENT accepted message sitting in the
+    // interval it opened then counted as new and reached the model. Expanding what is
+    // absorbed establishes nothing about the interval it spans.
+    threadBaselineBoundaryIso: iso(r.thread_baseline_boundary_at),
+    // The MEASURED span of what has been absorbed. Reported; decides no eligibility.
     threadBaselineFromIso: iso(r.thread_baseline_from_at),
     coverageThroughIso: throughCandidates.length === 0
       ? null

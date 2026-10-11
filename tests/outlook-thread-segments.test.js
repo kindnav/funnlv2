@@ -12,7 +12,7 @@ import { dirname, join } from 'node:path'
 import {
   MAX_SEGMENT_COVERAGE, normalizeCoverage, orderMessages, uncoveredMessages,
   decideSegment, recoveryFloorIso, coverageForSegment, segmentIsTwoSided, unpairedHintIso,
-  MAX_UNPAIRED_HINT_PAIRS, truncatedRetryFloorIso,
+  MAX_UNPAIRED_HINT_PAIRS, truncatedRetryFloorIso, splitAtKnowledgeFloor,
 } from '../supabase/functions/shared/outlookThreadSegments.js'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -324,6 +324,41 @@ test('the ORDINARY floor still refuses to exist without settled coverage', () =>
     .filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join(String.fromCharCode(10))
   assert.ok(!/proposed_interaction_date|interaction_date|reviewer/i.test(SRC_CODE),
     'and no floor is ever derived from a reviewer date')
+})
+
+test('the knowledge floor is the BOUNDARY, not the absorbed span', () => {
+  // Two different instants on purpose: the span reaches further back than the boundary, which
+  // is what happens as soon as anything older is absorbed. Only the boundary may decide
+  // eligibility - reproduced as a defect when the span's minimum was used.
+  const c = normalizeCoverage({
+    thread_baseline_fingerprints: [A],
+    thread_baseline_boundary_at: '2026-09-20T09:00:00+00:00',
+    thread_baseline_from_at: '2026-09-02T09:00:00+00:00',
+    thread_baseline_through_at: '2026-09-20T15:00:00+00:00',
+  })
+  assert.strictEqual(c.threadBaselineBoundaryIso, '2026-09-20T09:00:00+00:00')
+  assert.strictEqual(c.threadBaselineFromIso, '2026-09-02T09:00:00+00:00')
+  assert.ok(c.covered.has(A), 'and the absorbed set is still what makes a message covered')
+
+  // A message between the two: BELOW the boundary, so of unknown membership.
+  const between = msg(B, '2026-09-03T09:00:00Z')
+  const after = msg(C, '2026-10-01T09:00:00Z')
+  const byBoundary = splitAtKnowledgeFloor([between, after], c.threadBaselineBoundaryIso)
+  assert.deepStrictEqual(byBoundary.older.map((m) => m.messageFingerprint), [B])
+  assert.deepStrictEqual(byBoundary.drafted.map((m) => m.messageFingerprint), [C])
+  // Using the span's minimum instead would have called it new - the defect.
+  const bySpan = splitAtKnowledgeFloor([between, after], c.threadBaselineFromIso)
+  assert.deepStrictEqual(bySpan.older, [], 'which is exactly what went wrong')
+})
+
+test('the split compares INSTANTS, not strings', () => {
+  // Postgres hands back `+00:00` and a Graph envelope carries `Z`; at equal times '+' sorts
+  // BELOW 'Z', so a string comparison called an older message newer.
+  const same = msg(A, '2026-09-20T09:00:00Z')
+  const r = splitAtKnowledgeFloor([same], '2026-09-20T09:00:00+00:00')
+  assert.deepStrictEqual(r.drafted.map((m) => m.messageFingerprint), [A],
+    'the same instant in two notations is at the floor, not below it')
+  assert.deepStrictEqual(r.older, [])
 })
 
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed`)

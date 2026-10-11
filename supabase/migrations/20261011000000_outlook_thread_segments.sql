@@ -162,6 +162,18 @@ CREATE TABLE IF NOT EXISTS public.outlook_thread_recovery (
   -- A SET, not an instant, because coverage is set membership: two messages can share an
   -- instant, and a message can be discovered after a later one is already covered.
   baseline_fingerprints    text[],
+  -- THE HISTORICAL SUPPRESSION BOUNDARY, set ONCE when the baseline is initialized and never
+  -- moved afterwards. Below it, a message of this thread may belong to the pre-feature
+  -- accepted exchange and must not be drafted; at or above it, everything was absorbed,
+  -- covered, or genuinely seen as new.
+  --
+  -- SEPARATE FROM THE SPAN BELOW on purpose. Absorbing an older message expands what is
+  -- absorbed; it does NOT establish continuous knowledge of the interval that message opened
+  -- up. Reproduced: with the span's minimum used as the cutoff, a different accepted message
+  -- sitting between the new minimum and initialization counted as new and reached the model.
+  baseline_boundary_at     timestamptz,
+  -- The MEASURED span of what has been absorbed. Expands in both directions and decides
+  -- nothing; it is reported, and its upper end narrows a recovery listing.
   baseline_from_at         timestamptz,
   baseline_through_at      timestamptz,
   created_at               timestamptz NOT NULL DEFAULT now(),
@@ -182,9 +194,12 @@ CREATE TABLE IF NOT EXISTS public.outlook_thread_recovery (
     (baseline_fingerprints IS NULL AND baseline_from_at IS NULL
      AND baseline_through_at IS NULL)
     OR (baseline_fingerprints IS NOT NULL AND baseline_from_at IS NOT NULL
-        AND baseline_through_at IS NOT NULL
+        AND baseline_through_at IS NOT NULL AND baseline_boundary_at IS NOT NULL
         AND pg_catalog.array_length(baseline_fingerprints, 1) BETWEEN 1 AND 50
-        AND baseline_from_at <= baseline_through_at)),
+        AND baseline_from_at <= baseline_through_at
+        -- The boundary is inside the span it was taken from and never below its start.
+        AND baseline_from_at <= baseline_boundary_at
+        AND baseline_boundary_at <= baseline_through_at)),
   -- A row exists for a reason: a hint, a baseline, or both. Never empty.
   CONSTRAINT otr_not_empty CHECK (unpaired IS NOT NULL OR baseline_fingerprints IS NOT NULL),
   CONSTRAINT otr_conn_user_fk FOREIGN KEY (connection_id, user_id)
@@ -216,6 +231,7 @@ DECLARE
   v_at      timestamptz;
   v_cfps    text[];
   v_dropped int;
+  v_merged  jsonb;
 BEGIN
   IF p_conversation_fingerprint IS NULL OR p_conversation_fingerprint !~ '^[0-9a-f]{64}$' THEN
     RETURN jsonb_build_object('result', 'invalid_conversation_fingerprint');
@@ -269,41 +285,56 @@ BEGIN
                      AND conversation_fingerprint = ANY (v_cfps)), '[]'::jsonb)
          || p_unpaired) e;
 
-  -- MERGE the incoming pairs with what is already recorded, de-duplicated on the fingerprint,
-  -- keeping the EARLIEST instant for each - and bounded, so a pathological thread cannot grow
-  -- this row without limit. Over the bound the oldest pairs are kept, because they are the
-  -- ones a window has to reach.
+  -- MERGE the incoming pairs with what is already recorded, de-duplicated on the
+  -- fingerprint, keeping the EARLIEST instant for each - and bounded, so a pathological
+  -- thread cannot grow this row without limit.
+  --
+  -- ORDERED BY INSTANT, NOT BY FINGERPRINT. Truncating by fingerprint let 25 recent
+  -- low-sorting pairs evict an older, lexically higher one, which silently raised the floor
+  -- while still answering `ok` - and the oldest pairs are exactly the ones a recovery window
+  -- has to reach. Keeping the oldest preserves the floor by construction.
+  --
+  -- COALESCE on the existing value, because the row may be BASELINE-ONLY and carry no hint
+  -- at all. `NULL || x` is NULL in jsonb, so jsonb_array_elements saw no rows, the aggregate
+  -- came back NULL, and the function answered `ok` while leaving both hint columns NULL - the
+  -- first unpaired half on such a thread was dropped silently. Reproduced against the real
+  -- function.
+  --
+  -- COMPUTED HERE, not inside the ON CONFLICT clause, so the instant is written WITH the
+  -- pairs. Setting `unpaired` and leaving the instant to a following statement left a
+  -- baseline-only row holding pairs beside a NULL instant, which `otr_unpaired_together`
+  -- refuses - the RPC errored and the run reported `hint_write_failed`. Also reproduced.
+  SELECT pg_catalog.jsonb_agg(x ORDER BY (x->>'at')) INTO v_merged
+  FROM (
+    SELECT jsonb_build_object('fp', fp, 'at', at) AS x
+    FROM (
+      SELECT e->>'fp' AS fp, min(e->>'at') AS at
+      FROM pg_catalog.jsonb_array_elements(
+             COALESCE((SELECT unpaired FROM public.outlook_thread_recovery
+                        WHERE connection_id = p_connection_id
+                          AND conversation_fingerprint = p_conversation_fingerprint),
+                      '[]'::jsonb)
+             || p_unpaired) e
+      GROUP BY e->>'fp') d
+    ORDER BY d.at
+    LIMIT 25) q;
+  IF v_merged IS NULL THEN
+    -- Unreachable with a validated non-empty p_unpaired, and refused rather than written as
+    -- a row that would violate its own shape.
+    RETURN jsonb_build_object('result', 'invalid_unpaired');
+  END IF;
+
   INSERT INTO public.outlook_thread_recovery
     (connection_id, user_id, conversation_fingerprint, earliest_unpaired_at, unpaired)
   VALUES (p_connection_id, v_uid, p_conversation_fingerprint,
-          (SELECT min((e->>'at')::timestamptz) FROM pg_catalog.jsonb_array_elements(p_unpaired) e),
-          p_unpaired)
+          (SELECT min((e->>'at')::timestamptz)
+             FROM pg_catalog.jsonb_array_elements(v_merged) e),
+          v_merged)
   ON CONFLICT (connection_id, conversation_fingerprint) DO UPDATE
-    -- ORDERED BY INSTANT, NOT BY FINGERPRINT. Truncating by fingerprint let 25 recent
-    -- low-sorting pairs evict an older, lexically higher one, which silently raised the floor
-    -- while still answering `ok` - and the oldest pairs are exactly the ones a recovery window
-    -- has to reach. Keeping the oldest preserves the floor by construction.
-    SET unpaired = (
-          SELECT pg_catalog.jsonb_agg(x ORDER BY (x->>'at'))
-          FROM (
-            SELECT jsonb_build_object('fp', fp, 'at', at) AS x
-            FROM (
-              SELECT e->>'fp' AS fp, min(e->>'at') AS at
-              FROM pg_catalog.jsonb_array_elements(
-                     public.outlook_thread_recovery.unpaired || EXCLUDED.unpaired) e
-              GROUP BY e->>'fp') d
-            ORDER BY d.at
-            LIMIT 25) q),
+    SET unpaired = v_merged,
+        earliest_unpaired_at = (SELECT min((e->>'at')::timestamptz)
+                                  FROM pg_catalog.jsonb_array_elements(v_merged) e),
         updated_at = now()
-  RETURNING earliest_unpaired_at INTO v_at;
-
-  -- The instant is DERIVED from whatever survived the merge.
-  UPDATE public.outlook_thread_recovery
-     SET earliest_unpaired_at =
-           (SELECT min((e->>'at')::timestamptz)
-            FROM pg_catalog.jsonb_array_elements(unpaired) e)
-   WHERE connection_id = p_connection_id
-     AND conversation_fingerprint = p_conversation_fingerprint
   RETURNING earliest_unpaired_at INTO v_at;
 
   RETURN jsonb_build_object('result', 'ok', 'earliest_unpaired_at', v_at,
@@ -456,6 +487,9 @@ BEGIN
   base AS (
     SELECT w.cfp,
            pg_catalog.array_agg(DISTINCT f ORDER BY f) AS fps,
+           -- The BOUNDARY is the eligibility cutoff. Across ring variants the EARLIEST one
+           -- wins, because a thread must not become more permissive after a rotation.
+           min(tr.baseline_boundary_at) AS bnd,
            min(tr.baseline_from_at)    AS frm,
            max(tr.baseline_through_at) AS thru
     FROM want w
@@ -486,6 +520,9 @@ BEGIN
            -- drafted segment's coverage from a window nothing describes. The worker treats
            -- both as covered when deciding what is new.
            'thread_baseline_fingerprints',   COALESCE(bs.fps, ARRAY[]::text[]),
+           -- The fixed initialization boundary, and SEPARATELY the measured span. A caller
+           -- that confuses them re-opens the defect this split exists for.
+           'thread_baseline_boundary_at',    bs.bnd,
            'thread_baseline_from_at',        bs.frm,
            'thread_baseline_through_at',     bs.thru,
            'matched_conversation_fingerprint', mt.stored_cfp))
@@ -595,13 +632,18 @@ BEGIN
 
   INSERT INTO public.outlook_thread_recovery
     (connection_id, user_id, conversation_fingerprint,
-     baseline_fingerprints, baseline_from_at, baseline_through_at)
+     baseline_fingerprints, baseline_boundary_at, baseline_from_at, baseline_through_at)
   VALUES (p_connection_id, v_uid, p_conversation_fingerprint,
-          v_set, p_coverage_from_at, p_coverage_through_at)
+          v_set, p_coverage_from_at, p_coverage_from_at, p_coverage_through_at)
   ON CONFLICT (connection_id, conversation_fingerprint) DO UPDATE
     SET baseline_fingerprints = v_set,
-        -- FORWARD ONLY. A later window extends the span; it never pulls it back, because
-        -- pulling it back would re-expose messages this baseline already absorbed.
+        -- SET ONCE. The boundary belongs to the window that INITIALIZED the baseline, and a
+        -- later absorption must not move it: absorbing an older message does not establish
+        -- continuous knowledge of the interval it opened. COALESCE, not LEAST, so a row that
+        -- somehow has none takes this window's start and every later call leaves it alone.
+        baseline_boundary_at = COALESCE(
+          public.outlook_thread_recovery.baseline_boundary_at, p_coverage_from_at),
+        -- THE MEASURED SPAN still expands both ways. It decides nothing.
         baseline_from_at    = LEAST(
           COALESCE(public.outlook_thread_recovery.baseline_from_at, p_coverage_from_at),
           p_coverage_from_at),

@@ -350,5 +350,47 @@ test('the producer passes coverage through the pure plan builder, defaulting to 
   assert.ok(/segmentCoverage\?\.fingerprints/.test(stage), 'and the coverage from segmentCoverage')
 })
 
+test('the hint merge treats an ABSENT hint as empty, and writes both columns together', () => {
+  const fn = FORWARD.slice(FORWARD.indexOf('FUNCTION public.record_outlook_thread_recovery('))
+  const one = fn.slice(0, fn.indexOf('$fn$;') + 5)
+  // REPRODUCED: `unpaired || EXCLUDED.unpaired` with a NULL left side is NULL in jsonb, so
+  // the aggregate came back NULL and the function answered `ok` with both hint columns still
+  // NULL - the first unpaired half on a BASELINE-ONLY row was dropped silently.
+  assert.ok(/COALESCE\(\(SELECT unpaired FROM public\.outlook_thread_recovery/.test(one),
+    'the existing hint is read with COALESCE, so an absent one is an empty collection')
+  assert.ok(!/outlook_thread_recovery\.unpaired " + B + "|" + B + "| EXCLUDED/.test(one),
+    'and the NULL-propagating form is gone')
+  // And the pairs and their derived instant are written in ONE statement: leaving the instant
+  // to a following UPDATE left a baseline-only row holding pairs beside a NULL instant, which
+  // otr_unpaired_together refuses - reported as hint_write_failed.
+  const ins = one.slice(one.indexOf('INSERT INTO public.outlook_thread_recovery'))
+  const conflict = ins.slice(ins.indexOf('ON CONFLICT'))
+  assert.ok(/SET unpaired = v_merged/.test(conflict), 'the merged value is computed once')
+  assert.ok(/earliest_unpaired_at = \(SELECT min/.test(conflict),
+    'and its instant is set in the same statement')
+})
+
+test('the suppression BOUNDARY is set once; only the SPAN expands', () => {
+  const fn = FORWARD.slice(FORWARD.indexOf('FUNCTION public.baseline_outlook_thread_window('))
+  const one = fn.slice(0, fn.indexOf('$fn$;') + 5)
+  // REPRODUCED: the worker used the absorbed span's MINIMUM as its eligibility cutoff, so
+  // absorbing one older message lowered it and a different accepted message in the interval
+  // that opened up counted as new and reached the model.
+  assert.ok(/baseline_boundary_at = COALESCE\(/.test(one),
+    'the boundary is COALESCEd, never lowered')
+  assert.ok(!/baseline_boundary_at\s*=\s*LEAST/.test(one),
+    'and LEAST must never be applied to it')
+  assert.ok(/baseline_from_at\s*= LEAST\(/.test(one), 'while the span still expands downward')
+  assert.ok(/baseline_through_at = GREATEST\(/.test(one), 'and upward')
+  // The CHECK keeps the boundary inside the span it came from.
+  assert.ok(/baseline_from_at <= baseline_boundary_at/.test(FORWARD)
+            && /baseline_boundary_at <= baseline_through_at/.test(FORWARD),
+    'and the constraint keeps the boundary inside the measured span')
+  // The reader reports them separately, and takes the EARLIEST boundary across ring variants
+  // so a rotation cannot make a thread more permissive.
+  assert.ok(/'thread_baseline_boundary_at',    bs\.bnd/.test(FORWARD))
+  assert.ok(/min\(tr\.baseline_boundary_at\) AS bnd/.test(FORWARD))
+})
+
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed`)
 if (failed > 0) process.exit(1)
