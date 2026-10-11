@@ -391,6 +391,24 @@ export async function summarizeOneConversation (p) {
       .sort((a, b) => String(a.sentAt).localeCompare(String(b.sentAt)))
   }
 
+  // >>> 20261011 segments
+  // THE SEGMENT, AND ONLY THE SEGMENT. When the thread already has settled coverage the
+  // caller passes the message fingerprints this segment represents, and the bodies read - and
+  // therefore the model request built from them - are restricted to those. Without this the
+  // draft would describe the whole thread again and repeat an exchange the reviewer has
+  // already accepted. Absent, nothing is filtered and this is the unchanged read.
+  //
+  // The filter runs BEFORE selectBalancedHandles, so the per-direction reserve and the
+  // episode bounds apply to the segment rather than to the thread.
+  if (Array.isArray(p?.segmentMfps) && p.segmentMfps.length > 0) {
+    const allow = new Set(p.segmentMfps)
+    const kept = handles.filter((h) => allow.has(h.mfp))
+    // A segment with no readable handle is not a segment to draft from: leaving `handles`
+    // alone would silently widen the request back to the whole thread.
+    handles = kept
+  }
+  // <<< 20261011
+
   return summarizeConversation({
     conversation,
     consentVersion: consentVersion ?? null,
@@ -467,9 +485,26 @@ export function planContentWrite (entry, pass, opts = {}) {
       && entry.segmentCoverage.fingerprints.length > 0
       ? entry.segmentCoverage.fingerprints
       : null,
+    p_coverage_from_at: typeof entry?.segmentCoverage?.fromIso === 'string'
+      && entry.segmentCoverage.fromIso.length > 0
+      ? entry.segmentCoverage.fromIso
+      : null,
     p_coverage_through_at: typeof entry?.segmentCoverage?.throughIso === 'string'
       && entry.segmentCoverage.throughIso.length > 0
       ? entry.segmentCoverage.throughIso
+      : null,
+    // THE TWO LOOKUP SETS, and they are not interchangeable with the claim above.
+    // `conversationLookupFingerprints` is how a refs row written under a retired key is still
+    // FOUND - reproduced: without it the producer answered `created` for a settled exchange.
+    // `coveredLookupFingerprints` is how a hint recorded under a retired key is recognised as
+    // resolved. Neither is ever stored as coverage.
+    p_conversation_lookup_fingerprints: Array.isArray(entry?.conversationLookupFingerprints)
+      && entry.conversationLookupFingerprints.length > 0
+      ? entry.conversationLookupFingerprints
+      : null,
+    p_covered_lookup_fingerprints: Array.isArray(entry?.segmentCoverage?.aliases)
+      && entry.segmentCoverage.aliases.length > 0
+      ? entry.segmentCoverage.aliases
       : null,
     // <<< 20261011
   }

@@ -84,17 +84,29 @@ accepted prior key. Three consequences, each proven:
 
 - **Coverage decisions test any variant.** A message is already summarized if *any* of its ring
   variants is in the stored set.
-- **A write claims only current-key values.** The variants are for lookup; claiming an old-key
-  value would record coverage under a key being retired.
+- **A write claims ONE value per message**: the value it is already on record under when the
+  thread has seen that message before, and the current-key value otherwise. Keeping the stored
+  value stable is what makes a replay after a rotation produce the same claim the settled row
+  holds, so the producer's subset test still answers `exists_terminal`.
 - **The thread key migrates forward on touch.** The reader matches any variant and reports
   *which* one it found; the producer looks the row up by that variant and rewrites it to the
   current value, so a thread cannot fall out of the bounded ring.
 
-Coverage needs no variant *parameter* on the producers. A flat set of every variant cannot
-answer a per-message question - "every message is settled" and "one message has a variant that
-happens to be settled" would be indistinguishable - so the worker resolves each message to the
-value it is already on record under before passing it, and the plain subset test still holds.
-That was the second design; the first one was wrong in exactly that way.
+**Coverage takes a second, separate set - and the earlier claim that it needed none was
+wrong.** Reproduced: a recovery hint recorded under era 1 survived a coverage write under era 2
+*forever*, because cleanup compared the hint's fingerprint only against the **stored claim**.
+The two things are different and the producers now keep them apart:
+
+| parameter | what it is | stored? |
+|---|---|---|
+| `p_covered_fingerprints` | what the write **claims** - one value per message | yes |
+| `p_covered_lookup_fingerprints` | every variant those messages may be on record under, read to recognise a rotated hint | **never** |
+
+The original observation still holds for the claim: a flat set of every variant cannot answer a
+per-message question - "every message is settled" and "one message has a variant that happens to
+be settled" would be indistinguishable - so the worker resolves each message to one value before
+passing it, and the plain subset test is unchanged. What was wrong was concluding from that that
+no comparison set was needed anywhere.
 
 ## 4. Identity while a segment is pending
 
@@ -166,10 +178,32 @@ is written and the round's working records are erased on completion. The **inbou
 re-listed, in that round or any later one, because the delta will not show it again either.
 
 Round A now records `earliest_unpaired_at = 09:00`; round B reads it and lists from 09:00. The
-hint **lowers only** - a hint that rose could exclude a half it had already seen - and it is a
-floor hint and nothing else, never read to decide coverage. Holding it longer than strictly
-needed costs a wider listing window and nothing more, and that window is still one bounded page
-per folder.
+hint is a floor hint and nothing else, never read to decide coverage. Holding it longer than
+strictly needed costs a wider listing window and nothing more, and that window is still one
+bounded page per folder.
+
+**Both conclusions of "one-sided" record it, and only one of them used to.** A thread can be
+called one-sided in two places: by the segment decision, and - for a half first seen in a delta
+round - by **recovery**, which answers `not_two_sided` and returns no entry. Reproduced through
+the real handler: that second path returned before the segment block ran, so round 1 saw one
+outbound message, recovery confirmed one-sided, and the hint table stayed **empty**. Both paths
+now go through one `recordUnpairedHint` helper, and a failure to write the hint stops the round
+without committing rather than passing the conversation.
+
+**The hint is resolved, not merely lowered.** An earlier revision only ever lowered it, which
+was reproduced as harmful: once the half was covered the window still reached back over settled
+history, the single bounded page overflowed and the thread was abandoned
+`recovery_truncated`. So the hint records *which* messages are unpaired, and the coverage write
+that covers them deletes those pairs in the same transaction - comparing against the **aliases**,
+not the stored claim, which is the defect named in 3a.
+
+**At the bound it sheds the newest pair, never the oldest, and says so.** `MAX_UNPAIRED_HINT_PAIRS`
+= 25, one number shared by the module, the run and the function that enforces it. Truncating by
+fingerprint was reproduced as harmful: 25 recent low-sorting pairs evicted an older,
+lexically higher one, which silently raised the floor while the call still answered `ok`. The
+merge now orders by instant, so the survivors are the pairs a window has to reach, and `dropped`
+is measured **before** the merge and returned - after it the row holds only survivors and a
+count reads zero.
 
 **Coverage is never claimed for context lost during recovery.** When the widened window
 overflows, recovery reports `recovery_truncated` and returns no entry, so no write happens and
@@ -303,81 +337,117 @@ the migration or by a rollback.
 
 ## 9. What is demonstrated, and what is not
 
-**Demonstrated against the real functions and a disposable database**
-(`tests/sql/outlook-thread-segments-runtime.sql`, 15 sections): a settled exchange stays settled
-and its interaction and reviewed note are untouched; a later two-way exchange becomes a new
-pending suggestion; a replay is `exists_terminal`; messages sharing an instant are distinguished;
-a late-discovered older message is new; one pending segment per thread survives a refresh, a
-replay, a rotated key and delayed discovery; a metadata-only refresh and a rejected write advance
-no coverage; a concurrent dismissal yields `coverage_moved` and the new mail is then written;
-the new-contact transition keeps its coverage; a legacy thread refuses to guess and then works
-from its baseline; the lease fence refuses every new path; the constraints refuse half-written
-coverage; the acceptance RPCs are untouched.
+### Checkpoint 1 — the working worker flow
 
-**Demonstrated at the module boundary**: coverage decisions
-(`tests/outlook-thread-segments.test.js`, 17 tests) and bounded segment recovery against a fake
-mailbox that honours `$filter`, `$top` and `nextLink`
-(`tests/outlook-conversation-recovery.test.js`) — including that a thread with 30 historical
-inbox messages is abandoned `recovery_truncated` without a floor and recovers with one.
+The orchestration is **wired**, and the seven behaviours are demonstrated through the real
+worker handler (`handleOutlookImportWorker`), the real RPC contracts and the intercepted
+Anthropic request — `tests/outlook-two-sided-rounds.test.js`, section 9, 52 tests in the file:
 
-**Demonstrated as text** (`tests/outlook-thread-segments-migration.test.js`, 15 tests): both
-producers are byte-identical to the applied versions apart from marked blocks, with the single
-tolerated exception of a trailing comma, pinned explicitly and proven to be the only difference.
+| # | Demonstrated | How it is checked |
+|---|---|---|
+| D1 | An **accepted known-contact** exchange, then new two-way mail, produces exactly one new suggestion | `write_results { created: 1 }`, one further `upsert_outlook_interaction_candidate`, a different episode fingerprint |
+| D2 | The **unknown-person** path does the same | the same, via `upsert_new_contact_candidate` |
+| D3 | A **replay** of a pending exchange refreshes the one pending suggestion | `{ refreshed: 1 }`, same episode fingerprint, `created: 0` |
+| D4 | **Halves in separate completed rounds** are joined into one suggestion | round 1 records the hint (one pair, a fingerprint and its instant); round 2 writes once, claims the remembered half, and the hint is gone |
+| D5 | An **unanswered** message produces no draft, no suggestion, no model call | `candidates 0`, `model_calls 0`, `bodies 0`, `entry_skipped { not_two_sided: 1 }`, round still commits |
+| D6 | **Earlier accepted** interactions are never written again | a third round replays the whole thread: `{ refreshed: 1 }` on the pending segment, the accepted call byte-identical and never repeated, its coverage still settled |
+| D7 | A **failed required persistence operation** prevents cursor advancement | `get_outlook_thread_coverage` fails → `coverage_read_failed`; `record_outlook_thread_recovery` fails → `hint_write_failed`; both `cursors_advanced 0`, `finalize.cursor_advanced false`, nothing written |
 
-### Not demonstrated
+**The model request is inspected, not assumed.** D1 and D2 read the body the harness captured
+for the second suggestion and assert that both halves of the **later** exchange are present,
+that **neither** settled message is, and that no address appears. Only the segment's bodies are
+read for it — two, not four — so the exclusion is a property of what was fetched, not only of
+what was sent.
 
-- **The run-level orchestration is still not wired.** This is the remaining work, and the
-  design question that was blocking it is now RESOLVED, so what is left is mechanical rather
-  than open. The six call sites in `outlookImportRun.js`:
+### Demonstrated against the real functions and a disposable database
 
-  1. call `get_outlook_thread_coverage` once per page with each thread's
-     `{cfp, cfps, efp, efps}`;
-  2. call `baseline_outlook_thread_coverage` for a thread reporting `settled_without_coverage`,
-     and leave that thread alone for the rest of the round;
-  3. pass `recoveryFloorIso(...)` into `recoverConversation` as `sinceIso`;
-  4. build the message list for `decideSegment` from `stored.handles` plus
-     `recovery.extraHandles`;
-  5. apply `decideSegment`, filter the content handles to the segment, and attach
-     `segmentCoverage` plus `matched_conversation_fingerprint`;
-  6. call `record_outlook_thread_recovery` with the unpaired pairs when a thread has uncovered
-     mail it could not pair, and let the coverage write resolve them.
+`tests/sql/outlook-thread-segments-runtime.sql`, 20 sections, on a fresh
+`supabase/postgres:17.6.1.140` with the repo's own migrations applied in order: a settled
+exchange stays settled and its interaction and reviewed note are untouched; a later two-way
+exchange becomes a new pending suggestion; a replay is `exists_terminal`; messages sharing an
+instant are distinguished; a late-discovered older message is new; one pending segment per
+thread survives a refresh, a replay, a rotated key and delayed discovery; a metadata-only
+refresh and a rejected write advance no coverage; a concurrent dismissal yields `coverage_moved`
+and the new mail is then written; the new-contact transition keeps its coverage; a legacy thread
+refuses to guess and then works from its baseline; genuine rotation is found, migrated forward
+and still distinguishable; the hint is recorded, merged, partially resolved and fully removed;
+long legacy threads and legacy proposals that now resolve to a contact; re-consent as a
+same-account UPDATE preserves identity, cursors and dedup references; the lease fence refuses
+every new path; the constraints refuse half-written coverage; the acceptance RPCs are untouched.
 
-### The design question that was open, and its answer
+### Demonstrated at the module boundary
 
-**How can the run obtain ring variants at all?** `outlookRoundState` deliberately converts the
-raw Graph conversation and message keys to fingerprints and the run never persists the raw keys
-- that is a stated privacy property, not an oversight. So at write time the run holds
-fingerprints, and a fingerprint cannot be re-hashed under another key.
+Coverage decisions (`tests/outlook-thread-segments.test.js`, 21 tests, including that the
+hint-pair bound is one shared number); genuine rotation against the real builders and real key
+rings (`tests/outlook-thread-rotation.test.js`); bounded segment recovery against a fake mailbox
+that honours `$filter`, `$top` and `nextLink` (`tests/outlook-conversation-recovery.test.js`),
+including that a thread with 30 historical inbox messages is abandoned `recovery_truncated`
+without a floor and recovers with one.
 
-Three facts resolve it without any new column:
+### Demonstrated as text
 
-- **Message variants are computable.** Every message the content pass reads has a handle
-  carrying its *encrypted* provider id, and the run already decrypts those (`decryptCursor`, as
-  the recovery path does). So the run can recover the raw key and compute the full ring variant
-  set for exactly the messages it is about to draft from.
-- **Thread lookup does not need conversation variants.** `outlook_conversation_progress`
-  already persists `episode_lookup_fingerprints`, which is the current anchor under every ring
-  key. The reader and both producers therefore match a thread on
-  `conversation_fingerprint = ANY(cfps) OR episode_fingerprint = ANY(efps)`, and `efps` is
-  durable round state the run already has. The bounded episode lookup added for the legacy
-  case is the same mechanism.
-- **The model request is inspectable.** The handler harness in
-  `tests/outlook-two-sided-rounds.test.js` already intercepts `ANTHROPIC_MESSAGES_URL` in its
-  injected fetch, so asserting that a request carries the intended segment's context and not
-  the settled history needs no new harness.
+`tests/outlook-thread-segments-migration.test.js`, 19 tests: both producers are byte-identical
+to the applied versions apart from marked blocks, with the single tolerated exception of a
+trailing comma, pinned explicitly and proven to be the only difference; the hint merge sheds the
+newest pair rather than the oldest and reports what it dropped; the comparison aliases reach no
+stored column.
 
-Until the wiring lands the worker passes no coverage and **Production behaviour is exactly
-today's**, because every producer parameter defaults to NULL. The end-to-end demonstration
-through the real handler, the model-request inspection, and the composed rotation contract are
-therefore **not** carried by this PR.
+### Defects this pass reproduced and fixed
+
+Each was reproduced first, then fixed, and the fix is what the tests above now hold:
+
+1. **A rotated hint lived forever.** Cleanup compared against the stored claim, so a hint from
+   era 1 survived a coverage write in era 2. Fixed with `p_covered_lookup_fingerprints` — see 3a.
+2. **The hint bound silently raised the floor.** Truncating 25 pairs by fingerprint evicted an
+   older, lexically higher pair while answering `ok`. Now ordered by instant, with `dropped`
+   measured before the merge.
+3. **Episode aliases do not find a continuing thread.** A later segment's anchor is a different
+   message, so the settled segment read back `covered_fingerprints: []` and the producer
+   answered `created` for an exchange the reviewer had accepted. Fixed by looking the thread up
+   through the **conversation** fingerprint's ring variants, and by anchoring each segment on its
+   own first message (`segmentEpisodeFingerprint`) — reusing the thread anchor would also have
+   collided with the unique `source_fingerprint`.
+4. **A genuinely one-sided thread recorded no hint**, because recovery concluded it and returned
+   before the segment block — see section 6.
+5. **The segment's handle pre-read forfeited the whole round.** A transient handle-read failure
+   on one thread blocked every other thread in the round. It is now the retryable deferral that
+   vocabulary already had (`handles_unreadable`): the round stops without passing that
+   conversation and commits no cursor, but it is not a refusal.
+
+### Not demonstrated — the explicit gates before merge
+
+These are **acceptance gates, not optional polish**. Checkpoint 1 does not claim them:
+
+- **Genuine pre-feature new-contact initialization.** The legacy path is proven with a
+  constructed legacy row; it is not yet proven against a row written by the *shipped* producer
+  before this migration — both anchor forms, a NULL conversation fingerprint, NULL coverage, and
+  the person now an existing contact.
+- **Legacy history beyond the single-page recovery cap.** Section 19 of the SQL proof covers a
+  long legacy thread; the recovery cap itself is exercised at the module boundary. The two have
+  not been composed through the handler.
+- **Composed rotation including a reviewer decision during drafting.** Rotation is proven in SQL
+  and against the real builders, and a decision between rounds is proven through the handler.
+  Rotation *and* a decision landing in the same window — asserting both the stored state and the
+  resulting model request — is not yet demonstrated.
+
+### Also not demonstrated
+
 - Whether a tenant accepts the added `$filter` clause. The 400 path is handled; the owner-run
-  check establishes the fact, as it did for `conversationId eq`.
+  Graph Explorer check establishes the fact, as it did for `conversationId eq`.
 - Real-mail behaviour, which only the pilot answers.
 
 ### Pre-existing, re-confirmed
 
 Three older SQL proofs (`outlook-content-draft`, `outlook-pilot-reservation`,
 `outlook-user-rpc-grants`) assume a clean slate and fail when run after other files in one
-alphabetical sequence; each passes alone. `gmail-retention` fails alone and is unrelated. This
-file cleans up after itself, which the older ones do not — adding that teardown is what stopped
-it from making `outlook-token-rotation` fail on leftover state.
+alphabetical sequence; each passes alone, and `outlook-content-draft` was re-confirmed to do so
+on a fresh database during this pass. `gmail-retention` fails alone, with
+`{"result": "unauthorized"}`, and is unrelated: it fails identically with this migration
+**excluded**, which was checked explicitly. This file cleans up after itself, which the older
+ones do not — adding that teardown is what stopped it from making `outlook-token-rotation` fail
+on leftover state.
+
+Three existing SQL proofs pinned the producer's old arity and were updated to the new signature,
+which is what those pins exist for: `outlook-candidate-write-runtime`,
+`outlook-detailed-notes-runtime` and `outlook-known-contact-follow-up-runtime` (now 19
+arguments).

@@ -12,6 +12,7 @@ import { dirname, join } from 'node:path'
 import {
   MAX_SEGMENT_COVERAGE, normalizeCoverage, orderMessages, uncoveredMessages,
   decideSegment, recoveryFloorIso, coverageForSegment, segmentIsTwoSided, unpairedHintIso,
+  MAX_UNPAIRED_HINT_PAIRS,
 } from '../supabase/functions/shared/outlookThreadSegments.js'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -258,6 +259,28 @@ test('coverage is never decided by a timestamp comparison anywhere in the code',
   assert.ok(/set\.has\(/.test(fn), 'membership is the test')
   assert.ok(!/timestampIso/.test(fn.replace(/orderMessages\(messages\)/g, '')),
     'the coverage filter itself reads no timestamp')
+})
+
+test('the hint-pair bound is ONE number, shared with the function that enforces it', () => {
+  // The run trims to this; record_outlook_thread_recovery REFUSES a larger array and
+  // truncates a merged row to the same size. Two copies would drift, and the drift is not
+  // graceful: every hint write would come back invalid_unpaired, which stops the round.
+  assert.strictEqual(MAX_UNPAIRED_HINT_PAIRS, 25)
+  const MIG = readFileSync(join(ROOT,
+    'supabase/migrations/20261011000000_outlook_thread_segments.sql'), 'utf8')
+  const fn = MIG.slice(MIG.indexOf('FUNCTION public.record_outlook_thread_recovery('))
+  const one = fn.slice(0, fn.indexOf('$fn$;') + 5)
+  assert.ok(one.includes('jsonb_array_length(p_unpaired) > ' + MAX_UNPAIRED_HINT_PAIRS),
+    'the function refuses more pairs than the module sends')
+  assert.ok(one.includes('LIMIT ' + MAX_UNPAIRED_HINT_PAIRS),
+    'and truncates a merged row to the same bound')
+  assert.ok(one.includes('- ' + MAX_UNPAIRED_HINT_PAIRS + ', 0) INTO v_dropped'),
+    'and measures what it shed against the same bound')
+  const RUN = readFileSync(join(ROOT, 'supabase/functions/shared/outlookImportRun.js'), 'utf8')
+  assert.ok(/pairs\.length >= MAX_UNPAIRED_HINT_PAIRS/.test(RUN),
+    'the run trims to the shared constant, not to a literal')
+  assert.ok(!/\.slice\(0, 25\)/.test(RUN),
+    'and no literal 25 survives in the run')
 })
 
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed`)

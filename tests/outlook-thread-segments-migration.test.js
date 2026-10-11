@@ -202,8 +202,27 @@ test('the recovery hint is a bounded per-thread row, lowering only, and fenced',
     'the hint records which messages are unpaired, not only an instant')
   assert.ok(/public\.outlook_unpaired_valid\(unpaired\)/.test(FORWARD), 'with a checked shape')
   // ...is merged keeping the EARLIEST instant per fingerprint while a half is unresolved...
-  assert.ok(/min\(e->>'at'\) OVER \(PARTITION BY e->>'fp'\)/.test(FORWARD),
+  assert.ok(/SELECT e->>'fp' AS fp, min\(e->>'at'\) AS at/.test(FORWARD)
+            && /GROUP BY e->>'fp'/.test(FORWARD),
     'merging keeps the earliest instant for each unpaired message')
+  // ...and AT THE BOUND the OLDEST pairs survive. Truncating by fingerprint was reproduced as
+  // harmful: 25 recent low-sorting pairs evicted an older, lexically higher one, so the floor
+  // silently rose while the call still answered `ok`. Ordering by instant preserves the floor
+  // by construction, because the oldest pair is the one a recovery window has to reach.
+  assert.ok(/ORDER BY d\.at\s*LIMIT 25/.test(FORWARD),
+    'the bound sheds the NEWEST pairs, never the oldest')
+  assert.ok(!/ORDER BY \(x->>'fp'\)|LIMIT 25\) q\)[\s\S]{0,40}fp/.test(FORWARD),
+    'and never truncates on the fingerprint')
+  // ...and a shed pair is REPORTED, measured before the merge, because afterwards the row holds
+  // only the survivors and a post-merge count reads zero.
+  const rec = FORWARD.slice(FORWARD.indexOf('FUNCTION public.record_outlook_thread_recovery('))
+  const recOne = rec.slice(0, rec.indexOf('$fn$;') + 5)
+  assert.ok(/GREATEST\(count\(DISTINCT e->>'fp'\) - 25, 0\) INTO v_dropped/.test(recOne),
+    'the drop count is taken from the union BEFORE it is truncated')
+  assert.ok(recOne.indexOf('INTO v_dropped') < recOne.indexOf('ON CONFLICT'),
+    'and taken before the merge, not after it')
+  assert.ok(/'dropped', COALESCE\(v_dropped, 0\)/.test(recOne),
+    'and returned, so a caller can see that context was lost')
   // ...and is RESOLVED by the coverage write, in the same transaction, deleting before
   // updating because the shape constraint requires at least one pair.
   assert.strictEqual((FORWARD.match(/RESOLVE THE RECOVERY HINT/g) || []).length, 4,
@@ -213,7 +232,7 @@ test('the recovery hint is a bounded per-thread row, lowering only, and fenced',
   assert.ok(window.indexOf('DELETE FROM public.outlook_thread_recovery')
             < window.indexOf('UPDATE public.outlook_thread_recovery'),
     'the fully resolved row is deleted BEFORE the partial one is trimmed')
-  assert.ok(/WHERE NOT \(e->>'fp' = ANY \(v_seg_cov\)\)/.test(FORWARD),
+  assert.ok(/WHERE NOT \(e->>'fp' = ANY \(COALESCE\(v_cov_lk, v_seg_cov\)\)\)/.test(FORWARD),
     'and a pair survives only while the claim does not cover it')
   assert.ok(/ON DELETE CASCADE/.test(FORWARD.slice(FORWARD.indexOf('outlook_thread_recovery'))),
     'and it goes when the connection goes')
@@ -243,10 +262,31 @@ test('ROTATION: the thread is matched on ring variants and migrated forward on t
     'and the reader matches variants too')
   assert.ok(/'matched_conversation_fingerprint'/.test(FORWARD),
     'the reader says WHICH variant it found, so the worker can pass it back')
-  // Coverage needs no variant PARAMETER: a flat set cannot answer a per-message question, so
-  // the worker resolves each message to the value it is already stored under instead.
-  assert.ok(!/p_covered_lookup_fingerprints/.test(FORWARD),
-    'and coverage is resolved by the worker, not by a flat lookup set')
+  // COVERAGE TAKES A COMPARISON SET TOO, and the earlier revision's claim that it did not was
+  // wrong - reproduced: a hint recorded under era 1 survived a coverage write under era 2
+  // forever, because cleanup compared only against the STORED claim. The two are different
+  // things and the migration keeps them apart:
+  //   p_covered_fingerprints        what the write CLAIMS - one value per message, stored
+  //   p_covered_lookup_fingerprints every variant those messages may be on record under,
+  //                                 used to recognise a rotated hint, NEVER stored
+  assert.ok(/p_covered_lookup_fingerprints\s+text\[\]\s+DEFAULT NULL/.test(FORWARD),
+    'both producers take the coverage comparison aliases')
+  assert.ok(/comparison aliases for hint cleanup; never stored/.test(FORWARD),
+    'and the local that holds them says so')
+  assert.strictEqual((FORWARD.match(/COALESCE\(v_cov_lk, v_seg_cov\)/g) || []).length, 8,
+    'all four hint-cleanup sites of both producers compare against the aliases')
+  // And the aliases reach NO stored column. Every write of covered_message_fingerprints takes
+  // the claim.
+  const covWrites = [...FORWARD.matchAll(/covered_message_fingerprints\s*=([^,]*)/g)]
+  assert.ok(covWrites.length >= 4, 'both producers write coverage on both paths')
+  for (const m of covWrites) {
+    assert.ok(m[1].includes('v_seg_cov'),
+      'coverage is stored from the claim: ' + m[1].trim())
+    assert.ok(!m[1].includes('v_cov_lk'),
+      'and never from the aliases: ' + m[1].trim())
+  }
+  assert.ok(!/covered_message_fingerprints[\s\S]{0,80}v_cov_lk/.test(FORWARD),
+    'the alias set is never stored as coverage')
 })
 
 test('the NEW-CONTACT producer has the same two safeguards as the interaction one', () => {

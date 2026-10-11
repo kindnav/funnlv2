@@ -52,6 +52,15 @@
 /** An eligible segment may represent at most this many messages, so coverage stays bounded. */
 export const MAX_SEGMENT_COVERAGE = 50
 
+/**
+ * A recovery hint may hold at most this many unpaired messages for one thread.
+ *
+ * The SAME bound record_outlook_thread_recovery enforces on p_unpaired - a larger array is
+ * refused as invalid_unpaired - and the same bound it truncates a merged row to, keeping the
+ * OLDEST pairs, because the oldest is the one a recovery window has to reach.
+ */
+export const MAX_UNPAIRED_HINT_PAIRS = 25
+
 const FP_RE = /^[0-9a-f]{64}$/
 
 const isFp = (v) => typeof v === 'string' && FP_RE.test(v)
@@ -114,6 +123,12 @@ export function normalizeCoverage (raw) {
     // could not pair. Survives completed rounds, which is the only reason the cross-round
     // case can be assembled at all.
     earliestUnpairedIso: iso(r.earliest_unpaired_at),
+    // WHICH conversation value the thread is actually on record under. Passed back to the
+    // producer as its lookup, so a row written under a retired key is found - and then
+    // rewritten to the current value, migrating the thread key forward on touch.
+    matchedConversationFingerprint: isFp(r.matched_conversation_fingerprint)
+      ? r.matched_conversation_fingerprint
+      : null,
   }
 }
 

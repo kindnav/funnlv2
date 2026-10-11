@@ -178,6 +178,20 @@ async function makePorts (storedVersion) {
     throw new Error('unexpected select: ' + path)
   }
   const rpc = async (name, args) => {
+    // ── THREAD SEGMENTS: nothing settled here ─────────────────────────────────
+    // These fixtures have no decided exchange, so the honest answer is no coverage, and the
+    // run takes the single-exchange path it always took. The segment behaviour itself is
+    // proven against the real model in tests/outlook-two-sided-rounds.test.js.
+    if (name === 'get_outlook_thread_coverage') {
+      return { data: { result: 'ok', threads: [] }, error: null }
+    }
+    if (name === 'baseline_outlook_thread_coverage') {
+      return { data: { result: 'ok', initialized: 0 }, error: null }
+    }
+    if (name === 'record_outlook_thread_recovery') {
+      return { data: { result: 'ok', earliest_unpaired_at: null, unpaired: 1, dropped: 0 },
+               error: null }
+    }
     if (name === 'reserve_due_outlook_connection') {
       return { data: { result: 'reserved', connection_id: CONN, user_id: PILOT, run_id: 'run-1' }, error: null }
     }

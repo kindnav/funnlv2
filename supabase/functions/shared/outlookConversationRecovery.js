@@ -236,7 +236,14 @@ export async function recoverConversation (p) {
   // The fingerprint is HMAC(connection, conversation key). A thread that does not fold
   // to the record the round holds is not the conversation it was asked about.
   if (!contribution) return settled('recovery_mismatch', stats)
-  if (contribution.inbound === 0 || contribution.outbound === 0) return settled('not_two_sided', stats)
+  if (contribution.inbound === 0 || contribution.outbound === 0) {
+    // STILL ONE-SIDED after asking Outlook. The caller must REMEMBER the unanswered
+    // message, or a reply that arrives in a later round can never be paired with it:
+    // this round's own records go when it completes, and the delta will not show the
+    // message again. Recording that needs the thread's ring variants, so the raw key
+    // goes back with the settlement - in memory only, like the recovered case below.
+    return { ...settled('not_two_sided', stats), conversationKey: conversationId }
+  }
 
   // The same decision the finalisation makes for a round-held record, including the one
   // resolvable taint: an unknown counterparty whose headers the content pass must screen.
@@ -260,7 +267,11 @@ export async function recoverConversation (p) {
       keyVersion: Number.isInteger(h.key_version) ? h.key_version : 1,
     })
   }
-  return { outcome: 'recovered', entry: decided.entry, extraHandles, stats }
+  // THE RAW CONVERSATION KEY, IN MEMORY ONLY. The run cannot compute the thread's or its
+  // messages' ring variants from a fingerprint - a fingerprint cannot be re-hashed - and this
+  // envelope GET is the one place the key is already in hand. It is handed back for that and
+  // nothing else: it is never persisted, never logged, and never leaves the invocation.
+  return { outcome: 'recovered', entry: decided.entry, extraHandles, stats, conversationKey: conversationId }
 }
 
 function retryOrSettle (reason, stats) {

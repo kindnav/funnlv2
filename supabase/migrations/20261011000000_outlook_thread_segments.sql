@@ -187,6 +187,7 @@ DECLARE
   v_leaseok boolean;
   v_at      timestamptz;
   v_cfps    text[];
+  v_dropped int;
 BEGIN
   IF p_conversation_fingerprint IS NULL OR p_conversation_fingerprint !~ '^[0-9a-f]{64}$' THEN
     RETURN jsonb_build_object('result', 'invalid_conversation_fingerprint');
@@ -229,6 +230,17 @@ BEGIN
      AND conversation_fingerprint = ANY (v_cfps)
      AND conversation_fingerprint IS DISTINCT FROM p_conversation_fingerprint;
 
+  -- NOT SILENT AT THE BOUND, and measured BEFORE the merge: afterwards the row holds only the
+  -- survivors, so a post-merge count cannot see what was shed. `dropped` lets a caller observe
+  -- that context was lost instead of discovering it later as a floor that will not go down.
+  -- The floor itself is safe by construction, because the survivors are the OLDEST pairs.
+  SELECT GREATEST(count(DISTINCT e->>'fp') - 25, 0) INTO v_dropped
+  FROM pg_catalog.jsonb_array_elements(
+         COALESCE((SELECT unpaired FROM public.outlook_thread_recovery
+                   WHERE connection_id = p_connection_id
+                     AND conversation_fingerprint = ANY (v_cfps)), '[]'::jsonb)
+         || p_unpaired) e;
+
   -- MERGE the incoming pairs with what is already recorded, de-duplicated on the fingerprint,
   -- keeping the EARLIEST instant for each - and bounded, so a pathological thread cannot grow
   -- this row without limit. Over the bound the oldest pairs are kept, because they are the
@@ -239,14 +251,20 @@ BEGIN
           (SELECT min((e->>'at')::timestamptz) FROM pg_catalog.jsonb_array_elements(p_unpaired) e),
           p_unpaired)
   ON CONFLICT (connection_id, conversation_fingerprint) DO UPDATE
+    -- ORDERED BY INSTANT, NOT BY FINGERPRINT. Truncating by fingerprint let 25 recent
+    -- low-sorting pairs evict an older, lexically higher one, which silently raised the floor
+    -- while still answering `ok` - and the oldest pairs are exactly the ones a recovery window
+    -- has to reach. Keeping the oldest preserves the floor by construction.
     SET unpaired = (
           SELECT pg_catalog.jsonb_agg(x ORDER BY (x->>'at'))
           FROM (
-            SELECT DISTINCT ON (e->>'fp')
-                   jsonb_build_object('fp', e->>'fp', 'at', min(e->>'at') OVER (PARTITION BY e->>'fp')) AS x
-            FROM pg_catalog.jsonb_array_elements(
-                   public.outlook_thread_recovery.unpaired || EXCLUDED.unpaired) e
-            ORDER BY e->>'fp', e->>'at'
+            SELECT jsonb_build_object('fp', fp, 'at', at) AS x
+            FROM (
+              SELECT e->>'fp' AS fp, min(e->>'at') AS at
+              FROM pg_catalog.jsonb_array_elements(
+                     public.outlook_thread_recovery.unpaired || EXCLUDED.unpaired) e
+              GROUP BY e->>'fp') d
+            ORDER BY d.at
             LIMIT 25) q),
         updated_at = now()
   RETURNING earliest_unpaired_at INTO v_at;
@@ -261,6 +279,7 @@ BEGIN
   RETURNING earliest_unpaired_at INTO v_at;
 
   RETURN jsonb_build_object('result', 'ok', 'earliest_unpaired_at', v_at,
+                            'dropped', COALESCE(v_dropped, 0),
                             'unpaired', (SELECT pg_catalog.jsonb_array_length(unpaired)
                                          FROM public.outlook_thread_recovery
                                          WHERE connection_id = p_connection_id
@@ -607,7 +626,12 @@ CREATE OR REPLACE FUNCTION public.upsert_outlook_interaction_candidate(
   -- Coverage needs no equivalent parameter: the worker resolves each message to the variant it
   -- is already on record under before passing it, so the plain subset test still holds. A flat
   -- set of every variant could not answer a PER-MESSAGE question, which is why it is not one.
-  p_conversation_lookup_fingerprints text[] DEFAULT NULL
+  p_conversation_lookup_fingerprints text[] DEFAULT NULL,
+  -- COMPARISON ALIASES, never stored. Every value the covered messages may ALREADY be on
+  -- record under, so a hint recorded before a key rotation can still be recognised as
+  -- resolved. The stored claim stays p_covered_fingerprints: mixing the two would record an
+  -- era's worth of aliases as coverage.
+  p_covered_lookup_fingerprints      text[] DEFAULT NULL
   -- <<< 20261011
 )
 RETURNS jsonb
@@ -631,6 +655,7 @@ DECLARE
   v_pend    uuid;      -- this thread's pending segment, if it has one
   v_newfp   int;       -- how many incoming fingerprints are NOT already settled
   v_cfps    text[];    -- the thread's ring variants, the current value included
+  v_cov_lk  text[];    -- comparison aliases for hint cleanup; never stored
   -- <<< 20261011
 BEGIN
   -- ── shape validation, before any lock is taken ────────────────────────────
@@ -745,6 +770,19 @@ BEGIN
     FROM pg_catalog.unnest(
       pg_catalog.array_append(COALESCE(p_conversation_lookup_fingerprints, ARRAY[]::text[]),
                               p_conversation_fingerprint)) f
+    WHERE f ~ '^[0-9a-f]{64}$';
+  END IF;
+  -- The aliases a hint may be recorded under. Bounded by the ring times the coverage bound,
+  -- validated, and the claim itself is always a member so a caller that passes none behaves
+  -- exactly as before.
+  IF v_seg_cov IS NOT NULL THEN
+    IF pg_catalog.array_length(COALESCE(p_covered_lookup_fingerprints, ARRAY[]::text[]), 1) > 250 THEN
+      RETURN jsonb_build_object('result', 'invalid_coverage_set');
+    END IF;
+    SELECT pg_catalog.array_agg(DISTINCT f)
+      INTO v_cov_lk
+    FROM pg_catalog.unnest(
+      COALESCE(p_covered_lookup_fingerprints, ARRAY[]::text[]) || v_seg_cov) f
     WHERE f ~ '^[0-9a-f]{64}$';
   END IF;
   -- <<< 20261011
@@ -968,11 +1006,11 @@ BEGIN
          AND tr.conversation_fingerprint = ANY (v_cfps)
          AND NOT EXISTS (
            SELECT 1 FROM pg_catalog.jsonb_array_elements(tr.unpaired) e
-           WHERE NOT (e->>'fp' = ANY (v_seg_cov)));
+           WHERE NOT (e->>'fp' = ANY (COALESCE(v_cov_lk, v_seg_cov))));
       UPDATE public.outlook_thread_recovery tr
          SET unpaired = (SELECT pg_catalog.jsonb_agg(e ORDER BY (e->>'at'))
                          FROM pg_catalog.jsonb_array_elements(tr.unpaired) e
-                         WHERE NOT (e->>'fp' = ANY (v_seg_cov))),
+                         WHERE NOT (e->>'fp' = ANY (COALESCE(v_cov_lk, v_seg_cov)))),
              conversation_fingerprint = p_conversation_fingerprint,
              updated_at = now()
        WHERE tr.connection_id = p_connection_id
@@ -1044,11 +1082,11 @@ BEGIN
        AND tr.conversation_fingerprint = ANY (v_cfps)
        AND NOT EXISTS (
          SELECT 1 FROM pg_catalog.jsonb_array_elements(tr.unpaired) e
-         WHERE NOT (e->>'fp' = ANY (v_seg_cov)));
+         WHERE NOT (e->>'fp' = ANY (COALESCE(v_cov_lk, v_seg_cov))));
     UPDATE public.outlook_thread_recovery tr
        SET unpaired = (SELECT pg_catalog.jsonb_agg(e ORDER BY (e->>'at'))
                        FROM pg_catalog.jsonb_array_elements(tr.unpaired) e
-                       WHERE NOT (e->>'fp' = ANY (v_seg_cov))),
+                       WHERE NOT (e->>'fp' = ANY (COALESCE(v_cov_lk, v_seg_cov)))),
            conversation_fingerprint = p_conversation_fingerprint,
            updated_at = now()
      WHERE tr.connection_id = p_connection_id
@@ -1104,7 +1142,12 @@ CREATE OR REPLACE FUNCTION public.upsert_new_contact_candidate(
   -- Coverage needs no equivalent parameter: the worker resolves each message to the variant it
   -- is already on record under before passing it, so the plain subset test still holds. A flat
   -- set of every variant could not answer a PER-MESSAGE question, which is why it is not one.
-  p_conversation_lookup_fingerprints text[] DEFAULT NULL
+  p_conversation_lookup_fingerprints text[] DEFAULT NULL,
+  -- COMPARISON ALIASES, never stored. Every value the covered messages may ALREADY be on
+  -- record under, so a hint recorded before a key rotation can still be recognised as
+  -- resolved. The stored claim stays p_covered_fingerprints: mixing the two would record an
+  -- era's worth of aliases as coverage.
+  p_covered_lookup_fingerprints      text[] DEFAULT NULL
   -- <<< 20261011
 )
 RETURNS jsonb
@@ -1130,6 +1173,7 @@ DECLARE
   v_pend    uuid;
   v_newfp   int;
   v_cfps    text[];
+  v_cov_lk  text[];
   -- <<< 20261011
 BEGIN
   -- -- shape validation, before any lock is taken -----------------------------
@@ -1182,6 +1226,19 @@ BEGIN
     FROM pg_catalog.unnest(
       pg_catalog.array_append(COALESCE(p_conversation_lookup_fingerprints, ARRAY[]::text[]),
                               p_conversation_fingerprint)) f
+    WHERE f ~ '^[0-9a-f]{64}$';
+  END IF;
+  -- The aliases a hint may be recorded under. Bounded by the ring times the coverage bound,
+  -- validated, and the claim itself is always a member so a caller that passes none behaves
+  -- exactly as before.
+  IF v_seg_cov IS NOT NULL THEN
+    IF pg_catalog.array_length(COALESCE(p_covered_lookup_fingerprints, ARRAY[]::text[]), 1) > 250 THEN
+      RETURN jsonb_build_object('result', 'invalid_coverage_set');
+    END IF;
+    SELECT pg_catalog.array_agg(DISTINCT f)
+      INTO v_cov_lk
+    FROM pg_catalog.unnest(
+      COALESCE(p_covered_lookup_fingerprints, ARRAY[]::text[]) || v_seg_cov) f
     WHERE f ~ '^[0-9a-f]{64}$';
   END IF;
   -- <<< 20261011
@@ -1405,11 +1462,11 @@ BEGIN
          AND tr.conversation_fingerprint = ANY (v_cfps)
          AND NOT EXISTS (
            SELECT 1 FROM pg_catalog.jsonb_array_elements(tr.unpaired) e
-           WHERE NOT (e->>'fp' = ANY (v_seg_cov)));
+           WHERE NOT (e->>'fp' = ANY (COALESCE(v_cov_lk, v_seg_cov))));
       UPDATE public.outlook_thread_recovery tr
          SET unpaired = (SELECT pg_catalog.jsonb_agg(e ORDER BY (e->>'at'))
                          FROM pg_catalog.jsonb_array_elements(tr.unpaired) e
-                         WHERE NOT (e->>'fp' = ANY (v_seg_cov))),
+                         WHERE NOT (e->>'fp' = ANY (COALESCE(v_cov_lk, v_seg_cov)))),
              conversation_fingerprint = p_conversation_fingerprint,
              updated_at = now()
        WHERE tr.connection_id = p_connection_id
@@ -1474,11 +1531,11 @@ BEGIN
        AND tr.conversation_fingerprint = ANY (v_cfps)
        AND NOT EXISTS (
          SELECT 1 FROM pg_catalog.jsonb_array_elements(tr.unpaired) e
-         WHERE NOT (e->>'fp' = ANY (v_seg_cov)));
+         WHERE NOT (e->>'fp' = ANY (COALESCE(v_cov_lk, v_seg_cov))));
     UPDATE public.outlook_thread_recovery tr
        SET unpaired = (SELECT pg_catalog.jsonb_agg(e ORDER BY (e->>'at'))
                        FROM pg_catalog.jsonb_array_elements(tr.unpaired) e
-                       WHERE NOT (e->>'fp' = ANY (v_seg_cov))),
+                       WHERE NOT (e->>'fp' = ANY (COALESCE(v_cov_lk, v_seg_cov)))),
            conversation_fingerprint = p_conversation_fingerprint,
            updated_at = now()
      WHERE tr.connection_id = p_connection_id
@@ -1517,11 +1574,11 @@ REVOKE ALL ON FUNCTION public.baseline_outlook_thread_coverage(uuid, uuid, text,
   FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.upsert_outlook_interaction_candidate(
   uuid, uuid, uuid, text, text, smallint, text, date, text[], text, text, text, text,
-  text, text[], timestamptz, timestamptz, text[])
+  text, text[], timestamptz, timestamptz, text[], text[])
   FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.upsert_new_contact_candidate(
   uuid, uuid, text, text, smallint, text, date, text, text, text, text, text, text, text,
-  text, text[], timestamptz, timestamptz, text[])
+  text, text[], timestamptz, timestamptz, text[], text[])
   FROM PUBLIC, anon, authenticated;
 
 GRANT EXECUTE ON FUNCTION public.record_outlook_thread_recovery(uuid, uuid, text, jsonb, text[]) TO service_role;
@@ -1529,10 +1586,10 @@ GRANT EXECUTE ON FUNCTION public.get_outlook_thread_coverage(uuid, uuid, jsonb) 
 GRANT EXECUTE ON FUNCTION public.baseline_outlook_thread_coverage(uuid, uuid, text, text, text[], text[], timestamptz, timestamptz) TO service_role;
 GRANT EXECUTE ON FUNCTION public.upsert_outlook_interaction_candidate(
   uuid, uuid, uuid, text, text, smallint, text, date, text[], text, text, text, text,
-  text, text[], timestamptz, timestamptz, text[]) TO service_role;
+  text, text[], timestamptz, timestamptz, text[], text[]) TO service_role;
 GRANT EXECUTE ON FUNCTION public.upsert_new_contact_candidate(
   uuid, uuid, text, text, smallint, text, date, text, text, text, text, text, text, text,
-  text, text[], timestamptz, timestamptz, text[]) TO service_role;
+  text, text[], timestamptz, timestamptz, text[], text[]) TO service_role;
 
 -- The acceptance RPCs are NOT re-issued here and keep their 10,000-character reviewed-note
 -- allowance and their authenticated-only grant. A later segment becomes a NEW interaction

@@ -177,13 +177,13 @@ BEGIN
            WHERE n.nspname = 'public' AND p.proname = 'upsert_new_contact_candidate') = 1;
   -- both producers remain worker-only
   ASSERT has_function_privilege('service_role',
-    'public.upsert_outlook_interaction_candidate(uuid, uuid, uuid, text, text, smallint, text, date, text[], text, text, text, text, text, text[], timestamptz, timestamptz, text[])', 'EXECUTE');
+    'public.upsert_outlook_interaction_candidate(uuid, uuid, uuid, text, text, smallint, text, date, text[], text, text, text, text, text, text[], timestamptz, timestamptz, text[], text[])', 'EXECUTE');
   ASSERT NOT has_function_privilege('authenticated',
-    'public.upsert_outlook_interaction_candidate(uuid, uuid, uuid, text, text, smallint, text, date, text[], text, text, text, text, text, text[], timestamptz, timestamptz, text[])', 'EXECUTE');
+    'public.upsert_outlook_interaction_candidate(uuid, uuid, uuid, text, text, smallint, text, date, text[], text, text, text, text, text, text[], timestamptz, timestamptz, text[], text[])', 'EXECUTE');
   ASSERT has_function_privilege('service_role',
-    'public.upsert_new_contact_candidate(uuid, uuid, text, text, smallint, text, date, text, text, text, text, text, text, text, text, text[], timestamptz, timestamptz, text[])', 'EXECUTE');
+    'public.upsert_new_contact_candidate(uuid, uuid, text, text, smallint, text, date, text, text, text, text, text, text, text, text, text[], timestamptz, timestamptz, text[], text[])', 'EXECUTE');
   ASSERT NOT has_function_privilege('authenticated',
-    'public.upsert_new_contact_candidate(uuid, uuid, text, text, smallint, text, date, text, text, text, text, text, text, text, text, text[], timestamptz, timestamptz, text[])', 'EXECUTE');
+    'public.upsert_new_contact_candidate(uuid, uuid, text, text, smallint, text, date, text, text, text, text, text, text, text, text, text[], timestamptz, timestamptz, text[], text[])', 'EXECUTE');
   -- and the reviewed-note allowance is still the larger one
   ASSERT (SELECT pg_get_functiondef(p.oid) LIKE '%char_length(v_notes) > 10000%' FROM pg_proc p
            WHERE p.oid = 'public.accept_interaction_candidate(uuid, text, date, text, text, date)'::regprocedure);
