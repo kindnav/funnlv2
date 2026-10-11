@@ -146,11 +146,24 @@ CREATE TABLE IF NOT EXISTS public.outlook_thread_recovery (
   conversation_fingerprint text        NOT NULL,
   -- The earliest instant among the pairs below, maintained alongside them so a reader needs
   -- one column rather than a jsonb scan. It is DERIVED: every write recomputes it.
-  earliest_unpaired_at     timestamptz NOT NULL,
+  -- NULLABLE, because a row may now exist for a thread BASELINE alone.
+  earliest_unpaired_at     timestamptz,
   -- WHICH messages are unpaired, and when each was seen: [{"fp": <64 hex>, "at": <instant>}].
   -- Without the fingerprints a hint can never be resolved - only lowered forever - and a
   -- resolved hint is what forced the window back over settled history and truncated the page.
-  unpaired                 jsonb       NOT NULL,
+  unpaired                 jsonb,
+  -- ── THE THREAD-LEVEL FORWARD-ONLY BASELINE ────────────────────────────────
+  -- The messages a bounded window absorbed for a thread whose settled coverage CANNOT be
+  -- established: a pre-feature row with no conversation fingerprint, whose episode anchor is
+  -- the first message of an exchange a long back-catalogue hides. No refs row can hold this -
+  -- ocr_exactly_one_target requires a candidate - and without it the same window would be
+  -- re-absorbed every round for ever.
+  --
+  -- A SET, not an instant, because coverage is set membership: two messages can share an
+  -- instant, and a message can be discovered after a later one is already covered.
+  baseline_fingerprints    text[],
+  baseline_from_at         timestamptz,
+  baseline_through_at      timestamptz,
   created_at               timestamptz NOT NULL DEFAULT now(),
   updated_at               timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (connection_id, conversation_fingerprint),
@@ -158,7 +171,22 @@ CREATE TABLE IF NOT EXISTS public.outlook_thread_recovery (
   -- Bounded at 25 pairs, each a fingerprint and an instant. A thread with more unresolved
   -- halves than that is not a thread a summary should rest on anyway. The per-element shape
   -- goes through an IMMUTABLE helper because a CHECK may not contain a subquery.
-  CONSTRAINT otr_unpaired_shape CHECK (public.outlook_unpaired_valid(unpaired)),
+  CONSTRAINT otr_unpaired_shape CHECK (
+    unpaired IS NULL OR public.outlook_unpaired_valid(unpaired)),
+  -- The hint's two columns arrive together or not at all.
+  CONSTRAINT otr_unpaired_together CHECK (
+    (unpaired IS NULL AND earliest_unpaired_at IS NULL)
+    OR (unpaired IS NOT NULL AND earliest_unpaired_at IS NOT NULL)),
+  -- So do the baseline's three, and the span is ordered. Bounded by the same 50 a segment is.
+  CONSTRAINT otr_baseline_together CHECK (
+    (baseline_fingerprints IS NULL AND baseline_from_at IS NULL
+     AND baseline_through_at IS NULL)
+    OR (baseline_fingerprints IS NOT NULL AND baseline_from_at IS NOT NULL
+        AND baseline_through_at IS NOT NULL
+        AND pg_catalog.array_length(baseline_fingerprints, 1) BETWEEN 1 AND 50
+        AND baseline_from_at <= baseline_through_at)),
+  -- A row exists for a reason: a hint, a baseline, or both. Never empty.
+  CONSTRAINT otr_not_empty CHECK (unpaired IS NOT NULL OR baseline_fingerprints IS NOT NULL),
   CONSTRAINT otr_conn_user_fk FOREIGN KEY (connection_id, user_id)
     REFERENCES public.microsoft_connections(id, user_id) ON DELETE CASCADE
 );
@@ -422,6 +450,21 @@ BEGIN
       ON tr.user_id = v_uid AND tr.conversation_fingerprint = ANY (w.cfps)
     GROUP BY w.cfp
   ),
+  -- The THREAD-LEVEL baseline: messages absorbed for a thread whose settled coverage could
+  -- not be established at all. Read by ring variants like everything else, and unioned
+  -- across them, because a rotation may have left more than one row for the thread.
+  base AS (
+    SELECT w.cfp,
+           pg_catalog.array_agg(DISTINCT f ORDER BY f) AS fps,
+           min(tr.baseline_from_at)    AS frm,
+           max(tr.baseline_through_at) AS thru
+    FROM want w
+    JOIN public.outlook_thread_recovery tr
+      ON tr.user_id = v_uid AND tr.conversation_fingerprint = ANY (w.cfps)
+     AND tr.baseline_fingerprints IS NOT NULL
+    LEFT JOIN pg_catalog.unnest(tr.baseline_fingerprints) f ON true
+    GROUP BY w.cfp
+  ),
   -- WHICH variant the thread is actually on record under. The worker passes it back as the
   -- producer's lookup value, so a row written under a retired key is still found - and the
   -- producer rewrites it to the current value, migrating the thread key forward on touch.
@@ -439,15 +482,135 @@ BEGIN
            'pending_covered_fingerprints',   COALESCE(pd.cov, ARRAY[]::text[]),
            'pending_coverage_from_at',       pd.frm,
            'earliest_unpaired_at',           hn.at,
+           -- Reported SEPARATELY from covered_fingerprints, so a caller can still tell a
+           -- drafted segment's coverage from a window nothing describes. The worker treats
+           -- both as covered when deciding what is new.
+           'thread_baseline_fingerprints',   COALESCE(bs.fps, ARRAY[]::text[]),
+           'thread_baseline_from_at',        bs.frm,
+           'thread_baseline_through_at',     bs.thru,
            'matched_conversation_fingerprint', mt.stored_cfp))
     INTO v_out
   FROM want w
   LEFT JOIN settled st ON st.cfp = w.cfp
   LEFT JOIN pend    pd ON pd.cfp = w.cfp
   LEFT JOIN hint    hn ON hn.cfp = w.cfp
+  LEFT JOIN base    bs ON bs.cfp = w.cfp
   LEFT JOIN matched mt ON mt.cfp = w.cfp;
 
   RETURN jsonb_build_object('result', 'ok', 'threads', COALESCE(v_out, '[]'::jsonb));
+END
+$fn$;
+
+-- ── 2b. forward-only initialization for a thread with NO LOCATABLE candidate ──
+-- The case: a pre-feature refs row with no conversation fingerprint, whose episode anchor is
+-- the first message of an exchange a long back-catalogue hides. No bounded window reaches that
+-- anchor, so the row cannot be LOCATED, so baseline_outlook_thread_coverage below has nothing
+-- to initialize. Reproduced against the real functions: the worker drafted the whole narrowed
+-- window, which contained a message the reviewer had already accepted.
+--
+-- Unknown membership is not an assertion that the window is new. What the window covered is
+-- absorbed HERE, against the thread, and no suggestion is produced from it. The next exchange
+-- is decided against this set and is captured normally.
+--
+-- FORWARD ONLY, and never shrinking: the set is unioned, `from` takes the LEAST and `through`
+-- the GREATEST, so a later window can only extend what is absorbed. Bounded by the same 50 a
+-- segment is; a window larger than that is refused rather than silently trimmed.
+CREATE OR REPLACE FUNCTION public.baseline_outlook_thread_window(
+  p_connection_id                    uuid,
+  p_run_id                           uuid,
+  p_conversation_fingerprint         text,
+  p_covered_fingerprints             text[],
+  p_coverage_from_at                 timestamptz,
+  p_coverage_through_at              timestamptz,
+  p_conversation_lookup_fingerprints text[] DEFAULT NULL
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $fn$
+DECLARE
+  v_uid     uuid;
+  v_leaseok boolean;
+  v_cfps    text[];
+  v_set     text[];
+  v_n       int;
+BEGIN
+  IF p_conversation_fingerprint IS NULL
+     OR p_conversation_fingerprint !~ '^[0-9a-f]{64}$' THEN
+    RETURN jsonb_build_object('result', 'invalid_conversation_fingerprint');
+  END IF;
+  IF p_covered_fingerprints IS NULL
+     OR pg_catalog.array_length(p_covered_fingerprints, 1) IS NULL
+     OR pg_catalog.array_length(p_covered_fingerprints, 1) > 50 THEN
+    RETURN jsonb_build_object('result', 'invalid_coverage_set');
+  END IF;
+  PERFORM 1 FROM pg_catalog.unnest(p_covered_fingerprints) f
+   WHERE f IS NULL OR f !~ '^[0-9a-f]{64}$';
+  IF FOUND THEN RETURN jsonb_build_object('result', 'invalid_coverage_fingerprint'); END IF;
+  IF p_coverage_from_at IS NULL OR p_coverage_through_at IS NULL
+     OR p_coverage_from_at > p_coverage_through_at THEN
+    RETURN jsonb_build_object('result', 'invalid_coverage_span');
+  END IF;
+
+  -- Deterministic lock order, matching every other worker write.
+  PERFORM 1 FROM public.outlook_sync_state s WHERE s.connection_id = p_connection_id FOR SHARE;
+  SELECT c.user_id INTO v_uid
+  FROM public.microsoft_connections c WHERE c.id = p_connection_id;
+  IF v_uid IS NULL THEN RETURN jsonb_build_object('result', 'unknown_connection'); END IF;
+  SELECT count(*) = 2 AND bool_and(s.sync_run_id = p_run_id
+                                   AND s.sync_status = 'running'
+                                   AND s.sync_lease_until IS NOT NULL
+                                   AND s.sync_lease_until > now())
+    INTO v_leaseok
+  FROM public.outlook_sync_state s WHERE s.connection_id = p_connection_id;
+  IF v_leaseok IS NOT TRUE THEN RETURN jsonb_build_object('result', 'stale_run'); END IF;
+
+  -- MIGRATE THE KEY FORWARD, exactly as the hint does: a row written before a rotation is
+  -- found by any ring variant and rewritten to the current value.
+  SELECT pg_catalog.array_agg(DISTINCT f) INTO v_cfps
+  FROM pg_catalog.unnest(
+    pg_catalog.array_append(COALESCE(p_conversation_lookup_fingerprints, ARRAY[]::text[]),
+                            p_conversation_fingerprint)) f
+  WHERE f ~ '^[0-9a-f]{64}$';
+  UPDATE public.outlook_thread_recovery
+     SET conversation_fingerprint = p_conversation_fingerprint, updated_at = now()
+   WHERE connection_id = p_connection_id
+     AND conversation_fingerprint = ANY (v_cfps)
+     AND conversation_fingerprint IS DISTINCT FROM p_conversation_fingerprint;
+
+  -- The union of what is already absorbed and what this window covered, bounded. Over the
+  -- bound the call is REFUSED rather than trimmed: silently dropping a fingerprint from a
+  -- baseline would make an already-absorbed message look new again.
+  SELECT pg_catalog.array_agg(DISTINCT f ORDER BY f) INTO v_set
+  FROM pg_catalog.unnest(
+    COALESCE((SELECT baseline_fingerprints FROM public.outlook_thread_recovery
+               WHERE connection_id = p_connection_id
+                 AND conversation_fingerprint = p_conversation_fingerprint),
+             ARRAY[]::text[]) || p_covered_fingerprints) f;
+  v_n := pg_catalog.array_length(v_set, 1);
+  IF v_n IS NULL OR v_n > 50 THEN
+    RETURN jsonb_build_object('result', 'baseline_full', 'absorbed', COALESCE(v_n, 0));
+  END IF;
+
+  INSERT INTO public.outlook_thread_recovery
+    (connection_id, user_id, conversation_fingerprint,
+     baseline_fingerprints, baseline_from_at, baseline_through_at)
+  VALUES (p_connection_id, v_uid, p_conversation_fingerprint,
+          v_set, p_coverage_from_at, p_coverage_through_at)
+  ON CONFLICT (connection_id, conversation_fingerprint) DO UPDATE
+    SET baseline_fingerprints = v_set,
+        -- FORWARD ONLY. A later window extends the span; it never pulls it back, because
+        -- pulling it back would re-expose messages this baseline already absorbed.
+        baseline_from_at    = LEAST(
+          COALESCE(public.outlook_thread_recovery.baseline_from_at, p_coverage_from_at),
+          p_coverage_from_at),
+        baseline_through_at = GREATEST(
+          COALESCE(public.outlook_thread_recovery.baseline_through_at, p_coverage_through_at),
+          p_coverage_through_at),
+        updated_at = now();
+
+  RETURN jsonb_build_object('result', 'ok', 'absorbed', v_n);
 END
 $fn$;
 
@@ -1001,9 +1164,29 @@ BEGIN
       --
       -- DELETE BEFORE UPDATE, deliberately: the shape constraint requires at least one pair, so
       -- trimming a fully resolved row to an empty array would fail the CHECK first.
+      -- A FULLY RESOLVED HINT CLEARS THE HINT, not the row: the row may also carry
+      -- the thread's forward-only BASELINE, which is its knowledge floor. Deleting
+      -- it was reproduced as losing that floor, after which a window containing an
+      -- already-accepted message was drafted.
+      UPDATE public.outlook_thread_recovery tr
+         SET unpaired = NULL, earliest_unpaired_at = NULL,
+             conversation_fingerprint = p_conversation_fingerprint,
+             updated_at = now()
+       WHERE tr.connection_id = p_connection_id
+         AND tr.conversation_fingerprint = ANY (v_cfps)
+         AND tr.unpaired IS NOT NULL
+         AND tr.baseline_fingerprints IS NOT NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM pg_catalog.jsonb_array_elements(tr.unpaired) e
+           WHERE NOT (e->>'fp' = ANY (COALESCE(v_cov_lk, v_seg_cov))));
+      -- Nothing else on the row: then it goes. DELETE BEFORE UPDATE, deliberately -
+      -- the shape constraint requires at least one pair, so trimming a fully
+      -- resolved row to an empty array would fail the CHECK first.
       DELETE FROM public.outlook_thread_recovery tr
        WHERE tr.connection_id = p_connection_id
          AND tr.conversation_fingerprint = ANY (v_cfps)
+         AND tr.unpaired IS NOT NULL
+         AND tr.baseline_fingerprints IS NULL
          AND NOT EXISTS (
            SELECT 1 FROM pg_catalog.jsonb_array_elements(tr.unpaired) e
            WHERE NOT (e->>'fp' = ANY (COALESCE(v_cov_lk, v_seg_cov))));
@@ -1014,7 +1197,8 @@ BEGIN
              conversation_fingerprint = p_conversation_fingerprint,
              updated_at = now()
        WHERE tr.connection_id = p_connection_id
-         AND tr.conversation_fingerprint = ANY (v_cfps);
+         AND tr.conversation_fingerprint = ANY (v_cfps)
+         AND tr.unpaired IS NOT NULL;
       UPDATE public.outlook_thread_recovery
          SET earliest_unpaired_at = (SELECT min((e->>'at')::timestamptz)
                                      FROM pg_catalog.jsonb_array_elements(unpaired) e)
@@ -1077,9 +1261,29 @@ BEGIN
     --
     -- DELETE BEFORE UPDATE, deliberately: the shape constraint requires at least one pair, so
     -- trimming a fully resolved row to an empty array would fail the CHECK first.
+    -- A FULLY RESOLVED HINT CLEARS THE HINT, not the row: the row may also carry
+    -- the thread's forward-only BASELINE, which is its knowledge floor. Deleting
+    -- it was reproduced as losing that floor, after which a window containing an
+    -- already-accepted message was drafted.
+    UPDATE public.outlook_thread_recovery tr
+       SET unpaired = NULL, earliest_unpaired_at = NULL,
+           conversation_fingerprint = p_conversation_fingerprint,
+           updated_at = now()
+     WHERE tr.connection_id = p_connection_id
+       AND tr.conversation_fingerprint = ANY (v_cfps)
+       AND tr.unpaired IS NOT NULL
+       AND tr.baseline_fingerprints IS NOT NULL
+       AND NOT EXISTS (
+         SELECT 1 FROM pg_catalog.jsonb_array_elements(tr.unpaired) e
+         WHERE NOT (e->>'fp' = ANY (COALESCE(v_cov_lk, v_seg_cov))));
+    -- Nothing else on the row: then it goes. DELETE BEFORE UPDATE, deliberately -
+    -- the shape constraint requires at least one pair, so trimming a fully
+    -- resolved row to an empty array would fail the CHECK first.
     DELETE FROM public.outlook_thread_recovery tr
      WHERE tr.connection_id = p_connection_id
        AND tr.conversation_fingerprint = ANY (v_cfps)
+       AND tr.unpaired IS NOT NULL
+       AND tr.baseline_fingerprints IS NULL
        AND NOT EXISTS (
          SELECT 1 FROM pg_catalog.jsonb_array_elements(tr.unpaired) e
          WHERE NOT (e->>'fp' = ANY (COALESCE(v_cov_lk, v_seg_cov))));
@@ -1090,7 +1294,8 @@ BEGIN
            conversation_fingerprint = p_conversation_fingerprint,
            updated_at = now()
      WHERE tr.connection_id = p_connection_id
-       AND tr.conversation_fingerprint = ANY (v_cfps);
+       AND tr.conversation_fingerprint = ANY (v_cfps)
+       AND tr.unpaired IS NOT NULL;
     UPDATE public.outlook_thread_recovery
        SET earliest_unpaired_at = (SELECT min((e->>'at')::timestamptz)
                                    FROM pg_catalog.jsonb_array_elements(unpaired) e)
@@ -1457,9 +1662,29 @@ BEGIN
       --
       -- DELETE BEFORE UPDATE, deliberately: the shape constraint requires at least one pair, so
       -- trimming a fully resolved row to an empty array would fail the CHECK first.
+      -- A FULLY RESOLVED HINT CLEARS THE HINT, not the row: the row may also carry
+      -- the thread's forward-only BASELINE, which is its knowledge floor. Deleting
+      -- it was reproduced as losing that floor, after which a window containing an
+      -- already-accepted message was drafted.
+      UPDATE public.outlook_thread_recovery tr
+         SET unpaired = NULL, earliest_unpaired_at = NULL,
+             conversation_fingerprint = p_conversation_fingerprint,
+             updated_at = now()
+       WHERE tr.connection_id = p_connection_id
+         AND tr.conversation_fingerprint = ANY (v_cfps)
+         AND tr.unpaired IS NOT NULL
+         AND tr.baseline_fingerprints IS NOT NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM pg_catalog.jsonb_array_elements(tr.unpaired) e
+           WHERE NOT (e->>'fp' = ANY (COALESCE(v_cov_lk, v_seg_cov))));
+      -- Nothing else on the row: then it goes. DELETE BEFORE UPDATE, deliberately -
+      -- the shape constraint requires at least one pair, so trimming a fully
+      -- resolved row to an empty array would fail the CHECK first.
       DELETE FROM public.outlook_thread_recovery tr
        WHERE tr.connection_id = p_connection_id
          AND tr.conversation_fingerprint = ANY (v_cfps)
+         AND tr.unpaired IS NOT NULL
+         AND tr.baseline_fingerprints IS NULL
          AND NOT EXISTS (
            SELECT 1 FROM pg_catalog.jsonb_array_elements(tr.unpaired) e
            WHERE NOT (e->>'fp' = ANY (COALESCE(v_cov_lk, v_seg_cov))));
@@ -1470,7 +1695,8 @@ BEGIN
              conversation_fingerprint = p_conversation_fingerprint,
              updated_at = now()
        WHERE tr.connection_id = p_connection_id
-         AND tr.conversation_fingerprint = ANY (v_cfps);
+         AND tr.conversation_fingerprint = ANY (v_cfps)
+         AND tr.unpaired IS NOT NULL;
       UPDATE public.outlook_thread_recovery
          SET earliest_unpaired_at = (SELECT min((e->>'at')::timestamptz)
                                      FROM pg_catalog.jsonb_array_elements(unpaired) e)
@@ -1526,9 +1752,29 @@ BEGIN
     --
     -- DELETE BEFORE UPDATE, deliberately: the shape constraint requires at least one pair, so
     -- trimming a fully resolved row to an empty array would fail the CHECK first.
+    -- A FULLY RESOLVED HINT CLEARS THE HINT, not the row: the row may also carry
+    -- the thread's forward-only BASELINE, which is its knowledge floor. Deleting
+    -- it was reproduced as losing that floor, after which a window containing an
+    -- already-accepted message was drafted.
+    UPDATE public.outlook_thread_recovery tr
+       SET unpaired = NULL, earliest_unpaired_at = NULL,
+           conversation_fingerprint = p_conversation_fingerprint,
+           updated_at = now()
+     WHERE tr.connection_id = p_connection_id
+       AND tr.conversation_fingerprint = ANY (v_cfps)
+       AND tr.unpaired IS NOT NULL
+       AND tr.baseline_fingerprints IS NOT NULL
+       AND NOT EXISTS (
+         SELECT 1 FROM pg_catalog.jsonb_array_elements(tr.unpaired) e
+         WHERE NOT (e->>'fp' = ANY (COALESCE(v_cov_lk, v_seg_cov))));
+    -- Nothing else on the row: then it goes. DELETE BEFORE UPDATE, deliberately -
+    -- the shape constraint requires at least one pair, so trimming a fully
+    -- resolved row to an empty array would fail the CHECK first.
     DELETE FROM public.outlook_thread_recovery tr
      WHERE tr.connection_id = p_connection_id
        AND tr.conversation_fingerprint = ANY (v_cfps)
+       AND tr.unpaired IS NOT NULL
+       AND tr.baseline_fingerprints IS NULL
        AND NOT EXISTS (
          SELECT 1 FROM pg_catalog.jsonb_array_elements(tr.unpaired) e
          WHERE NOT (e->>'fp' = ANY (COALESCE(v_cov_lk, v_seg_cov))));
@@ -1539,7 +1785,8 @@ BEGIN
            conversation_fingerprint = p_conversation_fingerprint,
            updated_at = now()
      WHERE tr.connection_id = p_connection_id
-       AND tr.conversation_fingerprint = ANY (v_cfps);
+       AND tr.conversation_fingerprint = ANY (v_cfps)
+       AND tr.unpaired IS NOT NULL;
     UPDATE public.outlook_thread_recovery
        SET earliest_unpaired_at = (SELECT min((e->>'at')::timestamptz)
                                    FROM pg_catalog.jsonb_array_elements(unpaired) e)
@@ -1568,6 +1815,9 @@ $$;
 -- surfaces only as "function does not exist" at apply time.
 REVOKE ALL ON FUNCTION public.record_outlook_thread_recovery(uuid, uuid, text, jsonb, text[])
   FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.baseline_outlook_thread_window(
+  uuid, uuid, text, text[], timestamptz, timestamptz, text[])
+  FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.get_outlook_thread_coverage(uuid, uuid, jsonb)
   FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.baseline_outlook_thread_coverage(uuid, uuid, text, text, text[], text[], timestamptz, timestamptz)
@@ -1582,6 +1832,8 @@ REVOKE ALL ON FUNCTION public.upsert_new_contact_candidate(
   FROM PUBLIC, anon, authenticated;
 
 GRANT EXECUTE ON FUNCTION public.record_outlook_thread_recovery(uuid, uuid, text, jsonb, text[]) TO service_role;
+GRANT EXECUTE ON FUNCTION public.baseline_outlook_thread_window(
+  uuid, uuid, text, text[], timestamptz, timestamptz, text[]) TO service_role;
 GRANT EXECUTE ON FUNCTION public.get_outlook_thread_coverage(uuid, uuid, jsonb) TO service_role;
 GRANT EXECUTE ON FUNCTION public.baseline_outlook_thread_coverage(uuid, uuid, text, text, text[], text[], timestamptz, timestamptz) TO service_role;
 GRANT EXECUTE ON FUNCTION public.upsert_outlook_interaction_candidate(

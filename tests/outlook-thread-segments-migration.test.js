@@ -93,8 +93,13 @@ test('four columns, four CHECKs and one partial index, all guarded for re-applic
 test('the coverage bound in SQL matches the bound the decision module enforces', () => {
   assert.strictEqual(MAX_SEGMENT_COVERAGE, 50)
   assert.ok(FORWARD.includes('BETWEEN 1 AND 50'), 'the CHECK carries the same ceiling')
-  assert.strictEqual((FORWARD.match(/array_length\(p_covered_fingerprints, 1\) > 50/g) || []).length, 3,
-    'both producers and the baseline refuse an oversized coverage set')
+  assert.strictEqual((FORWARD.match(/array_length\(p_covered_fingerprints, 1\) > 50/g) || []).length, 4,
+    'both producers, the candidate baseline and the THREAD baseline all refuse an oversized '
+    + 'coverage set')
+  // And the thread baseline refuses rather than TRIMMING, because dropping a fingerprint from
+  // an absorbed window would make an already-absorbed message look new again.
+  assert.ok(/'baseline_full'/.test(FORWARD),
+    'an over-bound union is refused with its own code, not silently trimmed')
 })
 
 test('coverage is ALL OR NOTHING, and requires the thread it belongs to', () => {
@@ -125,12 +130,14 @@ test('anon and authenticated are revoked EXPLICITLY, not only PUBLIC', () => {
   // EXECUTE on a new function in public to anon and authenticated, so CREATE OR REPLACE
   // after a DROP hands the producers back to every signed-in user.
   const revokes = FORWARD.match(/REVOKE ALL ON FUNCTION[\s\S]*?;/g) || []
-  assert.strictEqual(revokes.length, 5, 'five functions are revoked')
+  assert.strictEqual(revokes.length, 6,
+    'six functions are revoked: the two producers, the coverage reader, the candidate '
+    + 'baseline, the thread baseline and the recovery hint')
   for (const r of revokes) {
     assert.ok(/FROM PUBLIC, anon, authenticated/.test(r), `a revoke misses anon/authenticated: ${r.slice(0, 70)}`)
   }
-  assert.strictEqual((FORWARD.match(/GRANT EXECUTE ON FUNCTION[\s\S]*?TO service_role;/g) || []).length, 5,
-    'and all five are granted to service_role only')
+  assert.strictEqual((FORWARD.match(/GRANT EXECUTE ON FUNCTION[\s\S]*?TO service_role;/g) || []).length, 6,
+    'and all six are granted to service_role only')
   // The hint TABLE is worker-only too, and carries no policy - a reader could otherwise learn
   // which threads have unresolved halves.
   assert.ok(/REVOKE ALL ON TABLE public\.outlook_thread_recovery FROM PUBLIC, anon, authenticated;/.test(FORWARD))
@@ -155,8 +162,9 @@ test('the acceptance RPCs are not re-issued and keep their reviewed-note allowan
   // closing comment that says so. (An earlier version of this control scanned for "10000"
   // and matched incidentally inside the migration id 20260921000000.)
   assert.strictEqual((FORWARD.match(/accept_interaction_candidate/g) || []).length, 0)
-  assert.strictEqual((FORWARD.match(/CREATE OR REPLACE FUNCTION/g) || []).length, 6,
-    'six functions: the two producers, the three worker RPCs, and the jsonb shape validator')
+  assert.strictEqual((FORWARD.match(/CREATE OR REPLACE FUNCTION/g) || []).length, 7,
+    'seven functions: the two producers, the FOUR worker RPCs (coverage reader, candidate '
+    + 'baseline, thread baseline, recovery hint) and the jsonb shape validator')
   // The validator exists because a CHECK may not contain a subquery, and it must be IMMUTABLE
   // to be usable in one at all.
   const val = FORWARD.slice(FORWARD.indexOf('FUNCTION public.outlook_unpaired_valid('))
@@ -193,12 +201,21 @@ test('the recovery hint is a bounded per-thread row, lowering only, and fenced',
   assert.ok(/CREATE TABLE IF NOT EXISTS public\.outlook_thread_recovery/.test(FORWARD))
   assert.ok(/PRIMARY KEY \(connection_id, conversation_fingerprint\)/.test(FORWARD),
     'one row per thread per connection, not one per message or per round')
-  assert.ok(/earliest_unpaired_at     timestamptz NOT NULL/.test(FORWARD))
+  // NULLABLE NOW, because the row may exist for a thread BASELINE alone - and a fully
+  // resolved hint clears these two columns instead of deleting a row that carries one.
+  // Reproduced: deleting the row took the baseline with it, and the knowledge floor went.
+  assert.ok(/earliest_unpaired_at     timestamptz,/.test(FORWARD))
+  assert.ok(/CONSTRAINT otr_unpaired_together/.test(FORWARD),
+    'the hint\'s two columns still arrive together or not at all')
+  assert.ok(/CONSTRAINT otr_not_empty CHECK \(unpaired IS NOT NULL OR baseline_fingerprints IS NOT NULL\)/
+    .test(FORWARD), 'and a row never exists for no reason')
+  assert.strictEqual((FORWARD.match(/A FULLY RESOLVED HINT CLEARS THE HINT/g) || []).length, 4,
+    'all four hint-resolution sites preserve a row that carries a baseline')
   // THE LIFECYCLE, not just the floor. An earlier revision only ever LOWERED the hint, and
   // that was reproduced as harmful: once the half was covered the window still reached back
   // over settled history, the single bounded page overflowed and the thread was abandoned
   // `recovery_truncated`. So the hint records WHICH messages are unpaired...
-  assert.ok(/unpaired                 jsonb       NOT NULL/.test(FORWARD),
+  assert.ok(/unpaired                 jsonb,/.test(FORWARD),
     'the hint records which messages are unpaired, not only an instant')
   assert.ok(/public\.outlook_unpaired_valid\(unpaired\)/.test(FORWARD), 'with a checked shape')
   // ...is merged keeping the EARLIEST instant per fingerprint while a half is unresolved...
@@ -228,10 +245,20 @@ test('the recovery hint is a bounded per-thread row, lowering only, and fenced',
   assert.strictEqual((FORWARD.match(/RESOLVE THE RECOVERY HINT/g) || []).length, 4,
     'all four write paths of both producers resolve the hint')
   const firstResolve = FORWARD.indexOf('RESOLVE THE RECOVERY HINT')
-  const window = FORWARD.slice(firstResolve, firstResolve + 1800)
+  // Widened: the block now carries the baseline-preserving clear as well as the delete
+  // and the trim, so 1800 characters stopped before the end of one site.
+  const window = FORWARD.slice(firstResolve, firstResolve + 3200)
+  // A fully resolved hint on a row that ALSO carries a baseline is CLEARED, not deleted; the
+  // delete is only for a row with nothing else on it, and it still comes before the trim
+  // because the shape constraint refuses an empty pair array.
+  assert.ok(window.indexOf('A FULLY RESOLVED HINT CLEARS THE HINT')
+            < window.indexOf('DELETE FROM public.outlook_thread_recovery'),
+    'the baseline-preserving clear comes first')
   assert.ok(window.indexOf('DELETE FROM public.outlook_thread_recovery')
-            < window.indexOf('UPDATE public.outlook_thread_recovery'),
-    'the fully resolved row is deleted BEFORE the partial one is trimmed')
+            < window.lastIndexOf('UPDATE public.outlook_thread_recovery'),
+    'and the delete still precedes the trim')
+  assert.ok(/AND tr\.baseline_fingerprints IS NULL/.test(window),
+    'the delete only fires when nothing else is on the row')
   assert.ok(/WHERE NOT \(e->>'fp' = ANY \(COALESCE\(v_cov_lk, v_seg_cov\)\)\)/.test(FORWARD),
     'and a pair survives only while the claim does not cover it')
   assert.ok(/ON DELETE CASCADE/.test(FORWARD.slice(FORWARD.indexOf('outlook_thread_recovery'))),
@@ -273,8 +300,10 @@ test('ROTATION: the thread is matched on ring variants and migrated forward on t
     'both producers take the coverage comparison aliases')
   assert.ok(/comparison aliases for hint cleanup; never stored/.test(FORWARD),
     'and the local that holds them says so')
-  assert.strictEqual((FORWARD.match(/COALESCE\(v_cov_lk, v_seg_cov\)/g) || []).length, 8,
-    'all four hint-cleanup sites of both producers compare against the aliases')
+  // TWELVE now: each of the four sites carries the alias comparison three times - the
+  // baseline-preserving clear, the delete, and the trim.
+  assert.strictEqual((FORWARD.match(/COALESCE\(v_cov_lk, v_seg_cov\)/g) || []).length, 12,
+    'every hint-cleanup statement of both producers compares against the aliases')
   // And the aliases reach NO stored column. Every write of covered_message_fingerprints takes
   // the claim.
   const covWrites = [...FORWARD.matchAll(/covered_message_fingerprints\s*=([^,]*)/g)]

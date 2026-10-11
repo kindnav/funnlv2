@@ -573,6 +573,9 @@ test('the run module calls only the permitted RPCs', () => {
     //   record_outlook_thread_recovery   remember an unanswered message so a later round
     //                                    can still pair it
     'baseline_outlook_thread_coverage',
+    // And ONE more: the thread-level forward-only baseline, for a pre-feature row that
+    // cannot be located at all because its anchor sits behind a long back-catalogue.
+    'baseline_outlook_thread_window',
     'get_outlook_thread_coverage',
     'list_outlook_round_conversations',
     // The content slice added two, and each is one narrow job:

@@ -185,6 +185,9 @@ async function makePorts (storedVersion) {
     if (name === 'get_outlook_thread_coverage') {
       return { data: { result: 'ok', threads: [] }, error: null }
     }
+    if (name === 'baseline_outlook_thread_window') {
+      return { data: { result: 'ok', absorbed: 0 }, error: null }
+    }
     if (name === 'baseline_outlook_thread_coverage') {
       return { data: { result: 'ok', initialized: 0 }, error: null }
     }

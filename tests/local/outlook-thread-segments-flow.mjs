@@ -60,6 +60,7 @@ const KNOWN = 'ava@bank.test'            // already a contact
 const STRANGER = 'priya@fund.test'       // not in Funnl
 const LEGACY_NEW = 'noor@firm.test'      // not in Funnl, becomes one via acceptance
 const LONG_NEW = 'dana@house.test'       // the same, on a thread with a back-catalogue
+const LONG_SLOW = 'omar@desk.test'       // a long thread used only for budget starvation
 const JWT_SECRET = randomBytes(32).toString('hex')   // per run; never printed
 
 const APPROVED = 'ol-disc-' + 'a'.repeat(32)
@@ -257,7 +258,16 @@ const newCounts = () => ({
  * THE DELTA PAGE IS CHOSEN BY THE TOKEN, not by a counter: a round that does not commit
  * re-lists exactly the page it saw, which is what resumability means here.
  */
-function provider ({ world: w, counts, state, draftFor }) {
+function provider ({ world: w, counts, state, draftFor, clock }) {
+  // Advance the injected clock AFTER a request is served, by the amount this scenario says
+  // that kind of request costs. Each request therefore stays inside its own deadline while
+  // the INVOCATION budget drains - which is the only way to stage an admission failure
+  // without changing a constant.
+  const spend = (kind) => {
+    if (!clock) return
+    const ms = clock.cost?.[kind]
+    if (Number.isFinite(ms) && ms > 0) clock.ms += ms
+  }
   return async (url, init) => {
     const u = String(url)
     if (u === ANTHROPIC_MESSAGES_URL) {
@@ -273,6 +283,7 @@ function provider ({ world: w, counts, state, draftFor }) {
       const select = qp(u, '$select') || ''
       if (select.indexOf('uniqueBody') < 0) {
         counts.envelopeGets.push(id)
+        spend('envelope')
         if (!env) {
           return { status: 404, headers: { get: () => null },
                    json: async () => ({ error: { code: 'ErrorItemNotFound' } }) }
@@ -306,6 +317,9 @@ function provider ({ world: w, counts, state, draftFor }) {
       // the recovery path refuses rather than following.
       if (all.length > top) {
         page['@odata.nextLink'] = `${GRAPH_BASE}/me/mailFolders/${folder}/messages?$skip=${top}`
+        spend('truncatedLookup')
+      } else {
+        spend('lookup')
       }
       return okRes(page)
     }
@@ -432,9 +446,14 @@ async function shippedRound ({ world: w, counts, state, ring, draftFor: df, call
 }
 
 /** One invocation, with the committed cursors read from the database first. */
-async function round ({ world: w, counts, state, ring, draftFor: df, hooks, calls = [] }) {
+async function round ({ world: w, counts, state, ring, draftFor: df, hooks, clock,
+  calls = [] }) {
   makeDue()
   const cursors = await committedCursors()
+  // A scenario that injects a clock also gets the invocation budget measured from it, which
+  // is what `requestEntryMs` is for. Without one the budget is effectively unlimited, which
+  // is the right default for every scenario not about admission.
+  const c = clock ? { ms: clock.start ?? 0, cost: clock.cost ?? {} } : null
   const run = await runOutlookImport({
     rpc: workerRpc(calls, hooks),
     pilotUserId: U1,
@@ -444,9 +463,13 @@ async function round ({ world: w, counts, state, ring, draftFor: df, hooks, call
     anthropicApiKey: FIXTURE_KEY,
     requiredConsent: REQUIRED,
     requiredBackgroundConsent: APPROVED,
-    deps: { fetchImpl: provider({ world: w, counts, state, draftFor: df }) },
+    ...(c ? { requestEntryMs: c.ms } : {}),
+    deps: {
+      fetchImpl: provider({ world: w, counts, state, draftFor: df, clock: c }),
+      ...(c ? { now: () => c.ms } : {}),
+    },
   })
-  return { run, report: summarizeRun(run), calls }
+  return { run, report: summarizeRun(run), calls, clock: c }
 }
 
 // ── reading what the database actually holds ─────────────────────────────────
@@ -500,11 +523,19 @@ const NOTES = {
   THIRD: 'THIRD-NOTE She passed on the feedback after the call and suggested a follow-up in '
     + 'the new year once the spring headcount is confirmed. You agreed to send a short '
     + 'thank-you note first. Left open: the exact headcount date.',
+  FOURTH: 'FOURTH-NOTE She confirmed the panel date and asked you to bring the modelling '
+    + 'example. You said you would be there. Left open: whether the desk head attends.',
+  SIXTH: 'SIXTH-NOTE She asked about your preferred start date and you said September. '
+    + 'Left open: whether that fits the cohort calendar.',
 }
 
 function draftFor (body) {
   const isNew = body.indexOf('new_contact_suggestion') >= 0
-  const which = /THIRD-/.test(body) ? 'THIRD' : /LATER-/.test(body) ? 'LATER' : 'FIRST'
+  // Chosen from the BODY TAGS the request carries, which is all the request has.
+  const which = /SIXTH-/.test(body) ? 'SIXTH'
+    : /FOURTH-/.test(body) ? 'FOURTH'
+      : /THIRD-/.test(body) ? 'THIRD'
+        : /LATER-/.test(body) ? 'LATER' : 'FIRST'
   const base = {
     summary: NOTES[which],
     summary_evidence: 'explicit_body',
@@ -590,7 +621,7 @@ async function main () {
     test, psql, one, num, rows, thread, world, newCounts, round, makeDue, seed, ownContacts,
     refRows, coveredFor, pendingInteractions, pendingNewContacts, storedInteractions,
     RING_V1, RING_V2, draftFor, NOTES, applySegments, acceptInteraction, acceptNewContact,
-    http, TOK, U1, ME, KNOWN, STRANGER, LEGACY_NEW, LONG_NEW,
+    http, TOK, U1, ME, KNOWN, STRANGER, LEGACY_NEW, LONG_NEW, LONG_SLOW,
     MAX_RECOVERY_MESSAGES_PER_FOLDER,
     assert, SEGMENTS_MIGRATION, shippedRound,
   })

@@ -97,6 +97,14 @@ export function normalizeCoverage (raw) {
   for (const f of Array.isArray(r.covered_fingerprints) ? r.covered_fingerprints : []) {
     if (isFp(f)) covered.add(f)
   }
+  // THE THREAD-LEVEL BASELINE IS COVERED. It names messages a bounded window absorbed for a
+  // thread whose settled coverage could not be established at all; absorbing them is exactly
+  // the claim that they must not be drafted again.
+  const threadBaseline = new Set()
+  for (const f of Array.isArray(r.thread_baseline_fingerprints)
+    ? r.thread_baseline_fingerprints : []) {
+    if (isFp(f)) { threadBaseline.add(f); covered.add(f) }
+  }
   let pending = null
   if (isFp(r.pending_episode_fingerprint)) {
     const pc = new Set()
@@ -111,11 +119,27 @@ export function normalizeCoverage (raw) {
   // it is initialized explicitly and forward-only. See decideSegment.
   const settledWithoutCoverage = r.settled_without_coverage === true
   const iso = (v) => (typeof v === 'string' && v.length > 0 ? v : null)
+  // The latest covered instant, from EITHER source: a settled segment's span end or the
+  // thread baseline's. It is what floors the next recovery window, so taking only one of them
+  // would send the window back over mail that is already absorbed.
+  const throughCandidates = [iso(r.coverage_through_at), iso(r.thread_baseline_through_at)]
+    .filter((t) => t !== null)
   return {
     covered,
     pending,
     settledWithoutCoverage,
-    coverageThroughIso: iso(r.coverage_through_at),
+    // The baseline, visible on its own: coverage that no draft describes.
+    threadBaseline,
+    threadBaselineThroughIso: iso(r.thread_baseline_through_at),
+    // THE START OF CONTINUOUS KNOWLEDGE for a thread whose history cannot be located. Below
+    // it, a message may belong to the pre-feature accepted exchange and must not be drafted;
+    // at or above it, everything was absorbed, covered, or genuinely new. Null for every
+    // thread that never needed a narrowed window, so ordinary delayed discovery is untouched.
+    threadBaselineFromIso: iso(r.thread_baseline_from_at),
+    coverageThroughIso: throughCandidates.length === 0
+      ? null
+      : throughCandidates.reduce((hi, t) => (t.localeCompare(hi) > 0 ? t : hi),
+        throughCandidates[0]),
     // The pending segment's own span start. A refresh must re-list the segment's EARLIER
     // messages or it would redraft from a truncated view of its own exchange.
     pendingFromIso: iso(r.pending_coverage_from_at),
@@ -321,6 +345,41 @@ export function coverageLookupFingerprints (segment) {
     for (const v of messageVariants(m)) out.add(v)
   }
   return [...out].sort()
+}
+
+/**
+ * Split a segment at a thread's start of continuous knowledge.
+ *
+ * `older` is of UNKNOWN membership - it predates anything this connection ever absorbed or
+ * covered for the thread, so it may be part of an accepted exchange whose coverage was never
+ * recorded. It is absorbed, never drafted. `drafted` is the rest, decided by the ordinary
+ * rules.
+ *
+ * With no floor nothing is split: that is every thread whose history is locatable.
+ *
+ * @returns {{ older: Array<object>, drafted: Array<object> }}
+ */
+export function splitAtKnowledgeFloor (segment, floorIso) {
+  const list = Array.isArray(segment) ? segment : []
+  if (typeof floorIso !== 'string' || floorIso.length === 0) {
+    return { older: [], drafted: list }
+  }
+  // COMPARED AS INSTANTS, not as strings. The floor comes back from Postgres as
+  // `...+00:00` while a Graph envelope carries `...Z`, and at equal times '+' sorts BELOW
+  // 'Z' - so a string comparison would call an older message newer. Coverage is still set
+  // membership; this is only the knowledge boundary.
+  const floor = Date.parse(floorIso)
+  if (!Number.isFinite(floor)) return { older: [], drafted: list }
+  const older = []
+  const drafted = []
+  for (const m of list) {
+    const t = Date.parse(typeof m?.timestampIso === 'string' ? m.timestampIso : '')
+    // A message with no usable instant cannot be shown to be at or after the floor, so it is
+    // treated as unknown rather than assumed new.
+    if (!Number.isFinite(t) || t < floor) older.push(m)
+    else drafted.push(m)
+  }
+  return { older, drafted }
 }
 
 /**

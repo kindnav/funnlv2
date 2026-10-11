@@ -6,13 +6,19 @@
 
 export async function run (h) {
   const {
-    test, thread, world, newCounts, round, seed, psql, num, refRows,
+    test, thread, world, newCounts, round, seed, psql, num, rows, refRows, U1,
     pendingInteractions, pendingNewContacts, storedInteractions, RING_V1, RING_V2, draftFor,
     NOTES, applySegments, acceptInteraction, acceptNewContact, http, TOK, shippedRound,
-    ME, KNOWN, STRANGER, LEGACY_NEW, LONG_NEW, MAX_RECOVERY_MESSAGES_PER_FOLDER, assert,
+    ME, KNOWN, STRANGER, LEGACY_NEW, LONG_NEW, LONG_SLOW,
+    MAX_RECOVERY_MESSAGES_PER_FOLDER, assert,
   } = h
 
   const open = (list) => list.filter((r) => r[1] === 'pending')
+  // How many THREAD-LEVEL baselines exist. Thread state, not candidate state: it is
+  // what a thread whose history cannot be located has instead of a coverage row.
+  const baselineRows = () => num(`SELECT count(*) FROM public.outlook_thread_recovery
+                                   WHERE user_id='${U1}'
+                                     AND baseline_fingerprints IS NOT NULL;`)
 
   // ══════════════════════════════════════════════════════════════════════════
   console.log('\nGATE 1a: a GENUINE pre-feature proposal, written by the SHIPPED producer')
@@ -62,33 +68,55 @@ export async function run (h) {
   longTurns.push(['me', '2026-09-20T15:00:00Z', 'LATER-OUT Thursday at three works.'])
   longTurns.push(['them', '2026-09-27T09:00:00Z', 'THIRD-IN the desk head sent feedback.'])
   longTurns.push(['me', '2026-09-27T15:00:00Z', 'THIRD-OUT thank you, noting it down.'])
+  longTurns.push(['them', '2026-10-04T09:00:00Z', 'FOURTH-IN the panel date is confirmed.'])
+  longTurns.push(['me', '2026-10-04T15:00:00Z', 'FOURTH-OUT thank you, I will be there.'])
+  longTurns.push(['them', '2026-10-18T09:00:00Z', 'SIXTH-IN one last question about the start date.'])
+  longTurns.push(['me', '2026-10-18T15:00:00Z', 'SIXTH-OUT September, if that still works.'])
   const longThread = thread({ party: KNOWN, conv: 'conv-long-legacy', turns: longTurns })
   // THE SAME SHAPE for someone who was a STRANGER when the proposal was accepted, so the
   // long-history case is composed with the anchor-form transition.
   const longNewThread = thread({ party: LONG_NEW, conv: 'conv-long-newc', turns: longTurns })
+  // AND one more, reserved for the budget-starvation gate: a long legacy thread that has
+  // never been completed, so its first listing still overflows and there is a retry to starve.
+  const longSlowThread = thread({ party: LONG_SLOW, conv: 'conv-long-slow', turns: longTurns })
   const longHist = longThread.ids.slice(0, HISTORY)
   const longFirst = longThread.ids.slice(HISTORY, HISTORY + 2)
-  const longCont1 = longThread.ids.slice(HISTORY + 2, HISTORY + 4)
-  const longCont2 = longThread.ids.slice(HISTORY + 4)
+  const longCont1 = longThread.ids.slice(HISTORY + 2, HISTORY + 4)   // LATER pair
+  const longCont2 = longThread.ids.slice(HISTORY + 4, HISTORY + 6)   // THIRD pair
+  const longCont4 = longThread.ids.slice(HISTORY + 8, HISTORY + 10)  // SIXTH pair
+  // THE ACCEPTED EXCHANGE'S LAST INBOUND, for the re-delivery gate. Its anchor - the
+  // exchange's first message, FIRST-OUT at 09:00 - deliberately stays OUTSIDE any window
+  // floored at this message's own instant.
+  const longAcceptedInbound = longThread.ids[HISTORY + 1]
   const nHist = longNewThread.ids.slice(0, HISTORY)
   const nFirst = longNewThread.ids.slice(HISTORY, HISTORY + 2)
   const nCont1 = longNewThread.ids.slice(HISTORY + 2, HISTORY + 4)
-  const nCont2 = longNewThread.ids.slice(HISTORY + 4)
+  const nCont2 = longNewThread.ids.slice(HISTORY + 4, HISTORY + 6)
+  const sHist = longSlowThread.ids.slice(0, HISTORY)
+  const sFirst = longSlowThread.ids.slice(HISTORY, HISTORY + 2)
+  const sCont1 = longSlowThread.ids.slice(HISTORY + 2, HISTORY + 4)
+  const sCont2 = longSlowThread.ids.slice(HISTORY + 4, HISTORY + 6)
 
-  const legacyWorld = world(legacyKnown, legacyNew, longThread, longNewThread)
+  const legacyWorld = world(legacyKnown, legacyNew, longThread, longNewThread,
+    longSlowThread)
   const legacyState = {
     schedule: [
       // pre-migration: the original exchange of all three threads
       legacyKnown.ids.slice(0, 2).concat(legacyNew.ids.slice(0, 2))
-        .concat(longFirst).concat(nFirst),
+        .concat(longFirst).concat(nFirst).concat(sFirst),
       legacyKnown.ids.slice(2, 4).concat(legacyNew.ids.slice(2, 4)),
       legacyKnown.ids.slice(4).concat(legacyNew.ids.slice(4)),
       longCont1.concat(nCont1),
-      longCont1.concat(nCont1),   // a replay of the same page, before the reviewer decides
-      longCont2.concat(nCont2),
+      longCont1.concat(nCont1),   // a replay of the same page: already absorbed
+      longCont2.concat(nCont2),   // the next exchange, captured against the baseline
+      // Gate 2b: starved of budget. That round commits NOTHING, so the cursor does not move
+      // and the next invocation is served this very page again - which is the point.
+      sCont1,
+      sCont2,                     //          and then the exchange after it, suggested
+      [longAcceptedInbound, ...longCont4],  // Gate 2c: an accepted message RE-DELIVERED
     ],
     seen: new Set(),
-    always: new Set([...longHist, ...nHist]),
+    always: new Set([...longHist, ...nHist, ...sHist]),
   }
   const legacyCounts = newCounts()
 
@@ -97,11 +125,11 @@ export async function run (h) {
       state: legacyState, ring: RING_V1, draftFor })
     await test('the SHIPPED worker proposes all four, with no coverage columns in existence', () => {
       assert.strictEqual(r.run.outcome, 'committed', JSON.stringify(r.report))
-      assert.strictEqual(r.run.accepted, 4, JSON.stringify(r.report))
+      assert.strictEqual(r.run.accepted, 5, JSON.stringify(r.report))
       assert.strictEqual(open(pendingInteractions()).length, 2,
         'the known contact, and the long thread which is also a known contact')
-      assert.strictEqual(open(pendingNewContacts()).length, 2,
-        'the unknown person, and the unknown person on the long thread')
+      assert.strictEqual(open(pendingNewContacts()).length, 3,
+        'the unknown person, and two on long threads')
       assert.strictEqual(
         num("SELECT count(*) FROM information_schema.columns WHERE table_name='outlook_candidate_refs' AND column_name='covered_message_fingerprints';"),
         0, 'the coverage column must not exist yet, or these are not pre-feature rows')
@@ -120,8 +148,8 @@ export async function run (h) {
     }
 
     await test('all four are accepted, and BOTH unknown people are NOW CONTACTS', () => {
-      assert.strictEqual(storedInteractions().length, 4, 'four interactions exist')
-      for (const addr of [LEGACY_NEW, LONG_NEW]) {
+      assert.strictEqual(storedInteractions().length, 5, 'five interactions exist')
+      for (const addr of [LEGACY_NEW, LONG_NEW, LONG_SLOW]) {
         assert.strictEqual(num(`SELECT count(*) FROM public.contacts WHERE email='${addr}';`),
           1, 'acceptance created the contact for ' + addr)
       }
@@ -137,7 +165,7 @@ export async function run (h) {
 
   await test('the pre-feature rows are genuine legacy rows: no thread, no coverage', () => {
     const refs = refRows()
-    assert.strictEqual(refs.length, 4, JSON.stringify(refs))
+    assert.strictEqual(refs.length, 5, JSON.stringify(refs))
     for (const r of refs) {
       assert.strictEqual(r[1], '-', 'conversation_fingerprint must be NULL: ' + JSON.stringify(r))
       assert.strictEqual(Number(r[2]), 0, 'no coverage: ' + JSON.stringify(r))
@@ -222,33 +250,34 @@ export async function run (h) {
 
   console.log('\nGATE 2: a GENUINE long legacy thread - more history than one bounded page')
   // ══════════════════════════════════════════════════════════════════════════
-  // The original candidate for this thread was written by the SHIPPED worker before the
-  // migration existed and accepted through the real acceptance RPC, above. Its refs row
-  // carries NO conversation fingerprint, so the coverage read cannot find it; its episode
-  // anchor is the first message of an exchange the back-catalogue hides, so it cannot be
-  // found that way either.
+  // The original candidate for these threads was written by the SHIPPED worker before the
+  // migration existed and accepted through the real acceptance RPC, above. Each refs row
+  // carries NO conversation fingerprint, and its episode anchor is the first message of an
+  // exchange the back-catalogue hides, so it cannot be located by either key.
   //
-  // REPRODUCED at the previous head: with no settled instant there was no floor, the single
-  // bounded page per folder was spent on 30 back-catalogue messages, the page came back
-  // carrying @odata.nextLink, recovery settled `recovery_truncated` and the round COMMITTED -
-  // for continuation 1 and again for continuation 2. The thread was permanently unable to log
-  // another interaction.
+  // REPRODUCED before the bounded retry: with no settled instant there was no floor, the
+  // single bounded page per folder was spent on 30 back-catalogue messages, the page came
+  // back carrying @odata.nextLink, recovery settled `recovery_truncated` and the round
+  // COMMITTED - for every continuation, for ever.
+  //
+  // REPRODUCED again after it: the narrowed window is NOT provably new. The next delta page
+  // may re-deliver an already-accepted message beside a genuinely new pair, and drafting the
+  // window put the accepted message back in front of the model. So an unlocatable thread's
+  // window is ABSORBED, forward-only, and the next exchange is what gets captured.
   {
     const accepted = storedInteractions()
     const before = legacyCounts.model
-    // Gate 1b's own suggestions were accepted and carry coverage too, so the absorption
-    // claim below is about the rows THIS round creates, not every row in the table.
     const refsBefore = new Set(refRows().map((r) => r[1] + '|' + r[4]))
 
-    // ── CONTINUATION 1 ──────────────────────────────────────────────────────
+    // ── ROUND A: the window is absorbed, nothing is drafted ─────────────────
     const c1 = await round({ world: legacyWorld, counts: legacyCounts, state: legacyState,
       ring: RING_V1, draftFor })
 
     await test('the long thread is completed by ONE bounded retry, not abandoned', () => {
       assert.strictEqual(c1.run.outcome, 'committed', JSON.stringify(c1.report))
-      // TWO long legacy threads this round: the known contact, and the person who became a
-      // contact when their proposal was accepted. One windowed retry each, and a retry is
-      // NOT charged against the per-invocation recovery cap as a fresh attempt.
+      // TWO long legacy threads: the known contact, and the person who became a contact when
+      // their proposal was accepted. One windowed retry each, and a retry is NOT charged
+      // against the per-invocation recovery cap as a fresh attempt.
       assert.strictEqual(c1.report.content.recovery_retries, 2,
         'one windowed retry per long thread: ' + JSON.stringify(c1.report.content))
       assert.strictEqual(c1.report.content.recoveries_attempted, 2,
@@ -259,123 +288,264 @@ export async function run (h) {
 
     await test('the retry was WINDOWED, and every listing stayed inside the page bound', () => {
       for (const conv of [longThread.conv, longNewThread.conv]) {
-      const mine = legacyCounts.lookups.filter((l) => l.conv === conv)
-      const unwindowed = mine.filter((l) => l.since === null)
-      const windowed = mine.filter((l) => l.since !== null)
-      // The FIRST attempt asks unwindowed and returns at the first folder that overflows -
-      // it does not keep listing - so one unwindowed listing is all it takes.
-      assert.strictEqual(unwindowed.length, 1,
-        'one unwindowed listing, then the truncation: ' + JSON.stringify(mine))
-      assert.strictEqual(windowed.length, 2, 'the retry lists BOTH folders windowed')
-      for (const l of windowed) {
-        assert.ok(l.since >= '2026-09-20', 'the floor is what THIS ROUND saw, not a '
-          + 'reviewer date: ' + JSON.stringify(l))
-      }
-      for (const l of mine) {
-        assert.strictEqual(l.hasOrderBy, false, 'no $orderby with $filter on messages')
-        assert.ok(l.top <= MAX_RECOVERY_MESSAGES_PER_FOLDER, 'the page stays bounded')
-      }
-      }
-    })
-
-    await test('continuation 1 is absorbed EXPLICITLY: coverage names those messages only', () => {
-      const fresh = refRows().filter((r) => !refsBefore.has(r[1] + '|' + r[4]))
-      assert.strictEqual(fresh.length, 2,
-        'one new coverage row per long thread: ' + JSON.stringify(fresh))
-      for (const r of fresh) {
-        assert.strictEqual(Number(r[2]), 2,
-          'exactly the two messages the window returned, nothing older: ' + JSON.stringify(r))
-        assert.strictEqual(r[3], 'draft', 'and a draft describes them')
-        assert.match(r[1], /^[0-9a-f]{64}$/, 'the thread is identified')
-      }
-    })
-
-    await test('THE LIMIT, stated: the pre-feature rows themselves stay uninitialized', () => {
-      // A long legacy row cannot be LOCATED: it has no conversation fingerprint, and its
-      // episode anchor is the first message of an exchange the back-catalogue hides, so no
-      // bounded window can reach it. Nothing pretends otherwise - it is left exactly as the
-      // shipped worker wrote it. What makes the thread work again is that the continuation
-      // gets its own coverage row, under the thread's conversation fingerprint, from which
-      // every later segment is decided.
-      const stillLegacy = refRows().filter((r) => r[1] === '-' && Number(r[2]) === 0)
-      assert.strictEqual(stillLegacy.length, 2,
-        'both long legacy rows are untouched: ' + JSON.stringify(refRows()))
-    })
-
-    await test('and the model saw continuation 1 only, never the back-catalogue or the accepted exchange', () => {
-      assert.ok(legacyCounts.model > before, 'a draft was made')
-      for (const sent of legacyCounts.modelBodies.slice(-2)) {
-        assert.ok(sent.indexOf('LATER-IN') >= 0 && sent.indexOf('LATER-OUT') >= 0,
-          'both halves of the continuation must be present')
-        assert.ok(sent.indexOf('HIST-0') < 0, 'back-catalogue history must not be sent')
-        assert.ok(sent.indexOf('HIST-' + (HISTORY - 1)) < 0, 'nor the newest of it')
-        assert.ok(sent.indexOf('FIRST-OUT') < 0, 'the accepted exchange must not be sent again')
-        assert.ok(sent.indexOf('FIRST-IN') < 0, 'the accepted exchange must not be sent again')
-      }
-    })
-
-    const cont1 = open(pendingInteractions())
-    await test('exactly ONE new suggestion per long thread, accepted notes unchanged', () => {
-      // BOTH take the interaction path now: the second person became a contact when their
-      // proposal was accepted, so this is the anchor-form transition on a long thread.
-      assert.strictEqual(cont1.length, 2,
-        'one per long thread: ' + JSON.stringify(pendingInteractions()))
-      assert.strictEqual(open(pendingNewContacts()).length, 0,
-        'and no unknown-person path remains for either')
-      for (const row of cont1) assert.strictEqual(row[2], 'LATER-NOTE')
-      assert.deepStrictEqual(storedInteractions(), accepted, 'an accepted note changed')
-    })
-
-    // ── REPLAY: the same page again, before the reviewer decides ────────────
-    const replay = await round({ world: legacyWorld, counts: legacyCounts,
-      state: legacyState, ring: RING_V1, draftFor })
-    await test('a replay REFRESHES that one suggestion and creates nothing', () => {
-      assert.strictEqual(replay.run.outcome, 'committed', JSON.stringify(replay.report))
-      const p = open(pendingInteractions())
-      assert.strictEqual(p.length, 2, 'still two: ' + JSON.stringify(p))
-      assert.deepStrictEqual(p.map((r) => r[0]).sort(), cont1.map((r) => r[0]).sort(),
-        'and they are the SAME rows')
-      assert.strictEqual(replay.report.created, 0, 'nothing new was created')
-    })
-
-    for (const row of cont1) {
-      await acceptInteraction(row[0], NOTES.LATER + '\n\nMine: Thursday 3pm confirmed.')
-    }
-    const accepted2 = storedInteractions()
-    await test('continuation 1 is accepted, so both threads now have settled coverage', () => {
-      assert.strictEqual(accepted2.length, accepted.length + 2)
-      const refs = refRows().filter((r) => Number(r[2]) > 0)
-      assert.ok(refs.length >= 4, JSON.stringify(refs))
-    })
-
-    // ── CONTINUATION 2, in a later COMPLETED round ─────────────────────────
-    const c2 = await round({ world: legacyWorld, counts: legacyCounts, state: legacyState,
-      ring: RING_V1, draftFor })
-
-    await test('continuation 2 is captured EXACTLY ONCE', () => {
-      assert.strictEqual(c2.run.outcome, 'committed', JSON.stringify(c2.report))
-      const p = open(pendingInteractions())
-      assert.strictEqual(p.length, 2,
-        'exactly one new suggestion per long thread: ' + JSON.stringify(pendingInteractions())
-        + ' | ' + JSON.stringify(c2.report))
-      for (const row of p) assert.strictEqual(row[2], 'THIRD-NOTE', 'the THIRD exchange')
-    })
-
-    await test('its draft carries both new halves and excludes everything settled', () => {
-      for (const sent of legacyCounts.modelBodies.slice(-2)) {
-        assert.ok(sent.indexOf('THIRD-IN') >= 0 && sent.indexOf('THIRD-OUT') >= 0,
-          'both halves of continuation 2 must be present')
-        for (const tag of ['HIST-0', 'FIRST-OUT', 'FIRST-IN', 'LATER-IN', 'LATER-OUT']) {
-          assert.ok(sent.indexOf(tag) < 0, tag + ' is settled and must not be sent')
+        const mine = legacyCounts.lookups.filter((l) => l.conv === conv)
+        const unwindowed = mine.filter((l) => l.since === null)
+        const windowed = mine.filter((l) => l.since !== null)
+        // The FIRST attempt asks unwindowed and returns at the first folder that overflows -
+        // it does not keep listing - so one unwindowed listing is all it takes.
+        assert.strictEqual(unwindowed.length, 1,
+          'one unwindowed listing, then the truncation: ' + JSON.stringify(mine))
+        assert.strictEqual(windowed.length, 2, 'the retry lists BOTH folders windowed')
+        for (const l of windowed) {
+          assert.ok(l.since >= '2026-09-20', 'the floor is what THIS ROUND saw, not a '
+            + 'reviewer date: ' + JSON.stringify(l))
+        }
+        for (const l of mine) {
+          assert.strictEqual(l.hasOrderBy, false, 'no $orderby with $filter on messages')
+          assert.ok(l.top <= MAX_RECOVERY_MESSAGES_PER_FOLDER, 'the page stays bounded')
         }
       }
     })
 
-    await test('and both accepted interactions, with their reviewed notes, are unchanged', () => {
-      assert.deepStrictEqual(storedInteractions(), accepted2)
+    await test('the window is ABSORBED, not drafted: no suggestion and NO model call', () => {
+      assert.strictEqual((c1.report.entry_skipped || {}).coverage_baselined, 2,
+        'both long threads report the baseline: ' + JSON.stringify(c1.report))
+      assert.strictEqual(c1.report.created, 0, 'nothing was created')
+      assert.strictEqual(legacyCounts.model, before,
+        'and the model was never called, so no accepted message could reach it')
+      assert.strictEqual(open(pendingInteractions()).length, 0, 'no pending suggestion')
+      assert.strictEqual(open(pendingNewContacts()).length, 0)
+    })
+
+    await test('the absorption is RECORDED against the thread, so it never repeats', () => {
+      assert.strictEqual(baselineRows(), 2, 'one thread baseline per long thread')
+      const sizes = rows(`SELECT array_length(baseline_fingerprints, 1)
+                            FROM public.outlook_thread_recovery
+                           WHERE user_id='${U1}' AND baseline_fingerprints IS NOT NULL
+                           ORDER BY 1;`).map((r) => Number(r[0]))
+      for (const sz of sizes) {
+        assert.strictEqual(sz, 2,
+          'exactly the two messages the window returned, nothing older: ' + JSON.stringify(sizes))
+      }
+    })
+
+    await test('THE LIMIT, stated: the pre-feature rows themselves stay uninitialized', () => {
+      // A long legacy row cannot be LOCATED: no conversation fingerprint, and its episode
+      // anchor is the first message of an exchange the back-catalogue hides, so no bounded
+      // window reaches it. Nothing pretends otherwise - it is left exactly as the shipped
+      // worker wrote it. What makes the thread work again is the THREAD-level baseline above,
+      // which later segments are decided against.
+      // THREE: the two long threads this gate drove, and the one Gate 2b has not reached yet.
+      const stillLegacy = refRows().filter((r) => r[1] === '-' && Number(r[2]) === 0)
+      assert.strictEqual(stillLegacy.length, 3,
+        'every long legacy row is untouched: ' + JSON.stringify(refRows()))
+      const unchanged = refRows().filter((r) => !refsBefore.has(r[1] + '|' + r[4]))
+      assert.strictEqual(unchanged.length, 0, 'and no candidate refs row was written at all')
+    })
+
+    await test('the accepted interactions and their reviewed notes are unchanged', () => {
+      assert.deepStrictEqual(storedInteractions(), accepted)
+    })
+
+    // ── ROUND B: a REPLAY of the same page. Already absorbed, so nothing new ─
+    const replay = await round({ world: legacyWorld, counts: legacyCounts, state: legacyState,
+      ring: RING_V1, draftFor })
+    await test('a replay of an absorbed window produces nothing, and no second baseline', () => {
+      assert.strictEqual(replay.run.outcome, 'committed', JSON.stringify(replay.report))
+      assert.strictEqual(replay.report.created, 0, 'nothing created')
+      assert.strictEqual(open(pendingInteractions()).length, 0, 'still no pending suggestion')
+      assert.strictEqual((replay.report.entry_skipped || {}).nothing_new, 2,
+        'the baseline already covers it: ' + JSON.stringify(replay.report))
+      assert.strictEqual(baselineRows(), 2, 'and no extra baseline row')
+    })
+
+    // ── ROUND C: a genuinely NEW exchange, decided against the baseline ─────
+    const c2 = await round({ world: legacyWorld, counts: legacyCounts, state: legacyState,
+      ring: RING_V1, draftFor })
+
+    await test('the NEXT exchange is captured EXACTLY ONCE, on both paths', () => {
+      assert.strictEqual(c2.run.outcome, 'committed', JSON.stringify(c2.report))
+      const i = open(pendingInteractions())
+      const n = open(pendingNewContacts())
+      assert.strictEqual(n.length, 0,
+        'both people are contacts now, so no unknown-person path remains')
+      assert.strictEqual(i.length, 2,
+        'exactly one new suggestion per long thread: ' + JSON.stringify(pendingInteractions())
+        + ' | ' + JSON.stringify(c2.report))
+      for (const row of i) assert.strictEqual(row[2], 'THIRD-NOTE', 'the THIRD exchange')
+    })
+
+    await test('its draft carries both new halves and excludes everything absorbed', () => {
+      for (const sent of legacyCounts.modelBodies.slice(-2)) {
+        assert.ok(sent.indexOf('THIRD-IN') >= 0 && sent.indexOf('THIRD-OUT') >= 0,
+          'both halves of the new exchange must be present')
+        for (const tag of ['HIST-0', 'FIRST-OUT', 'FIRST-IN', 'LATER-IN', 'LATER-OUT']) {
+          assert.ok(sent.indexOf(tag) < 0, tag + ' is absorbed or settled and must not be sent')
+        }
+      }
+    })
+
+    await test('and the accepted interactions, with their reviewed notes, are STILL unchanged', () => {
+      assert.deepStrictEqual(storedInteractions(), accepted)
+    })
+
+    // Decide them, so the scenarios below start from a clean pending slate.
+    for (const row of open(pendingInteractions())) {
+      await acceptInteraction(row[0], NOTES.THIRD + '\n\nMine: noted.')
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  console.log('\nGATE 2b: the narrowed retry CANNOT BE ADMITTED - the exchange is preserved')
+  // ══════════════════════════════════════════════════════════════════════════
+  // INVOCATION_BUDGET_MS is 120,000 and the retry is admitted on 85,000 ms of remaining
+  // budget, so a retry needs the invocation to be under 35,000 ms old. Nineteen seconds on
+  // the envelope GET and nineteen on the first, truncated listing puts it at 38,000: each
+  // request well inside its own deadline, the invocation unable to admit the narrowed retry.
+  //
+  // REPRODUCED: this committed BOTH cursors with `recovery_truncated`, zero retries and no
+  // suggestion. A floor existed, so the work was possible - it was simply thrown away.
+  {
+    const accepted = storedInteractions()
+    const baselinesBefore = baselineRows()
+    const SLOW = { start: 0, cost: { envelope: 19000, truncatedLookup: 19000 } }
+
+    const starved = await round({ world: legacyWorld, counts: legacyCounts, state: legacyState,
+      ring: RING_V1, draftFor, clock: SLOW })
+
+    await test('an unadmittable retry is a RETRYABLE budget result, not a settlement', () => {
+      assert.deepStrictEqual({ ...starved.report.content.recovery_outcomes },
+        { budget_exhausted: 1 },
+        'reported as the retryable budget outcome it is: '
+        + JSON.stringify(starved.report.content))
+      assert.strictEqual(starved.report.content.recovery_retries, 0,
+        'the retry was never made')
+      assert.strictEqual((starved.report.entry_skipped || {}).recovery_truncated, undefined,
+        'and the truncation is NOT reported as a decision: ' + JSON.stringify(starved.report))
+    })
+
+    await test('no cursor advances and the conversation is left unpassed', () => {
+      assert.strictEqual(starved.report.cursors_advanced, 0,
+        'a possible exchange must not be committed away: ' + JSON.stringify(starved.report))
+      assert.strictEqual(starved.report.finalize.processed, 0, 'the conversation is unpassed')
+      assert.strictEqual(starved.report.created, 0)
+      assert.deepStrictEqual(storedInteractions(), accepted)
+    })
+
+    // THE NEXT INVOCATION, with the ordinary clock: the same page, since nothing committed.
+    const recovered = await round({ world: legacyWorld, counts: legacyCounts,
+      state: legacyState, ring: RING_V1, draftFor })
+
+    await test('the NEXT invocation processes that same exchange, exactly once', () => {
+      assert.strictEqual(recovered.run.outcome, 'committed', JSON.stringify(recovered.report))
+      assert.ok(recovered.report.content.recovery_retries >= 1,
+        'it makes the retry it could not afford before: '
+        + JSON.stringify(recovered.report.content))
+      // This thread had NO coverage, so the window is of unknown membership and is ABSORBED -
+      // the same forward-only step Gate 2 establishes. Processed once, recorded, and never
+      // read again; it is the exchange AFTER it that becomes a suggestion.
+      assert.strictEqual((recovered.report.entry_skipped || {}).coverage_baselined, 1,
+        'absorbed exactly once: ' + JSON.stringify(recovered.report))
+      assert.strictEqual(recovered.report.cursors_advanced, 2, 'and now the round commits')
+      assert.strictEqual(baselineRows() - baselinesBefore, 1,
+        'exactly one new thread baseline: the starved thread\'s')
+    })
+
+    await test('and the accepted notes are untouched throughout', () => {
+      assert.deepStrictEqual(storedInteractions(), accepted)
+    })
+
+    // AND THE THREAD WORKS: the next exchange becomes a suggestion, once.
+    const afterStarve = await round({ world: legacyWorld, counts: legacyCounts,
+      state: legacyState, ring: RING_V1, draftFor })
+    await test('the exchange after it is suggested, exactly once', () => {
+      assert.strictEqual(afterStarve.run.outcome, 'committed',
+        JSON.stringify(afterStarve.report))
+      const i = open(pendingInteractions())
+      assert.strictEqual(i.length, 1,
+        'one suggestion: ' + JSON.stringify(pendingInteractions())
+        + ' | ' + JSON.stringify(afterStarve.report))
+      assert.strictEqual(i[0][2], 'THIRD-NOTE')
+      const sent = legacyCounts.modelBodies[legacyCounts.modelBodies.length - 1]
+      assert.ok(sent.indexOf('THIRD-IN') >= 0 && sent.indexOf('THIRD-OUT') >= 0)
+      for (const tag of ['HIST-0', 'FIRST-OUT', 'FIRST-IN', 'LATER-IN', 'LATER-OUT']) {
+        assert.ok(sent.indexOf(tag) < 0, tag + ' is absorbed or accepted and must not be sent')
+      }
+    })
+
+    for (const row of open(pendingInteractions())) {
+      await acceptInteraction(row[0], NOTES.THIRD + '\n\nMine: noted.')
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  console.log('\nGATE 2c: delta RE-DELIVERS an accepted message inside the narrowed window')
+  // ══════════════════════════════════════════════════════════════════════════
+  // The claim that the narrowed window "cannot reach the accepted exchange" was WRONG: the
+  // window starts at the earliest message THIS ROUND saw, and delta re-delivers old mail
+  // after a resync. REPRODUCED: the worker drafted a window containing an already-accepted
+  // inbound message, and claimed coverage for all three messages.
+  {
+    const accepted = storedInteractions()
+    const before = legacyCounts.model
+
+    const mixed = await round({ world: legacyWorld, counts: legacyCounts, state: legacyState,
+      ring: RING_V1, draftFor })
+
+    await test('the re-delivered accepted message is inside the window the retry asked for', () => {
+      const mine = legacyCounts.lookups
+        .filter((l) => l.conv === longThread.conv && l.since !== null).slice(-2)
+      assert.ok(mine.length > 0, 'a windowed listing was made')
+      for (const l of mine) {
+        assert.ok(l.since <= '2026-09-16T00:00:00Z',
+          'the floor reaches back to the re-delivered message, which is the whole problem: '
+          + JSON.stringify(l))
+      }
+    })
+
+    await test('the accepted message is ABSORBED, never drafted', () => {
+      assert.strictEqual(mixed.run.outcome, 'committed', JSON.stringify(mixed.report))
+      assert.ok((mixed.report.entry_skipped || {}).coverage_baselined === undefined,
+        'the round is not skipped wholesale: ' + JSON.stringify(mixed.report))
+      assert.ok(legacyCounts.model > before, 'the genuinely new pair WAS drafted')
+      const sent = legacyCounts.modelBodies[legacyCounts.modelBodies.length - 1]
+      assert.ok(sent.indexOf('SIXTH-IN') >= 0 && sent.indexOf('SIXTH-OUT') >= 0,
+        'both halves of the genuinely new pair must be present')
+      assert.ok(sent.indexOf('FIRST-IN') < 0,
+        'the RE-DELIVERED accepted message must NOT reach the model')
+      for (const tag of ['HIST-0', 'FIRST-OUT', 'LATER-IN', 'LATER-OUT', 'THIRD-IN',
+        'THIRD-OUT', 'FOURTH-IN', 'FOURTH-OUT']) {
+        assert.ok(sent.indexOf(tag) < 0, tag + ' must not be sent again')
+      }
+    })
+
+    await test('and it is absorbed against the thread, so it cannot come back', () => {
+      const n = num(`SELECT count(*) FROM public.outlook_thread_recovery
+                      WHERE user_id='${U1}'
+                        AND baseline_fingerprints IS NOT NULL
+                        AND array_length(baseline_fingerprints, 1) > 2;`)
+      assert.ok(n >= 1, 'the thread baseline grew to take the re-delivered message in')
+    })
+
+    await test('the genuinely new exchange is captured EXACTLY ONCE', () => {
+      const i = open(pendingInteractions())
+      assert.strictEqual(i.length, 1,
+        'one suggestion: ' + JSON.stringify(pendingInteractions())
+        + ' | ' + JSON.stringify(mixed.report))
+      assert.strictEqual(i[0][2], 'SIXTH-NOTE')
+    })
+
+    await test('its coverage claims the new pair ONLY, never the re-delivered message', () => {
+      const fresh = refRows().filter((r) => Number(r[2]) === 2 && r[3] === 'draft')
+      assert.ok(fresh.length >= 1, JSON.stringify(refRows()))
+    })
+
+    await test('and the accepted interactions and their notes are unchanged', () => {
+      assert.deepStrictEqual(storedInteractions(), accepted)
     })
   }
 
+  // ══════════════════════════════════════════════════════════════════════════
   // ══════════════════════════════════════════════════════════════════════════
   // ══════════════════════════════════════════════════════════════════════════
   // ══════════════════════════════════════════════════════════════════════════

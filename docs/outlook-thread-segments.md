@@ -373,7 +373,9 @@ and tears down its own containers.
 | Rotation, known contact | A first exchange is proposed and ACCEPTED through the real acceptance RPC with a reviewer-edited note. The key is rotated with the previous key still accepted. A later two-way exchange produces exactly ONE new pending suggestion, drafted from the later exchange; coverage reaches four messages; a replay refreshes that one row; the accepted interaction and its note are byte-identical (length and digest compared). |
 | Rotation, unknown person | The same through `upsert_new_contact_candidate` and `accept_new_contact_candidate`, which also makes the person a contact - so the later exchange crosses the anchor-form transition and the key change at once. |
 | Legacy initialization | The pre-feature proposal is written by the **shipped worker**, loaded from a git worktree at `main`, against a database with this migration HELD BACK - then accepted through the real acceptance RPC. The migration is applied to the database that already holds those rows. Both anchor forms are present, and one accepted proposal's person is now a contact. Through the handler the threads are BASELINED (`coverage_baselined`, `coverage_source = 'legacy_baseline'`, no suggestion, no model call), and only mail arriving after the baseline becomes a suggestion. |
-| Legacy history beyond the page cap | A GENUINE long legacy thread, for the known-contact path AND for a person who became a contact when their proposal was accepted. The original candidate is written by the shipped worker with the migration withheld and accepted through the real acceptance RPC; the thread then holds `MAX_RECOVERY_MESSAGES_PER_FOLDER + 5` inbound messages of back-catalogue in one folder, with the fixture honouring the conversation clause, the per-folder instant window, `$top` and `@odata.nextLink`. One unwindowed listing overflows; ONE windowed retry completes the thread; the continuation is absorbed explicitly (coverage naming exactly the two messages the window returned); a replay refreshes rather than duplicates; and a second continuation in a later completed round is captured exactly once. Neither the back-catalogue nor the accepted exchange reaches the model in either round. |
+| Legacy history beyond the page cap | A GENUINE long legacy thread, for the known-contact path AND for a person who became a contact when their proposal was accepted. The original candidate is written by the shipped worker with the migration withheld and accepted through the real acceptance RPC; the thread then holds `MAX_RECOVERY_MESSAGES_PER_FOLDER + 5` inbound messages of back-catalogue in one folder, with the fixture honouring the conversation clause, the per-folder instant window, `$top` and `@odata.nextLink`. One unwindowed listing overflows; ONE windowed retry completes the thread; the window is ABSORBED (no suggestion, no model call, recorded as a thread baseline naming exactly the two messages it returned); a replay of it produces nothing and no second baseline; and the NEXT exchange is captured exactly once with neither the back-catalogue nor anything absorbed in its request. |
+| Retry admission failure | The injected clock advances 19 s on the envelope GET and 19 s on the first truncated listing - each request inside its own deadline, the invocation unable to admit the narrowed retry. The result is a retryable `budget_exhausted` recovery outcome, no cursor advances, the conversation is left unpassed, and the next invocation is served the same page and processes that exchange exactly once. The exchange after it is then suggested. |
+| Delta re-delivering an accepted message | The next delta page carries the accepted exchange's last inbound message again beside a genuinely new pair, with the original accepted anchor outside the narrowed window. The re-delivered message never reaches the model and is absorbed into the thread baseline; the genuinely new pair is still captured exactly once in the same round, its coverage claiming the new pair only. |
 | Rotation composed with a decision during drafting | The reviewer ACCEPTS (and, separately, DISMISSES) between the coverage read and the producer write, staged by a hook on the real RPC call. The real producer answers `coverage_moved`, which is not in `WRITE_OK`: no cursor advances and nothing is written. The next attempt - same page, cursor never moved - captures the genuinely new exchange ONCE, the decided row is still the decided row, and the model is sent only the new exchange. |
 
 **The model request is inspected, not assumed**, in every group: the captured Anthropic body
@@ -474,17 +476,24 @@ found at all - and the fix is what the evidence above now holds.
    instants the run already holds - the earliest message this round stored, the pending
    segment's own span start, the durable unpaired hint. Never a reviewer's date, never a larger
    page, and never more than one retry: a second truncation settles exactly as the first did.
-   The window cannot reach the accepted exchange, because it starts at what this round saw, and
-   what it returns is claimed explicitly by the write that follows. `recovery_retries` is
-   reported so the bound is measurable rather than asserted, and the truncated answer carries
-   the conversation key back so the retry makes no second envelope GET.
+   `recovery_retries` is reported so the bound is measurable rather than asserted, and the
+   truncated answer carries the conversation key back so the retry makes no second envelope
+   GET.
+
+   **A CLAIM THAT WAS WRONG, and is corrected here.** An earlier revision of this section said
+   the narrowed window "cannot reach the accepted exchange, because it starts at what this
+   round saw". That is false: the window starts at the earliest message THIS ROUND SAW, and
+   delta re-delivers old mail - after a resync, or a provider replay. Reproduced against the
+   real functions, which is how it was found. See defect 11.
 
    **The limit, stated:** the pre-feature refs row itself stays uninitialized. It cannot be
    LOCATED - no conversation fingerprint, and its episode anchor is the first message of an
    exchange the back-catalogue hides, which no bounded window reaches. Nothing pretends
    otherwise; it is left exactly as the shipped worker wrote it. What makes the thread work
-   again is that the continuation gets its own coverage row under the thread's conversation
-   fingerprint, and every later segment is decided from that.
+   again is the THREAD-LEVEL baseline (defect 11), which later segments are decided against.
+
+   **And the bound is not a settlement.** A viable retry the invocation cannot ADMIT is a
+   retryable budget result, not a decision - see defect 12.
 
 9. **A genuine SHORT legacy row was never found.** It has no conversation fingerprint, so it is
    matched only on its own episode anchor - the thread's first message, which a delta round
@@ -505,6 +514,47 @@ found at all - and the fix is what the evidence above now holds.
     to `bumpDeferral`, in any call shape, and fails if one is outside the vocabulary; a second
     control shows the sanitized output keeping `fetch_failed` and still dropping an unknown
     code.
+
+11. **An unlocatable thread's window is not provably new, and was drafted anyway.** Delta
+    re-delivered the accepted exchange's last inbound message beside a genuinely new pair, so
+    the narrowed window contained a message the reviewer had already accepted. Reproduced
+    against the real functions: the model request carried the accepted inbound and the
+    coverage row claimed all three messages.
+
+    Two things fix it, and neither raises a cap or scans history:
+
+    * **A thread-level forward-only baseline.** The first window a narrowed retry manages to
+      read, for a thread whose coverage could not be established at all, is ABSORBED rather
+      than drafted - unknown membership is not an assertion that the window is new. There is
+      no refs row to record that on (`ocr_exactly_one_target` requires a candidate), so it
+      lives in `outlook_thread_recovery`, the table that exists for exactly this case, as a
+      bounded fingerprint SET with its span. `baseline_outlook_thread_window` unions the set
+      and only ever extends the span; over the 50-message bound it REFUSES rather than
+      trimming, because dropping a fingerprint from a baseline would make an absorbed message
+      look new again.
+    * **A knowledge floor.** That baseline's `from_at` is the start of continuous knowledge for
+      the thread. Below it a message may belong to the pre-feature accepted exchange; at or
+      above it everything was absorbed, covered, or genuinely seen as new. So for a thread
+      carrying a baseline - and only for such a thread, which is why ordinary delayed
+      discovery is untouched - the segment is SPLIT at that instant by
+      `splitAtKnowledgeFloor`: what is older is absorbed and never drafted, what is at or
+      after it is decided by the ordinary rules. Instants are compared as instants, not as
+      strings: Postgres returns `...+00:00` and a Graph envelope carries `...Z`, and at equal
+      times `'+'` sorts below `'Z'`.
+
+    The result, measured: the re-delivered accepted message never reaches the model, the
+    genuinely new pair is still captured exactly once in the same round, and its coverage
+    claims the new pair only.
+
+12. **A viable retry the invocation could not admit was treated as a settlement.** With the
+    clock advanced inside each request's own deadline - 19 s on the envelope GET, 19 s on the
+    first truncated listing - both lookups completed but the invocation could not admit the
+    narrowed retry. Reproduced against the real functions: both cursors committed with
+    `recovery_truncated`, zero retries and no suggestion. A floor existed, so the work was
+    possible; it was simply thrown away. It is now a retryable `budget_exhausted` recovery
+    outcome that leaves the conversation unpassed, so the next invocation is served the same
+    page and processes that exchange exactly once. An actually completed second truncated
+    lookup still settles deterministically, as before.
 
 ### Not demonstrated
 
