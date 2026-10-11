@@ -150,6 +150,11 @@ export async function recoverConversation (p) {
   const {
     row, handles, decryptHandle, accessToken, deps, budgetAllows, selfSet, contactIndex,
     connectionId, keyRing, produceHandles, localDateFor,
+    // THE SEGMENT WINDOW, optional. Supplied for a thread that already has settled
+    // coverage, so the one bounded page per folder is spent on the exchange being
+    // assembled instead of on history that is already summarized. Absent - a first pass, or
+    // a thread nobody has decided yet - the request is exactly the one that shipped.
+    sinceIso,
   } = p || {}
   const stats = { envelopeFetches: 0, lookups: 0, recoveredMessages: 0, dedupedAgainstStored: 0 }
   const exec = typeof deps?.executeGraphRequest === 'function' ? deps.executeGraphRequest : executeGraphRequest
@@ -191,7 +196,10 @@ export async function recoverConversation (p) {
     if (!allows(RECOVERY_REQUEST_ADMIT_MS)) return retry('budget_exhausted', stats)
     let req
     try {
-      req = buildConversationLookupRequest({ folder, conversationId, top: MAX_RECOVERY_MESSAGES_PER_FOLDER })
+      req = buildConversationLookupRequest({
+        folder, conversationId, top: MAX_RECOVERY_MESSAGES_PER_FOLDER,
+        ...(typeof sinceIso === 'string' && sinceIso.length > 0 ? { sinceIso } : {}),
+      })
     } catch {
       return settled('recovery_mismatch', stats)
     }

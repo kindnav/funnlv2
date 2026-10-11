@@ -80,7 +80,8 @@ BEGIN
   ASSERT n = 1, 'exactly ONE upsert_outlook_interaction_candidate must exist, found ' || n;
   SELECT pronargs INTO a FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace
    WHERE ns.nspname = 'public' AND p.proname = 'upsert_outlook_interaction_candidate';
-  ASSERT a = 13, 'the producer takes 13 arguments, found ' || a;
+  -- 16 since 20261011: the thread fingerprint and the coverage it claims.
+  ASSERT a = 16, 'the producer takes 16 arguments, found ' || a;
   SELECT count(*) INTO n FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace
    WHERE ns.nspname = 'public' AND p.proname = 'accept_interaction_candidate';
   ASSERT n = 1, 'exactly ONE accept_interaction_candidate must exist, found ' || n;
@@ -88,13 +89,13 @@ BEGIN
    WHERE ns.nspname = 'public' AND p.proname = 'accept_interaction_candidate';
   ASSERT a = 6, 'the accept RPC takes 6 arguments, found ' || a;
   ASSERT has_function_privilege('service_role',
-    'public.upsert_outlook_interaction_candidate(uuid,uuid,uuid,text,text,smallint,text,date,text[],text,text,text,text)', 'EXECUTE'),
+    'public.upsert_outlook_interaction_candidate(uuid,uuid,uuid,text,text,smallint,text,date,text[],text,text,text,text,text,text[],timestamptz)', 'EXECUTE'),
     'the producer must be executable by service_role';
   ASSERT NOT has_function_privilege('authenticated',
-    'public.upsert_outlook_interaction_candidate(uuid,uuid,uuid,text,text,smallint,text,date,text[],text,text,text,text)', 'EXECUTE'),
+    'public.upsert_outlook_interaction_candidate(uuid,uuid,uuid,text,text,smallint,text,date,text[],text,text,text,text,text,text[],timestamptz)', 'EXECUTE'),
     'the producer must NOT be executable by authenticated';
   ASSERT NOT has_function_privilege('anon',
-    'public.upsert_outlook_interaction_candidate(uuid,uuid,uuid,text,text,smallint,text,date,text[],text,text,text,text)', 'EXECUTE'),
+    'public.upsert_outlook_interaction_candidate(uuid,uuid,uuid,text,text,smallint,text,date,text[],text,text,text,text,text,text[],timestamptz)', 'EXECUTE'),
     'the producer must NOT be executable by anon';
   ASSERT has_function_privilege('authenticated',
     'public.accept_interaction_candidate(uuid,text,date,text,text,date)', 'EXECUTE'),

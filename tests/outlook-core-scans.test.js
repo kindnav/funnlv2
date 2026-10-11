@@ -469,6 +469,12 @@ test('applied migrations are unmodified; the only addition is the forward scope 
     // Detailed AI notes: the generated-summary ceiling 200 -> 2,000 in three column CHECKs
     // and both producer RPCs; bodies otherwise identical, acceptance RPCs untouched.
     '20261010180000_detailed_ai_interaction_notes.sql',
+    // Thread segments: four coverage columns on outlook_candidate_refs, the coverage read and
+    // the forward-only baseline, and both producers re-issued thread-first. It DROPs the
+    // 13- and 14-argument producer forms that 20261008000000 and 20261010180000 create, so
+    // like every producer change before it, it can only apply after them - which is why it
+    // must stay last.
+    '20261011000000_outlook_thread_segments.sql',
   ]
   assert.deepStrictEqual(files.slice(-UNAPPLIED.length), UNAPPLIED,
     'the unapplied forward migrations must be the newest, in this order')

@@ -353,6 +353,139 @@ await test('every outcome is in the allowlist; only two are retryable; the repor
 })
 
 console.log('')
+// ═══════════════════════════════════════════════════════════════════════════════
+console.log('')
+console.log('A LONG THREAD: more than one bounded page of history in one folder')
+// ═══════════════════════════════════════════════════════════════════════════════
+// The limit this proves is REAL and pre-existing: one page per folder, $top capped at
+// MAX_RECOVERY_MESSAGES_PER_FOLDER, and a response still carrying @odata.nextLink is
+// reported truncated and the conversation is abandoned. Anchoring a later segment on a
+// recent message does not help, because the REQUEST still asks for the whole conversation.
+//
+// So the mailbox below behaves like Graph rather than like a convenience: it applies the
+// $filter it is given, sorts newest first, truncates at $top and sets @odata.nextLink when
+// it had more to give. Nothing about the outcome is asserted into existence.
+const LONG_CONV = 'AAQkADconv-long-1'
+const longRaw = (id, from, to, sent) => ({
+  id, conversationId: LONG_CONV, receivedDateTime: sent, sentDateTime: sent, isDraft: false,
+  subject: 'Long thread', from: rcpt(from), sender: rcpt(from), toRecipients: to.map(rcpt), ccRecipients: [],
+})
+// 30 historical inbound messages across September - more than one page on their own.
+const HISTORY = Array.from({ length: 30 }, (_, i) =>
+  longRaw(`AAkALgAAhist-${i}`, KNOWN, [ME], `2026-09-${String(i + 1).padStart(2, '0')}T09:00:00Z`))
+// The fresh exchange, in October: one each way.
+const FRESH_IN = longRaw('AAkALgAAfresh-in', KNOWN, [ME], '2026-10-08T09:00:00Z')
+const FRESH_OUT = longRaw('AAkALgAAfresh-out', ME, [KNOWN], '2026-10-08T17:00:00Z')
+
+/** A mailbox that applies $filter, sorts newest first, honours $top and reports nextLink. */
+function mailbox (byFolder, log) {
+  return async ({ request }) => {
+    const u = request.url
+    if (u.startsWith(GRAPH_BASE + '/me/messages/')) {
+      log.push({ kind: 'envelope' })
+      return { ok: true, json: { id: 'AAkALgAAfresh-in', conversationId: LONG_CONV } }
+    }
+    const folder = u.indexOf('/mailFolders/inbox/') >= 0 ? 'inbox' : 'sentitems'
+    const q = decodeURIComponent(u.split('$filter=')[1].split('&')[0])
+    const top = Number(u.split('$top=')[1])
+    // The only filter clauses this builder can emit.
+    const geMatch = q.match(/(receivedDateTime|sentDateTime) ge (\S+)$/)
+    const prop = geMatch ? geMatch[1] : null
+    const floor = geMatch ? geMatch[2] : null
+    let items = (byFolder[folder] || []).filter(() => q.includes(`conversationId eq '${LONG_CONV}'`))
+    if (floor !== null) items = items.filter((m) => String(m[prop]).localeCompare(floor) >= 0)
+    items = items.slice().sort((a, b) => String(b.receivedDateTime).localeCompare(String(a.receivedDateTime)))
+    const page = items.slice(0, top)
+    log.push({ kind: 'lookup', folder, floor, matched: items.length, returned: page.length })
+    const json = { value: page }
+    if (items.length > page.length) json['@odata.nextLink'] = 'https://graph.microsoft.com/next'
+    return { ok: true, json }
+  }
+}
+
+const LONG_FOLDERS = { inbox: [...HISTORY, FRESH_IN], sentitems: [FRESH_OUT] }
+
+await test('WITHOUT a floor the page is spent on history, comes back truncated, and the thread is abandoned', async () => {
+  const log = []
+  const cfp = await cfpOf([FRESH_IN], [FRESH_OUT])
+  const r = await recoverConversation({
+    row: { cfp },
+    handles: [storedHandle('AAkALgAAfresh-in', 'inbox', '2026-10-08T09:00:00Z')],
+    decryptHandle, accessToken: 't',
+    deps: { executeGraphRequest: mailbox(LONG_FOLDERS, log) },
+    budgetAllows: () => true,
+    selfSet, contactIndex, connectionId: CONN, keyRing: KEY_RING, produceHandles, localDateFor: dateFor,
+  })
+  const inbox = log.find((l) => l.kind === 'lookup' && l.folder === 'inbox')
+  assert.strictEqual(inbox.floor, null, 'no floor was sent')
+  assert.strictEqual(inbox.matched, 31, 'the whole thread matched')
+  assert.strictEqual(inbox.returned, MAX_RECOVERY_MESSAGES_PER_FOLDER, 'the page is capped')
+  assert.strictEqual(r.outcome, 'settled')
+  assert.strictEqual(r.reason, 'recovery_truncated', 'and the fresh exchange is lost with it')
+})
+
+await test('WITH the segment floor the same thread recovers, folds two-sided, and yields an entry', async () => {
+  const log = []
+  const cfp = await cfpOf([FRESH_IN], [FRESH_OUT])
+  const r = await recoverConversation({
+    row: { cfp },
+    handles: [storedHandle('AAkALgAAfresh-in', 'inbox', '2026-10-08T09:00:00Z')],
+    decryptHandle, accessToken: 't',
+    deps: { executeGraphRequest: mailbox(LONG_FOLDERS, log) },
+    budgetAllows: () => true,
+    selfSet, contactIndex, connectionId: CONN, keyRing: KEY_RING, produceHandles, localDateFor: dateFor,
+    // The floor a settled thread supplies: coverage ran to the end of September.
+    sinceIso: '2026-10-01T00:00:00Z',
+  })
+  const inbox = log.find((l) => l.kind === 'lookup' && l.folder === 'inbox')
+  const sent = log.find((l) => l.kind === 'lookup' && l.folder === 'sentitems')
+  assert.strictEqual(inbox.floor, '2026-10-01T00:00:00Z', 'the floor reached the request')
+  assert.strictEqual(inbox.matched, 1, 'history is excluded by the window, not by luck')
+  assert.strictEqual(sent.floor, '2026-10-01T00:00:00Z')
+  assert.strictEqual(r.outcome, 'recovered', JSON.stringify(r))
+  assert.ok(r.entry, 'the fresh exchange produced an entry')
+  assert.strictEqual(r.entry.inbound, 1)
+  assert.strictEqual(r.entry.outbound, 1)
+})
+
+await test('the bounds that make recovery safe are unchanged: one page per folder, same cap, no nextLink following', async () => {
+  const log = []
+  const cfp = await cfpOf([FRESH_IN], [FRESH_OUT])
+  await recoverConversation({
+    row: { cfp },
+    handles: [storedHandle('AAkALgAAfresh-in', 'inbox', '2026-10-08T09:00:00Z')],
+    decryptHandle, accessToken: 't',
+    deps: { executeGraphRequest: mailbox(LONG_FOLDERS, log) },
+    budgetAllows: () => true,
+    selfSet, contactIndex, connectionId: CONN, keyRing: KEY_RING, produceHandles, localDateFor: dateFor,
+    sinceIso: '2026-10-01T00:00:00Z',
+  })
+  assert.strictEqual(log.filter((l) => l.kind === 'lookup').length, 2, 'exactly two listings')
+  assert.strictEqual(log.filter((l) => l.kind === 'envelope').length, 1, 'exactly one envelope GET')
+  for (const l of log.filter((l) => l.kind === 'lookup')) {
+    assert.ok(l.returned <= MAX_RECOVERY_MESSAGES_PER_FOLDER, 'the page cap still applies')
+  }
+})
+
+await test('a budget that runs out still stops recovery, floor or no floor', async () => {
+  const log = []
+  const cfp = await cfpOf([FRESH_IN], [FRESH_OUT])
+  let calls = 0
+  const r = await recoverConversation({
+    row: { cfp },
+    handles: [storedHandle('AAkALgAAfresh-in', 'inbox', '2026-10-08T09:00:00Z')],
+    decryptHandle, accessToken: 't',
+    deps: { executeGraphRequest: mailbox(LONG_FOLDERS, log) },
+    // Allows the envelope, refuses the listings.
+    budgetAllows: () => (++calls <= 1),
+    selfSet, contactIndex, connectionId: CONN, keyRing: KEY_RING, produceHandles, localDateFor: dateFor,
+    sinceIso: '2026-10-01T00:00:00Z',
+  })
+  assert.strictEqual(r.outcome, 'retry', JSON.stringify(r))
+  assert.strictEqual(r.reason, 'budget_exhausted', 'resumable, not settled')
+})
+
+
 console.log((passed + failed) + ' tests: ' + passed + ' passed, ' + failed + ' failed')
 console.log('')
 if (failed > 0) process.exit(1)

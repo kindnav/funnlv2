@@ -455,6 +455,23 @@ export function planContentWrite (entry, pass, opts = {}) {
     p_episode_fingerprint: entry?.episodeFingerprint ?? null,
     p_person_fingerprint: entry?.personFingerprint ?? null,
     p_key_version: entry?.keyVersion ?? null,
+    // >>> 20261011 thread segments
+    // THE THREAD, and the coverage this write claims for it. Both producers take these and
+    // both default them to NULL, so an entry that carries no segment coverage - a first
+    // pass, or a run whose coverage read has not happened - produces exactly the arguments
+    // that shipped. `conversationFingerprint` already exists on every entry the round
+    // builds; `segmentCoverage` is attached by the run once it knows what the thread has
+    // already summarized.
+    p_conversation_fingerprint: entry?.conversationFingerprint ?? null,
+    p_covered_fingerprints: Array.isArray(entry?.segmentCoverage?.fingerprints)
+      && entry.segmentCoverage.fingerprints.length > 0
+      ? entry.segmentCoverage.fingerprints
+      : null,
+    p_coverage_through_at: typeof entry?.segmentCoverage?.throughIso === 'string'
+      && entry.segmentCoverage.throughIso.length > 0
+      ? entry.segmentCoverage.throughIso
+      : null,
+    // <<< 20261011
   }
   const reason = typeof pass?.reason === 'string' ? pass.reason : null
 

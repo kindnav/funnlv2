@@ -333,9 +333,43 @@ export function buildMessageEnvelopeRequest(p) {
   }
 }
 /**
+ * The timestamp property each folder is filtered on.
+ *
+ * NOT interchangeable. outlookMessageNormalize takes `sentDateTime` for an outbound message
+ * and `receivedDateTime` for an inbound one, so a Sent Items listing filtered on
+ * receivedDateTime would be filtered on a different clock than the one the fold and the
+ * episode ordering use - and a message could fall outside a window it belongs inside.
+ */
+export const RECOVERY_FILTER_PROPERTY = Object.freeze({
+  inbox: 'receivedDateTime',
+  sentitems: 'sentDateTime',
+})
+
+/** An instant Graph will accept in a $filter, or null. Rejects anything else outright. */
+export function toODataInstant(iso) {
+  if (typeof iso !== 'string' || iso.length === 0) return null
+  const t = Date.parse(iso)
+  if (!Number.isFinite(t)) return null
+  return new Date(t).toISOString().replace(/\.\d{3}Z$/, 'Z')
+}
+
+/**
  * Every message of ONE conversation in ONE of the two folders, envelopes only.
  * `$filter` without `$orderby` (see above), `$select` to the envelope, `$top` bounded.
- * @param {{ folder:'inbox'|'sentitems', conversationId:string, top?:number }} p
+ *
+ * WITH `sinceIso`, the listing is bounded to the SEGMENT's window rather than the thread's
+ * whole history. That is what makes a fresh exchange reachable in a thread holding more than
+ * MAX_RECOVERY_MESSAGES_PER_FOLDER messages in one folder: without it the single page is
+ * spent on history, comes back carrying @odata.nextLink, and the conversation is reported
+ * truncated and abandoned. The bound is inclusive (`ge`), so the message AT the floor is
+ * fetched and then excluded by fingerprint if it is already covered - coverage is never
+ * decided by this filter.
+ *
+ * Still ONE page, still no `$orderby`, still no nextLink following, still the same `$top`.
+ * A tenant that rejects the added clause answers 400, which the caller already reports as
+ * `recovery_unsupported` and settles rather than retrying.
+ *
+ * @param {{ folder:'inbox'|'sentitems', conversationId:string, top?:number, sinceIso?:string }} p
  */
 export function buildConversationLookupRequest(p) {
   assertSafeParams(p)
@@ -344,7 +378,12 @@ export function buildConversationLookupRequest(p) {
   const top = Number.isInteger(p.top)
     ? Math.min(Math.max(p.top, 1), MAX_RECOVERY_MESSAGES_PER_FOLDER)
     : MAX_RECOVERY_MESSAGES_PER_FOLDER
-  const filter = `conversationId eq '${escapeODataString(p.conversationId)}'`
+  let filter = `conversationId eq '${escapeODataString(p.conversationId)}'`
+  if (p.sinceIso !== undefined && p.sinceIso !== null) {
+    const since = toODataInstant(p.sinceIso)
+    if (since === null) throw new Error('invalid_since')
+    filter += ` and ${RECOVERY_FILTER_PROPERTY[p.folder]} ge ${since}`
+  }
   const url = `${GRAPH_BASE}/me/mailFolders/${p.folder}/messages` +
     `?$filter=${encodeURIComponent(filter)}` +
     `&$select=${ENVELOPE_SELECT.join(',')}` +
