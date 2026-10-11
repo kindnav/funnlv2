@@ -101,7 +101,7 @@ BEGIN
   ASSERT NOT has_function_privilege('anon',
     'public.get_outlook_thread_coverage(uuid,uuid,jsonb)', 'EXECUTE'), 'nor anon';
   ASSERT NOT has_function_privilege('authenticated',
-    'public.baseline_outlook_thread_coverage(uuid,uuid,text,text,text[],timestamptz,timestamptz)', 'EXECUTE'),
+    'public.baseline_outlook_thread_coverage(uuid,uuid,text,text,text[],text[],timestamptz,timestamptz)', 'EXECUTE'),
     'baselining is the worker''s job only';
   -- and the acceptance RPCs are untouched
   ASSERT has_function_privilege('authenticated',
@@ -353,7 +353,7 @@ BEGIN
     jsonb_build_array(jsonb_build_object('cfp', cfp, 'efp', efp1)));
   ASSERT cov->>'result' = 'stale_run', '12b: reading coverage is fenced too: ' || cov::text;
   cov := public.baseline_outlook_thread_coverage(conn, '7d000000-0000-0000-0000-00000000000d'::uuid,
-    cfp, efp1, ARRAY[m1], now(), now());
+    cfp, efp1, NULL, ARRAY[m1], now(), now());
   ASSERT cov->>'result' = 'stale_run', '12c: baselining is fenced too: ' || cov::text;
   RAISE NOTICE '12. the lease fence refuses every new path';
 END $$;
@@ -417,7 +417,7 @@ BEGIN
 
   -- The explicit forward-only baseline. It records what is visible NOW as covered and
   -- produces no suggestion.
-  cov := public.baseline_outlook_thread_coverage(conn, run, lcfp, lefp,
+  cov := public.baseline_outlook_thread_coverage(conn, run, lcfp, lefp, NULL,
     ARRAY[lpad('b', 64, '0'), lpad('c', 64, '0')],
     TIMESTAMPTZ '2026-08-01 09:00:00+00', TIMESTAMPTZ '2026-09-01 12:00:00+00');
   ASSERT cov->>'result' = 'ok' AND (cov->>'initialized')::int = 1, '13c: ' || cov::text;
@@ -432,7 +432,7 @@ BEGIN
     'the accepted row itself is NOT modified by a baseline';
 
   -- Re-running the baseline changes nothing.
-  cov := public.baseline_outlook_thread_coverage(conn, run, lcfp, lefp,
+  cov := public.baseline_outlook_thread_coverage(conn, run, lcfp, lefp, NULL,
     ARRAY[lpad('d', 64, '0')], now(), now());
   ASSERT (cov->>'initialized')::int = 0, '13d: a row that already has coverage is never rewritten';
 
@@ -740,51 +740,111 @@ BEGIN
   RAISE NOTICE '17. genuine rotation: found, migrated, still distinguishable';
 END $$;
 
--- ══ 18. CROSS-ROUND HALVES, via the durable recovery hint ═════════════════════
+-- ══ 18. THE RECOVERY-HINT LIFECYCLE ══════════════════════════════════════════
 -- Settled coverage ends at 10:00. An unseen outbound at 09:00 arrives in round A, whose reply
 -- does not exist yet; the round writes nothing and its working records are erased. The reply
 -- at 11:00 arrives in round B. Without a durable hint round B floors its recovery at the
 -- coverage instant and the 09:00 half is never re-listed - in any later round, forever.
+--
+-- AND THE OTHER HALF OF THE PROBLEM, reproduced through recoverConversation before this
+-- existed: a hint that could only ever LOWER stayed in place after its half was covered, so
+-- the window still reached back over settled history, 32 messages matched the single bounded
+-- page, the response carried @odata.nextLink and the thread was abandoned recovery_truncated -
+-- while without that stale hint the fresh exchange recovered. So the hint records WHICH
+-- messages are unpaired and is RESOLVED by the coverage write that covers them.
 DO $$
 DECLARE
   u    uuid := '7a000000-0000-0000-0000-00000000000a';
   conn uuid := '7b000000-0000-0000-0000-00000000000b';
   run  uuid := '7c000000-0000-0000-0000-00000000000c';
+  cid  uuid;
   cfp  text := repeat('a7', 32);
-  res  jsonb; cov jsonb;
+  cfpR text := repeat('a9', 32);   -- the same thread after a key rotation
+  efp  text := repeat('a8', 32);
+  pfp  text := repeat('aa', 32);
+  u1   text := lpad('51', 64, '0'); -- the unpaired outbound, 09:00
+  u2   text := lpad('52', 64, '0'); -- a second unpaired message, 09:30
+  rep  text := lpad('53', 64, '0'); -- its reply, 11:00
+  res  jsonb; cov jsonb; n int;
 BEGIN
-  -- Round A records the hint for the half it could not pair.
-  res := public.record_outlook_thread_recovery(conn, run, cfp, TIMESTAMPTZ '2026-10-08 09:00:00+00');
-  ASSERT res->>'result' = 'ok', '18: ' || res::text;
+  SELECT id INTO cid FROM public.contacts WHERE user_id = u LIMIT 1;
 
-  -- Round B reads it back with the thread's coverage.
+  -- Round A records two unpaired halves it could not resolve.
+  res := public.record_outlook_thread_recovery(conn, run, cfp, jsonb_build_array(
+    jsonb_build_object('fp', u1, 'at', '2026-10-08T09:00:00Z'),
+    jsonb_build_object('fp', u2, 'at', '2026-10-08T09:30:00Z')));
+  ASSERT res->>'result' = 'ok' AND (res->>'unpaired')::int = 2, '18: ' || res::text;
+  ASSERT (res->>'earliest_unpaired_at')::timestamptz = TIMESTAMPTZ '2026-10-08 09:00:00+00';
+
+  -- Round B reads it back. This is what widens the window enough to pair them.
   cov := public.get_outlook_thread_coverage(conn, run,
-    jsonb_build_array(jsonb_build_object('cfp', cfp, 'efp', repeat('a8', 32))));
+    jsonb_build_array(jsonb_build_object('cfp', cfp, 'efp', efp)));
   ASSERT (SELECT (t->>'earliest_unpaired_at')::timestamptz FROM jsonb_array_elements(cov->'threads') t
            WHERE t->>'conversation_fingerprint' = cfp) = TIMESTAMPTZ '2026-10-08 09:00:00+00',
-    '18: the hint must survive the round that recorded it: ' || cov::text;
+    '18: the hint survives the round that recorded it: ' || cov::text;
 
-  -- It LOWERS only. A later round that sees something newer must not raise it, or the older
-  -- half it already knows about would fall outside the window again.
-  res := public.record_outlook_thread_recovery(conn, run, cfp, TIMESTAMPTZ '2026-10-08 11:00:00+00');
+  -- A newer unpaired message merges in WITHOUT raising the instant.
+  res := public.record_outlook_thread_recovery(conn, run, cfp, jsonb_build_array(
+    jsonb_build_object('fp', rep, 'at', '2026-10-08T11:00:00Z')));
   ASSERT (res->>'earliest_unpaired_at')::timestamptz = TIMESTAMPTZ '2026-10-08 09:00:00+00',
-    '18: the hint never rises: ' || res::text;
-  res := public.record_outlook_thread_recovery(conn, run, cfp, TIMESTAMPTZ '2026-10-08 07:00:00+00');
-  ASSERT (res->>'earliest_unpaired_at')::timestamptz = TIMESTAMPTZ '2026-10-08 07:00:00+00',
-    '18: but an older half does lower it: ' || res::text;
+    '18: a newer half never raises the floor: ' || res::text;
+  ASSERT (res->>'unpaired')::int = 3;
 
-  -- Fenced like everything else, and worker-only.
+  -- A WRITE THAT COVERS ONE OF THEM resolves exactly that pair and RAISES the instant. The
+  -- other two are genuinely unresolved and survive.
+  res := public.upsert_outlook_interaction_candidate(conn, run, cid, repeat('ab', 32), pfp, 1::smallint,
+    'Email', DATE '2026-10-08', NULL, 'The 09:00 half, finally paired.', NULL, 'explicit_body', 'ai_extracted',
+    p_conversation_fingerprint := cfp, p_covered_fingerprints := ARRAY[u1],
+    p_coverage_from_at := TIMESTAMPTZ '2026-10-08 09:00:00+00',
+    p_coverage_through_at := TIMESTAMPTZ '2026-10-08 09:00:00+00');
+  ASSERT res->>'result' = 'created', '18: ' || res::text;
+  ASSERT (SELECT pg_catalog.jsonb_array_length(unpaired) FROM public.outlook_thread_recovery
+           WHERE connection_id = conn AND conversation_fingerprint = cfp) = 2,
+    '18: the covered pair is dropped, the unresolved ones are kept';
+  ASSERT (SELECT earliest_unpaired_at FROM public.outlook_thread_recovery
+           WHERE connection_id = conn AND conversation_fingerprint = cfp)
+         = TIMESTAMPTZ '2026-10-08 09:30:00+00',
+    '18: and the instant RISES to the earliest that remains - this is what stops a resolved '
+    'hint widening the window over settled history';
+
+  -- A WRITE THAT COVERS THE REST removes the row entirely.
+  res := public.upsert_outlook_interaction_candidate(conn, run, cid, repeat('ac', 32), pfp, 1::smallint,
+    'Email', DATE '2026-10-09', NULL, 'The remaining halves, paired.', NULL, 'explicit_body', 'ai_extracted',
+    p_conversation_fingerprint := cfp, p_covered_fingerprints := ARRAY[u2, rep],
+    p_coverage_from_at := TIMESTAMPTZ '2026-10-08 09:30:00+00',
+    p_coverage_through_at := TIMESTAMPTZ '2026-10-08 11:00:00+00');
+  ASSERT res->>'result' IN ('created', 'refreshed'), '18: ' || res::text;
+  ASSERT NOT EXISTS (SELECT 1 FROM public.outlook_thread_recovery
+                      WHERE connection_id = conn AND conversation_fingerprint = cfp),
+    '18: a fully resolved hint is GONE, not left to widen every later window';
+
+  -- ROTATION: a hint row written in an older era is found by a ring variant and migrated
+  -- forward, so it cannot fall out of the bounded ring and strand the half it protects.
+  res := public.record_outlook_thread_recovery(conn, run, cfp, jsonb_build_array(
+    jsonb_build_object('fp', lpad('54', 64, '0'), 'at', '2026-10-10T09:00:00Z')));
+  res := public.record_outlook_thread_recovery(conn, run, cfpR, jsonb_build_array(
+    jsonb_build_object('fp', lpad('54', 64, '0'), 'at', '2026-10-10T09:00:00Z')), ARRAY[cfp]);
+  SELECT count(*) INTO n FROM public.outlook_thread_recovery
+   WHERE connection_id = conn AND conversation_fingerprint = ANY (ARRAY[cfp, cfpR]);
+  ASSERT n = 1, '18: ONE hint row across the rotation, found ' || n;
+  ASSERT (SELECT conversation_fingerprint FROM public.outlook_thread_recovery
+           WHERE connection_id = conn) = cfpR, '18: and it migrated to the current value';
+
+  -- Fenced and worker-only, like everything else.
   res := public.record_outlook_thread_recovery(conn, '7d000000-0000-0000-0000-00000000000d'::uuid,
-    cfp, now());
+    cfpR, jsonb_build_array(jsonb_build_object('fp', lpad('55', 64, '0'), 'at', now()::text)));
   ASSERT res->>'result' = 'stale_run', '18: ' || res::text;
   ASSERT NOT has_function_privilege('authenticated',
-    'public.record_outlook_thread_recovery(uuid,uuid,text,timestamptz)', 'EXECUTE'),
+    'public.record_outlook_thread_recovery(uuid,uuid,text,jsonb,text[])', 'EXECUTE'),
     '18: a signed-in user must not learn which threads have unresolved halves';
-  ASSERT (SELECT relrowsecurity FROM pg_class WHERE relname = 'outlook_thread_recovery'),
-    '18: the hint table has RLS on and no user policy';
-  ASSERT (SELECT count(*) FROM pg_policies WHERE tablename = 'outlook_thread_recovery') = 0,
-    '18: and no policy at all, like outlook_subscriptions';
-  RAISE NOTICE '18. cross-round halves: the hint survives, lowers only, and is worker-only';
+  ASSERT (SELECT relrowsecurity FROM pg_class WHERE relname = 'outlook_thread_recovery');
+  ASSERT (SELECT count(*) FROM pg_policies WHERE tablename = 'outlook_thread_recovery') = 0;
+  -- Malformed pairs are refused rather than stored and later trusted.
+  res := public.record_outlook_thread_recovery(conn, run, cfpR,
+    jsonb_build_array(jsonb_build_object('fp', 'nope', 'at', 'x')));
+  ASSERT res->>'result' = 'invalid_unpaired', '18: ' || res::text;
+  DELETE FROM public.outlook_thread_recovery WHERE connection_id = conn;
+  RAISE NOTICE '18. the hint lifecycle: recorded, merged, partially resolved, fully removed';
 END $$;
 
 -- ══ 19. A LONG LEGACY THREAD, and a legacy proposal for someone now known ═════
@@ -827,7 +887,7 @@ BEGIN
 
   -- The baseline absorbs ALL TWELVE. Three exchanges' worth of mail becomes covered and no
   -- suggestion is produced from any of it.
-  cov := public.baseline_outlook_thread_coverage(conn, run, lcfp, lefp, many,
+  cov := public.baseline_outlook_thread_coverage(conn, run, lcfp, lefp, NULL, many,
     TIMESTAMPTZ '2026-08-01 09:00:00+00', TIMESTAMPTZ '2026-09-20 18:00:00+00');
   ASSERT (cov->>'initialized')::int = 1, '19: ' || cov::text;
   ASSERT pg_catalog.array_length((SELECT covered_message_fingerprints

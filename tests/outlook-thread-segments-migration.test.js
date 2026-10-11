@@ -155,13 +155,18 @@ test('the acceptance RPCs are not re-issued and keep their reviewed-note allowan
   // closing comment that says so. (An earlier version of this control scanned for "10000"
   // and matched incidentally inside the migration id 20260921000000.)
   assert.strictEqual((FORWARD.match(/accept_interaction_candidate/g) || []).length, 0)
-  assert.strictEqual((FORWARD.match(/CREATE OR REPLACE FUNCTION/g) || []).length, 5,
-    'exactly five functions are issued: the three new ones and the two producers')
+  assert.strictEqual((FORWARD.match(/CREATE OR REPLACE FUNCTION/g) || []).length, 6,
+    'six functions: the two producers, the three worker RPCs, and the jsonb shape validator')
+  // The validator exists because a CHECK may not contain a subquery, and it must be IMMUTABLE
+  // to be usable in one at all.
+  const val = FORWARD.slice(FORWARD.indexOf('FUNCTION public.outlook_unpaired_valid('))
+  assert.ok(/IMMUTABLE/.test(val.slice(0, 400)), 'the validator is IMMUTABLE')
+  assert.ok(/SET search_path = ''/.test(val.slice(0, 400)), 'and pins an empty search_path')
 })
 
 test('no column is narrowed, nothing is deleted, and no row is rewritten AT MIGRATION TIME', () => {
-  assert.ok(!/DROP COLUMN|DROP TABLE|DELETE FROM|TRUNCATE/.test(FORWARD),
-    'the migration must not remove anything')
+  assert.ok(!/DROP COLUMN|DROP TABLE|TRUNCATE/.test(FORWARD),
+    'the migration must not remove a column or a table')
   // Function BODIES legitimately update candidates - that is what a producer does. The
   // claim is about statements the migration itself runs, so the bodies are removed first.
   const topLevel = FORWARD
@@ -189,8 +194,27 @@ test('the recovery hint is a bounded per-thread row, lowering only, and fenced',
   assert.ok(/PRIMARY KEY \(connection_id, conversation_fingerprint\)/.test(FORWARD),
     'one row per thread per connection, not one per message or per round')
   assert.ok(/earliest_unpaired_at     timestamptz NOT NULL/.test(FORWARD))
-  assert.ok(/LEAST\(public\.outlook_thread_recovery\.earliest_unpaired_at,/.test(FORWARD),
-    'the hint lowers only - a hint that rose could exclude a half it had already seen')
+  // THE LIFECYCLE, not just the floor. An earlier revision only ever LOWERED the hint, and
+  // that was reproduced as harmful: once the half was covered the window still reached back
+  // over settled history, the single bounded page overflowed and the thread was abandoned
+  // `recovery_truncated`. So the hint records WHICH messages are unpaired...
+  assert.ok(/unpaired                 jsonb       NOT NULL/.test(FORWARD),
+    'the hint records which messages are unpaired, not only an instant')
+  assert.ok(/public\.outlook_unpaired_valid\(unpaired\)/.test(FORWARD), 'with a checked shape')
+  // ...is merged keeping the EARLIEST instant per fingerprint while a half is unresolved...
+  assert.ok(/min\(e->>'at'\) OVER \(PARTITION BY e->>'fp'\)/.test(FORWARD),
+    'merging keeps the earliest instant for each unpaired message')
+  // ...and is RESOLVED by the coverage write, in the same transaction, deleting before
+  // updating because the shape constraint requires at least one pair.
+  assert.strictEqual((FORWARD.match(/RESOLVE THE RECOVERY HINT/g) || []).length, 4,
+    'all four write paths of both producers resolve the hint')
+  const firstResolve = FORWARD.indexOf('RESOLVE THE RECOVERY HINT')
+  const window = FORWARD.slice(firstResolve, firstResolve + 1800)
+  assert.ok(window.indexOf('DELETE FROM public.outlook_thread_recovery')
+            < window.indexOf('UPDATE public.outlook_thread_recovery'),
+    'the fully resolved row is deleted BEFORE the partial one is trimmed')
+  assert.ok(/WHERE NOT \(e->>'fp' = ANY \(v_seg_cov\)\)/.test(FORWARD),
+    'and a pair survives only while the claim does not cover it')
   assert.ok(/ON DELETE CASCADE/.test(FORWARD.slice(FORWARD.indexOf('outlook_thread_recovery'))),
     'and it goes when the connection goes')
   const fn = FORWARD.slice(FORWARD.indexOf('FUNCTION public.record_outlook_thread_recovery('))

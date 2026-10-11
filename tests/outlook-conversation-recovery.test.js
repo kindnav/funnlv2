@@ -486,6 +486,104 @@ await test('a budget that runs out still stops recovery, floor or no floor', asy
 })
 
 
+// ═══════════════════════════════════════════════════════════════════════════════
+console.log('')
+console.log('A RESOLVED RECOVERY HINT MUST NOT KEEP WIDENING THE WINDOW')
+// ═══════════════════════════════════════════════════════════════════════════════
+// The hint exists so an unpaired half survives a completed round. Left in place after that
+// half is covered it does the opposite: the window it forces reaches back over settled
+// history, the single bounded page overflows, and a thread that would otherwise recover is
+// abandoned. That is why the hint is resolved by the coverage write that covers it -
+// section 18 of tests/sql/outlook-thread-segments-runtime.sql proves the removal; this proves
+// why the removal matters.
+const STALE_CONV = 'AAQkADconv-stale-hint'
+const staleRaw = (id, from, to, sent) => ({
+  id, conversationId: STALE_CONV, receivedDateTime: sent, sentDateTime: sent, isDraft: false,
+  subject: 'Long settled thread', from: rcpt(from), sender: rcpt(from),
+  toRecipients: to.map(rcpt), ccRecipients: [],
+})
+// 31 historical inbound messages across September, all of them long settled.
+const SETTLED_HISTORY = Array.from({ length: 31 }, (_, i) =>
+  staleRaw(`AAkALgAAsett-${i}`, KNOWN, [ME], `2026-09-${String((i % 30) + 1).padStart(2, '0')}T09:0${i % 10}:00Z`))
+const NEW_IN = staleRaw('AAkALgAAnew-in', KNOWN, [ME], '2026-10-08T09:00:00Z')
+const NEW_OUT = staleRaw('AAkALgAAnew-out', ME, [KNOWN], '2026-10-08T17:00:00Z')
+const STALE_FOLDERS = { inbox: [...SETTLED_HISTORY, NEW_IN], sentitems: [NEW_OUT] }
+
+/** A mailbox that applies $filter, sorts newest first, honours $top and reports nextLink. */
+function staleMailbox (log) {
+  return async ({ request }) => {
+    const u = request.url
+    if (u.startsWith(GRAPH_BASE + '/me/messages/')) {
+      return { ok: true, json: { id: 'AAkALgAAnew-in', conversationId: STALE_CONV } }
+    }
+    const folder = u.indexOf('/mailFolders/inbox/') >= 0 ? 'inbox' : 'sentitems'
+    const q = decodeURIComponent(u.split('$filter=')[1].split('&')[0])
+    const top = Number(u.split('$top=')[1])
+    const ge = q.match(/(receivedDateTime|sentDateTime) ge (\S+)$/)
+    let items = (STALE_FOLDERS[folder] || []).filter(() => q.includes(`conversationId eq '${STALE_CONV}'`))
+    if (ge) items = items.filter((msg) => String(msg[ge[1]]).localeCompare(ge[2]) >= 0)
+    items = items.slice().sort((a, b) => String(b.receivedDateTime).localeCompare(String(a.receivedDateTime)))
+    const page = items.slice(0, top)
+    log.push({ folder, floor: ge ? ge[2] : null, matched: items.length, returned: page.length })
+    const json = { value: page }
+    if (items.length > page.length) json['@odata.nextLink'] = 'https://graph.microsoft.com/next'
+    return { ok: true, json }
+  }
+}
+
+async function staleCfp () {
+  const entries = []
+  for (const [list, folder] of [[[NEW_IN], 'inbox'], [[NEW_OUT], 'sentitems']]) {
+    const n = normalizeGraphPage(list, folder)
+    for (const msg of n.messages) entries.push({ message: msg, extra: n.extras.get(msg.providerMessageKey) })
+  }
+  const f = await foldPage({ entries, selfSet, contactIndex, connectionId: CONN, keyRing: KEY_RING })
+  return f.contributions[0].cfp
+}
+async function recoverWithFloor (sinceIso) {
+  const log = []
+  const r = await recoverConversation({
+    row: { cfp: await staleCfp() },
+    handles: [storedHandle('AAkALgAAnew-in', 'inbox', '2026-10-08T09:00:00Z')],
+    decryptHandle, accessToken: 't',
+    deps: { executeGraphRequest: staleMailbox(log) },
+    budgetAllows: () => true,
+    selfSet, contactIndex, connectionId: CONN, keyRing: KEY_RING, produceHandles, localDateFor: dateFor,
+    ...(sinceIso ? { sinceIso } : {}),
+  })
+  return { r, inbox: log.find((l) => l.folder === 'inbox') }
+}
+
+await test('a STALE hint drags the window over settled history and truncates the page', async () => {
+  // The floor a resolved-but-retained hint would still force: back to the start of September.
+  const { r, inbox } = await recoverWithFloor('2026-09-01T09:00:00Z')
+  assert.strictEqual(inbox.floor, '2026-09-01T09:00:00Z')
+  assert.ok(inbox.matched > MAX_RECOVERY_MESSAGES_PER_FOLDER,
+    `the window must overflow for this to be the real case, matched ${inbox.matched}`)
+  assert.strictEqual(inbox.returned, MAX_RECOVERY_MESSAGES_PER_FOLDER, 'the page is capped')
+  assert.strictEqual(r.outcome, 'settled')
+  assert.strictEqual(r.reason, 'recovery_truncated', 'and the fresh exchange is lost with it')
+})
+
+await test('once the hint is resolved the same thread recovers, and the entry is two-sided', async () => {
+  // The floor with no hint in play: the settled coverage instant.
+  const { r, inbox } = await recoverWithFloor('2026-10-01T00:00:00Z')
+  assert.strictEqual(inbox.matched, 1, 'history is excluded by the window, not by luck')
+  assert.strictEqual(r.outcome, 'recovered', JSON.stringify(r))
+  assert.strictEqual(r.entry.inbound, 1)
+  assert.strictEqual(r.entry.outbound, 1)
+})
+
+await test('and a GENUINELY unresolved half still widens the window, which is the point', async () => {
+  // An unpaired message at 2026-10-02 is newer than the settled instant, so its hint widens
+  // the window a little - and the page still fits, so the exchange is assembled.
+  const { r, inbox } = await recoverWithFloor('2026-10-02T00:00:00Z')
+  assert.strictEqual(inbox.floor, '2026-10-02T00:00:00Z')
+  assert.ok(inbox.matched <= MAX_RECOVERY_MESSAGES_PER_FOLDER, 'the widened window still fits')
+  assert.strictEqual(r.outcome, 'recovered', JSON.stringify(r))
+})
+
+
 console.log((passed + failed) + ' tests: ' + passed + ' passed, ' + failed + ' failed')
 console.log('')
 if (failed > 0) process.exit(1)

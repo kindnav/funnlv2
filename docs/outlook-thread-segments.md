@@ -195,7 +195,11 @@ carries coverage is never rewritten, so a baseline can be attempted twice with n
 cost was "at most one exchange per legacy thread". That was wrong. A baseline marks **every
 message visible when it runs** as covered, which on a long thread can be **several exchanges** -
 proven in the runtime file with a twelve-message legacy thread covering three exchanges, all
-absorbed, no suggestion produced. Only mail arriving *after* the baseline becomes a segment.
+absorbed, no suggestion produced. **That does not establish the beyond-page-cap case**: twelve
+messages fit inside one bounded recovery page, so a legacy thread whose history exceeds
+`MAX_RECOVERY_MESSAGES_PER_FOLDER` is still undemonstrated, and so is a baseline for a genuine
+pre-feature new-contact proposal built from the real two anchor forms rather than a hand-made
+row. Only mail arriving *after* the baseline becomes a segment.
 
 That is the price of never duplicating an interaction the reviewer has already accepted, and it
 is paid once per legacy thread. It is also why the baseline is recorded as
@@ -322,29 +326,50 @@ tolerated exception of a trailing comma, pinned explicitly and proven to be the 
 
 ### Not demonstrated
 
-- **The run-level orchestration is still not wired, and it is the one remaining blocker.**
-  Everything it would call now exists and is proven: the coverage reader, the baseline, the
-  recovery-hint recorder, the rotation-aware lookup, the segment decisions, the floor, and both
-  producers. `planContentWrite` passes the coverage arguments and `recoverConversation` accepts
-  the floor. What `outlookImportRun.js` does NOT yet do, in its per-page loop:
+- **The run-level orchestration is still not wired.** This is the remaining work, and the
+  design question that was blocking it is now RESOLVED, so what is left is mechanical rather
+  than open. The six call sites in `outlookImportRun.js`:
 
-  1. call `get_outlook_thread_coverage` once per page with each thread's `{cfp, cfps, efp}`;
+  1. call `get_outlook_thread_coverage` once per page with each thread's
+     `{cfp, cfps, efp, efps}`;
   2. call `baseline_outlook_thread_coverage` for a thread reporting `settled_without_coverage`,
      and leave that thread alone for the rest of the round;
   3. pass `recoveryFloorIso(...)` into `recoverConversation` as `sinceIso`;
   4. build the message list for `decideSegment` from `stored.handles` plus
-     `recovery.extraHandles` (`mfp` to `messageFingerprint`, `sentAt` to `timestampIso`, folder
-     `sentitems` to `outbound`), each carrying its ring variants;
+     `recovery.extraHandles`;
   5. apply `decideSegment`, filter the content handles to the segment, and attach
-     `segmentCoverage` resolved to stored variants plus `matched_conversation_fingerprint`;
-  6. call `record_outlook_thread_recovery` with `unpairedHintIso(...)` when a thread has
-     uncovered mail it could not pair.
+     `segmentCoverage` plus `matched_conversation_fingerprint`;
+  6. call `record_outlook_thread_recovery` with the unpaired pairs when a thread has uncovered
+     mail it could not pair, and let the coverage write resolve them.
 
-  Until that is done the worker passes no coverage and **Production behaviour is exactly
-  today's**, because every producer parameter defaults to NULL. Consequently the end-to-end
-  demonstration through the real handler, and the inspection of the actual model request for the
-  intended segment context, are **not** carried by this PR. Those are the proofs that belong
-  with the wiring, and they are why this is not yet a complete feature.
+### The design question that was open, and its answer
+
+**How can the run obtain ring variants at all?** `outlookRoundState` deliberately converts the
+raw Graph conversation and message keys to fingerprints and the run never persists the raw keys
+- that is a stated privacy property, not an oversight. So at write time the run holds
+fingerprints, and a fingerprint cannot be re-hashed under another key.
+
+Three facts resolve it without any new column:
+
+- **Message variants are computable.** Every message the content pass reads has a handle
+  carrying its *encrypted* provider id, and the run already decrypts those (`decryptCursor`, as
+  the recovery path does). So the run can recover the raw key and compute the full ring variant
+  set for exactly the messages it is about to draft from.
+- **Thread lookup does not need conversation variants.** `outlook_conversation_progress`
+  already persists `episode_lookup_fingerprints`, which is the current anchor under every ring
+  key. The reader and both producers therefore match a thread on
+  `conversation_fingerprint = ANY(cfps) OR episode_fingerprint = ANY(efps)`, and `efps` is
+  durable round state the run already has. The bounded episode lookup added for the legacy
+  case is the same mechanism.
+- **The model request is inspectable.** The handler harness in
+  `tests/outlook-two-sided-rounds.test.js` already intercepts `ANTHROPIC_MESSAGES_URL` in its
+  injected fetch, so asserting that a request carries the intended segment's context and not
+  the settled history needs no new harness.
+
+Until the wiring lands the worker passes no coverage and **Production behaviour is exactly
+today's**, because every producer parameter defaults to NULL. The end-to-end demonstration
+through the real handler, the model-request inspection, and the composed rotation contract are
+therefore **not** carried by this PR.
 - Whether a tenant accepts the added `$filter` clause. The 400 path is handled; the owner-run
   check establishes the fact, as it did for `conversationId eq`.
 - Real-mail behaviour, which only the pilot answers.
