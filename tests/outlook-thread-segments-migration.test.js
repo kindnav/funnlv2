@@ -125,12 +125,17 @@ test('anon and authenticated are revoked EXPLICITLY, not only PUBLIC', () => {
   // EXECUTE on a new function in public to anon and authenticated, so CREATE OR REPLACE
   // after a DROP hands the producers back to every signed-in user.
   const revokes = FORWARD.match(/REVOKE ALL ON FUNCTION[\s\S]*?;/g) || []
-  assert.strictEqual(revokes.length, 4, 'four functions are revoked')
+  assert.strictEqual(revokes.length, 5, 'five functions are revoked')
   for (const r of revokes) {
     assert.ok(/FROM PUBLIC, anon, authenticated/.test(r), `a revoke misses anon/authenticated: ${r.slice(0, 70)}`)
   }
-  assert.strictEqual((FORWARD.match(/GRANT EXECUTE ON FUNCTION[\s\S]*?TO service_role;/g) || []).length, 4,
-    'and all four are granted to service_role only')
+  assert.strictEqual((FORWARD.match(/GRANT EXECUTE ON FUNCTION[\s\S]*?TO service_role;/g) || []).length, 5,
+    'and all five are granted to service_role only')
+  // The hint TABLE is worker-only too, and carries no policy - a reader could otherwise learn
+  // which threads have unresolved halves.
+  assert.ok(/REVOKE ALL ON TABLE public\.outlook_thread_recovery FROM PUBLIC, anon, authenticated;/.test(FORWARD))
+  assert.ok(/ALTER TABLE public\.outlook_thread_recovery ENABLE ROW LEVEL SECURITY;/.test(FORWARD))
+  assert.ok(!/CREATE POLICY[\s\S]*outlook_thread_recovery/.test(FORWARD), 'and no policy on it')
 })
 
 test('the previous producer signatures are dropped, so exactly one overload survives', () => {
@@ -150,8 +155,8 @@ test('the acceptance RPCs are not re-issued and keep their reviewed-note allowan
   // closing comment that says so. (An earlier version of this control scanned for "10000"
   // and matched incidentally inside the migration id 20260921000000.)
   assert.strictEqual((FORWARD.match(/accept_interaction_candidate/g) || []).length, 0)
-  assert.strictEqual((FORWARD.match(/CREATE OR REPLACE FUNCTION/g) || []).length, 4,
-    'exactly four functions are issued: the two new ones and the two producers')
+  assert.strictEqual((FORWARD.match(/CREATE OR REPLACE FUNCTION/g) || []).length, 5,
+    'exactly five functions are issued: the three new ones and the two producers')
 })
 
 test('no column is narrowed, nothing is deleted, and no row is rewritten AT MIGRATION TIME', () => {
@@ -175,6 +180,59 @@ test('coverage is never decided from a date anywhere in the migration', () => {
     'the reviewer\'s date must never be compared to decide coverage')
   assert.ok(FORWARD.includes("coverage_source              = 'legacy_baseline'"),
     'a baseline is recorded as such')
+})
+
+console.log('\nwhat this amendment added')
+
+test('the recovery hint is a bounded per-thread row, lowering only, and fenced', () => {
+  assert.ok(/CREATE TABLE IF NOT EXISTS public\.outlook_thread_recovery/.test(FORWARD))
+  assert.ok(/PRIMARY KEY \(connection_id, conversation_fingerprint\)/.test(FORWARD),
+    'one row per thread per connection, not one per message or per round')
+  assert.ok(/earliest_unpaired_at     timestamptz NOT NULL/.test(FORWARD))
+  assert.ok(/LEAST\(public\.outlook_thread_recovery\.earliest_unpaired_at,/.test(FORWARD),
+    'the hint lowers only - a hint that rose could exclude a half it had already seen')
+  assert.ok(/ON DELETE CASCADE/.test(FORWARD.slice(FORWARD.indexOf('outlook_thread_recovery'))),
+    'and it goes when the connection goes')
+  const fn = FORWARD.slice(FORWARD.indexOf('FUNCTION public.record_outlook_thread_recovery('))
+  const one = fn.slice(0, fn.indexOf('$fn$;') + 5)
+  assert.ok(/sync_run_id = p_run_id/.test(one) && /count\(\*\) = 2/.test(one),
+    'fenced on the live lease, both folders, like every other worker RPC')
+})
+
+test('coverage carries BOTH ends of its span, and the span is ordered', () => {
+  assert.ok(/ADD COLUMN IF NOT EXISTS coverage_from_at/.test(FORWARD))
+  const chk = FORWARD.slice(FORWARD.indexOf('ocr_coverage_together'), FORWARD.indexOf('-- The one lookup'))
+  assert.ok(chk.includes('coverage_from_at IS NOT NULL'), 'the span start is part of all-or-nothing')
+  assert.ok(chk.includes('coverage_from_at <= coverage_through_at'), 'and it cannot be after the end')
+})
+
+test('ROTATION: the thread is matched on ring variants and migrated forward on touch', () => {
+  // Rotation changes the conversation fingerprint too, so equality on the current value would
+  // miss a row written under a retired key - and the thread would duplicate its own segment.
+  assert.ok(/p_conversation_lookup_fingerprints text\[\] DEFAULT NULL/.test(FORWARD),
+    'both producers take the thread ring variants')
+  assert.strictEqual((FORWARD.match(/r\.conversation_fingerprint = ANY \(v_cfps\)/g) || []).length >= 4, true,
+    'and every thread lookup uses them')
+  assert.ok(/conversation_fingerprint IS DISTINCT FROM p_conversation_fingerprint/.test(FORWARD),
+    'a row found under an old variant is rewritten to the current value')
+  assert.ok(/r\.conversation_fingerprint = ANY \(w\.cfps\)/.test(FORWARD),
+    'and the reader matches variants too')
+  assert.ok(/'matched_conversation_fingerprint'/.test(FORWARD),
+    'the reader says WHICH variant it found, so the worker can pass it back')
+  // Coverage needs no variant PARAMETER: a flat set cannot answer a per-message question, so
+  // the worker resolves each message to the value it is already stored under instead.
+  assert.ok(!/p_covered_lookup_fingerprints/.test(FORWARD),
+    'and coverage is resolved by the worker, not by a flat lookup set')
+})
+
+test('the NEW-CONTACT producer has the same two safeguards as the interaction one', () => {
+  const nc = FORWARD.slice(FORWARD.indexOf('FUNCTION public.upsert_new_contact_candidate('))
+  const one = nc.slice(0, nc.indexOf('$$;') + 3)
+  assert.ok(/nc\.status IN \('pending', 'deferred'\)/.test(one),
+    'an OPEN proposal pins identity, and deferred counts as open')
+  assert.ok(/coverage_uninitialized/.test(one), 'a legacy thread refuses to guess here too')
+  assert.ok(/coverage_moved/.test(one), 'and a concurrent decision is refused, not written around')
+  assert.ok(/exists_terminal/.test(one), 'and a dismissed unknown-person exchange stays settled')
 })
 
 console.log('\nthe worker contract')

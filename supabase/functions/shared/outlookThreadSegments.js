@@ -57,6 +57,23 @@ const FP_RE = /^[0-9a-f]{64}$/
 const isFp = (v) => typeof v === 'string' && FP_RE.test(v)
 
 /**
+ * Every fingerprint this message may be stored under: the current-key value first, then the
+ * accepted prior keys. ROTATION CHANGES MESSAGE FINGERPRINTS, so a covered set written before
+ * a rotation holds values the current key will never reproduce - and testing only the current
+ * value would read a settled exchange as entirely new mail.
+ *
+ * The variants come from the existing bounded key ring (computeFingerprintSet /
+ * MAX_KEYRING_KEYS), so this adds no new key, no new algorithm and no unbounded growth.
+ */
+export function messageVariants (m) {
+  const out = []
+  const push = (v) => { if (isFp(v) && !out.includes(v)) out.push(v) }
+  push(m?.messageFingerprint)
+  for (const v of Array.isArray(m?.fingerprintVariants) ? m.fingerprintVariants : []) push(v)
+  return out
+}
+
+/**
  * Normalize a coverage record read from the database into the shape the decisions below
  * expect. Unknown and malformed values are dropped rather than trusted: a fingerprint that
  * is not a fingerprint cannot prove coverage of anything.
@@ -84,10 +101,20 @@ export function normalizeCoverage (raw) {
   // from the reviewer's date (the reviewer may edit it, and it is a date, not a message), so
   // it is initialized explicitly and forward-only. See decideSegment.
   const settledWithoutCoverage = r.settled_without_coverage === true
-  const coverageThroughIso = typeof r.coverage_through_at === 'string' && r.coverage_through_at.length > 0
-    ? r.coverage_through_at
-    : null
-  return { covered, pending, settledWithoutCoverage, coverageThroughIso }
+  const iso = (v) => (typeof v === 'string' && v.length > 0 ? v : null)
+  return {
+    covered,
+    pending,
+    settledWithoutCoverage,
+    coverageThroughIso: iso(r.coverage_through_at),
+    // The pending segment's own span start. A refresh must re-list the segment's EARLIER
+    // messages or it would redraft from a truncated view of its own exchange.
+    pendingFromIso: iso(r.pending_coverage_from_at),
+    // The durable hint: the earliest uncovered message this connection saw for the thread and
+    // could not pair. Survives completed rounds, which is the only reason the cross-round
+    // case can be assembled at all.
+    earliestUnpairedIso: iso(r.earliest_unpaired_at),
+  }
 }
 
 /**
@@ -111,7 +138,13 @@ export function orderMessages (messages) {
  */
 export function uncoveredMessages (messages, covered) {
   const set = covered instanceof Set ? covered : new Set()
-  return orderMessages(messages).filter((m) => isFp(m?.messageFingerprint) && !set.has(m.messageFingerprint))
+  return orderMessages(messages).filter((m) => {
+    const variants = messageVariants(m)
+    if (variants.length === 0) return false
+    // ANY variant counts as covered. A message summarized before a key rotation is stored
+    // under the old key, and the current key will never reproduce that value.
+    return !variants.some((v) => set.has(v))
+  })
 }
 
 /**
@@ -179,16 +212,25 @@ export function decideSegment (p) {
  * @returns {string|null} an ISO instant to filter at or after, or null for no filter
  */
 export function recoveryFloorIso (p) {
-  const seen = (Array.isArray(p?.messages) ? p.messages : [])
-    .map((m) => (typeof m?.timestampIso === 'string' ? m.timestampIso : null))
-    .filter((t) => typeof t === 'string' && t.length > 0)
-    .sort()
-  const through = typeof p?.coverageThroughIso === 'string' && p.coverageThroughIso.length > 0
-    ? p.coverageThroughIso
-    : null
+  const iso = (v) => (typeof v === 'string' && v.length > 0 ? v : null)
+  const through = iso(p?.coverageThroughIso)
+  // NO SETTLED COVERAGE MEANS NO FLOOR. A first pass, or a thread nobody has decided, wants
+  // the whole conversation - which is the request that shipped.
   if (through === null) return null
-  if (seen.length === 0) return through
-  return seen[0].localeCompare(through) < 0 ? seen[0] : through
+
+  const seen = (Array.isArray(p?.messages) ? p.messages : [])
+    .map((m) => iso(m?.timestampIso))
+    .filter((t) => t !== null)
+    .sort()
+
+  // THE LEAST OF EVERYTHING THAT CAN REACH BACK. The settled instant bounds the lookback -
+  // it is what keeps a long thread inside one bounded page - but it must not be the floor on
+  // its own. Reproduced: settled coverage to 10:00, an unseen outbound at 09:00 read in one
+  // round and its reply at 11:00 in the next; a floor of 10:00 excluded the 09:00 half and
+  // the exchange could never be assembled, in any later round, forever.
+  const candidates = [through, seen[0] ?? null, iso(p?.pendingFromIso), iso(p?.earliestUnpairedIso)]
+    .filter((t) => t !== null)
+  return candidates.reduce((lo, t) => (t.localeCompare(lo) < 0 ? t : lo), candidates[0])
 }
 
 /**
@@ -201,10 +243,51 @@ export function recoveryFloorIso (p) {
  */
 export function coverageForSegment (segment) {
   const ordered = orderMessages(segment).filter((m) => isFp(m?.messageFingerprint))
-  if (ordered.length === 0) return { fingerprints: [], throughIso: null }
+  if (ordered.length === 0) return { fingerprints: [], fromIso: null, throughIso: null }
+  // The CURRENT-key value only. The variants exist for lookup, never for the claim: claiming
+  // an old-key value would record coverage under a key that is being retired.
   const fingerprints = [...new Set(ordered.map((m) => m.messageFingerprint))].sort()
-  const throughIso = ordered[ordered.length - 1].timestampIso ?? null
-  return { fingerprints, throughIso }
+  // BOTH ENDS of the span. The earliest is what a later refresh of this same segment uses as
+  // its recovery floor, so it has to be stored rather than re-derived from messages that the
+  // round will have erased.
+  return {
+    fingerprints,
+    fromIso: ordered[0].timestampIso ?? null,
+    throughIso: ordered[ordered.length - 1].timestampIso ?? null,
+  }
+}
+
+/**
+ * Every value the segment's messages may ALREADY be stored under, for the producer's
+ * settled-coverage comparison.
+ *
+ * A write CLAIMS only current-key values (coverageForSegment). The comparison that decides
+ * `exists_terminal` versus `created` has to reach the old-key values too, or a replay after a
+ * rotation would be classified as entirely new and duplicate a settled exchange. Bounded by
+ * the key ring, so at most MAX_KEYRING_KEYS values per message.
+ */
+export function coverageLookupFingerprints (segment) {
+  const out = new Set()
+  for (const m of Array.isArray(segment) ? segment : []) {
+    for (const v of messageVariants(m)) out.add(v)
+  }
+  return [...out].sort()
+}
+
+/**
+ * The instant to remember when a thread has uncovered mail this round could NOT pair.
+ *
+ * Recorded durably, because the round's own working records are erased when it completes and
+ * the next round's delta will not show the message again. It is a floor hint only: it widens a
+ * later recovery listing and is never read to decide coverage.
+ *
+ * @returns {string|null} the earliest uncovered instant, or null if nothing is uncovered
+ */
+export function unpairedHintIso (messages, covered) {
+  const un = uncoveredMessages(messages, covered)
+  if (un.length === 0) return null
+  const t = un[0].timestampIso
+  return typeof t === 'string' && t.length > 0 ? t : null
 }
 
 /**

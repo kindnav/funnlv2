@@ -101,7 +101,7 @@ BEGIN
   ASSERT NOT has_function_privilege('anon',
     'public.get_outlook_thread_coverage(uuid,uuid,jsonb)', 'EXECUTE'), 'nor anon';
   ASSERT NOT has_function_privilege('authenticated',
-    'public.baseline_outlook_thread_coverage(uuid,uuid,text,text,text[],timestamptz)', 'EXECUTE'),
+    'public.baseline_outlook_thread_coverage(uuid,uuid,text,text,text[],timestamptz,timestamptz)', 'EXECUTE'),
     'baselining is the worker''s job only';
   -- and the acceptance RPCs are untouched
   ASSERT has_function_privilege('authenticated',
@@ -154,7 +154,7 @@ BEGIN
     'Email', DATE '2026-10-01', NULL, note1, 'Send the CV.', 'explicit_body', 'ai_extracted',
     p_conversation_fingerprint := cfp,
     p_covered_fingerprints     := ARRAY[m1, m2],
-    p_coverage_through_at      := TIMESTAMPTZ '2026-10-01 17:00:00+00');
+    p_coverage_from_at := TIMESTAMPTZ '2026-10-01 17:00:00+00', p_coverage_through_at := TIMESTAMPTZ '2026-10-01 17:00:00+00');
   ASSERT res->>'result' = 'created', '2: ' || res::text;
   seg1 := (res->>'candidate_id')::uuid;
   ASSERT (SELECT covered_message_fingerprints FROM public.outlook_candidate_refs
@@ -174,7 +174,7 @@ BEGIN
     'Email', DATE '2026-10-02', NULL, NULL, NULL, NULL, NULL,
     p_conversation_fingerprint := cfp,
     p_covered_fingerprints     := ARRAY[m1, m2, m3],
-    p_coverage_through_at      := TIMESTAMPTZ '2026-10-02 09:00:00+00');
+    p_coverage_from_at := TIMESTAMPTZ '2026-10-02 09:00:00+00', p_coverage_through_at := TIMESTAMPTZ '2026-10-02 09:00:00+00');
   ASSERT res->>'result' = 'refreshed' AND (res->>'candidate_id')::uuid = seg1, '3: ' || res::text;
   ASSERT (SELECT covered_message_fingerprints FROM public.outlook_candidate_refs
            WHERE interaction_candidate_id = seg1) = ARRAY[m1, m2],
@@ -189,7 +189,7 @@ BEGIN
     'Email', DATE '2026-10-02', NULL, note1, NULL, 'explicit_body', 'ai_extracted',
     p_conversation_fingerprint := cfp,
     p_covered_fingerprints     := ARRAY['not-a-fingerprint'],
-    p_coverage_through_at      := TIMESTAMPTZ '2026-10-02 09:00:00+00');
+    p_coverage_from_at := TIMESTAMPTZ '2026-10-02 09:00:00+00', p_coverage_through_at := TIMESTAMPTZ '2026-10-02 09:00:00+00');
   ASSERT res->>'result' = 'invalid_coverage_fingerprint', '4: ' || res::text;
   ASSERT (SELECT covered_message_fingerprints FROM public.outlook_candidate_refs
            WHERE interaction_candidate_id = seg1) = ARRAY[m1, m2], 'a refused write changes nothing';
@@ -202,7 +202,7 @@ BEGIN
   res := public.upsert_outlook_interaction_candidate(
     conn, run, (SELECT id FROM public.contacts WHERE user_id = u), efp1, pfp, 1::smallint,
     'Email', DATE '2026-10-02', NULL, note1, NULL, 'explicit_body', 'ai_extracted',
-    p_covered_fingerprints := ARRAY[m1], p_coverage_through_at := now());
+    p_covered_fingerprints := ARRAY[m1], p_coverage_from_at := now(), p_coverage_through_at := now());
   ASSERT res->>'result' = 'invalid_coverage_set', '4c: ' || res::text;
   RAISE NOTICE '4. refused writes advance nothing';
 
@@ -220,7 +220,7 @@ BEGIN
     'Email', DATE '2026-10-01', NULL, 'a re-read of the same exchange', NULL, 'explicit_body', 'ai_extracted',
     p_conversation_fingerprint := cfp,
     p_covered_fingerprints     := ARRAY[m1, m2],
-    p_coverage_through_at      := TIMESTAMPTZ '2026-10-01 17:00:00+00');
+    p_coverage_from_at := TIMESTAMPTZ '2026-10-01 17:00:00+00', p_coverage_through_at := TIMESTAMPTZ '2026-10-01 17:00:00+00');
   ASSERT res->>'result' = 'exists_terminal', '6: ' || res::text;
   ASSERT (SELECT count(*) FROM public.interaction_candidates WHERE user_id = u) = 1, 'still one candidate';
   ASSERT (SELECT notes FROM public.interactions WHERE id = inter) = reviewed, 'the note is untouched';
@@ -236,7 +236,7 @@ BEGIN
     'Send two referees by Friday.', 'explicit_body', 'ai_extracted',
     p_conversation_fingerprint := cfp,
     p_covered_fingerprints     := ARRAY[m3, m4, m5],
-    p_coverage_through_at      := TIMESTAMPTZ '2026-10-08 12:00:00+00');
+    p_coverage_from_at := TIMESTAMPTZ '2026-10-08 12:00:00+00', p_coverage_through_at := TIMESTAMPTZ '2026-10-08 12:00:00+00');
   ASSERT res->>'result' = 'created', '7: ' || res::text;
   seg2 := (res->>'candidate_id')::uuid;
   ASSERT seg2 <> seg1, 'a NEW suggestion, not the old row';
@@ -256,7 +256,7 @@ BEGIN
     conn, run, (SELECT id FROM public.contacts WHERE user_id = u), efp2, pfp, 1::smallint,
     'Email', DATE '2026-10-08', NULL, 'same instant, already summarized', NULL, 'explicit_body', 'ai_extracted',
     p_conversation_fingerprint := cfp, p_covered_fingerprints := ARRAY[m5],
-    p_coverage_through_at := TIMESTAMPTZ '2026-10-08 12:00:00+00');
+    p_coverage_from_at := TIMESTAMPTZ '2026-10-08 12:00:00+00', p_coverage_through_at := TIMESTAMPTZ '2026-10-08 12:00:00+00');
   ASSERT res->>'result' = 'refreshed' AND (res->>'candidate_id')::uuid = seg2,
     '8: a pending segment absorbs it rather than creating another: ' || res::text;
   RAISE NOTICE '8. messages sharing an instant are distinguished';
@@ -269,7 +269,7 @@ BEGIN
     'Email', DATE '2026-10-09', NULL, 'the same exchange under a rotated key', NULL,
     'explicit_body', 'ai_extracted',
     p_conversation_fingerprint := cfp, p_covered_fingerprints := ARRAY[m3, m4, m5],
-    p_coverage_through_at := TIMESTAMPTZ '2026-10-09 09:00:00+00');
+    p_coverage_from_at := TIMESTAMPTZ '2026-10-09 09:00:00+00', p_coverage_through_at := TIMESTAMPTZ '2026-10-09 09:00:00+00');
   ASSERT res->>'result' = 'refreshed' AND (res->>'candidate_id')::uuid = seg2,
     '9: a rotated key refreshes the pending segment: ' || res::text;
   -- DELAYED DISCOVERY: m0 is older than every covered message and has never been seen.
@@ -278,7 +278,7 @@ BEGIN
     'Email', DATE '2026-10-09', NULL, 'and one message that surfaced late', NULL,
     'explicit_body', 'ai_extracted',
     p_conversation_fingerprint := cfp, p_covered_fingerprints := ARRAY[m0, m3, m4, m5],
-    p_coverage_through_at := TIMESTAMPTZ '2026-10-09 10:00:00+00');
+    p_coverage_from_at := TIMESTAMPTZ '2026-10-09 10:00:00+00', p_coverage_through_at := TIMESTAMPTZ '2026-10-09 10:00:00+00');
   ASSERT res->>'result' = 'refreshed' AND (res->>'candidate_id')::uuid = seg2,
     '9b: a late-discovered older message joins the pending segment: ' || res::text;
   -- Compared as a SET: the producer stores it de-duplicated and sorted, so the order here
@@ -325,7 +325,7 @@ BEGIN
     'explicit_body', 'ai_extracted',
     p_conversation_fingerprint := cfp,
     p_covered_fingerprints     := ARRAY[m3, m4, m5, lpad('7', 64, '0')],
-    p_coverage_through_at      := TIMESTAMPTZ '2026-10-10 09:00:00+00');
+    p_coverage_from_at := TIMESTAMPTZ '2026-10-10 09:00:00+00', p_coverage_through_at := TIMESTAMPTZ '2026-10-10 09:00:00+00');
   ASSERT res->>'result' = 'coverage_moved', '11: ' || res::text;
   ASSERT (SELECT count(*) FROM public.interaction_candidates WHERE user_id = u) = 2,
     'nothing was created from the mixed draft';
@@ -336,7 +336,7 @@ BEGIN
     'explicit_body', 'ai_extracted',
     p_conversation_fingerprint := cfp,
     p_covered_fingerprints     := ARRAY[lpad('7', 64, '0'), lpad('8', 64, '0')],
-    p_coverage_through_at      := TIMESTAMPTZ '2026-10-10 09:00:00+00');
+    p_coverage_from_at := TIMESTAMPTZ '2026-10-10 09:00:00+00', p_coverage_through_at := TIMESTAMPTZ '2026-10-10 09:00:00+00');
   ASSERT res->>'result' = 'created', '11b: the new mail is not lost: ' || res::text;
   RAISE NOTICE '11. a concurrent decision loses no mail and duplicates none';
 
@@ -347,13 +347,13 @@ BEGIN
     'Email', DATE '2026-10-11', NULL, 'from a run that lost its lease', NULL,
     'explicit_body', 'ai_extracted',
     p_conversation_fingerprint := cfp, p_covered_fingerprints := ARRAY[lpad('9', 64, '0')],
-    p_coverage_through_at := now());
+    p_coverage_from_at := now(), p_coverage_through_at := now());
   ASSERT res->>'result' = 'stale_run', '12: ' || res::text;
   cov := public.get_outlook_thread_coverage(conn, '7d000000-0000-0000-0000-00000000000d'::uuid,
     jsonb_build_array(jsonb_build_object('cfp', cfp, 'efp', efp1)));
   ASSERT cov->>'result' = 'stale_run', '12b: reading coverage is fenced too: ' || cov::text;
   cov := public.baseline_outlook_thread_coverage(conn, '7d000000-0000-0000-0000-00000000000d'::uuid,
-    cfp, efp1, ARRAY[m1], now());
+    cfp, efp1, ARRAY[m1], now(), now());
   ASSERT cov->>'result' = 'stale_run', '12c: baselining is fenced too: ' || cov::text;
   RAISE NOTICE '12. the lease fence refuses every new path';
 END $$;
@@ -408,7 +408,7 @@ BEGIN
     'Email', DATE '2026-10-09', NULL, 'a later exchange in a legacy thread', NULL,
     'explicit_body', 'ai_extracted',
     p_conversation_fingerprint := lcfp, p_covered_fingerprints := ARRAY[lpad('a', 64, '0')],
-    p_coverage_through_at := now());
+    p_coverage_from_at := now(), p_coverage_through_at := now());
   ASSERT res->>'result' = 'coverage_uninitialized',
     '13b: a linked settled row with no coverage must refuse, never guess: ' || res::text;
   ASSERT (SELECT count(*) FROM public.interaction_candidates
@@ -418,7 +418,8 @@ BEGIN
   -- The explicit forward-only baseline. It records what is visible NOW as covered and
   -- produces no suggestion.
   cov := public.baseline_outlook_thread_coverage(conn, run, lcfp, lefp,
-    ARRAY[lpad('b', 64, '0'), lpad('c', 64, '0')], TIMESTAMPTZ '2026-09-01 12:00:00+00');
+    ARRAY[lpad('b', 64, '0'), lpad('c', 64, '0')],
+    TIMESTAMPTZ '2026-08-01 09:00:00+00', TIMESTAMPTZ '2026-09-01 12:00:00+00');
   ASSERT cov->>'result' = 'ok' AND (cov->>'initialized')::int = 1, '13c: ' || cov::text;
   ASSERT (SELECT coverage_source FROM public.outlook_candidate_refs
            WHERE interaction_candidate_id = legacy) = 'legacy_baseline',
@@ -432,7 +433,7 @@ BEGIN
 
   -- Re-running the baseline changes nothing.
   cov := public.baseline_outlook_thread_coverage(conn, run, lcfp, lefp,
-    ARRAY[lpad('d', 64, '0')], now());
+    ARRAY[lpad('d', 64, '0')], now(), now());
   ASSERT (cov->>'initialized')::int = 0, '13d: a row that already has coverage is never rewritten';
 
   -- From here the thread behaves normally: mail INSIDE the baseline is terminal...
@@ -441,7 +442,7 @@ BEGIN
     'Email', DATE '2026-09-01', NULL, 'inside the baseline', NULL, 'explicit_body', 'ai_extracted',
     p_conversation_fingerprint := lcfp,
     p_covered_fingerprints := ARRAY[lpad('b', 64, '0'), lpad('c', 64, '0')],
-    p_coverage_through_at := TIMESTAMPTZ '2026-09-01 12:00:00+00');
+    p_coverage_from_at := TIMESTAMPTZ '2026-09-01 12:00:00+00', p_coverage_through_at := TIMESTAMPTZ '2026-09-01 12:00:00+00');
   ASSERT res->>'result' = 'exists_terminal', '13e: ' || res::text;
   -- ...and mail AFTER it is a new segment.
   res := public.upsert_outlook_interaction_candidate(
@@ -449,7 +450,7 @@ BEGIN
     'Email', DATE '2026-10-09', NULL, 'a genuinely later exchange', NULL, 'explicit_body', 'ai_extracted',
     p_conversation_fingerprint := lcfp,
     p_covered_fingerprints := ARRAY[lpad('e', 64, '0'), lpad('f', 64, '0')],
-    p_coverage_through_at := TIMESTAMPTZ '2026-10-09 12:00:00+00');
+    p_coverage_from_at := TIMESTAMPTZ '2026-10-09 12:00:00+00', p_coverage_through_at := TIMESTAMPTZ '2026-10-09 12:00:00+00');
   ASSERT res->>'result' = 'created', '13f: ' || res::text;
   RAISE NOTICE '13. legacy rows: forward-only baseline, never inferred from a date';
 END $$;
@@ -478,7 +479,7 @@ BEGIN
     'Noor offered to introduce you to the growth team and asked for a one-pager.',
     'Send the one-pager.', 'Intro', 'ai_extracted',
     p_conversation_fingerprint := ncfp, p_covered_fingerprints := ARRAY[k1, k2],
-    p_coverage_through_at := TIMESTAMPTZ '2026-10-02 18:00:00+00');
+    p_coverage_from_at := TIMESTAMPTZ '2026-10-02 18:00:00+00', p_coverage_through_at := TIMESTAMPTZ '2026-10-02 18:00:00+00');
   ASSERT res->>'result' = 'created', '14: ' || res::text;
   prop := (res->>'candidate_id')::uuid;
   ASSERT (SELECT covered_message_fingerprints FROM public.outlook_candidate_refs
@@ -499,7 +500,7 @@ BEGIN
     conn, run, newc, nefp, npfp, 1::smallint, 'Email', DATE '2026-10-02', NULL,
     'the same exchange, re-read after acceptance', NULL, 'explicit_body', 'ai_extracted',
     p_conversation_fingerprint := ncfp, p_covered_fingerprints := ARRAY[k1, k2],
-    p_coverage_through_at := TIMESTAMPTZ '2026-10-02 18:00:00+00');
+    p_coverage_from_at := TIMESTAMPTZ '2026-10-02 18:00:00+00', p_coverage_through_at := TIMESTAMPTZ '2026-10-02 18:00:00+00');
   ASSERT res->>'result' = 'exists_terminal',
     '14c: coverage must survive the new-contact transition: ' || res::text;
 
@@ -509,7 +510,7 @@ BEGIN
     'Noor introduced you to the growth team and suggested a call on the 14th.',
     'Reply to the intro.', 'explicit_body', 'ai_extracted',
     p_conversation_fingerprint := ncfp, p_covered_fingerprints := ARRAY[k3],
-    p_coverage_through_at := TIMESTAMPTZ '2026-10-09 10:00:00+00');
+    p_coverage_from_at := TIMESTAMPTZ '2026-10-09 10:00:00+00', p_coverage_through_at := TIMESTAMPTZ '2026-10-09 10:00:00+00');
   ASSERT res->>'result' = 'created', '14d: ' || res::text;
   ASSERT (SELECT status FROM public.new_contact_candidates WHERE id = prop) = 'accepted',
     'the accepted proposal is untouched';
@@ -559,6 +560,375 @@ BEGIN
   RAISE NOTICE '15. the constraints refuse half-written coverage';
   RAISE NOTICE '';
   RAISE NOTICE 'ALL THREAD-SEGMENT CHECKS PASSED';
+END $$;
+
+-- ══ 16. THE NEW-CONTACT PATH gets the same two safeguards ════════════════════
+-- Reproduced against the migration before this existed: two writes with the same conversation
+-- fingerprint and the same coverage but DIFFERENT episode anchors both answered `created` and
+-- left two pending proposals for one exchange, because the producer deduplicated on the
+-- episode alone - and the coverage reader gave every new-contact row a NULL pending anchor and
+-- then filtered it out, so the worker could not see the open proposal either.
+DO $$
+DECLARE
+  u    uuid := '7a000000-0000-0000-0000-00000000000a';
+  conn uuid := '7b000000-0000-0000-0000-00000000000b';
+  run  uuid := '7c000000-0000-0000-0000-00000000000c';
+  cfp  text := repeat('8a', 32);
+  e1   text := repeat('8b', 32);
+  e2   text := repeat('8c', 32);
+  e3   text := repeat('8d', 32);
+  pfp  text := repeat('8e', 32);
+  k1   text := lpad('21', 64, '0');
+  k2   text := lpad('22', 64, '0');
+  k3   text := lpad('23', 64, '0');
+  res  jsonb; cov jsonb; prop uuid; n int;
+BEGIN
+  res := public.upsert_new_contact_candidate(conn, run, e1, pfp, 1::smallint, 'ada@lab.test',
+    DATE '2026-10-02', 'Ada Okonjo', 'explicit_signature', 'high',
+    'Ada offered to review the deck and asked for it by Friday.', NULL, 'Intro', 'ai_extracted',
+    p_conversation_fingerprint := cfp, p_covered_fingerprints := ARRAY[k1, k2],
+    p_coverage_from_at := TIMESTAMPTZ '2026-10-02 09:00:00+00',
+    p_coverage_through_at := TIMESTAMPTZ '2026-10-02 18:00:00+00');
+  ASSERT res->>'result' = 'created', '16: ' || res::text;
+  prop := (res->>'candidate_id')::uuid;
+
+  -- A DIFFERENT anchor for the same thread must REFRESH, never create a second proposal.
+  res := public.upsert_new_contact_candidate(conn, run, e2, pfp, 1::smallint, 'ada@lab.test',
+    DATE '2026-10-03', 'Ada Okonjo', 'explicit_signature', 'high',
+    'The same exchange, anchored differently.', NULL, 'Intro', 'ai_extracted',
+    p_conversation_fingerprint := cfp, p_covered_fingerprints := ARRAY[k1, k2],
+    p_coverage_from_at := TIMESTAMPTZ '2026-10-02 09:00:00+00',
+    p_coverage_through_at := TIMESTAMPTZ '2026-10-02 18:00:00+00');
+  ASSERT res->>'result' = 'refreshed' AND (res->>'candidate_id')::uuid = prop,
+    '16: a new-contact proposal must keep its identity: ' || res::text;
+  SELECT count(*) INTO n FROM public.new_contact_candidates
+   WHERE user_id = u AND status IN ('pending', 'deferred');
+  ASSERT n = 1, '16: exactly ONE open proposal per thread, found ' || n;
+
+  -- The reader must expose that proposal's anchor, or the worker cannot pin identity at all.
+  cov := public.get_outlook_thread_coverage(conn, run,
+    jsonb_build_array(jsonb_build_object('cfp', cfp, 'efp', e1)));
+  ASSERT (SELECT t->>'pending_episode_fingerprint' FROM jsonb_array_elements(cov->'threads') t
+           WHERE t->>'conversation_fingerprint' = cfp) = e1,
+    '16: the reader must report the proposal anchor: ' || cov::text;
+
+  -- A DISMISSED unknown-person exchange stays settled, under any anchor...
+  PERFORM public.dismiss_new_contact_candidate(prop);
+  res := public.upsert_new_contact_candidate(conn, run, e3, pfp, 1::smallint, 'ada@lab.test',
+    DATE '2026-10-04', 'Ada Okonjo', 'explicit_signature', 'high',
+    'A replay of the dismissed exchange.', NULL, 'Intro', 'ai_extracted',
+    p_conversation_fingerprint := cfp, p_covered_fingerprints := ARRAY[k1, k2],
+    p_coverage_from_at := TIMESTAMPTZ '2026-10-02 09:00:00+00',
+    p_coverage_through_at := TIMESTAMPTZ '2026-10-02 18:00:00+00');
+  ASSERT res->>'result' = 'exists_terminal',
+    '16: a dismissed unknown-person exchange is never proposed again: ' || res::text;
+
+  -- ...and genuinely later mail with the same stranger IS a new proposal.
+  res := public.upsert_new_contact_candidate(conn, run, e3, pfp, 1::smallint, 'ada@lab.test',
+    DATE '2026-10-09', 'Ada Okonjo', 'explicit_signature', 'high',
+    'Ada came back about the deck and you agreed a call.', NULL, 'Intro', 'ai_extracted',
+    p_conversation_fingerprint := cfp, p_covered_fingerprints := ARRAY[k3],
+    p_coverage_from_at := TIMESTAMPTZ '2026-10-09 09:00:00+00',
+    p_coverage_through_at := TIMESTAMPTZ '2026-10-09 10:00:00+00');
+  ASSERT res->>'result' = 'created', '16: later mail is a new segment: ' || res::text;
+  RAISE NOTICE '16. the new-contact path: pinned identity, settled coverage, dismissal honoured';
+END $$;
+
+-- ══ 17. GENUINE KEY ROTATION ══════════════════════════════════════════════════
+-- Rotation changes the CONVERSATION fingerprint and every MESSAGE fingerprint, not just the
+-- episode anchor - verified against the real builders in tests/outlook-thread-segments.test.js.
+-- Here the database half: a thread and a settled exchange written under era 1 must still be
+-- FOUND under era 2, the thread key must migrate forward on touch, and genuinely new mail must
+-- still be distinguishable.
+DO $$
+DECLARE
+  u    uuid := '7a000000-0000-0000-0000-00000000000a';
+  conn uuid := '7b000000-0000-0000-0000-00000000000b';
+  run  uuid := '7c000000-0000-0000-0000-00000000000c';
+  cid  uuid;
+  cfp1 text := repeat('91', 32);   -- the thread, era 1
+  cfp2 text := repeat('92', 32);   -- the SAME thread, era 2
+  efp1 text := repeat('93', 32);
+  efp2 text := repeat('94', 32);
+  pfp  text := repeat('95', 32);
+  a1   text := lpad('31', 64, '0'); -- message A under era 1
+  a2   text := lpad('32', 64, '0'); -- message A under era 2 (the worker resolves to a1)
+  b1   text := lpad('33', 64, '0');
+  nw   text := lpad('34', 64, '0'); -- genuinely new, era 2 only
+  res  jsonb; cov jsonb; seg1 uuid; n int;
+BEGIN
+  SELECT id INTO cid FROM public.contacts WHERE user_id = u LIMIT 1;
+
+  -- Era 1: a segment, settled.
+  res := public.upsert_outlook_interaction_candidate(conn, run, cid, efp1, pfp, 1::smallint,
+    'Email', DATE '2026-10-01', NULL, 'The era-one exchange.', NULL, 'explicit_body', 'ai_extracted',
+    p_conversation_fingerprint := cfp1, p_covered_fingerprints := ARRAY[a1, b1],
+    p_coverage_from_at := TIMESTAMPTZ '2026-10-01 08:00:00+00',
+    p_coverage_through_at := TIMESTAMPTZ '2026-10-01 17:00:00+00');
+  ASSERT res->>'result' = 'created', '17: ' || res::text;
+  seg1 := (res->>'candidate_id')::uuid;
+  PERFORM public.accept_interaction_candidate(seg1, 'Email', DATE '2026-10-01',
+    'My own note on the era-one exchange.', NULL, NULL);
+
+  -- Era 2. The reader is asked under the NEW conversation value, with the old one as a ring
+  -- variant. Without the variant it would report an untouched thread.
+  cov := public.get_outlook_thread_coverage(conn, run, jsonb_build_array(
+    jsonb_build_object('cfp', cfp2, 'cfps', jsonb_build_array(cfp1), 'efp', efp2)));
+  ASSERT (SELECT t->'covered_fingerprints' @> jsonb_build_array(a1, b1)
+            FROM jsonb_array_elements(cov->'threads') t
+           WHERE t->>'conversation_fingerprint' = cfp2),
+    '17: the thread must be found under a ring variant: ' || cov::text;
+  ASSERT (SELECT t->>'matched_conversation_fingerprint' FROM jsonb_array_elements(cov->'threads') t
+           WHERE t->>'conversation_fingerprint' = cfp2) = cfp1,
+    '17: and the reader must say WHICH variant it is on record under: ' || cov::text;
+  -- Without the variant, the same thread looks untouched - which is the bug this prevents.
+  cov := public.get_outlook_thread_coverage(conn, run,
+    jsonb_build_array(jsonb_build_object('cfp', cfp2, 'efp', efp2)));
+  ASSERT (SELECT t->'covered_fingerprints' = '[]'::jsonb FROM jsonb_array_elements(cov->'threads') t
+           WHERE t->>'conversation_fingerprint' = cfp2),
+    '17: control - no variant, no match';
+
+  -- A REPLAY under era 2. The worker resolves message A to the value it is already stored
+  -- under (a1), so the settled comparison still holds and nothing is resurrected.
+  res := public.upsert_outlook_interaction_candidate(conn, run, cid, efp2, pfp, 2::smallint,
+    'Email', DATE '2026-10-01', NULL, 'A replay after rotation.', NULL, 'explicit_body', 'ai_extracted',
+    p_conversation_fingerprint := cfp2, p_conversation_lookup_fingerprints := ARRAY[cfp1],
+    p_covered_fingerprints := ARRAY[a1, b1],
+    p_coverage_from_at := TIMESTAMPTZ '2026-10-01 08:00:00+00',
+    p_coverage_through_at := TIMESTAMPTZ '2026-10-01 17:00:00+00');
+  ASSERT res->>'result' = 'exists_terminal',
+    '17: a covered exchange stays covered across a rotation: ' || res::text;
+
+  -- Genuinely new mail under era 2 creates a segment, and the thread key MIGRATES FORWARD.
+  res := public.upsert_outlook_interaction_candidate(conn, run, cid, efp2, pfp, 2::smallint,
+    'Email', DATE '2026-10-09', NULL, 'A new exchange, after the rotation.', NULL,
+    'explicit_body', 'ai_extracted',
+    p_conversation_fingerprint := cfp2, p_conversation_lookup_fingerprints := ARRAY[cfp1],
+    p_covered_fingerprints := ARRAY[nw],
+    p_coverage_from_at := TIMESTAMPTZ '2026-10-09 09:00:00+00',
+    p_coverage_through_at := TIMESTAMPTZ '2026-10-09 10:00:00+00');
+  ASSERT res->>'result' = 'created', '17: new mail is still distinguishable: ' || res::text;
+  ASSERT (SELECT conversation_fingerprint FROM public.outlook_candidate_refs
+           WHERE interaction_candidate_id = (res->>'candidate_id')::uuid) = cfp2,
+    '17: a new row is written under the current value';
+
+  -- And a PENDING segment found under the old variant refreshes AND migrates.
+  res := public.upsert_outlook_interaction_candidate(conn, run, cid, repeat('96', 32), pfp, 2::smallint,
+    'Email', DATE '2026-10-10', NULL, 'The same new exchange, re-read.', NULL,
+    'explicit_body', 'ai_extracted',
+    p_conversation_fingerprint := cfp2, p_conversation_lookup_fingerprints := ARRAY[cfp1],
+    p_covered_fingerprints := ARRAY[nw],
+    p_coverage_from_at := TIMESTAMPTZ '2026-10-09 09:00:00+00',
+    p_coverage_through_at := TIMESTAMPTZ '2026-10-09 10:00:00+00');
+  ASSERT res->>'result' = 'refreshed', '17: ' || res::text;
+  -- Scoped to THIS thread: earlier sections of this file deliberately leave pending segments
+  -- on other threads, and counting them all would prove nothing about rotation.
+  SELECT count(*) INTO n
+  FROM public.outlook_candidate_refs r
+  JOIN public.interaction_candidates ic
+    ON ic.id = r.interaction_candidate_id AND ic.user_id = r.user_id
+  WHERE r.user_id = u AND r.conversation_fingerprint = ANY (ARRAY[cfp1, cfp2])
+    AND ic.status = 'pending';
+  ASSERT n = 1, '17: still one pending segment on this thread across the rotation, found ' || n;
+  ASSERT (SELECT ic.proposed_notes FROM public.interaction_candidates ic WHERE ic.id = seg1)
+         IS NOT NULL, '17: the settled segment row survives';
+  ASSERT (SELECT status FROM public.interaction_candidates WHERE id = seg1) = 'accepted',
+    '17: and stays accepted';
+  ASSERT EXISTS (SELECT 1 FROM public.interactions
+                  WHERE user_id = u AND notes = 'My own note on the era-one exchange.'),
+    '17: and the accepted note is untouched';
+  RAISE NOTICE '17. genuine rotation: found, migrated, still distinguishable';
+END $$;
+
+-- ══ 18. CROSS-ROUND HALVES, via the durable recovery hint ═════════════════════
+-- Settled coverage ends at 10:00. An unseen outbound at 09:00 arrives in round A, whose reply
+-- does not exist yet; the round writes nothing and its working records are erased. The reply
+-- at 11:00 arrives in round B. Without a durable hint round B floors its recovery at the
+-- coverage instant and the 09:00 half is never re-listed - in any later round, forever.
+DO $$
+DECLARE
+  u    uuid := '7a000000-0000-0000-0000-00000000000a';
+  conn uuid := '7b000000-0000-0000-0000-00000000000b';
+  run  uuid := '7c000000-0000-0000-0000-00000000000c';
+  cfp  text := repeat('a7', 32);
+  res  jsonb; cov jsonb;
+BEGIN
+  -- Round A records the hint for the half it could not pair.
+  res := public.record_outlook_thread_recovery(conn, run, cfp, TIMESTAMPTZ '2026-10-08 09:00:00+00');
+  ASSERT res->>'result' = 'ok', '18: ' || res::text;
+
+  -- Round B reads it back with the thread's coverage.
+  cov := public.get_outlook_thread_coverage(conn, run,
+    jsonb_build_array(jsonb_build_object('cfp', cfp, 'efp', repeat('a8', 32))));
+  ASSERT (SELECT (t->>'earliest_unpaired_at')::timestamptz FROM jsonb_array_elements(cov->'threads') t
+           WHERE t->>'conversation_fingerprint' = cfp) = TIMESTAMPTZ '2026-10-08 09:00:00+00',
+    '18: the hint must survive the round that recorded it: ' || cov::text;
+
+  -- It LOWERS only. A later round that sees something newer must not raise it, or the older
+  -- half it already knows about would fall outside the window again.
+  res := public.record_outlook_thread_recovery(conn, run, cfp, TIMESTAMPTZ '2026-10-08 11:00:00+00');
+  ASSERT (res->>'earliest_unpaired_at')::timestamptz = TIMESTAMPTZ '2026-10-08 09:00:00+00',
+    '18: the hint never rises: ' || res::text;
+  res := public.record_outlook_thread_recovery(conn, run, cfp, TIMESTAMPTZ '2026-10-08 07:00:00+00');
+  ASSERT (res->>'earliest_unpaired_at')::timestamptz = TIMESTAMPTZ '2026-10-08 07:00:00+00',
+    '18: but an older half does lower it: ' || res::text;
+
+  -- Fenced like everything else, and worker-only.
+  res := public.record_outlook_thread_recovery(conn, '7d000000-0000-0000-0000-00000000000d'::uuid,
+    cfp, now());
+  ASSERT res->>'result' = 'stale_run', '18: ' || res::text;
+  ASSERT NOT has_function_privilege('authenticated',
+    'public.record_outlook_thread_recovery(uuid,uuid,text,timestamptz)', 'EXECUTE'),
+    '18: a signed-in user must not learn which threads have unresolved halves';
+  ASSERT (SELECT relrowsecurity FROM pg_class WHERE relname = 'outlook_thread_recovery'),
+    '18: the hint table has RLS on and no user policy';
+  ASSERT (SELECT count(*) FROM pg_policies WHERE tablename = 'outlook_thread_recovery') = 0,
+    '18: and no policy at all, like outlook_subscriptions';
+  RAISE NOTICE '18. cross-round halves: the hint survives, lowers only, and is worker-only';
+END $$;
+
+-- ══ 19. A LONG LEGACY THREAD, and a legacy proposal for someone now known ═════
+-- A baseline absorbs EVERY message visible when it runs - which can be several exchanges, not
+-- one. That is the honest cost of never duplicating an interaction the reviewer accepted, and
+-- it is asserted here rather than described.
+DO $$
+DECLARE
+  u    uuid := '7a000000-0000-0000-0000-00000000000a';
+  conn uuid := '7b000000-0000-0000-0000-00000000000b';
+  run  uuid := '7c000000-0000-0000-0000-00000000000c';
+  cid  uuid;
+  lcfp text := repeat('b1', 32);
+  lefp text := repeat('b2', 32);
+  pfp  text := repeat('b3', 32);
+  legacy uuid; ncand uuid; res jsonb; cov jsonb; many text[]; i int;
+BEGIN
+  SELECT id INTO cid FROM public.contacts WHERE user_id = u LIMIT 1;
+  -- Twelve messages: three separate two-way exchanges, all visible when the baseline runs.
+  many := ARRAY[]::text[];
+  FOR i IN 1..12 LOOP
+    many := pg_catalog.array_append(many, lpad(to_hex(1000 + i), 64, '0'));
+  END LOOP;
+
+  INSERT INTO public.interaction_candidates
+    (user_id, contact_id, source, source_fingerprint, proposed_type, proposed_interaction_date,
+     proposed_notes, status)
+  VALUES (u, cid, 'outlook', lefp, 'Email', DATE '2026-08-01',
+          'A long thread accepted before segments existed.', 'accepted')
+  RETURNING id INTO legacy;
+  INSERT INTO public.outlook_candidate_refs
+    (user_id, connection_id, interaction_candidate_id, episode_fingerprint, person_fingerprint, key_version)
+  VALUES (u, conn, legacy, lefp, pfp, 1);
+
+  cov := public.get_outlook_thread_coverage(conn, run,
+    jsonb_build_array(jsonb_build_object('cfp', lcfp, 'efp', lefp)));
+  ASSERT (SELECT (t->>'settled_without_coverage')::boolean FROM jsonb_array_elements(cov->'threads') t
+           WHERE t->>'conversation_fingerprint' = lcfp),
+    '19: a legacy thread reports that its coverage is missing';
+
+  -- The baseline absorbs ALL TWELVE. Three exchanges' worth of mail becomes covered and no
+  -- suggestion is produced from any of it.
+  cov := public.baseline_outlook_thread_coverage(conn, run, lcfp, lefp, many,
+    TIMESTAMPTZ '2026-08-01 09:00:00+00', TIMESTAMPTZ '2026-09-20 18:00:00+00');
+  ASSERT (cov->>'initialized')::int = 1, '19: ' || cov::text;
+  ASSERT pg_catalog.array_length((SELECT covered_message_fingerprints
+    FROM public.outlook_candidate_refs WHERE interaction_candidate_id = legacy), 1) = 12,
+    '19: a baseline absorbs every visible message, not one exchange';
+  ASSERT (SELECT coverage_source FROM public.outlook_candidate_refs
+           WHERE interaction_candidate_id = legacy) = 'legacy_baseline';
+  ASSERT (SELECT count(*) FROM public.interaction_candidates
+           WHERE user_id = u AND source_fingerprint = repeat('b4', 32)) = 0,
+    '19: and produces no suggestion';
+
+  -- Everything inside the baseline is settled; only mail after it is a segment.
+  res := public.upsert_outlook_interaction_candidate(conn, run, cid, repeat('b4', 32), pfp, 1::smallint,
+    'Email', DATE '2026-09-10', NULL, 'Inside the baseline.', NULL, 'explicit_body', 'ai_extracted',
+    p_conversation_fingerprint := lcfp, p_covered_fingerprints := many[3:6],
+    p_coverage_from_at := TIMESTAMPTZ '2026-08-20 09:00:00+00',
+    p_coverage_through_at := TIMESTAMPTZ '2026-08-25 18:00:00+00');
+  ASSERT res->>'result' = 'exists_terminal', '19: ' || res::text;
+
+  -- A LEGACY NEW-CONTACT PROPOSAL whose person is now a contact. Its coverage lives on the
+  -- proposal's refs row, and the known-contact write must find it by the thread.
+  -- An ACCEPTED proposal has its draft columns erased - ncc_terminal_erased enforces that,
+  -- and the fixture has to satisfy it rather than work around it.
+  INSERT INTO public.new_contact_candidates
+    (user_id, source, status, person_fingerprint, episode_fingerprint, key_version,
+     proposed_interaction_date, proposed_type, extraction_status)
+  VALUES (u, 'outlook', 'accepted', repeat('b5', 32), repeat('b6', 32), 1,
+          DATE '2026-08-05', 'Email', 'deterministic')
+  RETURNING id INTO ncand;
+  INSERT INTO public.outlook_candidate_refs
+    (user_id, connection_id, new_contact_candidate_id, episode_fingerprint, person_fingerprint,
+     key_version, conversation_fingerprint, covered_message_fingerprints,
+     coverage_from_at, coverage_through_at, coverage_source)
+  VALUES (u, conn, ncand, repeat('b6', 32), repeat('b5', 32), 1,
+          repeat('b7', 32), ARRAY[lpad('41', 64, '0'), lpad('42', 64, '0')],
+          TIMESTAMPTZ '2026-08-05 09:00:00+00', TIMESTAMPTZ '2026-08-05 18:00:00+00', 'draft');
+
+  -- The person is already a contact (ava@bank.test, from the fixtures). A replay of that
+  -- settled exchange through the KNOWN-CONTACT producer must be terminal.
+  res := public.upsert_outlook_interaction_candidate(conn, run, cid, repeat('b8', 32), repeat('b5', 32),
+    1::smallint, 'Email', DATE '2026-08-05', NULL, 'A replay of the legacy proposal exchange.',
+    NULL, 'explicit_body', 'ai_extracted',
+    p_conversation_fingerprint := repeat('b7', 32),
+    p_covered_fingerprints := ARRAY[lpad('41', 64, '0'), lpad('42', 64, '0')],
+    p_coverage_from_at := TIMESTAMPTZ '2026-08-05 09:00:00+00',
+    p_coverage_through_at := TIMESTAMPTZ '2026-08-05 18:00:00+00');
+  ASSERT res->>'result' = 'exists_terminal',
+    '19: a legacy proposal for someone now known still resolves: ' || res::text;
+  RAISE NOTICE '19. long legacy threads and legacy proposals that now resolve to a contact';
+END $$;
+
+-- ══ 20. RE-CONSENT: the same-account update path, not disconnect/reconnect ════
+-- The consent cutover this feature requires needs the pilot to consent again. HOW that is done
+-- decides whether every dedup reference survives, so it is verified here rather than assumed.
+DO $$
+DECLARE
+  src text;
+  n   int;
+BEGIN
+  SELECT prosrc INTO src FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace
+   WHERE ns.nspname = 'public' AND p.proname = 'finalize_microsoft_connection';
+  ASSERT src IS NOT NULL, '20: the OAuth finalize RPC must exist';
+
+  -- 1. IT UPDATES THE EXISTING ROW. One connection per user, upserted on user_id, returning
+  --    the SAME id - so the connection identity a reconnect produces is the one that was
+  --    already there.
+  ASSERT src LIKE '%ON CONFLICT (user_id) DO UPDATE%',
+    '20: re-consent must UPDATE the existing connection, not replace it';
+  ASSERT src LIKE '%RETURNING id INTO v_conn_id%', '20: and hand back that same id';
+
+  -- 2. IT REFUSES A DIFFERENT ACCOUNT rather than silently swapping it, which is what makes
+  --    "the same-account update path" a real guarantee and not a hope.
+  ASSERT src LIKE '%different_account%',
+    '20: a different Microsoft account must be refused, never swapped in';
+
+  -- 3. IT CARRIES THE NEW CONSENT VERSION onto that existing row. This is the whole mechanism
+  --    the cutover depends on: consent moves, identity does not.
+  ASSERT src LIKE '%consent_policy_version = EXCLUDED.consent_policy_version%',
+    '20: the new consent version is written to the existing connection';
+
+  -- 4. IT DELETES NOTHING. No cursor, no candidate, no provenance row is touched.
+  ASSERT src NOT LIKE '%DELETE FROM public.outlook_sync_state%';
+  ASSERT src NOT LIKE '%DELETE FROM public.outlook_candidate_refs%';
+  ASSERT src NOT LIKE '%DELETE FROM public.microsoft_connections%';
+
+  -- 5. WHY DISCONNECT IS THE WRONG INSTRUCTION. Everything this feature relies on hangs off
+  --    the connection by a CASCADING foreign key, so a disconnect/reconnect cycle would erase
+  --    the cursors, the coverage and the recovery hints and the thread history would restart
+  --    from a legacy baseline. Asserted from the catalog, because this is the reason the
+  --    cutover must say "re-consent through the same account" and nothing else.
+  SELECT count(*) INTO n
+  FROM pg_constraint c
+  WHERE c.confrelid = 'public.microsoft_connections'::regclass
+    AND c.contype = 'f' AND c.confdeltype = 'c'
+    AND c.conrelid IN ('public.outlook_sync_state'::regclass,
+                       'public.outlook_candidate_refs'::regclass,
+                       'public.outlook_thread_recovery'::regclass);
+  ASSERT n = 3,
+    '20: cursors, provenance and recovery hints all cascade from the connection, found ' || n;
+  RAISE NOTICE '20. re-consent: same-account UPDATE preserves identity, cursors and dedup refs';
+  RAISE NOTICE '    (disconnect would CASCADE them away - which is why it must not be prescribed)';
 END $$;
 
 -- ══ teardown ══════════════════════════════════════════════════════════════════

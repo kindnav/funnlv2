@@ -59,6 +59,7 @@
 ALTER TABLE public.outlook_candidate_refs
   ADD COLUMN IF NOT EXISTS conversation_fingerprint     text,
   ADD COLUMN IF NOT EXISTS covered_message_fingerprints text[],
+  ADD COLUMN IF NOT EXISTS coverage_from_at             timestamptz,
   ADD COLUMN IF NOT EXISTS coverage_through_at          timestamptz,
   ADD COLUMN IF NOT EXISTS coverage_source              text;
 
@@ -92,9 +93,11 @@ BEGIN
     ALTER TABLE public.outlook_candidate_refs
       ADD CONSTRAINT ocr_coverage_together
       CHECK ((covered_message_fingerprints IS NULL AND coverage_through_at IS NULL
-              AND coverage_source IS NULL)
+              AND coverage_from_at IS NULL AND coverage_source IS NULL)
              OR (covered_message_fingerprints IS NOT NULL AND coverage_through_at IS NOT NULL
-                 AND coverage_source IS NOT NULL AND conversation_fingerprint IS NOT NULL));
+                 AND coverage_from_at IS NOT NULL AND coverage_source IS NOT NULL
+                 AND conversation_fingerprint IS NOT NULL
+                 AND coverage_from_at <= coverage_through_at));
   END IF;
 END
 $mig$;
@@ -103,6 +106,87 @@ $mig$;
 CREATE INDEX IF NOT EXISTS ocr_conversation_idx
   ON public.outlook_candidate_refs (user_id, conversation_fingerprint)
   WHERE conversation_fingerprint IS NOT NULL;
+
+-- ── 1b. the durable recovery floor hint ────────────────────────────────────────
+-- ONE ROW PER THREAD, and it exists for the one case no column can serve: a thread that has
+-- an uncovered message nobody could pair, and therefore NO candidate to hang state on.
+--
+-- Reproduced before this existed. Settled coverage ends at 10:00. An unseen outbound at 09:00
+-- arrives in round A, whose floor is correctly 09:00 - but its reply does not exist yet, so
+-- nothing is written and the round's working records are erased on completion. The reply
+-- arrives at 11:00 in round B, whose floor is the coverage instant, 10:00. The 09:00 half is
+-- never re-listed and the exchange is never assembled.
+--
+-- THIS IS A FLOOR HINT AND NOTHING ELSE. It is never read to decide coverage, so holding it
+-- longer than strictly necessary costs a wider listing window and nothing more - and that
+-- window is still one bounded page per folder, with truncation reported rather than written
+-- around. It lowers monotonically, so an older unpaired half can only widen the window.
+CREATE TABLE IF NOT EXISTS public.outlook_thread_recovery (
+  connection_id            uuid        NOT NULL,
+  user_id                  uuid        NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  conversation_fingerprint text        NOT NULL,
+  earliest_unpaired_at     timestamptz NOT NULL,
+  created_at               timestamptz NOT NULL DEFAULT now(),
+  updated_at               timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (connection_id, conversation_fingerprint),
+  CONSTRAINT otr_cfp_shape CHECK (conversation_fingerprint ~ '^[0-9a-f]{64}$'),
+  CONSTRAINT otr_conn_user_fk FOREIGN KEY (connection_id, user_id)
+    REFERENCES public.microsoft_connections(id, user_id) ON DELETE CASCADE
+);
+ALTER TABLE public.outlook_thread_recovery ENABLE ROW LEVEL SECURITY;
+-- No user policy, exactly as outlook_subscriptions has none: this is worker state, and a
+-- reader could otherwise learn which threads have unresolved halves.
+REVOKE ALL ON TABLE public.outlook_thread_recovery FROM PUBLIC, anon, authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.outlook_thread_recovery TO service_role;
+
+-- Record (or lower) the hint for one thread. Worker-only, lease-fenced, LEAST so it never
+-- rises - a hint that rose could exclude a half it had already seen.
+CREATE OR REPLACE FUNCTION public.record_outlook_thread_recovery(
+  p_connection_id            uuid,
+  p_run_id                   uuid,
+  p_conversation_fingerprint text,
+  p_earliest_unpaired_at     timestamptz
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $fn$
+DECLARE
+  v_uid     uuid;
+  v_leaseok boolean;
+  v_at      timestamptz;
+BEGIN
+  IF p_conversation_fingerprint IS NULL OR p_conversation_fingerprint !~ '^[0-9a-f]{64}$' THEN
+    RETURN jsonb_build_object('result', 'invalid_conversation_fingerprint');
+  END IF;
+  IF p_earliest_unpaired_at IS NULL THEN
+    RETURN jsonb_build_object('result', 'invalid_instant');
+  END IF;
+
+  PERFORM 1 FROM public.outlook_sync_state s WHERE s.connection_id = p_connection_id FOR SHARE;
+  SELECT c.user_id INTO v_uid FROM public.microsoft_connections c WHERE c.id = p_connection_id;
+  IF v_uid IS NULL THEN RETURN jsonb_build_object('result', 'unknown_connection'); END IF;
+  SELECT count(*) = 2 AND bool_and(s.sync_run_id = p_run_id
+                                   AND s.sync_status = 'running'
+                                   AND s.sync_lease_until IS NOT NULL
+                                   AND s.sync_lease_until > now())
+    INTO v_leaseok
+  FROM public.outlook_sync_state s WHERE s.connection_id = p_connection_id;
+  IF v_leaseok IS NOT TRUE THEN RETURN jsonb_build_object('result', 'stale_run'); END IF;
+
+  INSERT INTO public.outlook_thread_recovery
+    (connection_id, user_id, conversation_fingerprint, earliest_unpaired_at)
+  VALUES (p_connection_id, v_uid, p_conversation_fingerprint, p_earliest_unpaired_at)
+  ON CONFLICT (connection_id, conversation_fingerprint) DO UPDATE
+    SET earliest_unpaired_at = LEAST(public.outlook_thread_recovery.earliest_unpaired_at,
+                                     EXCLUDED.earliest_unpaired_at),
+        updated_at           = now()
+  RETURNING earliest_unpaired_at INTO v_at;
+
+  RETURN jsonb_build_object('result', 'ok', 'earliest_unpaired_at', v_at);
+END
+$fn$;
 
 -- ── 2. read the coverage of the threads this round will write ──────────────────
 -- ONE call per round, not one per conversation: the worker passes every thread it is about
@@ -144,7 +228,17 @@ BEGIN
   IF v_leaseok IS NOT TRUE THEN RETURN jsonb_build_object('result', 'stale_run'); END IF;
 
   WITH want AS (
-    SELECT t->>'cfp' AS cfp, t->>'efp' AS efp
+    -- `cfp` is the CURRENT-key value and keys every row in the answer. `cfps` are its ring
+    -- variants: a refs row written before a key rotation is stored under an older value, and
+    -- an equality match on the current one misses the thread entirely - so the thread would
+    -- look new and its pending segment would be duplicated.
+    SELECT t->>'cfp' AS cfp,
+           t->>'efp' AS efp,
+           COALESCE(
+             (SELECT pg_catalog.array_agg(v) FROM pg_catalog.jsonb_array_elements_text(
+                CASE WHEN pg_catalog.jsonb_typeof(t->'cfps') = 'array' THEN t->'cfps' ELSE '[]'::jsonb END) v
+              WHERE v ~ '^[0-9a-f]{64}$'),
+             ARRAY[]::text[]) || ARRAY[t->>'cfp'] AS cfps
     FROM pg_catalog.jsonb_array_elements(p_threads) t
     WHERE t->>'cfp' ~ '^[0-9a-f]{64}$'
   ),
@@ -155,22 +249,28 @@ BEGIN
     SELECT w.cfp,
            r.covered_message_fingerprints AS cov,
            r.coverage_through_at          AS thru,
+           r.coverage_from_at             AS frm,
+           r.conversation_fingerprint     AS stored_cfp,
            ic.status                      AS st,
            ic.source_fingerprint          AS sfp
     FROM want w
     JOIN public.outlook_candidate_refs r
       ON r.user_id = v_uid
-     AND (r.conversation_fingerprint = w.cfp
+     AND (r.conversation_fingerprint = ANY (w.cfps)
           OR (r.conversation_fingerprint IS NULL AND w.efp ~ '^[0-9a-f]{64}$'
               AND r.episode_fingerprint = w.efp))
     JOIN public.interaction_candidates ic
       ON ic.id = r.interaction_candidate_id AND ic.user_id = r.user_id
     UNION ALL
-    SELECT w.cfp, r.covered_message_fingerprints, r.coverage_through_at, nc.status, NULL::text
+    -- The proposal's OWN anchor, not NULL. An earlier version selected NULL here and then
+    -- filtered the pending CTE on `sfp IS NOT NULL`, so a pending proposal was invisible to
+    -- the worker and every write for that thread created another one.
+    SELECT w.cfp, r.covered_message_fingerprints, r.coverage_through_at, r.coverage_from_at,
+           r.conversation_fingerprint, nc.status, nc.episode_fingerprint
     FROM want w
     JOIN public.outlook_candidate_refs r
       ON r.user_id = v_uid
-     AND (r.conversation_fingerprint = w.cfp
+     AND (r.conversation_fingerprint = ANY (w.cfps)
           OR (r.conversation_fingerprint IS NULL AND w.efp ~ '^[0-9a-f]{64}$'
               AND r.episode_fingerprint = w.efp))
     JOIN public.new_contact_candidates nc
@@ -187,10 +287,33 @@ BEGIN
     GROUP BY s.cfp
   ),
   pend AS (
-    SELECT DISTINCT ON (s.cfp) s.cfp, s.sfp, s.cov
+    -- OPEN, not only 'pending'. A proposal may be 'deferred', which the new-contact producer
+    -- treats as refreshable ("not yet, and more of the exchange may arrive"), so it pins
+    -- identity exactly as a pending row does. interaction_candidates has no 'deferred'
+    -- status, so this is a no-op on that side. Ordered deterministically: newest coverage
+    -- first, then the anchor, so a thread that transiently holds both kinds of open row
+    -- still resolves to one answer.
+    SELECT DISTINCT ON (s.cfp) s.cfp, s.sfp, s.cov, s.frm
     FROM seg s
-    WHERE s.st = 'pending' AND s.sfp IS NOT NULL
-    ORDER BY s.cfp, s.thru NULLS LAST
+    WHERE s.st IN ('pending', 'deferred') AND s.sfp IS NOT NULL
+    ORDER BY s.cfp, s.thru DESC NULLS LAST, s.sfp
+  ),
+  -- The durable floor hint: the earliest uncovered message this connection has seen for the
+  -- thread and could not pair. Survives completed rounds, which is the whole point.
+  hint AS (
+    SELECT w.cfp, min(tr.earliest_unpaired_at) AS at
+    FROM want w
+    JOIN public.outlook_thread_recovery tr
+      ON tr.user_id = v_uid AND tr.conversation_fingerprint = ANY (w.cfps)
+    GROUP BY w.cfp
+  ),
+  -- WHICH variant the thread is actually on record under. The worker passes it back as the
+  -- producer's lookup value, so a row written under a retired key is still found - and the
+  -- producer rewrites it to the current value, migrating the thread key forward on touch.
+  matched AS (
+    SELECT DISTINCT ON (s.cfp) s.cfp, s.stored_cfp
+    FROM seg s WHERE s.stored_cfp IS NOT NULL
+    ORDER BY s.cfp, s.thru DESC NULLS LAST
   )
   SELECT pg_catalog.jsonb_agg(jsonb_build_object(
            'conversation_fingerprint',       w.cfp,
@@ -198,11 +321,16 @@ BEGIN
            'coverage_through_at',            st.thru,
            'settled_without_coverage',       COALESCE(st.missing, false),
            'pending_episode_fingerprint',    pd.sfp,
-           'pending_covered_fingerprints',   COALESCE(pd.cov, ARRAY[]::text[])))
+           'pending_covered_fingerprints',   COALESCE(pd.cov, ARRAY[]::text[]),
+           'pending_coverage_from_at',       pd.frm,
+           'earliest_unpaired_at',           hn.at,
+           'matched_conversation_fingerprint', mt.stored_cfp))
     INTO v_out
   FROM want w
   LEFT JOIN settled st ON st.cfp = w.cfp
-  LEFT JOIN pend    pd ON pd.cfp = w.cfp;
+  LEFT JOIN pend    pd ON pd.cfp = w.cfp
+  LEFT JOIN hint    hn ON hn.cfp = w.cfp
+  LEFT JOIN matched mt ON mt.cfp = w.cfp;
 
   RETURN jsonb_build_object('result', 'ok', 'threads', COALESCE(v_out, '[]'::jsonb));
 END
@@ -227,6 +355,7 @@ CREATE OR REPLACE FUNCTION public.baseline_outlook_thread_coverage(
   p_conversation_fingerprint text,
   p_episode_fingerprint      text,
   p_covered_fingerprints     text[],
+  p_coverage_from_at         timestamptz,
   p_coverage_through_at      timestamptz
 )
 RETURNS jsonb
@@ -246,7 +375,8 @@ BEGIN
   IF p_episode_fingerprint IS NULL OR p_episode_fingerprint !~ '^[0-9a-f]{64}$' THEN
     RETURN jsonb_build_object('result', 'invalid_fingerprint');
   END IF;
-  IF p_coverage_through_at IS NULL THEN
+  IF p_coverage_through_at IS NULL OR p_coverage_from_at IS NULL
+      OR p_coverage_from_at > p_coverage_through_at THEN
     RETURN jsonb_build_object('result', 'invalid_coverage_set');
   END IF;
   IF p_covered_fingerprints IS NULL
@@ -292,6 +422,7 @@ BEGIN
   UPDATE public.outlook_candidate_refs r
      SET conversation_fingerprint     = p_conversation_fingerprint,
          covered_message_fingerprints = v_seg_cov,
+         coverage_from_at             = p_coverage_from_at,
          coverage_through_at          = p_coverage_through_at,
          coverage_source              = 'legacy_baseline',
          updated_at                   = now()
@@ -355,7 +486,17 @@ CREATE OR REPLACE FUNCTION public.upsert_outlook_interaction_candidate(
   -- that shipped - so it can be applied before the worker that uses it.
   p_conversation_fingerprint text        DEFAULT NULL,
   p_covered_fingerprints     text[]      DEFAULT NULL,
-  p_coverage_through_at      timestamptz DEFAULT NULL
+  p_coverage_from_at         timestamptz DEFAULT NULL,
+  p_coverage_through_at      timestamptz DEFAULT NULL,
+  -- ROTATION. The thread's other ring variants, bounded by the existing key ring. A refs row
+  -- written before a rotation is stored under an older value; this is how it is still FOUND,
+  -- while the value STORED is always p_conversation_fingerprint - so the thread key migrates
+  -- forward on touch and cannot fall out of the bounded ring.
+  --
+  -- Coverage needs no equivalent parameter: the worker resolves each message to the variant it
+  -- is already on record under before passing it, so the plain subset test still holds. A flat
+  -- set of every variant could not answer a PER-MESSAGE question, which is why it is not one.
+  p_conversation_lookup_fingerprints text[] DEFAULT NULL
   -- <<< 20261011
 )
 RETURNS jsonb
@@ -378,6 +519,7 @@ DECLARE
   v_missing boolean;   -- a settled segment of this thread carries NO coverage set
   v_pend    uuid;      -- this thread's pending segment, if it has one
   v_newfp   int;       -- how many incoming fingerprints are NOT already settled
+  v_cfps    text[];    -- the thread's ring variants, the current value included
   -- <<< 20261011
 BEGIN
   -- ── shape validation, before any lock is taken ────────────────────────────
@@ -471,11 +613,28 @@ BEGIN
       RETURN jsonb_build_object('result', 'invalid_coverage_fingerprint');
     END IF;
     -- Coverage is meaningful only against a thread, and only together with its instant.
-    IF p_conversation_fingerprint IS NULL OR p_coverage_through_at IS NULL THEN
+    -- The SPAN travels with the set: the earliest instant is what a refresh needs to
+    -- re-list its own earlier messages, and a span without both ends is a half-written claim.
+    IF p_conversation_fingerprint IS NULL OR p_coverage_through_at IS NULL
+        OR p_coverage_from_at IS NULL OR p_coverage_from_at > p_coverage_through_at THEN
       RETURN jsonb_build_object('result', 'invalid_coverage_set');
     END IF;
     SELECT pg_catalog.array_agg(DISTINCT f ORDER BY f)
       INTO v_seg_cov FROM pg_catalog.unnest(p_covered_fingerprints) f;
+  END IF;
+  -- The thread's ring variants. Malformed values are dropped rather than trusted, and the
+  -- current value is always a member, so a caller that passes no variants behaves exactly as
+  -- it did before rotation was handled at all.
+  IF p_conversation_fingerprint IS NOT NULL THEN
+    IF pg_catalog.array_length(COALESCE(p_conversation_lookup_fingerprints, ARRAY[]::text[]), 1) > 5 THEN
+      RETURN jsonb_build_object('result', 'invalid_conversation_fingerprint');
+    END IF;
+    SELECT pg_catalog.array_agg(DISTINCT f)
+      INTO v_cfps
+    FROM pg_catalog.unnest(
+      pg_catalog.array_append(COALESCE(p_conversation_lookup_fingerprints, ARRAY[]::text[]),
+                              p_conversation_fingerprint)) f
+    WHERE f ~ '^[0-9a-f]{64}$';
   END IF;
   -- <<< 20261011
 
@@ -535,7 +694,7 @@ BEGIN
     JOIN public.interaction_candidates ic
       ON ic.id = r.interaction_candidate_id AND ic.user_id = r.user_id
     WHERE r.user_id = v_uid
-      AND r.conversation_fingerprint = p_conversation_fingerprint
+      AND r.conversation_fingerprint = ANY (v_cfps)
       AND ic.status = 'pending'
     ORDER BY ic.created_at
     FOR UPDATE OF ic
@@ -548,13 +707,13 @@ BEGIN
         FROM public.outlook_candidate_refs r
         JOIN public.interaction_candidates ic
           ON ic.id = r.interaction_candidate_id AND ic.user_id = r.user_id
-        WHERE r.user_id = v_uid AND r.conversation_fingerprint = p_conversation_fingerprint
+        WHERE r.user_id = v_uid AND r.conversation_fingerprint = ANY (v_cfps)
         UNION ALL
         SELECT r.covered_message_fingerprints, nc.status, nc.updated_at, NULL::uuid
         FROM public.outlook_candidate_refs r
         JOIN public.new_contact_candidates nc
           ON nc.id = r.new_contact_candidate_id AND nc.user_id = r.user_id
-        WHERE r.user_id = v_uid AND r.conversation_fingerprint = p_conversation_fingerprint
+        WHERE r.user_id = v_uid AND r.conversation_fingerprint = ANY (v_cfps)
       )
       SELECT pg_catalog.array_agg(DISTINCT f ORDER BY f), bool_or(s.cov IS NULL)
         INTO v_settled, v_missing
@@ -583,7 +742,7 @@ BEGIN
           JOIN public.interaction_candidates ic
             ON ic.id = r.interaction_candidate_id AND ic.user_id = r.user_id
           WHERE r.user_id = v_uid
-            AND r.conversation_fingerprint = p_conversation_fingerprint
+            AND r.conversation_fingerprint = ANY (v_cfps)
             AND ic.status NOT IN ('pending', 'deferred')
           ORDER BY ic.updated_at DESC
           LIMIT 1;
@@ -671,6 +830,7 @@ BEGIN
       UPDATE public.outlook_candidate_refs
          SET conversation_fingerprint     = p_conversation_fingerprint,
              covered_message_fingerprints = v_seg_cov,
+             coverage_from_at             = p_coverage_from_at,
              coverage_through_at          = p_coverage_through_at,
              coverage_source              = 'draft',
              updated_at                   = now()
@@ -681,7 +841,8 @@ BEGIN
       UPDATE public.outlook_candidate_refs
          SET conversation_fingerprint = p_conversation_fingerprint, updated_at = now()
        WHERE user_id = v_uid AND interaction_candidate_id = v_cand
-         AND conversation_fingerprint IS NULL;
+         AND (conversation_fingerprint IS NULL
+              OR conversation_fingerprint IS DISTINCT FROM p_conversation_fingerprint);
     END IF;
     -- <<< 20261011
     RETURN jsonb_build_object('result', 'refreshed', 'candidate_id', v_cand);
@@ -723,6 +884,8 @@ BEGIN
   UPDATE public.outlook_candidate_refs
      SET conversation_fingerprint     = p_conversation_fingerprint,
          covered_message_fingerprints = CASE WHEN v_notes IS NOT NULL THEN v_seg_cov END,
+         coverage_from_at             = CASE WHEN v_notes IS NOT NULL AND v_seg_cov IS NOT NULL
+                                             THEN p_coverage_from_at END,
          coverage_through_at          = CASE WHEN v_notes IS NOT NULL AND v_seg_cov IS NOT NULL
                                              THEN p_coverage_through_at END,
          coverage_source              = CASE WHEN v_notes IS NOT NULL AND v_seg_cov IS NOT NULL
@@ -764,7 +927,17 @@ CREATE OR REPLACE FUNCTION public.upsert_new_contact_candidate(
   -- for exactly that reason.
   p_conversation_fingerprint text        DEFAULT NULL,
   p_covered_fingerprints     text[]      DEFAULT NULL,
-  p_coverage_through_at      timestamptz DEFAULT NULL
+  p_coverage_from_at         timestamptz DEFAULT NULL,
+  p_coverage_through_at      timestamptz DEFAULT NULL,
+  -- ROTATION. The thread's other ring variants, bounded by the existing key ring. A refs row
+  -- written before a rotation is stored under an older value; this is how it is still FOUND,
+  -- while the value STORED is always p_conversation_fingerprint - so the thread key migrates
+  -- forward on touch and cannot fall out of the bounded ring.
+  --
+  -- Coverage needs no equivalent parameter: the worker resolves each message to the variant it
+  -- is already on record under before passing it, so the plain subset test still holds. A flat
+  -- set of every variant could not answer a PER-MESSAGE question, which is why it is not one.
+  p_conversation_lookup_fingerprints text[] DEFAULT NULL
   -- <<< 20261011
 )
 RETURNS jsonb
@@ -785,6 +958,11 @@ DECLARE
   v_dup     uuid;
   -- >>> 20261011 segments
   v_seg_cov text[];
+  v_settled text[];
+  v_missing boolean;
+  v_pend    uuid;
+  v_newfp   int;
+  v_cfps    text[];
   -- <<< 20261011
 BEGIN
   -- -- shape validation, before any lock is taken -----------------------------
@@ -816,11 +994,28 @@ BEGIN
     IF FOUND THEN
       RETURN jsonb_build_object('result', 'invalid_coverage_fingerprint');
     END IF;
-    IF p_conversation_fingerprint IS NULL OR p_coverage_through_at IS NULL THEN
+    -- The SPAN travels with the set: the earliest instant is what a refresh needs to
+    -- re-list its own earlier messages, and a span without both ends is a half-written claim.
+    IF p_conversation_fingerprint IS NULL OR p_coverage_through_at IS NULL
+        OR p_coverage_from_at IS NULL OR p_coverage_from_at > p_coverage_through_at THEN
       RETURN jsonb_build_object('result', 'invalid_coverage_set');
     END IF;
     SELECT pg_catalog.array_agg(DISTINCT f ORDER BY f)
       INTO v_seg_cov FROM pg_catalog.unnest(p_covered_fingerprints) f;
+  END IF;
+  -- The thread's ring variants. Malformed values are dropped rather than trusted, and the
+  -- current value is always a member, so a caller that passes no variants behaves exactly as
+  -- it did before rotation was handled at all.
+  IF p_conversation_fingerprint IS NOT NULL THEN
+    IF pg_catalog.array_length(COALESCE(p_conversation_lookup_fingerprints, ARRAY[]::text[]), 1) > 5 THEN
+      RETURN jsonb_build_object('result', 'invalid_conversation_fingerprint');
+    END IF;
+    SELECT pg_catalog.array_agg(DISTINCT f)
+      INTO v_cfps
+    FROM pg_catalog.unnest(
+      pg_catalog.array_append(COALESCE(p_conversation_lookup_fingerprints, ARRAY[]::text[]),
+                              p_conversation_fingerprint)) f
+    WHERE f ~ '^[0-9a-f]{64}$';
   END IF;
   -- <<< 20261011
   IF p_extraction_status IS NULL
@@ -897,13 +1092,96 @@ BEGIN
     RETURN jsonb_build_object('result', 'already_a_contact');
   END IF;
 
+  -- >>> 20261011 segments
+  -- ── THE THREAD, BEFORE THE EPISODE ──────────────────────────────────────
+  -- The same two safeguards the interaction producer has, for the same reasons. Without
+  -- them, two writes for one thread under different anchors both created a proposal:
+  -- reproduced before this existed, two pending rows for one exchange.
+  --
+  -- ONE OPEN PROPOSAL PER THREAD, keeping the identity it was created under. 'deferred'
+  -- counts as open because this function already refreshes it.
+  IF p_conversation_fingerprint IS NOT NULL THEN
+    SELECT nc.id INTO v_pend
+    FROM public.outlook_candidate_refs r
+    JOIN public.new_contact_candidates nc
+      ON nc.id = r.new_contact_candidate_id AND nc.user_id = r.user_id
+    WHERE r.user_id = v_uid
+      AND r.conversation_fingerprint = ANY (v_cfps)
+      AND nc.status IN ('pending', 'deferred')
+    ORDER BY nc.created_at
+    FOR UPDATE OF nc
+    LIMIT 1;
+
+    IF v_pend IS NULL THEN
+      WITH seg AS (
+        SELECT r.covered_message_fingerprints AS cov, nc.status AS st, nc.updated_at AS upd
+        FROM public.outlook_candidate_refs r
+        JOIN public.new_contact_candidates nc
+          ON nc.id = r.new_contact_candidate_id AND nc.user_id = r.user_id
+        WHERE r.user_id = v_uid AND r.conversation_fingerprint = ANY (v_cfps)
+        UNION ALL
+        SELECT r.covered_message_fingerprints, ic.status, ic.updated_at
+        FROM public.outlook_candidate_refs r
+        JOIN public.interaction_candidates ic
+          ON ic.id = r.interaction_candidate_id AND ic.user_id = r.user_id
+        WHERE r.user_id = v_uid AND r.conversation_fingerprint = ANY (v_cfps)
+      )
+      SELECT pg_catalog.array_agg(DISTINCT f ORDER BY f), bool_or(s.cov IS NULL)
+        INTO v_settled, v_missing
+      FROM seg s
+      LEFT JOIN pg_catalog.unnest(COALESCE(s.cov, ARRAY[]::text[])) f ON true
+      WHERE s.st NOT IN ('pending', 'deferred');
+
+      IF COALESCE(v_missing, false) THEN
+        RETURN jsonb_build_object('result', 'coverage_uninitialized');
+      END IF;
+
+      IF v_seg_cov IS NOT NULL AND v_settled IS NOT NULL THEN
+        SELECT count(*) INTO v_newfp
+        FROM pg_catalog.unnest(v_seg_cov) f
+        WHERE NOT (f = ANY (v_settled));
+
+        IF v_newfp = 0 THEN
+          -- A DISMISSED OR ACCEPTED UNKNOWN-PERSON EXCHANGE stays settled. This is the case
+          -- the episode-only lookup missed whenever the anchor moved.
+          SELECT nc.id INTO v_cand
+          FROM public.outlook_candidate_refs r
+          JOIN public.new_contact_candidates nc
+            ON nc.id = r.new_contact_candidate_id AND nc.user_id = r.user_id
+          WHERE r.user_id = v_uid
+            AND r.conversation_fingerprint = ANY (v_cfps)
+            AND nc.status NOT IN ('pending', 'deferred')
+          ORDER BY nc.updated_at DESC
+          LIMIT 1;
+          RETURN jsonb_build_object('result', 'exists_terminal', 'candidate_id', v_cand);
+        END IF;
+
+        IF v_newfp < pg_catalog.array_length(v_seg_cov, 1) THEN
+          RETURN jsonb_build_object('result', 'coverage_moved');
+        END IF;
+      END IF;
+    END IF;
+  END IF;
+  -- <<< 20261011
   -- -- deduplicate on the episode -------------------------------------------
+  -- >>> 20261011 segments
+  -- When the thread already located and locked its open proposal, THAT row is the answer
+  -- whatever anchor this write arrived under. Re-selected by id rather than assigned, so
+  -- `FOUND` below means the same thing on both branches.
+  IF v_pend IS NOT NULL THEN
+    SELECT id, status INTO v_cand, v_status
+    FROM public.new_contact_candidates WHERE id = v_pend;
+  ELSE
+  -- <<< 20261011
   SELECT id, status INTO v_cand, v_status
   FROM public.new_contact_candidates
   WHERE user_id = v_uid AND source = 'outlook'
     AND episode_fingerprint = p_episode_fingerprint
   FOR UPDATE
   LIMIT 1;
+  -- >>> 20261011 segments
+  END IF;
+  -- <<< 20261011
 
   IF FOUND THEN
     -- A dismissed, accepted or invalidated proposal is never made again. 'deferred'
@@ -935,6 +1213,7 @@ BEGIN
       UPDATE public.outlook_candidate_refs
          SET conversation_fingerprint     = p_conversation_fingerprint,
              covered_message_fingerprints = v_seg_cov,
+             coverage_from_at             = p_coverage_from_at,
              coverage_through_at          = p_coverage_through_at,
              coverage_source              = 'draft',
              updated_at                   = now()
@@ -943,7 +1222,8 @@ BEGIN
       UPDATE public.outlook_candidate_refs
          SET conversation_fingerprint = p_conversation_fingerprint, updated_at = now()
        WHERE user_id = v_uid AND new_contact_candidate_id = v_cand
-         AND conversation_fingerprint IS NULL;
+         AND (conversation_fingerprint IS NULL
+              OR conversation_fingerprint IS DISTINCT FROM p_conversation_fingerprint);
     END IF;
     -- <<< 20261011
     RETURN jsonb_build_object('result', 'refreshed', 'candidate_id', v_cand);
@@ -978,6 +1258,8 @@ BEGIN
   UPDATE public.outlook_candidate_refs
      SET conversation_fingerprint     = p_conversation_fingerprint,
          covered_message_fingerprints = CASE WHEN v_sum IS NOT NULL THEN v_seg_cov END,
+         coverage_from_at             = CASE WHEN v_sum IS NOT NULL AND v_seg_cov IS NOT NULL
+                                             THEN p_coverage_from_at END,
          coverage_through_at          = CASE WHEN v_sum IS NOT NULL AND v_seg_cov IS NOT NULL
                                              THEN p_coverage_through_at END,
          coverage_source              = CASE WHEN v_sum IS NOT NULL AND v_seg_cov IS NOT NULL
@@ -991,31 +1273,43 @@ END;
 $$;
 
 -- ── 5. who may call what ───────────────────────────────────────────────────────
--- Identical to the posture the producers already have: the worker's role only. Never
--- authenticated, never anon, never PUBLIC - a reader could otherwise learn which threads a
--- user has exchanges in.
+-- The worker's role only, which is the posture the producers already had. Never
+-- authenticated, never anon, never PUBLIC: a reader could otherwise learn which threads a
+-- user has exchanges in, and which of them have unresolved halves.
+--
 -- FROM PUBLIC IS NOT ENOUGH, and the disposable-database check is what proved it. This
 -- project's default privileges grant EXECUTE on a new function in `public` to anon,
--- authenticated and service_role, so CREATE OR REPLACE after a DROP hands the producers
--- back to every signed-in user. anon and authenticated are therefore revoked EXPLICITLY,
--- exactly as 20261008000000 and 20261010180000 state it.
+-- authenticated and service_role, so CREATE OR REPLACE after a DROP hands the producers back
+-- to every signed-in user. anon and authenticated are revoked EXPLICITLY, exactly as
+-- 20261008000000 and 20261010180000 state it.
+--
+-- Every signature is spelled out once, here. An earlier revision patched these by substring
+-- and appended an argument to baseline_outlook_thread_coverage that it does not take - which
+-- surfaces only as "function does not exist" at apply time.
+REVOKE ALL ON FUNCTION public.record_outlook_thread_recovery(uuid, uuid, text, timestamptz)
+  FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.get_outlook_thread_coverage(uuid, uuid, jsonb)
   FROM PUBLIC, anon, authenticated;
-REVOKE ALL ON FUNCTION public.baseline_outlook_thread_coverage(uuid, uuid, text, text, text[], timestamptz)
+REVOKE ALL ON FUNCTION public.baseline_outlook_thread_coverage(uuid, uuid, text, text, text[], timestamptz, timestamptz)
   FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.upsert_outlook_interaction_candidate(
-  uuid, uuid, uuid, text, text, smallint, text, date, text[], text, text, text, text, text, text[], timestamptz)
+  uuid, uuid, uuid, text, text, smallint, text, date, text[], text, text, text, text,
+  text, text[], timestamptz, timestamptz, text[])
   FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION public.upsert_new_contact_candidate(
-  uuid, uuid, text, text, smallint, text, date, text, text, text, text, text, text, text, text, text[], timestamptz)
+  uuid, uuid, text, text, smallint, text, date, text, text, text, text, text, text, text,
+  text, text[], timestamptz, timestamptz, text[])
   FROM PUBLIC, anon, authenticated;
 
+GRANT EXECUTE ON FUNCTION public.record_outlook_thread_recovery(uuid, uuid, text, timestamptz) TO service_role;
 GRANT EXECUTE ON FUNCTION public.get_outlook_thread_coverage(uuid, uuid, jsonb) TO service_role;
-GRANT EXECUTE ON FUNCTION public.baseline_outlook_thread_coverage(uuid, uuid, text, text, text[], timestamptz) TO service_role;
+GRANT EXECUTE ON FUNCTION public.baseline_outlook_thread_coverage(uuid, uuid, text, text, text[], timestamptz, timestamptz) TO service_role;
 GRANT EXECUTE ON FUNCTION public.upsert_outlook_interaction_candidate(
-  uuid, uuid, uuid, text, text, smallint, text, date, text[], text, text, text, text, text, text[], timestamptz) TO service_role;
+  uuid, uuid, uuid, text, text, smallint, text, date, text[], text, text, text, text,
+  text, text[], timestamptz, timestamptz, text[]) TO service_role;
 GRANT EXECUTE ON FUNCTION public.upsert_new_contact_candidate(
-  uuid, uuid, text, text, smallint, text, date, text, text, text, text, text, text, text, text, text[], timestamptz) TO service_role;
+  uuid, uuid, text, text, smallint, text, date, text, text, text, text, text, text, text,
+  text, text[], timestamptz, timestamptz, text[]) TO service_role;
 
 -- The acceptance RPCs are NOT re-issued here and keep their 10,000-character reviewed-note
 -- allowance and their authenticated-only grant. A later segment becomes a NEW interaction

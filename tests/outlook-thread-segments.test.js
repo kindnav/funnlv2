@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import {
   MAX_SEGMENT_COVERAGE, normalizeCoverage, orderMessages, uncoveredMessages,
-  decideSegment, recoveryFloorIso, coverageForSegment, segmentIsTwoSided,
+  decideSegment, recoveryFloorIso, coverageForSegment, segmentIsTwoSided, unpairedHintIso,
 } from '../supabase/functions/shared/outlookThreadSegments.js'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -176,12 +176,59 @@ test('the recovery floor is the EARLIEST of the watermark and anything seen this
     'no coverage: no floor, the whole thread is wanted')
 })
 
-test('a write records the segment\'s fingerprints, sorted and unique, and its latest instant', () => {
+test('a write records the segment\'s fingerprints, sorted and unique, and BOTH ends of its span', () => {
   const seg = [msg(C, '2026-10-05T09:00:00Z'), msg(A, '2026-10-05T08:00:00Z'), msg(A, '2026-10-05T08:00:00Z')]
   const c = coverageForSegment(seg)
   assert.deepStrictEqual(c.fingerprints, [A, C].sort(), 'unique and ordered, so a replay produces the same array')
   assert.strictEqual(c.throughIso, '2026-10-05T09:00:00Z', 'the latest instant in the segment')
-  assert.deepStrictEqual(coverageForSegment([]), { fingerprints: [], throughIso: null })
+  // BOTH ends. The earliest is what a later refresh of this same segment floors its recovery
+  // at, so it has to be stored rather than re-derived from messages the round has erased.
+  assert.strictEqual(c.fromIso, '2026-10-05T08:00:00Z', 'and the earliest')
+  assert.deepStrictEqual(coverageForSegment([]), { fingerprints: [], fromIso: null, throughIso: null })
+})
+
+test('the unpaired hint is the earliest UNCOVERED instant, and null when nothing is uncovered', () => {
+  const messages = [msg(A, '2026-10-08T09:00:00Z', 'outbound'), msg(B, '2026-10-08T11:00:00Z')]
+  assert.strictEqual(unpairedHintIso(messages, new Set()), '2026-10-08T09:00:00Z')
+  assert.strictEqual(unpairedHintIso(messages, new Set([A])), '2026-10-08T11:00:00Z',
+    'a covered message does not hold the hint down')
+  assert.strictEqual(unpairedHintIso(messages, new Set([A, B])), null)
+})
+
+test('CROSS-ROUND HALVES: the floor takes the least of everything that can reach back', () => {
+  const through = '2026-10-08T10:00:00Z'
+  // The reported case. Settled coverage ends at 10:00. Round A sees an unseen outbound at
+  // 09:00; its reply arrives at 11:00 in round B, by which time round A's working records are
+  // erased. Flooring at the coverage instant excludes the 09:00 half - forever, in every
+  // later round, because the delta will not show it again either.
+  const roundB = { messages: [msg(B, '2026-10-08T11:00:00Z')], coverageThroughIso: through }
+  assert.strictEqual(recoveryFloorIso(roundB), through, 'without a durable hint the gap is real')
+  assert.strictEqual(recoveryFloorIso({ ...roundB, earliestUnpairedIso: '2026-10-08T09:00:00Z' }),
+    '2026-10-08T09:00:00Z', 'the hint reaches the earlier half')
+  // A pending refresh must re-list its OWN earlier messages or it redrafts from a truncated
+  // view of the exchange it already represents.
+  assert.strictEqual(recoveryFloorIso({ ...roundB, pendingFromIso: '2026-10-08T07:30:00Z' }),
+    '2026-10-08T07:30:00Z', 'the pending span start reaches its own context')
+  // The settled instant still bounds the lookback when nothing reaches further back, which is
+  // what keeps a long thread inside one bounded page.
+  assert.strictEqual(recoveryFloorIso({ messages: [msg(C, '2026-10-08T13:00:00Z')], coverageThroughIso: through }),
+    through)
+  assert.strictEqual(recoveryFloorIso({ messages: [msg(C, '2026-10-08T13:00:00Z')] }), null,
+    'and no settled coverage still means the whole thread')
+})
+
+test('normalizeCoverage carries the pending span and the durable hint through', () => {
+  const cov = normalizeCoverage({
+    covered_fingerprints: [A], coverage_through_at: '2026-10-08T10:00:00Z',
+    pending_episode_fingerprint: fp(9), pending_covered_fingerprints: [B],
+    pending_coverage_from_at: '2026-10-08T07:30:00Z',
+    earliest_unpaired_at: '2026-10-08T09:00:00Z',
+  })
+  assert.strictEqual(cov.pendingFromIso, '2026-10-08T07:30:00Z')
+  assert.strictEqual(cov.earliestUnpairedIso, '2026-10-08T09:00:00Z')
+  const bare = normalizeCoverage({})
+  assert.strictEqual(bare.pendingFromIso, null)
+  assert.strictEqual(bare.earliestUnpairedIso, null)
 })
 
 test('the two-way rule applies to the SEGMENT, not to the thread', () => {
