@@ -279,10 +279,21 @@ async function makePorts ({ contacts }) {
       const cfp = args && args.p_conversation_fingerprint
       const claim = args?.p_covered_fingerprints ?? null
       const aliases = args?.p_covered_lookup_fingerprints ?? claim ?? []
+      // THE EPISODE-ALIAS TOMBSTONE LOOKUP, which this model used to omit. The real function
+      // selects by `source_fingerprint = ANY(p_lookup_fingerprints || p_episode_fingerprint)`
+      // and answers exists_terminal for anything it finds that is not pending - so an episode
+      // ALIAS of a decided exchange is a tombstone, not just its exact value. Omitting this
+      // made the model answer `created` for a rotated thread whose segment had taken the
+      // thread's first message as its anchor, which is exactly the integration defect
+      // reproduced against the real function in tests/local/outlook-thread-segments-flow.mjs.
+      const efpRing = [efp, ...(Array.isArray(args?.p_lookup_fingerprints)
+        ? args.p_lookup_fingerprints : [])].filter((f) => typeof f === 'string')
+      const anyTerminal = efpRing.some((f) => terminal.has(f))
+      const anySeen = efpRing.some((f) => episodes.has(f))
       let result
       if (cfp === null || cfp === undefined) {
         // No thread supplied: the behaviour that shipped, keyed on the episode alone.
-        result = terminal.has(efp) ? 'exists_terminal' : episodes.has(efp) ? 'refreshed' : 'created'
+        result = anyTerminal ? 'exists_terminal' : anySeen ? 'refreshed' : 'created'
         episodes.add(efp)
       } else {
         const { key, t } = threadFor(cfp, args.p_conversation_lookup_fingerprints ?? [])
@@ -301,8 +312,11 @@ async function makePorts ({ contacts }) {
             return { data: { result: 'coverage_moved' }, error: null }
           } else result = 'created'
         } else {
-          result = terminal.has(efp) ? 'exists_terminal' : 'created'
+          result = anyTerminal ? 'exists_terminal' : 'created'
         }
+        // And the tombstone lookup runs for a thread too: the real function reaches it
+        // whenever the coverage comparison did not already answer.
+        if (result === 'created' && anyTerminal) result = 'exists_terminal'
         if (result !== 'exists_terminal') {
           if (row.open === null) {
             row.open = { efp, covered: new Set(), fromIso: args.p_coverage_from_at }
@@ -1562,6 +1576,29 @@ for (const [rpcName, refusal, turns] of [
     assert.strictEqual(r.run.finalize.cursor_advanced, false, 'nor does the write cursor move')
   })
 }
+
+await test('the port models the EPISODE-ALIAS TOMBSTONE, which the real function applies', async () => {
+  // THIS MODEL WAS WRONG, and the wrongness hid an integration defect completely: it keyed
+  // `terminal` on the exact episode fingerprint, while the real function selects by
+  // `source_fingerprint = ANY(p_lookup_fingerprints || p_episode_fingerprint)` and answers
+  // exists_terminal for anything not pending. So for a rotated thread whose segment had
+  // taken the thread's first message as its anchor, this port said `created` where the real
+  // function says `exists_terminal` - proven against the real function in
+  // tests/local/outlook-thread-segments-flow.mjs. The guard keeps the port honest.
+  const ports = await makePorts({ contacts: [{ id: KNOWN_CONTACT, user_id: PILOT, email: KNOWN }] })
+  const fpA = 'a'.repeat(64)
+  const fpB = 'b'.repeat(64)
+  ports.decide(fpA)                       // the reviewer decided the exchange anchored at A
+  // A later write arrives under a DIFFERENT anchor but offers A among its lookup aliases,
+  // which is exactly what a rotated or re-anchored episode does.
+  const res = await ports.rpc('upsert_outlook_interaction_candidate', {
+    p_episode_fingerprint: fpB,
+    p_lookup_fingerprints: [fpA],
+    p_conversation_fingerprint: null,
+  })
+  assert.strictEqual(res.data.result, 'exists_terminal',
+    'an ALIAS of a decided exchange is a tombstone, not just its exact value')
+})
 
 console.log((passed + failed) + ' tests: ' + passed + ' passed, ' + failed + ' failed')
 console.log('')

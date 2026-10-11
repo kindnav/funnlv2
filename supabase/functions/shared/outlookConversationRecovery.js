@@ -126,6 +126,61 @@ function lookupFailure (code) {
 }
 
 /**
+ * THE THREAD'S RAW CONVERSATION KEY, from a message the round already holds.
+ *
+ * WHY THIS IS CALLABLE ON ITS OWN. A fingerprint cannot be re-hashed, so the run cannot
+ * compute a thread's ring variants from the fingerprint it holds - it needs the raw key, and
+ * this envelope GET is the one place that key exists. Asking for coverage WITHOUT those
+ * variants is what hid a settled exchange written under a retired key: reproduced against
+ * the real producer, which then answered `exists_terminal` while the round committed and the
+ * new exchange was never suggested.
+ *
+ * It is the SAME request recovery makes - not an additional one. `recoverConversation`
+ * accepts the answer and skips its own fetch.
+ *
+ * IN MEMORY ONLY. The key is returned so ring variants can be computed from it; it is never
+ * persisted and never logged.
+ *
+ * @returns {Promise<{outcome:'ok', conversationKey:string, stats:object}
+ *                  |{outcome:'settled'|'retry', reason:string, stats:object}>}
+ */
+export async function resolveConversationIdentity (p) {
+  const { handles, decryptHandle, accessToken, deps, budgetAllows } = p || {}
+  const stats = { envelopeFetches: 0 }
+  const exec = typeof deps?.executeGraphRequest === 'function'
+    ? deps.executeGraphRequest : executeGraphRequest
+  const allows = typeof budgetAllows === 'function' ? budgetAllows : () => true
+
+  const stored = (Array.isArray(handles) ? handles : [])
+    .filter((h) => isPlainObject(h) && typeof h.midCt === 'string' && h.midCt.length > 0)
+  if (stored.length === 0) return settled('recovery_no_handles', stats)
+  if (!allows(RECOVERY_REQUEST_ADMIT_MS)) return retry('budget_exhausted', stats)
+
+  let messageId
+  try {
+    messageId = await decryptHandle({ ciphertext: stored[0].midCt, nonce: stored[0].midNonce })
+  } catch {
+    return retry('recovery_fetch_failed', stats)
+  }
+  if (!isUsableGraphId(messageId)) return settled('recovery_mismatch', stats)
+  let envelopeReq
+  try {
+    envelopeReq = buildMessageEnvelopeRequest({ messageId })
+  } catch {
+    return settled('recovery_mismatch', stats)
+  }
+  stats.envelopeFetches += 1
+  const env = await exec({
+    request: envelopeReq, accessToken, fetchImpl: deps?.fetchImpl, sleepImpl: deps?.sleepImpl,
+    now: deps?.now, budgetAllows: allows,
+  })
+  if (!env?.ok) return retryOrSettle(envelopeFailure(env?.code), stats)
+  const conversationKey = env.json?.conversationId
+  if (!isUsableGraphId(conversationKey)) return settled('recovery_mismatch', stats)
+  return { outcome: 'ok', conversationKey, stats }
+}
+
+/**
  * Ask Outlook for the rest of ONE one-sided conversation and decide it the way a
  * same-round read would have.
  *
@@ -155,6 +210,9 @@ export async function recoverConversation (p) {
     // assembled instead of on history that is already summarized. Absent - a first pass, or
     // a thread nobody has decided yet - the request is exactly the one that shipped.
     sinceIso,
+    // THE THREAD'S RAW KEY, optional. When the caller has already resolved it - which it
+    // must, to ask for coverage under a rotated ring - the envelope GET is NOT repeated.
+    conversationId: knownConversationId,
   } = p || {}
   const stats = { envelopeFetches: 0, lookups: 0, recoveredMessages: 0, dedupedAgainstStored: 0 }
   const exec = typeof deps?.executeGraphRequest === 'function' ? deps.executeGraphRequest : executeGraphRequest
@@ -167,28 +225,21 @@ export async function recoverConversation (p) {
   if (stored.length === 0) return settled('recovery_no_handles', stats)
 
   // ── 1. the conversation id, from a message the round already holds ─────────
-  if (!allows(RECOVERY_REQUEST_ADMIT_MS)) return retry('budget_exhausted', stats)
-  let messageId
-  try {
-    messageId = await decryptHandle({ ciphertext: stored[0].midCt, nonce: stored[0].midNonce })
-  } catch {
-    return retry('recovery_fetch_failed', stats)
+  // ALREADY RESOLVED? Then this is the same value the caller computed its ring variants
+  // from, and fetching it again would be a second identical request.
+  let conversationId = isUsableGraphId(knownConversationId) ? knownConversationId : null
+  if (conversationId === null) {
+    const ident = await resolveConversationIdentity({
+      handles: stored, decryptHandle, accessToken, deps, budgetAllows: allows,
+    })
+    stats.envelopeFetches += ident.stats?.envelopeFetches ?? 0
+    if (ident.outcome !== 'ok') {
+      return ident.outcome === 'retry'
+        ? retry(ident.reason, stats)
+        : settled(ident.reason, stats)
+    }
+    conversationId = ident.conversationKey
   }
-  if (!isUsableGraphId(messageId)) return settled('recovery_mismatch', stats)
-  let envelopeReq
-  try {
-    envelopeReq = buildMessageEnvelopeRequest({ messageId })
-  } catch {
-    return settled('recovery_mismatch', stats)
-  }
-  stats.envelopeFetches += 1
-  const env = await exec({
-    request: envelopeReq, accessToken, fetchImpl: deps?.fetchImpl, sleepImpl: deps?.sleepImpl,
-    now: deps?.now, budgetAllows: allows,
-  })
-  if (!env?.ok) return retryOrSettle(envelopeFailure(env?.code), stats)
-  const conversationId = env.json?.conversationId
-  if (!isUsableGraphId(conversationId)) return settled('recovery_mismatch', stats)
 
   // ── 2. the thread, folder by folder, envelopes only ──────────────────────
   const entries = []

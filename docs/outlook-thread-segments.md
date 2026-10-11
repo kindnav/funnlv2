@@ -337,117 +337,144 @@ the migration or by a rollback.
 
 ## 9. What is demonstrated, and what is not
 
-### Checkpoint 1 — the working worker flow
+Two kinds of evidence appear below and they are not interchangeable:
 
-The orchestration is **wired**, and the seven behaviours are demonstrated through the real
-worker handler (`handleOutlookImportWorker`), the real RPC contracts and the intercepted
-Anthropic request — `tests/outlook-two-sided-rounds.test.js`, section 9, 52 tests in the file:
+- **REAL DATABASE EXECUTION** - the run module driving the real functions over real PostgREST
+  against the project's own Postgres image, with every migration applied in order. The
+  answers are the functions' own.
+- **MOCKED CONTRACT** - the run module driving an in-memory model of those functions. Fast,
+  and useful for control flow, but a model is a *reading* of the SQL and a reading can be
+  wrong. This one was: it keyed the tombstone check on the exact episode fingerprint while
+  the real function matches any lookup alias, so it answered `created` where the real
+  function answers `exists_terminal` - and that hid a defect that lost mail. The model now
+  carries a guard for exactly that behaviour, and nothing is claimed on its evidence alone
+  that the real functions have not also been asked.
 
-| # | Demonstrated | How it is checked |
-|---|---|---|
-| D1 | An **accepted known-contact** exchange, then new two-way mail, produces exactly one new suggestion | `write_results { created: 1 }`, one further `upsert_outlook_interaction_candidate`, a different episode fingerprint |
-| D2 | The **unknown-person** path does the same | the same, via `upsert_new_contact_candidate` |
-| D3 | A **replay** of a pending exchange refreshes the one pending suggestion | `{ refreshed: 1 }`, same episode fingerprint, `created: 0` |
-| D4 | **Halves in separate completed rounds** are joined into one suggestion | round 1 records the hint (one pair, a fingerprint and its instant); round 2 writes once, claims the remembered half, and the hint is gone |
-| D5 | An **unanswered** message produces no draft, no suggestion, no model call | `candidates 0`, `model_calls 0`, `bodies 0`, `entry_skipped { not_two_sided: 1 }`, round still commits |
-| D6 | **Earlier accepted** interactions are never written again | a third round replays the whole thread: `{ refreshed: 1 }` on the pending segment, the accepted call byte-identical and never repeated, its coverage still settled |
-| D7 | A **failed required persistence operation** prevents cursor advancement | `get_outlook_thread_coverage` fails → `coverage_read_failed`; `record_outlook_thread_recovery` fails → `hint_write_failed`; both `cursors_advanced 0`, `finalize.cursor_advanced false`, nothing written |
+### REAL DATABASE EXECUTION: `tests/local/outlook-thread-segments-flow.mjs`
 
-**The model request is inspected, not assumed.** D1 and D2 read the body the harness captured
-for the second suggestion and assert that both halves of the **later** exchange are present,
-that **neither** settled message is, and that no address appears. Only the segment's bodies are
-read for it — two, not four — so the exclusion is a property of what was fetched, not only of
-what was sent.
+36 checks. The run module, the real producer and acceptance RPCs, real PostgREST, controlled
+Graph and Anthropic fixtures. Not part of `npm test`, which stays dependency-free; it builds
+and tears down its own containers.
 
-### Demonstrated against the real functions and a disposable database
+| Group | Demonstrated |
+|---|---|
+| Rotation, known contact | A first exchange is proposed and ACCEPTED through the real acceptance RPC with a reviewer-edited note. The key is rotated with the previous key still accepted. A later two-way exchange produces exactly ONE new pending suggestion, drafted from the later exchange; coverage reaches four messages; a replay refreshes that one row; the accepted interaction and its note are byte-identical (length and digest compared). |
+| Rotation, unknown person | The same through `upsert_new_contact_candidate` and `accept_new_contact_candidate`, which also makes the person a contact - so the later exchange crosses the anchor-form transition and the key change at once. |
+| Legacy initialization | The pre-feature proposal is written by the **shipped worker**, loaded from a git worktree at `main`, against a database with this migration HELD BACK - then accepted through the real acceptance RPC. The migration is applied to the database that already holds those rows. Both anchor forms are present, and one accepted proposal's person is now a contact. Through the handler the threads are BASELINED (`coverage_baselined`, `coverage_source = 'legacy_baseline'`, no suggestion, no model call), and only mail arriving after the baseline becomes a suggestion. |
+| Legacy history beyond the page cap | A thread with more history than `MAX_RECOVERY_MESSAGES_PER_FOLDER` in one folder, with the fixture honouring the conversation clause, the per-folder instant window, `$top` and `@odata.nextLink`. The settled exchange is proposed, the later one is captured, every lookup carries a floor and stays within the page bound, and neither the back-catalogue nor the settled exchange is sent to the model again. |
+| Rotation composed with a decision during drafting | The reviewer ACCEPTS (and, separately, DISMISSES) between the coverage read and the producer write, staged by a hook on the real RPC call. The real producer answers `coverage_moved`, which is not in `WRITE_OK`: no cursor advances and nothing is written. The next attempt - same page, cursor never moved - captures the genuinely new exchange ONCE, the decided row is still the decided row, and the model is sent only the new exchange. |
 
-`tests/sql/outlook-thread-segments-runtime.sql`, 20 sections, on a fresh
-`supabase/postgres:17.6.1.140` with the repo's own migrations applied in order: a settled
+**The model request is inspected, not assumed**, in every group: the captured Anthropic body
+must contain both halves of the intended exchange, must not contain any settled or baselined
+message, and must contain no address.
+
+### REAL DATABASE EXECUTION: `tests/sql/outlook-thread-segments-runtime.sql`
+
+20 sections on a fresh database with every migration applied in filename order: a settled
 exchange stays settled and its interaction and reviewed note are untouched; a later two-way
 exchange becomes a new pending suggestion; a replay is `exists_terminal`; messages sharing an
 instant are distinguished; a late-discovered older message is new; one pending segment per
 thread survives a refresh, a replay, a rotated key and delayed discovery; a metadata-only
-refresh and a rejected write advance no coverage; a concurrent dismissal yields `coverage_moved`
-and the new mail is then written; the new-contact transition keeps its coverage; a legacy thread
-refuses to guess and then works from its baseline; genuine rotation is found, migrated forward
-and still distinguishable; the hint is recorded, merged, partially resolved and fully removed;
-long legacy threads and legacy proposals that now resolve to a contact; re-consent as a
-same-account UPDATE preserves identity, cursors and dedup references; the lease fence refuses
-every new path; the constraints refuse half-written coverage; the acceptance RPCs are untouched.
+refresh and a rejected write advance no coverage; a concurrent dismissal yields
+`coverage_moved` and the new mail is then written; the new-contact transition keeps its
+coverage; a legacy thread refuses to guess and then works from its baseline; genuine rotation
+is found, migrated forward and still distinguishable; the hint is recorded, merged, partially
+resolved and fully removed; long legacy threads and legacy proposals whose person is now a
+contact; re-consent as a same-account UPDATE preserves identity, cursors and dedup
+references; the lease fence refuses every new path; the constraints refuse half-written
+coverage; the acceptance RPCs are untouched.
 
-### Demonstrated at the module boundary
+### MOCKED CONTRACT: `tests/outlook-two-sided-rounds.test.js`
+
+53 tests through the real handler against the in-memory producer model, including the seven
+checkpoint-1 demonstrations (D1-D7) and a guard that the model applies the episode-alias
+tombstone the real function applies. Its value is breadth and speed over control flow; the
+behaviour it models is also asked of the real functions above.
+
+### Module boundary and migration text
 
 Coverage decisions (`tests/outlook-thread-segments.test.js`, 21 tests, including that the
-hint-pair bound is one shared number); genuine rotation against the real builders and real key
-rings (`tests/outlook-thread-rotation.test.js`); bounded segment recovery against a fake mailbox
-that honours `$filter`, `$top` and `nextLink` (`tests/outlook-conversation-recovery.test.js`),
-including that a thread with 30 historical inbox messages is abandoned `recovery_truncated`
-without a floor and recovers with one.
+hint-pair bound is one shared number); genuine rotation against the real fingerprint builders
+and real key rings (`tests/outlook-thread-rotation.test.js`); the identity step and its reuse
+(`tests/outlook-conversation-recovery.test.js`, 33 tests), including that a resolved key makes
+recovery skip its own envelope GET and that a one-sided settlement carries the key back;
+migration text controls (`tests/outlook-thread-segments-migration.test.js`, 19 tests): both
+producers byte-identical to the applied versions apart from marked blocks with one tolerated
+trailing comma pinned explicitly, the hint merge shedding the newest pair rather than the
+oldest, and the comparison aliases reaching no stored column.
 
-### Demonstrated as text
+### Defects reproduced and fixed
 
-`tests/outlook-thread-segments-migration.test.js`, 19 tests: both producers are byte-identical
-to the applied versions apart from marked blocks, with the single tolerated exception of a
-trailing comma, pinned explicitly and proven to be the only difference; the hint merge sheds the
-newest pair rather than the oldest and reports what it dropped; the comparison aliases reach no
-stored column.
-
-### Defects this pass reproduced and fixed
-
-Each was reproduced first, then fixed, and the fix is what the tests above now hold:
+Each was reproduced first - the first three against the real functions, which is how they were
+found at all - and the fix is what the evidence above now holds.
 
 1. **A rotated hint lived forever.** Cleanup compared against the stored claim, so a hint from
-   era 1 survived a coverage write in era 2. Fixed with `p_covered_lookup_fingerprints` — see 3a.
-2. **The hint bound silently raised the floor.** Truncating 25 pairs by fingerprint evicted an
-   older, lexically higher pair while answering `ok`. Now ordered by instant, with `dropped`
-   measured before the merge.
-3. **Episode aliases do not find a continuing thread.** A later segment's anchor is a different
-   message, so the settled segment read back `covered_fingerprints: []` and the producer
-   answered `created` for an exchange the reviewer had accepted. Fixed by looking the thread up
-   through the **conversation** fingerprint's ring variants, and by anchoring each segment on its
-   own first message (`segmentEpisodeFingerprint`) — reusing the thread anchor would also have
-   collided with the unique `source_fingerprint`.
-4. **A genuinely one-sided thread recorded no hint**, because recovery concluded it and returned
-   before the segment block — see section 6.
-5. **The segment's handle pre-read forfeited the whole round.** A transient handle-read failure
-   on one thread blocked every other thread in the round. It is now the retryable deferral that
-   vocabulary already had (`handles_unreadable`): the round stops without passing that
-   conversation and commits no cursor, but it is not a refusal.
+   era 1 survived a coverage write in era 2. Fixed with `p_covered_lookup_fingerprints` - see
+   3a.
+2. **The hint bound silently raised the recovery floor.** Truncating 25 pairs by fingerprint
+   shed an older, lexically higher pair while answering `ok`. The merge now orders by instant
+   and reports `dropped`, measured before the merge.
+3. **Episode aliases do not locate a continuing thread** once its anchor changes. Fixed by
+   looking the thread up through the conversation fingerprint's ring variants, and by
+   anchoring each segment on its own first message.
+4. **A genuinely one-sided thread recorded no hint**, because recovery concluded it and
+   returned before the segment block - see section 6.
+5. **The segment's handle pre-read forfeited the whole round**, so one thread's transient
+   failure blocked every other thread in it. It is now the retryable deferral the vocabulary
+   already had.
+6. **COVERAGE WAS ASKED FOR BEFORE THE THREAD'S IDENTITY WAS KNOWN.** The per-page batch read
+   matches on the current conversation fingerprint and the round's episode aliases; after a
+   rotation neither finds a row written under a retired key. Reproduced against the real
+   producer: coverage read empty, so there was no floor, recovery re-listed the WHOLE thread,
+   the segment took the thread's first message as its anchor, the settled exchange went to
+   the model again, and the producer answered `exists_terminal` while the round COMMITTED -
+   the new exchange never suggested, and the delta would not deliver it again. Fixed by
+   resolving the thread's raw key first - the same envelope GET recovery makes, which recovery
+   now reuses rather than repeating - and re-asking that one thread's coverage with its ring
+   variants. Only when the ring carries more than one key: with a single key, which is
+   Production today, rotation cannot have happened, the batch answer stands and not one extra
+   request is made.
+7. **The claim was resolved against the settled set alone.** Reproduced against the real
+   producer: a reviewer accepted while the worker was drafting the same rotated thread, so
+   every message claimed its current-key value, the overlap with the retired-key coverage
+   acceptance then settled was invisible, the producer fell through to the episode dedup and
+   answered `exists_terminal` - in `WRITE_OK` - so the round committed and the new exchange
+   was lost. The claim now resolves against every value the thread is on record under,
+   **settled and pending**, so the overlap is visible and the producer answers
+   `coverage_moved`: the cursor is forfeited and the next attempt drafts only the new part.
+8. **A genuine legacy row was never found.** It has no conversation fingerprint, so it is
+   matched only on its own episode anchor - the thread's first message, which a delta round
+   never delivered. Reproduced with a proposal written by the shipped worker: the thread
+   looked brand new, mail that was already a logged interaction was summarized again, and the
+   accepted exchange went to the model a second time. Fixed with one bounded extra coverage
+   read, taken only when the thread appears to have no coverage AND recovery supplied older
+   mail, using the thread's first message under BOTH contact forms across the ring. The
+   baseline is given the same set - without that the known-contact thread initialized and the
+   accepted-proposal thread did not, because the form the worker computes now is not the form
+   an older proposal was written under.
 
-### Not demonstrated — the explicit gates before merge
-
-These are **acceptance gates, not optional polish**. Checkpoint 1 does not claim them:
-
-- **Genuine pre-feature new-contact initialization.** The legacy path is proven with a
-  constructed legacy row; it is not yet proven against a row written by the *shipped* producer
-  before this migration — both anchor forms, a NULL conversation fingerprint, NULL coverage, and
-  the person now an existing contact.
-- **Legacy history beyond the single-page recovery cap.** Section 19 of the SQL proof covers a
-  long legacy thread; the recovery cap itself is exercised at the module boundary. The two have
-  not been composed through the handler.
-- **Composed rotation including a reviewer decision during drafting.** Rotation is proven in SQL
-  and against the real builders, and a decision between rounds is proven through the handler.
-  Rotation *and* a decision landing in the same window — asserting both the stored state and the
-  resulting model request — is not yet demonstrated.
-
-### Also not demonstrated
+### Not demonstrated
 
 - Whether a tenant accepts the added `$filter` clause. The 400 path is handled; the owner-run
   Graph Explorer check establishes the fact, as it did for `conversationId eq`.
+- Real Microsoft and real Anthropic. Every provider response is a local fixture built from the
+  documented contract.
+- The browser, Kong, supabase-js and GoTrue. Review writes go straight to PostgREST with a
+  locally minted JWT.
 - Real-mail behaviour, which only the pilot answers.
 
 ### Pre-existing, re-confirmed
 
 Three older SQL proofs (`outlook-content-draft`, `outlook-pilot-reservation`,
 `outlook-user-rpc-grants`) assume a clean slate and fail when run after other files in one
-alphabetical sequence; each passes alone, and `outlook-content-draft` was re-confirmed to do so
-on a fresh database during this pass. `gmail-retention` fails alone, with
-`{"result": "unauthorized"}`, and is unrelated: it fails identically with this migration
-**excluded**, which was checked explicitly. This file cleans up after itself, which the older
-ones do not — adding that teardown is what stopped it from making `outlook-token-rotation` fail
-on leftover state.
+sequence; each passes alone, re-confirmed on a fresh database during this work.
+`outlook-change-notifications` and `outlook-content-draft` also fail under a
+`createdb`+`pg_restore` shortcut, because pg_cron's objects do not come through the dump -
+both pass on a database the migrations were applied to directly. `gmail-retention` fails
+alone with `{"result": "unauthorized"}` and is unrelated: it fails identically with this
+migration excluded, checked explicitly.
 
-Three existing SQL proofs pinned the producer's old arity and were updated to the new signature,
-which is what those pins exist for: `outlook-candidate-write-runtime`,
+Three existing SQL proofs pinned the producer's old arity and were updated to the new
+signature, which is what those pins exist for: `outlook-candidate-write-runtime`,
 `outlook-detailed-notes-runtime` and `outlook-known-contact-follow-up-runtime` (now 19
 arguments).

@@ -16,7 +16,8 @@ import {
   escapeODataString,
 } from '../supabase/functions/shared/outlookGraphTransport.js'
 import {
-  recoverConversation, summarizeRecovery, RECOVERY_OUTCOME_CODES, RECOVERY_RETRYABLE,
+  recoverConversation, resolveConversationIdentity, summarizeRecovery,
+  RECOVERY_OUTCOME_CODES, RECOVERY_RETRYABLE,
   MAX_RECOVERIES_PER_INVOCATION, RECOVERY_ADMIT_MS, RECOVERY_REQUEST_ADMIT_MS,
 } from '../supabase/functions/shared/outlookConversationRecovery.js'
 import { buildSelfIdentitySet, indexContactsByEmail } from '../supabase/functions/shared/outlookParticipants.js'
@@ -583,6 +584,107 @@ await test('and a GENUINELY unresolved half still widens the window, which is th
   assert.strictEqual(r.outcome, 'recovered', JSON.stringify(r))
 })
 
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// THE IDENTITY STEP, on its own. The run has to resolve the thread's raw key BEFORE it can
+// ask for coverage under a rotated ring - a fingerprint cannot be re-hashed - and this is
+// the one request that holds it. Reproduced against the real producer without it: coverage
+// read empty, no floor, the whole thread re-listed, the settled exchange sent to the model
+// again and `exists_terminal` returned while the round committed.
+console.log('')
+
+await test('the identity step returns the raw conversation key from ONE envelope GET', async () => {
+  const log = []
+  const r = await resolveConversationIdentity({
+    handles: [storedHandle('AAkALgAAfresh-in', 'inbox', '2026-10-08T09:00:00Z')],
+    decryptHandle, accessToken: 't',
+    deps: { executeGraphRequest: mailbox(LONG_FOLDERS, log) },
+    budgetAllows: () => true,
+  })
+  assert.strictEqual(r.outcome, 'ok')
+  assert.strictEqual(r.conversationKey, LONG_CONV, 'the raw key, for computing ring variants')
+  assert.strictEqual(r.stats.envelopeFetches, 1)
+  assert.strictEqual(log.filter((l) => l.kind === 'envelope').length, 1, 'exactly one GET')
+  assert.strictEqual(log.filter((l) => l.kind === 'lookup').length, 0, 'and no thread listing')
+})
+
+await test('with no handle it settles rather than guessing', async () => {
+  const r = await resolveConversationIdentity({
+    handles: [], decryptHandle, accessToken: 't',
+    deps: { executeGraphRequest: mailbox(LONG_FOLDERS, []) }, budgetAllows: () => true,
+  })
+  assert.strictEqual(r.outcome, 'settled')
+  assert.strictEqual(r.reason, 'recovery_no_handles')
+})
+
+await test('out of budget it is RETRYABLE, so nothing is settled for the thread', async () => {
+  const r = await resolveConversationIdentity({
+    handles: [storedHandle('AAkALgAAfresh-in', 'inbox', '2026-10-08T09:00:00Z')],
+    decryptHandle, accessToken: 't',
+    deps: { executeGraphRequest: mailbox(LONG_FOLDERS, []) }, budgetAllows: () => false,
+  })
+  assert.strictEqual(r.outcome, 'retry')
+  assert.strictEqual(r.reason, 'budget_exhausted')
+  assert.ok(RECOVERY_RETRYABLE.includes(r.reason), 'and it is in the retryable vocabulary')
+})
+
+await test('a key already resolved is REUSED: recovery makes no second envelope GET', async () => {
+  const log = []
+  const cfp = await cfpOf([FRESH_IN], [FRESH_OUT])
+  const r = await recoverConversation({
+    row: { cfp },
+    conversationId: LONG_CONV,                      // what the identity step already returned
+    handles: [storedHandle('AAkALgAAfresh-in', 'inbox', '2026-10-08T09:00:00Z')],
+    decryptHandle, accessToken: 't',
+    sinceIso: '2026-10-08T00:00:00Z',
+    deps: { executeGraphRequest: mailbox(LONG_FOLDERS, log) },
+    budgetAllows: () => true,
+    selfSet, contactIndex, connectionId: CONN, keyRing: KEY_RING, produceHandles,
+    localDateFor: dateFor,
+  })
+  assert.strictEqual(r.outcome, 'recovered', JSON.stringify(r))
+  assert.strictEqual(log.filter((l) => l.kind === 'envelope').length, 0,
+    'the envelope GET must NOT be repeated when the caller already resolved it')
+  assert.strictEqual(r.stats.envelopeFetches, 0, 'and it is not counted as one')
+  assert.strictEqual(r.conversationKey, LONG_CONV, 'the key still comes back for ring variants')
+})
+
+await test('without one it resolves identity itself, exactly as before', async () => {
+  const log = []
+  const cfp = await cfpOf([FRESH_IN], [FRESH_OUT])
+  const r = await recoverConversation({
+    row: { cfp },
+    handles: [storedHandle('AAkALgAAfresh-in', 'inbox', '2026-10-08T09:00:00Z')],
+    decryptHandle, accessToken: 't',
+    sinceIso: '2026-10-08T00:00:00Z',
+    deps: { executeGraphRequest: mailbox(LONG_FOLDERS, log) },
+    budgetAllows: () => true,
+    selfSet, contactIndex, connectionId: CONN, keyRing: KEY_RING, produceHandles,
+    localDateFor: dateFor,
+  })
+  assert.strictEqual(r.outcome, 'recovered', JSON.stringify(r))
+  assert.strictEqual(log.filter((l) => l.kind === 'envelope').length, 1, 'one GET, as before')
+  assert.strictEqual(r.stats.envelopeFetches, 1)
+})
+
+await test('a one-sided settlement carries the key back, so the hint can be recorded', async () => {
+  // The caller needs the thread's ring variants to record an unpaired half under a rotated
+  // key. Reproduced: without the key the hint went in under the current value only.
+  const cfp = await cfpOf([FRESH_IN], [])
+  const r = await recoverConversation({
+    row: { cfp },
+    handles: [storedHandle('AAkALgAAfresh-in', 'inbox', '2026-10-08T09:00:00Z')],
+    decryptHandle, accessToken: 't',
+    sinceIso: '2026-10-08T00:00:00Z',
+    deps: { executeGraphRequest: mailbox({ inbox: [FRESH_IN], sentitems: [] }, []) },
+    budgetAllows: () => true,
+    selfSet, contactIndex, connectionId: CONN, keyRing: KEY_RING, produceHandles,
+    localDateFor: dateFor,
+  })
+  assert.strictEqual(r.outcome, 'settled')
+  assert.strictEqual(r.reason, 'not_two_sided')
+  assert.strictEqual(r.conversationKey, LONG_CONV, 'the key comes back with the settlement')
+})
 
 console.log((passed + failed) + ' tests: ' + passed + ' passed, ' + failed + ' failed')
 console.log('')
