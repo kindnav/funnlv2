@@ -389,11 +389,28 @@ test('the disclosure is longer than before and still one paragraph per idea', ()
   // material fact.
   // 21 -> 23: the Anthropic minimization paragraph split into three, separating what
   // the check does from what it cannot do. The overclaim hid in the join.
-  assert.strictEqual(DISCLOSURE_PARAGRAPH_COUNT, 23,
+  // 23 -> 24 (published 2026-10-12, thread segments): the suggestion-provenance paragraph
+  // gained message-level coverage, the later-exchange behaviour and the thread starting point,
+  // which carried it past the 700-character reading limit below. It was split at the sentence
+  // seam the original text already had - what a suggestion KEEPS, then what is DISCARDED - so
+  // every approved word is published and each paragraph is still one idea.
+  assert.strictEqual(DISCLOSURE_PARAGRAPH_COUNT, 24,
     'the paragraph count is pinned; change it deliberately with the text')
   // Published 2026-10-09: paragraph 3 ends with the approved background-sync sentence.
   assert.ok(OUTLOOK_DISCLOSURE_PARAGRAPHS[2].endsWith("Funnl also asks Microsoft to tell its servers when new mail arrives, so a check can start automatically within minutes while Funnl is closed."),
     'the just-in-time notice carries the approved automatic-check sentence, word for word')
+  // Published 2026-10-12: the approved thread-segments clause, word for word, and the
+  // starting-point sentence that says no suggestion comes out of what it absorbs.
+  const keeps = OUTLOOK_DISCLOSURE_PARAGRAPHS.find((p) => p.startsWith('A suggestion keeps'))
+  assert.ok(keeps.includes('one-way fingerprints of the exchange and of the messages it was '
+    + 'drawn from, so the same exchange is not suggested twice.'),
+    'the notice says the fingerprints cover the messages a suggestion was drawn from')
+  assert.ok(keeps.includes('A later exchange in the same thread is prepared as a new suggestion '
+    + 'for the new messages only.'),
+    'the notice states the later-exchange behaviour')
+  assert.ok(keeps.includes('it records a starting point from those messages\u2019 own times and '
+    + 'makes no suggestion from anything it finds there'),
+    'the notice states the starting point and that nothing it absorbs becomes a suggestion')
   assert.strictEqual(DISCLOSURE_PARAGRAPH_COUNT, OUTLOOK_DISCLOSURE_PARAGRAPHS.length,
     'the rendered count is derived from the array, so the card shows all of them')
   for (const para of OUTLOOK_DISCLOSURE_PARAGRAPHS) {

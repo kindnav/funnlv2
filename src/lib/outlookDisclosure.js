@@ -171,8 +171,14 @@ export const OUTLOOK_DISCLOSURE_PARAGRAPHS = Object.freeze([
     + 'different terms, including zero retention. Funnl has no zero-retention agreement with '
     + 'Anthropic, so this is not zero-retention processing.',
   'A suggestion keeps the summary, the suggested next step, the subject line, the '
-    + 'contact, the date, the type (Email) and one-way fingerprints of the exchange, so the '
-    + 'same conversation is not suggested twice. The message text itself is discarded once '
+    + 'contact, the date, the type (Email) and one-way fingerprints of the exchange and of '
+    + 'the messages it was drawn from, so the same exchange is not suggested twice. A later '
+    + 'exchange in the same thread is prepared as a new suggestion for the new messages '
+    + 'only. Where Funnl cannot tell which of a thread’s older messages it has already '
+    + 'accounted for, it records a starting point from those messages’ own times and makes '
+    + 'no suggestion from anything it finds there, so some earlier mail on that thread is '
+    + 'recorded as history rather than offered to you.',
+  'The message text itself is discarded once '
     + 'the summary is written — it is not saved to Funnl’s database and not written to any '
     + 'log. The fingerprints are pseudonymous but are stored against your account, so they '
     + 'are personal data about you; they cannot be turned back into a message, an address or '
@@ -271,6 +277,25 @@ export function disclosureFingerprint (paragraphs) {
 // text it shows. It is deliberately NOT kept as an accepted alternative here: the two
 // documents say opposite things about body reading, so that connection must disconnect
 // and reconnect rather than be treated as having agreed to this one.
+// THE THREAD-SEGMENTS RELEASE (published October 12, 2026, wording approved from
+// docs/outlook-thread-segments-rollout.md section 2): the suggestion-provenance paragraph now
+// says the fingerprints cover the MESSAGES a suggestion was drawn from, that a later exchange in
+// the same thread becomes a new suggestion for the new messages only, and that where Funnl
+// cannot tell which older messages it has accounted for it records a starting point from those
+// messages' own times and makes no suggestion from anything it finds there. That paragraph was
+// split at its own sentence seam - what a suggestion KEEPS, then what is DISCARDED - because
+// the combined text passed the 700-character reading limit the consent card is held to; every
+// approved word is published, and the split is part of what the digest below covers.
+// The previous value,
+// 6d1ddd67f51d5b3bfd8d3801c50271a7, identified the background-sync text (October 9, 2026).
+//
+// PUBLISHING THIS DOES NOT CHANGE WHAT THE DEPLOYED WORKER REQUIRES. The three requirements in
+// supabase/functions/shared/outlookContentConsent.js and the server's OUTLOOK_DISCLOSURE_VERSION
+// still name the background-sync value, so the pilot's stored consent still SATISFIES them and
+// the worker would still read mail if it were allowed to run. The only things stopping it are
+// the absent OUTLOOK_IMPORT_WORKER_ENABLED flag and the inactive cron job. Raising the three
+// requirements to the value below, re-deploying the worker so its closure carries them, and the
+// pilot re-consenting are a separate, later step - in that order, never one alone.
 // THE BACKGROUND-SYNC RELEASE (published October 9, 2026, approved at PR #76 head 505523f):
 // paragraph 3 gained one sentence - Funnl asks Microsoft to tell its servers when new mail
 // arrives, so a check can start automatically within minutes while Funnl is closed. The
@@ -279,7 +304,7 @@ export function disclosureFingerprint (paragraphs) {
 // October 9, 2026 (activation packet, step 5), after publication - so no requirement was
 // ever raised ahead of its approval, and a connection that consents under this notice
 // satisfies all three.
-export const DISCLOSURE_FINGERPRINT = '6d1ddd67f51d5b3bfd8d3801c50271a7'
+export const DISCLOSURE_FINGERPRINT = 'e1107c0221c89ded0b6a2134df848eea'
 
 /**
  * True only when the paragraphs still match the fingerprint the version was
