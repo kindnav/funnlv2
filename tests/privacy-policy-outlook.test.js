@@ -600,15 +600,17 @@ test('human-access wording is precise and includes the Anthropic safety exceptio
 // ── Date guard and non-regression ────────────────────────────────────────────
 console.log('\npublication date guard')
 
-test('the public date is the actual October 10, 2026 publication date', () => {
-  // Owner/product decision: publish the DETAILED-DRAFT wording (the 2,000-character summary
-  // limit and the paragraph describing what the draft records) dated 2026-10-10, the actual
-  // New York date of the publishing commit. October 9 (background sync), October 6 (content
-  // release), October 5 and September 27 (envelope-only) are historical. If a later merge
-  // moves the day, this pin must move with it in that same commit - which is the point of
-  // pinning it rather than leaving it free.
-  assert.ok(POLICY.includes('Last updated: October 10, 2026'),
+test('the public date is the actual October 12, 2026 publication date', () => {
+  // Owner/product decision: publish the THREAD-SEGMENTS wording (message-level coverage, the
+  // later-exchange behaviour, the thread starting point and its bounds) dated 2026-10-12, the
+  // actual New York date of the publishing commit. October 10 (detailed draft), October 9
+  // (background sync), October 6 (content release), October 5 and September 27 (envelope-only)
+  // are historical. If a later merge moves the day, this pin must move with it in that same
+  // commit - which is the point of pinning it rather than leaving it free.
+  assert.ok(POLICY.includes('Last updated: October 12, 2026'),
     'the approved publication date must be present')
+  assert.ok(!/Last updated: October 10, 2026/.test(POLICY),
+    'the superseded detailed-draft date must no longer be the public date')
   assert.ok(!/Last updated: October 9, 2026/.test(POLICY),
     'the superseded background-sync date must no longer be the public date')
   assert.ok(!/Last updated: September 2[07], 2026/.test(POLICY),
@@ -620,10 +622,13 @@ test('the public date is the actual October 10, 2026 publication date', () => {
   // Once in the public line, twice in the source decision comment (the approval and
   // the recheck instruction). Pinned so a stray extra date cannot creep in unnoticed.
   // Twice now: the public line and the approval in the source decision comment.
-  assert.strictEqual((POLICY.match(/October 10, 2026/g) || []).length, 2,
+  assert.strictEqual((POLICY.match(/October 12, 2026/g) || []).length, 2,
     'one public date line plus the source-comment approval')
-  assert.strictEqual((POLICY.match(/Last updated: October 10, 2026/g) || []).length, 1,
+  assert.strictEqual((POLICY.match(/Last updated: October 12, 2026/g) || []).length, 1,
     'exactly one public Last-updated line carries the date')
+  // October 10 survives ONCE, in the comment, as the superseded detailed-draft publication.
+  assert.strictEqual((POLICY.match(/October 10, 2026/g) || []).length, 1,
+    'the superseded detailed-draft date is recorded once, as history')
   // October 9 survives TWICE, both in the comment, as history: the background-sync
   // publication record and the note saying it was superseded by this one.
   assert.strictEqual((POLICY.match(/October 9, 2026/g) || []).length, 2,

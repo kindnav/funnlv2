@@ -36,7 +36,7 @@ function PrivacyPage() {
             <span className="font-display font-bold text-[20px] text-hi">Funnl</span>
           </div>
           <h1 className="font-display text-[32px] font-bold text-hi tracking-[-0.5px] mb-3">Privacy Policy</h1>
-          <p className="text-[14px] text-low">Last updated: October 10, 2026</p>
+          <p className="text-[14px] text-low">Last updated: October 12, 2026</p>
           <div className="mt-4 px-4 py-3 bg-elevated border border-line-1 rounded-xl">
             <p className="text-[13.5px] text-muted leading-relaxed">
               This policy explains, in plain language, what Funnl collects, how it is used, who processes it, and how to remove it.
@@ -183,12 +183,12 @@ function PrivacyPage() {
             not legal advice, and is not evidence that outside
             counsel reviewed or approved this policy.
 
-            MANDATORY AT PUBLICATION: the date above is October 10, 2026 - the New York
-            date on which the detailed-draft wording (the 2,000-character summary limit and
-            the paragraph describing what the draft records) was published. October 9, 2026
-            was the background-sync publication and is now history. If the merge
-            that publishes this section happens on any later day, the "Last updated"
-            date MUST be changed again in that same commit.
+            MANDATORY AT PUBLICATION: the date above is October 12, 2026 - the New York
+            date on which the thread-segments wording (message-level coverage, the later-exchange
+            behaviour, and the thread starting point) was published. October 10, 2026 was the
+            detailed-draft publication and October 9, 2026 the background-sync one; both are now
+            history. If the merge that publishes this section happens on any later day, the
+            "Last updated" date MUST be changed again in that same commit.
             tests/privacy-policy-outlook.test.js pins the conditional framing and the
             date. ------------- */}
         <Section title="Outlook connection (not yet available)">
@@ -338,8 +338,27 @@ function PrivacyPage() {
                   release the company, role, how-you-met, LinkedIn and tag fields start blank</strong> and are stored only if
                   <em> you</em> fill them in while reviewing. Funnl does not store a company or job title it inferred — the database columns for
                   them exist, and the import does not write to them;</li>
-                <li>one-way keyed fingerprints (with the key version) of the conversation and of the person, so the same exchange is not suggested
-                  twice. Funnl does not store Microsoft message or conversation identifiers, mailbox addresses, or subject lines in these
+                <li>one-way keyed fingerprints (with the key version) of the conversation, of the person, and of the individual messages a
+                  suggestion was drawn from, together with the times of the first and last of those messages, so the same exchange is not
+                  suggested twice and a later exchange in the same thread can be recognised as new. Accepting or dismissing a suggestion settles
+                  that exchange; if you and the same person exchange messages again in that thread, Funnl prepares a new suggestion for the new
+                  messages only, and the interaction you already accepted is never changed.
+                  {' '}Sometimes Funnl cannot work out which of a thread's older messages it has already accounted for &mdash; for example a long
+                  thread that was in your mailbox before Funnl began tracking it this way, where the record that would identify its earlier
+                  messages is not reachable. When that happens, and only then, Funnl records a <strong className="text-hi font-semibold">starting
+                  point</strong> for that thread instead of guessing: the messages it can see in that first look are marked as already accounted
+                  for and <strong className="text-hi font-semibold">no suggestion is made from any of them</strong>, however many exchanges they
+                  contain, and only mail after that point becomes a suggestion. Threads whose earlier messages Funnl can still identify are
+                  unaffected and keep producing suggestions as normal.
+                  {' '}What is kept for a thread with a starting point is a list of up to fifty message fingerprints, the starting point itself
+                  &mdash; <strong className="text-hi font-semibold">a time taken from the messages in that first look, not the time Funnl happened
+                  to look</strong> &mdash; and the earliest and latest times of everything it has accounted for since. That span can widen as
+                  older messages reappear; the starting point never moves.
+                  {' '}Where Funnl has seen a message it could not yet pair with a reply, it also keeps a short list for that conversation of those
+                  messages' fingerprints and the time of each &mdash; at most twenty-five &mdash; so the two halves can still be brought together
+                  when the reply arrives in a later check, and so each entry can be removed once its message has been accounted for.
+                  {' '}These fingerprints and times are stored against your account; none of them is a message, an address or a subject line.
+                  {' '}Funnl does not store Microsoft message or conversation identifiers, mailbox addresses, or subject lines in these
                   provenance records. These fingerprints are <strong className="text-hi font-semibold">pseudonymous, not anonymous</strong>:
                   they are stored against your account and your contact, so they are personal data about you and they do link a suggestion to
                   the connected mailbox. What they cannot do is be reversed into an address, a subject line or a Microsoft identifier;</li>

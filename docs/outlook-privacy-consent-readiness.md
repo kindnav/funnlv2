@@ -92,7 +92,9 @@ re-reads the array and fails if this section paraphrases any of them.
 
 > 11. Anthropic’s published policy for its API is to delete inputs and outputs from its systems within 30 days of receiving or generating them. Three things can extend that: where its automated systems flag something as violating its usage policy, the inputs and outputs may be kept for up to 2 years and the resulting trust-and-safety classification scores for up to 7 years; it may keep data where the law requires it, or as necessary to act on usage-policy violations; and a customer can negotiate different terms, including zero retention. Funnl has no zero-retention agreement with Anthropic, so this is not zero-retention processing.
 
-> 12. A suggestion keeps the summary, the suggested next step, the subject line, the contact, the date, the type (Email) and one-way fingerprints of the exchange, so the same conversation is not suggested twice. The message text itself is discarded once the summary is written — it is not saved to Funnl’s database and not written to any log. The fingerprints are pseudonymous but are stored against your account, so they are personal data about you; they cannot be turned back into a message, an address or a subject line.
+> 12. A suggestion keeps the summary, the suggested next step, the subject line, the contact, the date, the type (Email) and one-way fingerprints of the exchange and of the messages it was drawn from, so the same exchange is not suggested twice. A later exchange in the same thread is prepared as a new suggestion for the new messages only. Where Funnl cannot tell which of a thread’s older messages it has already accounted for, it records a starting point from those messages’ own times and makes no suggestion from anything it finds there, so some earlier mail on that thread is recorded as history rather than offered to you.
+>
+> 13. The message text itself is discarded once the summary is written — it is not saved to Funnl’s database and not written to any log. The fingerprints are pseudonymous but are stored against your account, so they are personal data about you; they cannot be turned back into a message, an address or a subject line.
 
 > 13. When the other person is not already one of your contacts, Funnl will propose adding them. The proposed email address comes from the message itself and the proposed name from the name your mail provider shows for the sender or from their signature. Funnl will not guess a company, a job title, how you met, a LinkedIn profile or a tag — those fields are left blank for you to fill in if you want them.
 
@@ -123,13 +125,29 @@ each as a paragraph and shows nothing else as disclosure.
 `ol-disc-<first 32 hex of SHA-256 over the paragraphs joined by newline>`, so any edit
 produces a different version and the server's exact-string gate refuses the stale one.
 
-The derived version for this text is **`ol-disc-6d1ddd67f51d5b3bfd8d3801c50271a7`**
-(fingerprint `6d1ddd67f51d5b3bfd8d3801c50271a7`), **published October 9, 2026** (background-sync wording approved at
-PR #76 head 505523f). The previous content-release version `ol-disc-e3e2b1714b453c2904e3ed08cb232097`
-(October 6, 2026) was what the three worker requirements named until the cutover of
-2026-10-09 (activation packet step 5) moved them to this value together, with the server's
-`OUTLOOK_DISCLOSURE_VERSION`. The paragraphs below about `null` constants and an unset
-server variable are historical.
+The derived version for this text is **`ol-disc-e1107c0221c89ded0b6a2134df848eea`**
+(fingerprint `e1107c0221c89ded0b6a2134df848eea`, 24 paragraphs), **published October 12, 2026**
+(thread-segments wording approved from `docs/outlook-thread-segments-rollout.md` section 2).
+
+**What publication moved, and what it did not.** The notice and the browser's
+`DISCLOSURE_FINGERPRINT` moved together in the publishing commit, so the card renders the new
+text and sends the new derived version. The three worker requirements in
+`supabase/functions/shared/outlookContentConsent.js` and the server's
+`OUTLOOK_DISCLOSURE_VERSION` **still name the previous value,
+`ol-disc-6d1ddd67f51d5b3bfd8d3801c50271a7`** (published October 9, 2026, background-sync
+wording approved at PR #76 head 505523f). That is deliberate and it has a consequence worth
+stating plainly: the pilot's stored consent carries that previous value, so it still
+**satisfies** those requirements, and the deployed worker would read mail if it were allowed to
+run. What stops it is the absent `OUTLOOK_IMPORT_WORKER_ENABLED` flag and the inactive
+`outlook-worker-tick` job - not the consent gate. Raising all three requirements and the server
+variable to the value above, redeploying the worker so its closure carries them, and only then
+having the pilot re-consent, is the next step, in that order.
+
+The content-release version `ol-disc-e3e2b1714b453c2904e3ed08cb232097` (October 6, 2026) was
+what the three requirements named until the cutover of 2026-10-09 (activation packet step 5)
+moved them to the background-sync value together, with the server's
+`OUTLOOK_DISCLOSURE_VERSION`. The paragraphs below about `null` constants and an unset server
+variable are historical.
 The server's `OUTLOOK_DISCLOSURE_VERSION` is not set to it. What that variable holds
 today has **not been read from this branch**, and is not asserted here either way -
 see section 0, which records that it WAS configured in Production for the

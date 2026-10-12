@@ -253,12 +253,18 @@ is unconfigured or malformed.
 
 Not interchangeable. Each step has a gate; stop on any failure.
 
-**Why the pause exists.** The newly deployed worker carries the new *feature* but its three
-consent requirements still name the *existing* notice version until the cutover commit. If it
-were allowed to run in that state it would do segmenting, absorption and baselining under a
-disclosure that does not describe any of it. So execution is switched off before the feature is
-deployed and stays off until the published wording, the derived version and the pilot's stored
-consent all agree.
+**Why the pause exists, stated exactly.** The deployed worker carries the new *feature* while
+its three consent requirements still name the *previous* notice version. **Publishing the
+browser notice does not change those requirements, and does not invalidate the pilot's stored
+consent:** that consent carries the previous value, which is exactly what the requirements still
+name, so it continues to **pass**. The consent gate is therefore not what holds the feature
+back - it would let a run proceed. The only things stopping it are the **absent
+`OUTLOOK_IMPORT_WORKER_ENABLED` flag and the inactive `outlook-worker-tick` job**, which is why
+the pause is essential rather than belt-and-braces, and why neither may be touched until the
+requirements are raised, the worker is redeployed with them, and the pilot has re-consented.
+
+An earlier revision of this packet said the gate would fail closed during this window. It will
+not. Treating it as a backstop was wrong, and nothing in the rollout should rely on it.
 
 | # | Step | Gate |
 |---|---|---|
@@ -270,12 +276,48 @@ consent all agree.
 | 4 | **DONE 2026-10-12** — **Apply migration `20261011000000` only** | `supabase migration list --linked` shows exactly one pending first. Afterwards verify: the five coverage columns and their CHECKs on `outlook_candidate_refs`; `outlook_thread_recovery` with RLS on and no user policy; the four worker RPCs present with one overload each, SECURITY DEFINER, `service_role`-only; both producers at 19 and 20 arguments; **the two acceptance RPCs unchanged**. |
 | 5 | **DONE 2026-10-12** — Merge PR #85 pinned to the reviewed head | Vercel build READY. The frontend bundle is functionally unchanged by this PR. |
 | 6 | **DONE 2026-10-12** — **Deploy `outlook-import-worker`** from merged main | Execution is still disabled — re-verify step 2's two states before and after. Download the deployed source and verify file-set equality and byte equality with the complete import closure (normalise CRLF). |
-| 7 | Publish the approved wording, derive the new version | The published page matches §2 exactly; the date is the publication date. |
+| 7 | **DONE 2026-10-12** — Publish the approved wording, derive the new version | The published page matches §2 exactly; the date is the publication date. |
 | 8 | Carry that one version into the browser constant, `OUTLOOK_DISCLOSURE_VERSION`, and **all three** worker requirements, in one commit | All five read the same value. No partial cutover. |
 | 9 | **Redeploy `outlook-import-worker`** so the deployed closure contains the new requirements | Download the deployed source again and verify byte equality with the post-cutover closure. Execution still disabled. |
 | 10 | Pilot re-consents via the **same-account OAuth update** | `consent_policy_version` equals the new value, **and** the connection `id`, both `delta_link_ciphertext` cursors and the candidate/`outlook_candidate_refs` references match the step-3a baseline exactly. |
 | 11 | **RESUME** — only now | Re-enable the flag, then `SELECT cron.alter_job(1, active := true);`. Resume is conditional on step 10 having passed; if stored consent does not match, the gate fails closed anyway and every run releases with `background_consent_not_configured`, but do not rely on that as the control. |
 | 12 | Live acceptance (§4) | As defined below. |
+
+### Step 7, as executed 2026-10-12
+
+**Published:** the §2a `/privacy` provenance replacement and the §2b notice clause, word for
+word as approved, with `Last updated: October 12, 2026` - the actual publication date - set in
+the same commit, and the source note and date guard moved with it.
+
+**The derived version moved with the text, in one commit.** The browser version is computed from
+the paragraphs, so it could not have been held at its old value: `DISCLOSURE_FINGERPRINT` was
+recomputed from the revised paragraphs and written in the same commit, and
+`verifyDisclosureIntegrity()` passes (a failing check disables the consent control, so this is
+not optional).
+
+| | |
+|---|---|
+| New fingerprint | `e1107c0221c89ded0b6a2134df848eea` |
+| **New derived consent version** | **`ol-disc-e1107c0221c89ded0b6a2134df848eea`** (40 characters, within the `consent_policy_version` CHECK) |
+| Previous | `ol-disc-6d1ddd67f51d5b3bfd8d3801c50271a7` (background sync, October 9, 2026) |
+| Notice paragraphs | 23 → **24** |
+
+**One presentational consequence, recorded because the digest covers it.** With the approved
+clause in it, the suggestion-provenance paragraph passed the 700-character limit the consent
+card is held to - a readability bound the test suite enforces at a decision point. It was split
+at the sentence seam the original text already had: what a suggestion **keeps**, then what is
+**discarded**. Every approved word is published; only the paragraph boundary is new, and the
+fingerprint above is computed over the split form, which is what the card renders and what the
+readiness packet now quotes verbatim.
+
+**What was deliberately left alone:** the server's `OUTLOOK_DISCLOSURE_VERSION` and all three
+worker requirements in `outlookContentConsent.js`. They still name the previous value - see
+"Why the pause exists" above for what that means, which is not what an earlier revision of this
+packet claimed.
+
+**Checks:** `privacy-policy-outlook` 36/36, `outlook-consent-ui` 55/55,
+`outlook-content-consent` 14/14, `outlook-background-consent-cutover` 8/8, full suite
+**7249/7249 across 187 suites**, build green.
 
 ### Steps 5-6, as executed 2026-10-12
 
