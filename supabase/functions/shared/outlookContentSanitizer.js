@@ -131,6 +131,91 @@ export function htmlToText(html) {
   return s
 }
 
+// ── Address redaction ─────────────────────────────────────────────────────────
+// WHY THIS EXISTS. assertRequestMinimization refuses a request containing ANY bare
+// email address, which is correct: an address is the one identifier this product will
+// not hand to a third party. But a signature block is also the only place this product
+// accepts a company or a job title from, and signatures almost always carry an address -
+// so without redaction the guard refused every real exchange, before any model call.
+// That is the October 12 pilot failure: `minimization_failed`, categories ["address"].
+//
+// The redaction is SURGICAL. Only the address token is replaced; the name, company,
+// role, phone number and surrounding prose are left exactly as written, because they
+// are the evidence the draft is allowed to rest on.
+//
+// IT RUNS AFTER DECODING, always. `&#64;` decodes to '@' downstream of here, so a
+// redaction applied to raw HTML would miss an encoded address that later decodes inside
+// the request. Every caller below redacts text that htmlToText and decodeEntities have
+// already been through.
+
+/** What replaces a removed address. Contains no '@', so no guard can trip on it. */
+export const EMAIL_REDACTED = '[email removed]'
+
+// Deliberately close to the guard's own structural rule, so nothing can pass here and
+// fail there. Apostrophes are admitted in the local part because real addresses use them.
+const EMAIL_RE = /[A-Za-z0-9._%+'-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g
+// A scheme prefix must go with the address, or `mailto:` survives as a meaningless stub.
+const MAILTO_RE = /\bmailto:\s*/gi
+// An '@' written as an entity or a percent escape. Graph's HTML bodies are decoded
+// upstream, but a TEXT body is deliberately not decoded at all - decoding plain text
+// would rewrite characters the sender actually typed. So the encoded forms are matched
+// HERE, in place, rather than by decoding the whole message: obfuscation a reader can
+// reverse at a glance is still an address. Only the matched address is replaced, so an
+// unrelated `&amp;` or `%40` elsewhere in the text is left exactly as written.
+const ENCODED_EMAIL_RE =
+  /[A-Za-z0-9._%+'-]+(?:&#64;|&#x40;|&commat;|%40)[A-Za-z0-9.-]+\.[A-Za-z]{2,}/gi
+
+/**
+ * Replace every email address with EMAIL_REDACTED, leaving everything else intact.
+ * Non-strings pass through unchanged so callers can redact an optional field directly.
+ * @param {string|null|undefined} s
+ */
+export function redactEmailAddresses(s) {
+  if (typeof s !== 'string' || s.length === 0) return s
+  return s
+    .replace(MAILTO_RE, '')
+    .replace(EMAIL_RE, EMAIL_REDACTED)
+    .replace(ENCODED_EMAIL_RE, EMAIL_REDACTED)
+}
+
+// Brackets or separators left around a removed address, plus the placeholder itself:
+// stripped from a DISPLAY NAME only, where "Noor Haddad <[email removed]>" should read
+// "Noor Haddad" rather than keep a hole in it. Message text keeps the placeholder, so a
+// reviewer can see something was removed.
+const NAME_PLACEHOLDER_RE =
+  /[<([{"']?\s*\[email removed\]\s*[>)\]}"']?/g
+const NAME_EDGE_RE = /^[\s,;:|/\\<>()[\]{}"'\u2018\u2019\u201C\u201D.-]+|[\s,;:|/\\<>()[\]{}"'\u2018\u2019\u201C\u201D-]+$/g
+const MAX_DISPLAY_NAME_CHARS = 200
+
+/**
+ * A provider display name that is safe to put in a model request and to offer as a
+ * fallback contact name - or null when nothing name-like is left.
+ *
+ * WHY NULL RATHER THAN A GUESS. Providers commonly set the display name to the address
+ * itself, or to "Name <address>". The first contains no name at all, and this product
+ * must NEVER invent one from the local part: "noor@fund.test" does not establish that
+ * anybody is called Noor, and a proposal is supposed to carry only evidence a reviewer
+ * could check. So the address is removed, and if what remains has no word in it the
+ * answer is null - the proposal then has no name until the model finds one in the
+ * signature, or the reviewer types one.
+ *
+ * The ENVELOPE address is unaffected by this and remains authoritative for contact
+ * matching and for proposed_email.
+ * @param {string|null|undefined} name
+ * @returns {string|null}
+ */
+export function safeProviderDisplayName(name) {
+  if (typeof name !== 'string' || name.length === 0) return null
+  let s = stripUnsafeCharacters(decodeEntities(name))
+  s = redactEmailAddresses(s)
+  s = s.replace(NAME_PLACEHOLDER_RE, ' ').replace(/\s{2,}/g, ' ')
+  s = s.replace(NAME_EDGE_RE, '').trim()
+  if (s.length < 2) return null
+  // At least one real word, so punctuation or a bare number is not offered as a name.
+  if (!/\p{L}{2,}/u.test(s)) return null
+  return s.slice(0, MAX_DISPLAY_NAME_CHARS)
+}
+
 /** Remove control, bidi and nonprinting characters, then normalize whitespace. */
 export function stripUnsafeCharacters(s) {
   if (typeof s !== 'string') return ''
@@ -287,7 +372,10 @@ export function looksBinary(s) {
 /** Bounded, control-free subject suitable for `retained_subject` (<= 160 chars). */
 export function sanitizeSubject(subject) {
   if (typeof subject !== 'string') return null
-  const s = stripUnsafeCharacters(subject).replace(/\n+/g, ' ').trim()
+  // A forwarded subject ("FW: intro to someone@example.com") carries an address as
+  // readily as a body does, and the subject goes into the request too.
+  const s = redactEmailAddresses(
+    stripUnsafeCharacters(subject).replace(/\n+/g, ' ').trim())
   if (s.length === 0) return null
   return s.slice(0, MAX_SUBJECT_CHARS)
 }
@@ -344,7 +432,13 @@ export function sanitizeMessageContent(input) {
 
   const s = splitSignature(text)
   text = s.text
-  const signature = s.signature
+  let signature = s.signature
+
+  // AFTER the split, deliberately: the signature cues are matched on the text as
+  // written, so redaction cannot change which trailing block is treated as a signature.
+  // BEFORE the bounds, so what is kept and measured is what the model will actually see.
+  text = redactEmailAddresses(text)
+  signature = redactEmailAddresses(signature)
 
   if (text.length < MIN_USABLE_CHARS) return { ok: false, code: 'no_usable_text' }
   if (looksBinary(text)) return { ok: false, code: 'binary_like' }

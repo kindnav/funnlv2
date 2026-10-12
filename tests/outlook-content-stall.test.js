@@ -115,14 +115,28 @@ const PARTY_BLOCKED = 'ava' + AT + 'bank.test'
 const PARTY_CLEAN = 'ben' + AT + 'fund.test'
 const PARTY_STRANGER = 'cleo' + AT + 'ventures.test'
 
-// THE ADDRESS THAT TRIPS THE GUARD, in this FIXTURE. It is the counterparty's own
-// address in a signature block, which is a realistic way for one to appear - but it is
-// the fixture's chosen cause, NOT a reconstruction of the live one. The live report said
-// only `minimization_failed`, a code that at the time also covered a request that could
-// not be built; nothing in it identifies an address or a signature.
-// Nothing here weakens or bypasses the scan; the fixture reproduces its input.
+// WHAT TRIPS THE GUARD, in this FIXTURE - and why it is no longer an address.
+//
+// This fixture used to leak the counterparty's own address in a signature block. That
+// shape NO LONGER refuses: addresses are redacted from model-bound text, signatures and
+// subjects before the request is built, which is the fix for the October 12 pilot
+// failure (tests/outlook-address-minimization.test.js reproduces both halves of it).
+// Keeping the old fixture here would have asserted the bug.
+//
+// The leak is therefore a TOKEN pasted into the message body - someone forwarding a
+// JWT-looking string - which redaction deliberately does not touch, because a token is
+// not an address and must never be quietly rewritten into prose. The guard's `token`
+// rule catches it, the refusal is the same refusal, and everything this suite is
+// actually about - a retryable deferral that advanced nothing and stalled the round -
+// is unchanged. The signature below still carries the address, now redacted, so the
+// fixture also exercises the fix on the way past.
+//
+// It remains the FIXTURE's chosen cause, NOT a reconstruction of the live one: the live
+// report said only `minimization_failed`, a code that at the time also covered a request
+// that could not be built. Nothing here weakens or bypasses the scan.
 const BLOCKED_IN = 'Good to meet you at the info session. I have put your name forward '
-  + 'for the spring insight week and the team would like a short call next week.'
+  + 'for the spring insight week and the team would like a short call next week. The '
+  + 'portal token they sent me is eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.fixture'
   + String.fromCharCode(10) + String.fromCharCode(10)
   + 'Ava Mensah | Analyst Programme | ' + PARTY_BLOCKED
 const BLOCKED_OUT = 'Thank you, next week works well. I will send a few questions over '
@@ -454,7 +468,7 @@ check('the refusal is still REPORTED, under its controlled code',
   repA && repA.deferred && repA.deferred.minimization_failed === 1,
   JSON.stringify(repA && repA.deferred))
 check('and the safe category reaches the HTTP report',
-  repA && repA.refusal_categories && repA.refusal_categories.address === 1,
+  repA && repA.refusal_categories && repA.refusal_categories.token === 1,
   JSON.stringify(repA && repA.refusal_categories))
 check('the clean conversation still produced its note',
   repA && repA.notes_written === 1, JSON.stringify(repA))

@@ -43,7 +43,9 @@
 // retryable: the handles are still stored, the round is untouched, and a later
 // invocation redoes exactly this conversation. Nothing partial is written.
 
-import { boundEpisodeContent, sanitizeMessageContent, sanitizeSubject } from './outlookContentSanitizer.js'
+import {
+  boundEpisodeContent, sanitizeMessageContent, sanitizeSubject, safeProviderDisplayName,
+} from './outlookContentSanitizer.js'
 import { buildDraftRequest, assertRequestMinimization, validateDraftResponse } from './outlookDraftContract.js'
 import { contentPermissions } from './outlookContentConsent.js'
 // THE SAME CLASSIFIERS THE ENVELOPE PASS USES, not a second opinion. An earlier
@@ -171,7 +173,12 @@ export function counterpartyFromEnvelopes (messages, selfAddresses) {
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(address) || address.length > 320) {
     return { ok: false, reason: 'counterparty_unusable' }
   }
-  return { ok: true, address, displayName: name.length > 0 ? name : null }
+  // The display name is PROVIDER metadata, not something the user wrote, and providers
+  // routinely set it to the address itself. It reaches the model request and is the
+  // fallback proposed name, so it is cleaned here, once, at the only place it is read:
+  // an address inside it is removed, and a name is never invented from a local part.
+  // `address` above is untouched - it stays authoritative for matching and proposed_email.
+  return { ok: true, address, displayName: safeProviderDisplayName(name) }
 }
 
 /** Handles reserved per folder before the rest is filled by recency. */
