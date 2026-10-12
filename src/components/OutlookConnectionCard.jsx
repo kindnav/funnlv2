@@ -12,6 +12,7 @@ import {
   buildConsentRequest,
   messageForOutcome,
   readOutlookCallbackResult,
+  outlookUpdateNeeded,
   startOutlookConsent,
 } from '../lib/outlookConnection'
 import {
@@ -108,6 +109,17 @@ export default function OutlookConnectionCard() {
   const callbackFailed =
     readOutlookCallbackResult(searchParams) === 'error' && status !== 'connected'
 
+  // THE SAME REDIRECT, read the other way round. An error returning to a page whose database
+  // row still says `connected` is a failed UPDATE, not a failed connection, and it was
+  // previously shown nowhere at all - the condition above hides it. It must be visible, and
+  // it must not claim the connection went away, because it did not.
+  const updateFailed =
+    readOutlookCallbackResult(searchParams) === 'error' && status === 'connected'
+
+  // Why the connected branch may need the consent control: a superseded recorded version, or
+  // an authorisation Microsoft wants renewed. Same control for both.
+  const update = outlookUpdateNeeded(connection)
+
   const request = buildConsentRequest({
     acknowledged,
     originOk,
@@ -203,11 +215,80 @@ export default function OutlookConnectionCard() {
               a child from one authenticated RPC. The card itself still only connects. */}
           <OutlookSyncStatus />
 
+          {updateFailed && (
+            <p
+              className="mt-3 rounded-xl border border-danger/40 bg-danger/10 p-3 text-sm text-danger"
+              role="status"
+              aria-live="polite"
+              data-testid="outlook-update-failed"
+            >
+              {messageForOutcome('update_failed')}
+            </p>
+          )}
+
           {connection.needsReauth && (
             <p className="mt-3 rounded-xl border border-warning/40 bg-warning/10 p-3 text-sm text-warning">
               This connection needs your permission again before Funnl can read
-              anything. Disconnect and reconnect to renew it.
+              anything. Use <span className="font-semibold">Update Outlook permissions</span> below
+              to renew it - your connection, and everything Funnl has already matched, stay as
+              they are. Disconnecting is not needed.
             </p>
+          )}
+
+          {/* ── UPDATE: the same disclosure, acknowledged again, on the SAME account ──
+              Rendered only when the recorded version is superseded or Microsoft wants the
+              authorisation renewed. Nothing here disconnects: the start flow is the one the
+              not-connected branch uses, and the backend enforces the same account. */}
+          {update.needed && (
+            <div className="mt-4" data-testid="outlook-update-panel">
+              <p className="rounded-xl border border-accent/40 bg-accent/10 p-3 text-sm text-hi">
+                {update.consentSuperseded
+                  ? 'Funnl\u2019s Outlook disclosure has been updated since you connected. Until you agree to the current version, Funnl will not read this mailbox. Read it below and update your permissions - the same Microsoft account, the same connection.'
+                  : 'Microsoft needs your permission again for this connection. Read the disclosure below and update your permissions - the same Microsoft account, the same connection.'}
+              </p>
+
+              {!integrityOk && (
+                <p className="mt-4 rounded-xl border border-danger/40 bg-danger/10 p-3 text-sm text-danger">
+                  {messageForOutcome('disclosure_integrity_failed')}
+                </p>
+              )}
+
+              <div className="mt-4 space-y-3 rounded-xl border border-line-1 bg-elevated p-4">
+                {OUTLOOK_DISCLOSURE_PARAGRAPHS.map((para) => (
+                  <p key={para} className="text-sm leading-relaxed text-muted">{para}</p>
+                ))}
+                <p className="pt-1 font-mono text-[11px] text-lower">
+                  Disclosure version {OUTLOOK_DISCLOSURE_VERSION}
+                </p>
+              </div>
+
+              <label className="mt-4 flex items-start gap-3 text-sm text-mid">
+                <input
+                  type="checkbox"
+                  className="mt-0.5 h-4 w-4 shrink-0"
+                  checked={acknowledged}
+                  disabled={!integrityOk || connecting}
+                  onChange={(e) => setAcknowledged(e.target.checked)}
+                />
+                <span>
+                  I have read the disclosure above and I want to update my Outlook permissions.
+                </span>
+              </label>
+
+              {error && (
+                <p className="mt-3 text-sm text-danger" role="status" aria-live="polite">{error}</p>
+              )}
+
+              <button
+                type="button"
+                onClick={handleConnect}
+                disabled={!canConnect}
+                data-testid="outlook-update-button"
+                className="mt-4 rounded-xl bg-[linear-gradient(135deg,#8B7CFF,#5B45F0)] px-4 py-2 text-sm font-semibold text-hi disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {connecting ? 'Starting…' : 'Update Outlook permissions'}
+              </button>
+            </div>
           )}
 
           {!confirmingDisconnect && (

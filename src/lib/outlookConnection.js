@@ -185,8 +185,41 @@ export function readOutlookCallbackResult (search) {
 }
 
 /** User-facing copy for each outcome. Never echoes a server message. */
+/**
+ * Does an EXISTING connection need the user to go through consent again?
+ *
+ * Two independent reasons, and the control is the same for both:
+ *   * the version it recorded is not the one the card now renders - the published notice has
+ *     moved on, so the server's exact-string gate refuses that connection until it consents
+ *     under the current text;
+ *   * Microsoft's authorisation needs renewing (`needs_reauth`).
+ *
+ * WHY THIS EXISTS AT ALL. The card used to render the disclosure and a consent control only
+ * while the account was NOT connected, so the only route through consent for a connected
+ * account was to disconnect first - which cascades the synchronisation state, the candidate
+ * references and the thread-recovery rows away. Re-consent is a SAME-ACCOUNT OAUTH UPDATE:
+ * `finalize_microsoft_connection` upserts on (user_id), returns the same connection id and
+ * rewrites `consent_policy_version`, deleting nothing.
+ *
+ * Pure, so the decision can be tested without a browser.
+ */
+export function outlookUpdateNeeded (connection, publishedVersion = OUTLOOK_DISCLOSURE_VERSION) {
+  if (!connection || typeof connection !== 'object') {
+    return { needed: false, consentSuperseded: false, needsReauth: false }
+  }
+  const consentSuperseded = connection.consentVersion !== publishedVersion
+  const needsReauth = connection.needsReauth === true
+  return { needed: consentSuperseded || needsReauth, consentSuperseded, needsReauth }
+}
+
 export function messageForOutcome (kind) {
   switch (kind) {
+    case 'update_failed':
+      // Deliberately NOT the callback_failed copy. That one says "nothing was connected",
+      // which would be false and alarming here: the existing connection is untouched - an
+      // update that stops before finalize_microsoft_connection stores the new version leaves
+      // the row, its tokens and its cursors exactly as they were.
+      return 'That permission update did not finish, so nothing changed - your Outlook account is still connected, with the permissions it already had. Read the disclosure below and try the update again.'
     case 'callback_failed':
       // "Nothing was connected" is accurate: the error redirect is returned on
       // every path that stops before finalize_microsoft_connection stores a

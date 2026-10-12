@@ -1330,8 +1330,9 @@ VALUES ('${CONN_ID}', '${PILOT_USER}', 'sub-browser', repeat('a', 64), 'active',
   // The connection needs permission again: error tone, with the actionable instruction.
   psql(`UPDATE public.microsoft_connections SET needs_reauth = true WHERE id = '${CONN_ID}';`, { tuplesOnly: false })
   st = await statusBlock('Needs your permission again', 'the reauth status')
-  check('needs_reauth reads "Needs your permission again" (error tone) with the reconnect instruction',
-    st.tone === 'error' && /Disconnect Outlook/.test(st.text), JSON.stringify(st))
+  check('needs_reauth reads "Needs your permission again" (error tone) and points at the UPDATE path, not a disconnect',
+    st.tone === 'error' && /Update Outlook permissions/.test(st.text) && !/Disconnect Outlook/.test(st.text),
+    JSON.stringify(st))
   // New mail signalled, nothing running yet: the queued check is said, and nothing else is claimed.
   psql(`UPDATE public.microsoft_connections SET needs_reauth = false, wake_requested_at = now(), wake_source = 'change',
           wake_count = 1, last_wake_at = now() WHERE id = '${CONN_ID}';
@@ -1353,6 +1354,122 @@ VALUES ('${CONN_ID}', '${PILOT_USER}', 'sub-browser', repeat('a', 64), 'active',
   const leaksSt = ['token', 'ciphertext', 'nonce', 'service_role', 'rpc', 'sub-browser', 'aaaaaaaa']
     .filter((w) => st.text.toLowerCase().includes(w))
   check('the status block reveals no identifier, hash or secret', leaksSt.length === 0, JSON.stringify(leaksSt))
+
+  // ══ 8b. UPDATING an existing connection, without disconnecting ══════════
+  // THE GAP THIS CLOSES: the card used to render the disclosure and a consent control only
+  // while the account was NOT connected. A connected pilot whose recorded consent version had
+  // been superseded therefore had no route through consent except to disconnect first - which
+  // cascades the synchronisation state, the candidate references and the thread-recovery rows
+  // away. Everything below runs against the row the previous section left behind, with only
+  // its consent_policy_version moved back to a superseded value.
+  console.log('\n8b. a superseded consent version offers an UPDATE, never a disconnect')
+  const SUPERSEDED = 'ol-disc-6d1ddd67f51d5b3bfd8d3801c50271a7'
+  psql(`UPDATE public.microsoft_connections SET needs_reauth = false,
+          consent_policy_version = '${SUPERSEDED}' WHERE id = '${CONN_ID}';`, { tuplesOnly: false })
+  await page.goto(`${ORIGIN}/settings`)
+  await page.waitFor('document.querySelector(\'[data-testid="outlook-update-panel"]\') !== null',
+    20000, 'the update panel')
+  const up0 = await page.eval(`
+    const panel = document.querySelector('[data-testid="outlook-update-panel"]')
+    const box = panel.querySelector('input[type="checkbox"]')
+    const btn = document.querySelector('[data-testid="outlook-update-button"]')
+    return {
+      panelText: panel.innerText,
+      bodyText: document.body.innerText,
+      checked: box ? box.checked : null,
+      disabled: btn ? btn.disabled : null,
+      label: btn ? btn.innerText.trim() : null,
+      version: (panel.innerText.match(/ol-disc-[0-9a-f]{32}/) || [null])[0],
+      stillConnected: /Connected to/.test(document.body.innerText),
+      disconnectOffered: [...document.querySelectorAll('button')].some((e) => /^Disconnect Outlook$/i.test(e.innerText.trim())),
+    }`)
+  const missingUp = shipped.filter((p) => !up0.panelText.includes(p))
+  check(`8b: all ${shipped.length} shipped paragraphs are rendered in the UPDATE panel`,
+    missingUp.length === 0, missingUp.length ? `missing: ${missingUp[0].slice(0, 70)}...` : '')
+  check('8b: the version offered is the CURRENT derived one, not the stored one',
+    up0.version === mod.OUTLOOK_DISCLOSURE_VERSION && up0.version !== SUPERSEDED,
+    `rendered=${up0.version}`)
+  check('8b: the acknowledgement starts UNCHECKED', up0.checked === false, JSON.stringify(up0.checked))
+  check('8b: the update control is disabled before acknowledgement',
+    up0.disabled === true && /Update Outlook permissions/.test(up0.label ?? ''), JSON.stringify(up0))
+  check('8b: the existing connection is still shown, accurately',
+    up0.stillConnected === true && up0.bodyText.includes(PILOT_EMAIL), `stillConnected=${up0.stillConnected}`)
+  check('8b: explicit disconnection survives as its OWN action',
+    up0.disconnectOffered === true)
+  check('8b: nothing on the page tells the user to disconnect in order to update',
+    !/Disconnect and reconnect|then connect again/i.test(up0.bodyText))
+
+  // A real press while unacknowledged: the control is disabled, so nothing is sent.
+  startCalls.length = 0
+  sinkCalls.length = 0
+  await page.click('Update Outlook permissions', { byText: true })
+  await sleep(500)
+  check('8b: a real press on the DISABLED update control sends no start request',
+    startCalls.length === 0, `startCalls=${startCalls.length}`)
+
+  // Acknowledge, then press for real. The start endpoint is the same stub the connect flow
+  // used; the navigation to the provider sink is what proves the flow was entered.
+  await page.click('[data-testid="outlook-update-panel"] input[type="checkbox"]')
+  const upAck = await page.eval(`
+    const btn = document.querySelector('[data-testid="outlook-update-button"]')
+    const box = document.querySelector('[data-testid="outlook-update-panel"] input[type="checkbox"]')
+    return { checked: box.checked, disabled: btn.disabled }`)
+  check('8b: ticking the box enables the update control',
+    upAck.checked === true && upAck.disabled === false, JSON.stringify(upAck))
+
+  startCalls.length = 0
+  sinkCalls.length = 0
+  setStartResponse({
+    status: 200,
+    json: { url: 'https://login.microsoftonline.test/common/oauth2/v2.0/authorize?update=1' },
+    cookie: '__Host-fnl_ms_oauth_bind=state-not-a-secret; Max-Age=600; Path=/; Secure; HttpOnly; SameSite=None',
+  })
+  await page.click('Update Outlook permissions', { byText: true })
+  await sleep(1500)
+  check('8b: an acknowledged update makes exactly ONE start request',
+    startCalls.length === 1, `startCalls=${startCalls.length}`)
+  check('8b: it carries a bearer token and the CURRENT derived version',
+    startCalls[0]?.hasBearer === true
+    && startCalls[0]?.consentPolicyVersion === mod.OUTLOOK_DISCLOSURE_VERSION,
+    JSON.stringify(startCalls[0]))
+  // The whole point: no disconnect anywhere on this path. sinkCalls records every request
+  // the page made, including every PostgREST RPC.
+  const disconnectCalls = sinkCalls.filter((c) => /disconnect_my_outlook/.test(c.url))
+  check('8b: starting an update NEVER calls disconnect_my_outlook',
+    disconnectCalls.length === 0, JSON.stringify(disconnectCalls))
+  check('8b: and the connection row is untouched by starting the update',
+    one(`SELECT count(*) FROM public.microsoft_connections WHERE id='${CONN_ID}'
+      AND consent_policy_version='${SUPERSEDED}';`) === '1')
+
+  // ── a FAILED update must be visible, and must not claim the connection vanished ──
+  // The error redirect lands on Settings with ?outlook=error while the row still says
+  // connected - the case the old condition hid entirely.
+  await page.goto(`${ORIGIN}/settings?outlook=error`)
+  await page.waitFor('document.querySelector(\'[data-testid="outlook-update-failed"]\') !== null',
+    20000, 'the update-failed message')
+  const failView = await page.eval(`
+    const el = document.querySelector('[data-testid="outlook-update-failed"]')
+    return {
+      text: el.innerText,
+      live: el.getAttribute('aria-live'),
+      stillConnected: /Connected to/.test(document.body.innerText),
+      panelStillOffered: document.querySelector('[data-testid="outlook-update-panel"]') !== null,
+    }`)
+  check('8b: a failed update is SHOWN on a connected card', /did not finish/i.test(failView.text),
+    JSON.stringify(failView.text))
+  check('8b: it says the connection is still connected, and never that nothing was connected',
+    /still connected/i.test(failView.text) && !/nothing was connected/i.test(failView.text),
+    JSON.stringify(failView.text))
+  check('8b: the connection is still shown and the update can be retried',
+    failView.stillConnected === true && failView.panelStillOffered === true, JSON.stringify(failView))
+  check('8b: the failure is announced politely', failView.live === 'polite', JSON.stringify(failView))
+  check('8b: a failed update left the stored consent exactly as it was',
+    one(`SELECT consent_policy_version FROM public.microsoft_connections WHERE id='${CONN_ID}';`) === SUPERSEDED)
+
+  // Restore the state the next section expects.
+  psql(`UPDATE public.microsoft_connections
+          SET consent_policy_version = '${mod.OUTLOOK_DISCLOSURE_VERSION}' WHERE id = '${CONN_ID}';`,
+    { tuplesOnly: false })
 
   // ══ 9. a proposal that ARRIVES while the queue is open becomes visible ════
   // SIMULATED ARRIVAL: the background worker is not run here. The row it would write is
