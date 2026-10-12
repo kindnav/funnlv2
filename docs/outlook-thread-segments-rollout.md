@@ -289,7 +289,7 @@ packet used the second where the first belongs.
 | 5 | **DONE 2026-10-12** — Merge PR #85 pinned to the reviewed head | Vercel build READY. The frontend bundle is functionally unchanged by this PR. |
 | 6 | **DONE 2026-10-12** — **Deploy `outlook-import-worker`** from merged main | Execution is still disabled — re-verify step 2's two states before and after. Download the deployed source and verify file-set equality and byte equality with the complete import closure (normalise CRLF). |
 | 7 | **DONE 2026-10-12** — Publish the approved wording, derive the new version | The published page matches §2 exactly; the date is the publication date. |
-| 8 | Carry that one version into the browser constant, `OUTLOOK_DISCLOSURE_VERSION`, and **all three** worker requirements, in one commit | All five read the same value. No partial cutover. |
+| 8 | **DONE 2026-10-12** — Carry that one version into the browser constant, `OUTLOOK_DISCLOSURE_VERSION`, and **all three** worker requirements, in one commit | All five read the same value. No partial cutover. |
 | 9 | **Redeploy `outlook-import-worker`** so the deployed closure contains the new requirements | Download the deployed source again and verify byte equality with the post-cutover closure. Execution still disabled. |
 | 10 | Pilot re-consents via the **same-account OAuth update** | `consent_policy_version` equals the new value, **and** the connection `id`, both `delta_link_ciphertext` cursors and the candidate/`outlook_candidate_refs` references match the step-3a baseline exactly. |
 | 11 | **RESUME** — only now | Re-enable the flag, then `SELECT cron.alter_job(1, active := true);`. Resume is conditional on step 10 having passed. If stored consent does not match, the gate does fail closed - every run releases with **`background_consent_missing`**, which is the code for a connection carrying no version or a different one. `background_consent_not_configured` is a different fault entirely: an unconfigured or malformed REQUIREMENT. Neither is a substitute for checking step 10. |
@@ -330,6 +330,86 @@ packet claimed.
 **Checks:** `privacy-policy-outlook` 36/36, `outlook-consent-ui` 55/55,
 `outlook-content-consent` 14/14, `outlook-background-consent-cutover` 8/8, full suite
 **7249/7249 across 187 suites**, build green.
+
+**Merge and deployment.** PR **#86**, head `dce5de7`, merged pinned as
+**`51e6e546c405f80c4a42313cf2763108a1a093f8`**. Vercel's own API confirms deployment
+**`dpl_78GorKrwcwy57hx4Brqjd7Q8vKnC`**, target Production, state **READY** for that exact merge
+SHA, aliased to `getfunnl.com` and `www.getfunnl.com` (owner-confirmed; there is no Vercel API
+path from the working session - the `VERCEL_OIDC_TOKEN` in `.env.local` is refused with 403).
+GitHub also recorded this one: deployment 7022559159, Production, `success`.
+
+**Verified against what is SERVED, not against the repository.** A script fetched
+`www.getfunnl.com`, found the bundle, tokenised the paragraph array out of the served
+JavaScript and hashed it with the module's own rule: **24 paragraphs**, independent fingerprint
+**`e1107c0221c89ded0b6a2134df848eea`** - an exact match, so the served text derives exactly the
+published version. Every approved policy sentence is present, including the fifty-fingerprint
+and twenty-five-unpaired bounds, "only then", "a time taken from the messages in that first
+look, not the time Funnl happened to look", and `Last updated: October 12, 2026`.
+
+### Step 8, as executed 2026-10-12
+
+**Recomputed before changing anything:** the published module's paragraph array derives
+`ol-disc-e1107c0221c89ded0b6a2134df848eea`, matching the authorized value, with
+`verifyDisclosureIntegrity()` passing. The paragraphs and their structure were not touched by
+this step, so the published wording and the derived version are unchanged by it.
+
+**All three requirements, one commit.** `REQUIRED_CONTENT_CONSENT_VERSION`,
+`REQUIRED_THIRD_PARTY_CONSENT_VERSION` and `REQUIRED_BACKGROUND_CONSENT_VERSION` moved together
+from `ol-disc-6d1ddd67f51d5b3bfd8d3801c50271a7` to the published value, the relaxed equality
+assertions were restored, and the pinned values in the cutover and subscriptions suites moved
+with them. PR **#87**, head `f126b49`, merged pinned as
+**`f788203cbaf98df4e31dced6ea0563ace54f683d`**.
+
+**The server variable, and what actually verifies it.** `supabase secrets set
+OUTLOOK_DISCLOSURE_VERSION=...`. Presence of the name proves nothing about the value, so the
+check is a digest comparison: `supabase secrets list --output json` returns each secret's
+**SHA-256 digest** in its `value` field, and that digest now equals `sha256(published version)`
+and no longer equals `sha256(previous version)`. Before the change it equalled the previous
+version's digest exactly, which is how the old value was established rather than assumed. No
+secret value or digest is printed anywhere in the record.
+
+**Worker redeployed from clean merged main** (`f788203`, working tree clean) - only
+`outlook-import-worker`. Result **v55**, `verify_jwt = false`, `ezbr_sha256 5af87a97...`.
+
+| Check | Result |
+|---|---|
+| Closure size | **31 files** |
+| File-set equality vs merged main | **identical** |
+| Byte equality | **every file identical**, CRLF → LF the only normalisation |
+| Extras shipped | none |
+| `REQUIRED_CONTENT_CONSENT_VERSION` **in the deployed bundle** | published value |
+| `REQUIRED_THIRD_PARTY_CONSENT_VERSION` **in the deployed bundle** | published value |
+| `REQUIRED_BACKGROUND_CONSENT_VERSION` **in the deployed bundle** | published value |
+| Previous value in the deployed module | only in comments; **zero** non-comment occurrences |
+| Repository | untouched; every download went to an isolated directory |
+
+**Dormancy and baselines after all of it:** tick inactive, flag `ABSENT (verified)`, no busy
+rows, no open round, `last_attempt_at` unchanged on both folders (`2026-10-12 17:30:02`, before
+the pause), `outlook_thread_recovery` 0 rows, no ref carrying any coverage column, pending wakes
+preserved, one subscription row left as it was. The baseline is identical field for field
+**across the migration, the worker deploy, the publication and this cutover**.
+
+**Three platform anomalies, recorded so they are not mistaken for faults in this change.**
+
+1. **The first deploy attempt failed with `500 Function deploy failed due to an internal
+   error`** - twice more after that - and the third succeeded. Crucially the failure was not
+   silent-but-successful: the function's reported **version counter moved 53 → 54 while
+   `updated_at` and `ezbr_sha256` stayed exactly as they were**, and a download of the deployed
+   source still showed the OLD requirements. That download is what established the deploy had
+   not taken effect. **Never read the version counter as evidence of a deploy; read the bundle.**
+2. **`supabase functions download` returned `500 Failed to retrieve function bundle`** on some
+   attempts and succeeded on a retry, exactly as during step 6.
+3. **`outlook-notifications` shows v11 where it was v10**, with an unchanged `ezbr_sha256` and
+   an unchanged `updated_at` of 2026-10-09. It was not redeployed; the counter moved on its own,
+   consistent with (1).
+
+**What is now true.** The published notice, the browser constant, the server variable and all
+three deployed requirements carry one value. The pilot's stored consent names the superseded
+October 9 value, so a run would be released with **`background_consent_missing`** before any
+read and before any subscription request - the gate is a real control again, alongside the
+still-absent flag and the still-inactive cron job. Clearing it is step 9: a **same-account OAuth
+update**, which rewrites `consent_policy_version` on the same connection row. Disconnecting is
+not the path and would cascade away every cursor and dedup reference.
 
 ### Steps 5-6, as executed 2026-10-12
 
