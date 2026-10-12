@@ -379,7 +379,7 @@ Two kinds of evidence appear below and they are not interchangeable:
 
 ### REAL DATABASE EXECUTION: `tests/local/outlook-thread-segments-flow.mjs`
 
-36 checks. The run module, the real producer and acceptance RPCs, real PostgREST, controlled
+64 checks. The run module, the real producer and acceptance RPCs, real PostgREST, controlled
 Graph and Anthropic fixtures. Not part of `npm test`, which stays dependency-free; it builds
 and tears down its own containers.
 
@@ -424,12 +424,12 @@ behaviour it models is also asked of the real functions above.
 
 ### Module boundary and migration text
 
-Coverage decisions (`tests/outlook-thread-segments.test.js`, 21 tests, including that the
+Coverage decisions (`tests/outlook-thread-segments.test.js`, 26 tests, including that the
 hint-pair bound is one shared number); genuine rotation against the real fingerprint builders
 and real key rings (`tests/outlook-thread-rotation.test.js`); the identity step and its reuse
 (`tests/outlook-conversation-recovery.test.js`, 33 tests), including that a resolved key makes
 recovery skip its own envelope GET and that a one-sided settlement carries the key back;
-migration text controls (`tests/outlook-thread-segments-migration.test.js`, 19 tests): both
+migration text controls (`tests/outlook-thread-segments-migration.test.js`, 21 tests): both
 producers byte-identical to the applied versions apart from marked blocks with one tolerated
 trailing comma pinned explicitly, the hint merge shedding the newest pair rather than the
 oldest, and the comparison aliases reaching no stored column.
@@ -600,12 +600,33 @@ found at all - and the fix is what the evidence above now holds.
     pairs and leaving the instant to a following statement was itself reproduced, as
     `hint_write_failed`.
 
+### Demonstrated, and no longer open
+
+Every checkpoint-2 gate that earlier revisions of this file listed as outstanding is now
+demonstrated against the real functions, in `tests/local/outlook-thread-segments-flow.mjs`:
+genuine pre-feature initialization for both anchor forms including an accepted proposal whose
+person has since become a contact; legacy history beyond the single-page recovery cap;
+composed rotation with an acceptance and a dismissal landing between the coverage read and the
+producer write; retry admission failure and its resumption; delta re-delivering an accepted
+message; the first hint on a baseline-only row; and the fixed suppression boundary. Nothing in
+this file should be read as saying those remain untested.
+
 ### Not demonstrated
 
-- Whether a tenant accepts the added `$filter` clause. The 400 path is handled; the owner-run
-  Graph Explorer check establishes the fact, as it did for `conversationId eq`.
-- Real Microsoft and real Anthropic. Every provider response is a local fixture built from the
-  documented contract.
+- **Whether this tenant actually applies the lookup filter.** The 400 path is handled - the
+  worker reports `recovery_unsupported` and settles the conversation rather than retrying -
+  but a silently IGNORED `$filter` returns HTTP 200 with a plausible body, so 200 is not the
+  test. `scripts/outlook-filter-check.mjs` prints the exact requests, built by this head's own
+  builder, for the owner to run signed in as the pilot mailbox; the verdict it asks for is
+  inclusion at the boundary, exclusion one second past it, matching conversation ids, a
+  non-empty positive control with no `@odata.nextLink`, and - where a message's two instants
+  differ - which property is actually filtered. **This blocks rollout of the narrowed window**,
+  because without it a long legacy thread could never be completed.
+- Response ORDER is deliberately not asserted and is not an activation requirement: the
+  recovery path never sends `$orderby` and refuses `@odata.nextLink` rather than relying on
+  order.
+- Real Microsoft and real Anthropic responses. Every provider response in the suites is a local
+  fixture built from the documented contract.
 - The browser, Kong, supabase-js and GoTrue. Review writes go straight to PostgREST with a
   locally minted JWT.
 - Real-mail behaviour, which only the pilot answers.
