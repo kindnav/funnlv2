@@ -566,6 +566,17 @@ test('the run module calls only the permitted RPCs', () => {
   // key-value store.
   assert.deepStrictEqual(names.sort(), [
     'advance_outlook_round_write_cursor',
+    // Thread segments added three, and each is one narrow job:
+    //   get_outlook_thread_coverage      what of this thread is already summarized?
+    //   baseline_outlook_thread_coverage the forward-only start for a thread settled
+    //                                    before coverage was recorded at all
+    //   record_outlook_thread_recovery   remember an unanswered message so a later round
+    //                                    can still pair it
+    'baseline_outlook_thread_coverage',
+    // And ONE more: the thread-level forward-only baseline, for a pre-feature row that
+    // cannot be located at all because its anchor sits behind a long back-catalogue.
+    'baseline_outlook_thread_window',
+    'get_outlook_thread_coverage',
     'list_outlook_round_conversations',
     // The content slice added two, and each is one narrow job:
     //   list_outlook_round_message_handles  the stored handles for ONE conversation
@@ -576,6 +587,7 @@ test('the run module calls only the permitted RPCs', () => {
     // Background sync added ONE: the change-notification subscription the run keeps alive,
     // recorded through an RPC fenced on the run id like every other worker write.
     'record_outlook_subscription_state',
+    'record_outlook_thread_recovery',
     'release_outlook_sync_lease', 'renew_outlook_sync_lease',
     'reserve_due_outlook_connection', 'reset_outlook_round',
     'upsert_new_contact_candidate',

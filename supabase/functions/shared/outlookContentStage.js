@@ -189,6 +189,10 @@ export const CONTENT_REPORT_COUNTS = Object.freeze([
   // CONVERSATION RECOVERY: how many one-sided threads the round asked Outlook about, how
   // many came back two-sided, and how many envelopes that took. Counts only.
   'recoveries_attempted', 'recoveries_two_sided', 'recovered_messages',
+  // AND how many of those needed a SECOND, windowed attempt because the thread is longer
+  // than one bounded page. Reported so "bounded, not endless" is measurable rather than
+  // asserted: it can never exceed recoveries_attempted.
+  'recovery_retries',
 ])
 
 /**
@@ -391,6 +395,24 @@ export async function summarizeOneConversation (p) {
       .sort((a, b) => String(a.sentAt).localeCompare(String(b.sentAt)))
   }
 
+  // >>> 20261011 segments
+  // THE SEGMENT, AND ONLY THE SEGMENT. When the thread already has settled coverage the
+  // caller passes the message fingerprints this segment represents, and the bodies read - and
+  // therefore the model request built from them - are restricted to those. Without this the
+  // draft would describe the whole thread again and repeat an exchange the reviewer has
+  // already accepted. Absent, nothing is filtered and this is the unchanged read.
+  //
+  // The filter runs BEFORE selectBalancedHandles, so the per-direction reserve and the
+  // episode bounds apply to the segment rather than to the thread.
+  if (Array.isArray(p?.segmentMfps) && p.segmentMfps.length > 0) {
+    const allow = new Set(p.segmentMfps)
+    const kept = handles.filter((h) => allow.has(h.mfp))
+    // A segment with no readable handle is not a segment to draft from: leaving `handles`
+    // alone would silently widen the request back to the whole thread.
+    handles = kept
+  }
+  // <<< 20261011
+
   return summarizeConversation({
     conversation,
     consentVersion: consentVersion ?? null,
@@ -455,6 +477,40 @@ export function planContentWrite (entry, pass, opts = {}) {
     p_episode_fingerprint: entry?.episodeFingerprint ?? null,
     p_person_fingerprint: entry?.personFingerprint ?? null,
     p_key_version: entry?.keyVersion ?? null,
+    // >>> 20261011 thread segments
+    // THE THREAD, and the coverage this write claims for it. Both producers take these and
+    // both default them to NULL, so an entry that carries no segment coverage - a first
+    // pass, or a run whose coverage read has not happened - produces exactly the arguments
+    // that shipped. `conversationFingerprint` already exists on every entry the round
+    // builds; `segmentCoverage` is attached by the run once it knows what the thread has
+    // already summarized.
+    p_conversation_fingerprint: entry?.conversationFingerprint ?? null,
+    p_covered_fingerprints: Array.isArray(entry?.segmentCoverage?.fingerprints)
+      && entry.segmentCoverage.fingerprints.length > 0
+      ? entry.segmentCoverage.fingerprints
+      : null,
+    p_coverage_from_at: typeof entry?.segmentCoverage?.fromIso === 'string'
+      && entry.segmentCoverage.fromIso.length > 0
+      ? entry.segmentCoverage.fromIso
+      : null,
+    p_coverage_through_at: typeof entry?.segmentCoverage?.throughIso === 'string'
+      && entry.segmentCoverage.throughIso.length > 0
+      ? entry.segmentCoverage.throughIso
+      : null,
+    // THE TWO LOOKUP SETS, and they are not interchangeable with the claim above.
+    // `conversationLookupFingerprints` is how a refs row written under a retired key is still
+    // FOUND - reproduced: without it the producer answered `created` for a settled exchange.
+    // `coveredLookupFingerprints` is how a hint recorded under a retired key is recognised as
+    // resolved. Neither is ever stored as coverage.
+    p_conversation_lookup_fingerprints: Array.isArray(entry?.conversationLookupFingerprints)
+      && entry.conversationLookupFingerprints.length > 0
+      ? entry.conversationLookupFingerprints
+      : null,
+    p_covered_lookup_fingerprints: Array.isArray(entry?.segmentCoverage?.aliases)
+      && entry.segmentCoverage.aliases.length > 0
+      ? entry.segmentCoverage.aliases
+      : null,
+    // <<< 20261011
   }
   const reason = typeof pass?.reason === 'string' ? pass.reason : null
 
@@ -665,6 +721,7 @@ export function summarizeContentStage (counts) {
     recoveries_attempted: Number.isInteger(c.recoveriesAttempted) ? c.recoveriesAttempted : 0,
     recoveries_two_sided: Number.isInteger(c.recoveriesTwoSided) ? c.recoveriesTwoSided : 0,
     recovered_messages: Number.isInteger(c.recoveredMessages) ? c.recoveredMessages : 0,
+    recovery_retries: Number.isInteger(c.recoveryRetries) ? c.recoveryRetries : 0,
     recovery_outcomes: clean(c.recoveryOutcomes, RECOVERY_OUTCOME_CODES),
   }
 }

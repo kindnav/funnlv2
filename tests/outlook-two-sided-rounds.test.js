@@ -160,6 +160,19 @@ async function makePorts ({ contacts }) {
   // Exchanges the reviewer has DECIDED (accepted or dismissed): the write RPCs answer
   // exists_terminal for them and write nothing, exactly as the applied functions do.
   const terminal = new Set()
+  // ── THE THREAD-SEGMENT STATE, modelled as the applied functions hold it ───────
+  // threads: cfp -> { settled: Set<fp>, settledFrom, settledThrough, open: {efp, covered:Set}|null,
+  //                   noCoverage: boolean }
+  // hints:   cfp -> Array<{fp, at}>
+  const threads = new Map()
+  const hints = new Map()
+  const threadFor = (cfp, lookups = []) => {
+    for (const k of [cfp, ...lookups]) {
+      if (typeof k === 'string' && threads.has(k)) return { key: k, t: threads.get(k) }
+    }
+    return { key: cfp, t: null }
+  }
+  const newThread = () => ({ settled: new Set(), settledFrom: null, settledThrough: null, open: null, noCoverage: false })
   const select = async (path) => {
     if (path.startsWith('microsoft_connections?')) {
       return { data: [{
@@ -200,10 +213,127 @@ async function makePorts ({ contacts }) {
       }, error: null }
     }
     if (name === 'renew_outlook_sync_lease') return { data: true, error: null }
+    // ── the coverage read: one answer per asked thread ─────────────────────────
+    if (name === 'get_outlook_thread_coverage') {
+      const out = []
+      for (const want of Array.isArray(args?.p_threads) ? args.p_threads : []) {
+        const { key, t } = threadFor(want.cfp, want.cfps ?? [])
+        // A row with no conversation fingerprint is found by its EPISODE aliases, which is
+        // how a thread settled before this feature existed is located at all.
+        let found = t
+        let matched = t !== null ? key : null
+        if (found === null) {
+          for (const [k, v] of threads) {
+            const aliases = [want.efp, ...(want.efps ?? [])].filter(Boolean)
+            if (v.legacyEfp && aliases.includes(v.legacyEfp)) { found = v; matched = k; break }
+          }
+        }
+        out.push({
+          conversation_fingerprint: want.cfp,
+          covered_fingerprints: found ? [...found.settled] : [],
+          coverage_from_at: found?.settledFrom ?? null,
+          coverage_through_at: found?.settledThrough ?? null,
+          settled_without_coverage: found?.noCoverage === true,
+          pending_episode_fingerprint: found?.open?.efp ?? null,
+          pending_covered_fingerprints: found?.open ? [...found.open.covered] : [],
+          pending_coverage_from_at: found?.open?.fromIso ?? null,
+          earliest_unpaired_at: (hints.get(matched ?? want.cfp) ?? [])
+            .map((h) => h.at).sort()[0] ?? null,
+          matched_conversation_fingerprint: matched,
+        })
+      }
+      return { data: { result: 'ok', threads: out }, error: null }
+    }
+    if (name === 'baseline_outlook_thread_coverage') {
+      const { key, t } = threadFor(args.p_conversation_fingerprint)
+      const row = t ?? newThread()
+      for (const f of args.p_covered_fingerprints ?? []) row.settled.add(f)
+      row.settledFrom = args.p_coverage_from_at
+      row.settledThrough = args.p_coverage_through_at
+      row.noCoverage = false
+      row.baselined = (row.baselined || 0) + 1
+      threads.delete(key)
+      threads.set(args.p_conversation_fingerprint, row)
+      return { data: { result: 'ok', initialized: 1 }, error: null }
+    }
+    if (name === 'record_outlook_thread_recovery') {
+      const { key } = threadFor(args.p_conversation_fingerprint,
+        args.p_conversation_lookup_fingerprints ?? [])
+      const merged = new Map()
+      for (const h of hints.get(key) ?? []) merged.set(h.fp, h.at)
+      for (const h of args.p_unpaired ?? []) {
+        const prev = merged.get(h.fp)
+        merged.set(h.fp, prev && prev < h.at ? prev : h.at)
+      }
+      // Oldest first at the bound, so the floor a window has to reach is never the pair
+      // that gets shed.
+      const pairs = [...merged].map(([fp, at]) => ({ fp, at }))
+        .sort((a, b) => String(a.at).localeCompare(String(b.at))).slice(0, 25)
+      hints.delete(key)
+      hints.set(args.p_conversation_fingerprint, pairs)
+      return { data: { result: 'ok', earliest_unpaired_at: pairs[0]?.at ?? null,
+        unpaired: pairs.length, dropped: Math.max(merged.size - 25, 0) }, error: null }
+    }
     if (name === 'upsert_outlook_interaction_candidate' || name === 'upsert_new_contact_candidate') {
-      const fp = args && args.p_episode_fingerprint
-      const result = terminal.has(fp) ? 'exists_terminal' : episodes.has(fp) ? 'refreshed' : 'created'
-      episodes.add(fp)
+      const efp = args && args.p_episode_fingerprint
+      const cfp = args && args.p_conversation_fingerprint
+      const claim = args?.p_covered_fingerprints ?? null
+      const aliases = args?.p_covered_lookup_fingerprints ?? claim ?? []
+      // THE EPISODE-ALIAS TOMBSTONE LOOKUP, which this model used to omit. The real function
+      // selects by `source_fingerprint = ANY(p_lookup_fingerprints || p_episode_fingerprint)`
+      // and answers exists_terminal for anything it finds that is not pending - so an episode
+      // ALIAS of a decided exchange is a tombstone, not just its exact value. Omitting this
+      // made the model answer `created` for a rotated thread whose segment had taken the
+      // thread's first message as its anchor, which is exactly the integration defect
+      // reproduced against the real function in tests/local/outlook-thread-segments-flow.mjs.
+      const efpRing = [efp, ...(Array.isArray(args?.p_lookup_fingerprints)
+        ? args.p_lookup_fingerprints : [])].filter((f) => typeof f === 'string')
+      const anyTerminal = efpRing.some((f) => terminal.has(f))
+      const anySeen = efpRing.some((f) => episodes.has(f))
+      let result
+      if (cfp === null || cfp === undefined) {
+        // No thread supplied: the behaviour that shipped, keyed on the episode alone.
+        result = anyTerminal ? 'exists_terminal' : anySeen ? 'refreshed' : 'created'
+        episodes.add(efp)
+      } else {
+        const { key, t } = threadFor(cfp, args.p_conversation_lookup_fingerprints ?? [])
+        const row = t ?? newThread()
+        if (row.noCoverage) {
+          candidates.push({ rpc: name, args, result: 'coverage_uninitialized' })
+          return { data: { result: 'coverage_uninitialized' }, error: null }
+        }
+        if (row.open !== null) {
+          result = 'refreshed'                       // identity pinned to the open segment
+        } else if (claim !== null && row.settled.size > 0) {
+          const fresh = claim.filter((f) => !row.settled.has(f))
+          if (fresh.length === 0) result = 'exists_terminal'
+          else if (fresh.length < claim.length) {
+            candidates.push({ rpc: name, args, result: 'coverage_moved' })
+            return { data: { result: 'coverage_moved' }, error: null }
+          } else result = 'created'
+        } else {
+          result = anyTerminal ? 'exists_terminal' : 'created'
+        }
+        // And the tombstone lookup runs for a thread too: the real function reaches it
+        // whenever the coverage comparison did not already answer.
+        if (result === 'created' && anyTerminal) result = 'exists_terminal'
+        if (result !== 'exists_terminal') {
+          if (row.open === null) {
+            row.open = { efp, covered: new Set(), fromIso: args.p_coverage_from_at }
+          }
+          if (claim !== null) for (const f of claim) row.open.covered.add(f)
+          // THE HINT IS RESOLVED BY THE COVERAGE WRITE, through the ACCEPTED VARIANTS -
+          // comparing only the stored claim left a hint recorded under a retired key alive
+          // forever.
+          const covering = new Set(aliases)
+          const left = (hints.get(key) ?? []).filter((h) => !covering.has(h.fp))
+          hints.delete(key)
+          if (left.length > 0) hints.set(cfp, left)
+          threads.delete(key)
+          threads.set(cfp, row)
+        }
+        episodes.add(efp)
+      }
       candidates.push({ rpc: name, args, result })
       return { data: { result }, error: null }
     }
@@ -220,7 +350,36 @@ async function makePorts ({ contacts }) {
     if (s !== null) return s
     throw new Error('unexpected rpc: ' + name)
   }
-  return { select, rpc, store, candidates, releases, decide: (fp) => terminal.add(fp) }
+  return {
+    select, rpc, store, candidates, releases,
+    // A REVIEWER DECISION settles the thread's open segment, exactly as accepting or
+    // dismissing a candidate does: its coverage becomes settled coverage and the thread has
+    // no open segment any more. Marking only the episode terminal left the open segment in
+    // place, so the producer kept answering `refreshed` for a decided exchange.
+    decide: (fp) => {
+      terminal.add(fp)
+      for (const row of threads.values()) {
+        if (row.open && row.open.efp === fp) {
+          for (const f of row.open.covered) row.settled.add(f)
+          row.settledFrom = row.open.fromIso ?? row.settledFrom
+          row.settledThrough = row.settledThrough ?? row.open.fromIso ?? null
+          row.open = null
+        }
+      }
+    },
+    // The thread-segment state, so a test can settle a thread, plant a legacy row or a hint,
+    // and then assert what the handler did with it.
+    threads, hints, newThread,
+    settle: (cfp, fps, fromIso, throughIso) => {
+      const row = threads.get(cfp) ?? newThread()
+      for (const f of fps) row.settled.add(f)
+      row.settledFrom = fromIso ?? null
+      row.settledThrough = throughIso ?? null
+      row.open = null
+      threads.set(cfp, row)
+      return row
+    },
+  }
 }
 
 const MESSAGES_PREFIX = GRAPH_BASE + '/me/messages/'
@@ -307,13 +466,23 @@ function makeFetch ({ rounds, envelopes, folderOf, bodies, counts, model, faults
     const filter = queryParam(u, '$filter')
     if (filter !== null) {
       // THE CONVERSATION LOOKUP: what "Outlook" holds for this thread in this folder.
-      const m = filter.startsWith("conversationId eq '") && filter.endsWith("'") ? filter.slice("conversationId eq '".length, -1) : null
+      // THE FILTER NOW HAS TWO CLAUSES, so this parses both rather than string-matching one.
+      // `receivedDateTime ge` on Inbox and `sentDateTime ge` on Sent Items bound the listing
+      // to the SEGMENT's window; without modelling it the fixture silently answered nothing
+      // for every windowed lookup, which is how a continuation looked like
+      // `recovery_no_messages`.
+      const convM = filter.match(/^conversationId eq '([^']*)'/)
+      const m = convM ? convM[1] : null
+      const geM = filter.match(/(receivedDateTime|sentDateTime) ge (\S+)$/)
+      const geProp = geM ? geM[1] : null
+      const geAt = geM ? geM[2] : null
       counts.lookups.push({ folder, conv: m, select: queryParam(u, '$select'), top: queryParam(u, '$top'),
-        hasOrderBy: queryParam(u, '$orderby') !== null, prefer })
+        hasOrderBy: queryParam(u, '$orderby') !== null, prefer, since: geAt })
       if (typeof clock === 'object' && clock.trapOnLookup) { clock.ms += clock.trapOnLookup; clock.trapOnLookup = 0 }
       if (faults.lookup === 'bad_request') return errRes(400)
       const items = Object.values(envelopes)
         .filter((e) => e.conversationId === m && folderOf[e.id] === folder && visible.has(e.id))
+        .filter((e) => geAt === null || String(e[geProp] ?? '').localeCompare(geAt) >= 0)
         .filter((e) => !(faults.lookup === 'only_current' && !counts.currentIds.has(e.id)))
       const page = { value: items }
       if (faults.lookup === 'truncated') page['@odata.nextLink'] = GRAPH_BASE + '/me/mailFolders/' + folder + '/messages?$skip=25'
@@ -773,15 +942,23 @@ await test('after the reviewer DECIDED on the exchange, a further round of it an
   const [r1, r2] = runs
   assert.strictEqual(r1.run.created, 1, summarize(r1))
   assert.strictEqual(r2.run.outcome, 'committed', summarize(r2))
-  assert.deepStrictEqual(r2.run.content.recovery_outcomes, { recovered: 2 }, 'both threads of the delta round were completed: ' + summarize(r2))
-  assert.deepStrictEqual(r2.run.write_results, { exists_terminal: 1, created: 1 }, summarize(r2))
+  // THREAD A CONTINUED AFTER THE DECISION, so it gets a SECOND suggestion - this is the
+  // discard the feature removes, and the old expectation here was `exists_terminal`. Thread B
+  // is a different thread with the same person and is proposed on its own, as it always was.
+  assert.deepStrictEqual(r2.run.write_results, { created: 2 }, summarize(r2))
   assert.strictEqual(r2.run.accepted, 2, 'both are successful outcomes for the run')
   const first = ports.candidates[0].args.p_episode_fingerprint
-  const terminalCall = ports.candidates.find((c) => c.result === 'exists_terminal')
-  assert.strictEqual(terminalCall.args.p_episode_fingerprint, first, 'the decided exchange keeps its identity and is NOT resurrected')
-  const fresh = ports.candidates.find((c, i) => i > 0 && c.result === 'created')
-  assert.notStrictEqual(fresh.args.p_episode_fingerprint, first, 'a different thread with the same person is a different identity - and IS proposed')
-  assert.strictEqual(fresh.args.p_proposed_email, STRANGER)
+  assert.strictEqual(ports.candidates[0].result, 'created')
+  // The decided row is never touched again: its candidate call is not repeated.
+  assert.strictEqual(ports.candidates.filter((c) => c.args.p_episode_fingerprint === first).length, 1,
+    'the accepted exchange is neither refreshed nor resurrected')
+  const later = ports.candidates.slice(1)
+  assert.strictEqual(later.length, 2, 'two further writes: A\'s second exchange and B')
+  for (const c of later) {
+    assert.strictEqual(c.result, 'created')
+    assert.notStrictEqual(c.args.p_episode_fingerprint, first, 'each is its own identity')
+    assert.strictEqual(c.args.p_proposed_email, STRANGER)
+  }
 })
 
 await test('a THIRD person joins the thread in round 2: the COMPLETE thread shows two external people, the pass refuses to pick one, nothing is written, the round-1 proposal stands', async () => {
@@ -1162,14 +1339,266 @@ for (const party of [KNOWN, STRANGER]) {
       const replay = await invoke(ports,rejecting)
       assert.equal(replay.run.outcome,'committed',summarize(replay))
       assert.equal(replay.run.created,0)
-      assert.equal(replay.run.write_results[decided?'exists_terminal':'refreshed'],1)
-      assert.equal(replay.run.content.recovery_outcomes.recovered,1)
-      assert.equal(ports.candidates.length,2)
-      assert.equal(ports.candidates[1].args.p_episode_fingerprint,fp)
+      if (decided) {
+        // NOTHING NEW. The same two messages, already summarized and already decided: the
+        // coverage read says so, so the run neither recovers the thread nor calls the
+        // producer. The producer's own `exists_terminal` answer for this case is proven in
+        // tests/sql/outlook-thread-segments-runtime.sql; spending a recovery and a write to
+        // hear it is not an improvement.
+        assert.deepStrictEqual(replay.run.write_results,{},summarize(replay))
+        assert.equal(replay.run.entry_skipped.nothing_new,1,summarize(replay))
+        assert.equal(ports.candidates.length,1,'no second write attempt')
+      } else {
+        assert.equal(replay.run.write_results.refreshed,1)
+        assert.equal(replay.run.content.recovery_outcomes.recovered,1)
+        assert.equal(ports.candidates.length,2)
+        assert.equal(ports.candidates[1].args.p_episode_fingerprint,fp)
+      }
       assert.equal(replay.run.cursors_advanced,2)
     })
   }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+console.log('')
+console.log('9. CHECKPOINT 1 - the seven demonstrations, through the real handler and the RPC contracts')
+
+// The settled exchange and the later one are tagged so the MODEL REQUEST can be read: the
+// request for the second suggestion must carry the second exchange and must NOT carry the
+// first, which a reviewer has already decided and whose note is already written.
+const LATER_TURNS = [
+  ['them', 1, 9, 'SETTLED-IN good to meet you at the panel on Tuesday.'],
+  ['me', 1, 15, 'SETTLED-OUT thank you, I will send my CV this week.'],
+  ['them', 6, 9, 'LATER-IN the credit desk has a spring opening, shall we speak Thursday?'],
+  ['me', 6, 15, 'LATER-OUT Thursday at three works, thank you for thinking of me.'],
+]
+
+for (const [label, party, expectRpc, demo] of [
+  ['an ACCEPTED known-contact exchange, then new two-way mail', KNOWN, 'upsert_outlook_interaction_candidate', 'D1'],
+  ['the same for an UNKNOWN person', STRANGER, 'upsert_new_contact_candidate', 'D2'],
+]) {
+  await test(demo + '. ' + label + ' -> exactly ONE new suggestion, drafted from the LATER exchange only', async () => {
+    const t = thread({ party, conv: 'AAQkAD-' + demo.toLowerCase(), turns: LATER_TURNS })
+    const { runs, ports, counts, after } = await runThreads({
+      threads: [t], schedule: [t.ids.slice(0, 2), t.ids.slice(2)], invocations: 2,
+      // The reviewer ACCEPTS round 1's proposal between the rounds. (Dismissal takes the
+      // same path: both are terminal, and the producer's own answer for each is proven in
+      // tests/sql/outlook-thread-segments-runtime.sql.)
+      beforeInvocation: (i, p) => { if (i === 1) p.decide(p.candidates[0].args.p_episode_fingerprint) },
+    })
+    const [r1, r2] = runs
+    assert.strictEqual(r1.run.created, 1, summarize(r1))
+    assert.strictEqual(ports.candidates[0].rpc, expectRpc)
+    const settledEfp = ports.candidates[0].args.p_episode_fingerprint
+    const settledCall = JSON.stringify(ports.candidates[0])
+
+    // ── ONE new suggestion, and only one ────────────────────────────────────────
+    assert.strictEqual(r2.run.outcome, 'committed', summarize(r2))
+    assert.deepStrictEqual(r2.run.write_results, { created: 1 }, summarize(r2))
+    assert.strictEqual(ports.candidates.length, 2, 'exactly one further write')
+    const later = ports.candidates[1]
+    assert.strictEqual(later.rpc, expectRpc, 'the same path as the first, for the same person')
+    assert.strictEqual(later.result, 'created')
+    assert.notStrictEqual(later.args.p_episode_fingerprint, settledEfp,
+      'a new segment is its own identity - reusing the settled one would collide on source_fingerprint')
+    assert.strictEqual(r2.run.cursors_advanced, 2)
+
+    // ── D6, on the same run: the accepted row is never touched again ────────────
+    assert.strictEqual(JSON.stringify(ports.candidates[0]), settledCall,
+      'the accepted exchange and its reviewed note are not rewritten')
+    assert.strictEqual(ports.candidates.filter((c) =>
+      c.args.p_episode_fingerprint === settledEfp).length, 1,
+      'and it is neither refreshed nor resurrected')
+    // Its coverage is also unchanged: the claim the first write made is still the claim.
+    const cfp = later.args.p_conversation_fingerprint
+    assert.strictEqual(typeof cfp, 'string')
+    const row = ports.threads.get(cfp)
+    assert.ok(row, 'the thread carries coverage')
+    for (const f of ports.candidates[0].args.p_covered_fingerprints) {
+      assert.ok(row.settled.has(f), 'the settled messages stay settled')
+    }
+
+    // ── THE INTERCEPTED ANTHROPIC REQUEST ──────────────────────────────────────
+    assert.strictEqual(counts.modelBodies.length, 2, 'one model call per suggestion')
+    const sent = counts.modelBodies[1]
+    assert.ok(carries(sent, 'LATER-IN'), 'the later inbound half is missing from the request')
+    assert.ok(carries(sent, 'LATER-OUT'), 'the later outbound half is missing from the request')
+    assert.ok(!carries(sent, 'SETTLED-IN'), 'the settled inbound is in the request and must not be')
+    assert.ok(!carries(sent, 'SETTLED-OUT'), 'the settled outbound is in the request and must not be')
+    // And the minimization that already applied still applies.
+    assert.ok(!carries(sent, party), 'no address in the model request')
+    assert.ok(!carries(sent, ME), 'no self address in the model request')
+    // Only the segment's bodies are read for it: two, not four.
+    assert.strictEqual(after[1].bodies - after[0].bodies, 2,
+      'only the later exchange is read, not the settled history beside it')
+  })
+}
+
+await test('D3. a REPLAY of a pending exchange refreshes the ONE pending suggestion', async () => {
+  const t = thread({ party: STRANGER, conv: 'AAQkAD-d3-replay', turns: LATER_TURNS.slice(0, 2) })
+  // The SAME two ids arrive again in round 2 - a replayed page, nothing new in the mailbox.
+  const { runs, ports } = await runThreads({
+    threads: [t], schedule: [t.ids, t.ids], invocations: 2,
+  })
+  const [r1, r2] = runs
+  assert.strictEqual(r1.run.created, 1, summarize(r1))
+  const fp = ports.candidates[0].args.p_episode_fingerprint
+  assert.strictEqual(r2.run.outcome, 'committed', summarize(r2))
+  assert.deepStrictEqual(r2.run.write_results, { refreshed: 1 }, summarize(r2))
+  assert.strictEqual(ports.candidates.length, 2)
+  assert.strictEqual(ports.candidates[1].args.p_episode_fingerprint, fp,
+    'a pending segment keeps the identity it was created under')
+  assert.strictEqual(r2.run.created, 0, 'no second suggestion for one exchange')
+})
+
+await test('D4. the two halves arrive in SEPARATE COMPLETED rounds and are joined into one suggestion', async () => {
+  const t = thread({ party: STRANGER, conv: 'AAQkAD-d4-split', turns: [
+    ['me', 2, 9, 'SPLIT-OUT following up after the info session, may I ask about the analyst programme?'],
+    ['them', 3, 11, 'SPLIT-IN happy to - Thursday afternoon suits me.'],
+  ] })
+  // WHAT ROUND 1 LEFT BEHIND, captured as round 2 starts: runThreads returns only after
+  // every invocation, so a claim about round 1 has to be read before round 2 runs.
+  let afterRound1 = null
+  const { runs, ports, counts } = await runThreads({
+    threads: [t], schedule: [[t.ids[0]], [t.ids[1]]], invocations: 2,
+    beforeInvocation: (i, p) => {
+      if (i === 1) afterRound1 = { candidates: p.candidates.length, hints: [...p.hints] }
+    },
+  })
+  const [r1, r2] = runs
+  // Round 1 saw one side only: nothing is drafted, and the unanswered half IS remembered.
+  // That record is the point. Reproduced before the fix: the conclusion "still one-sided"
+  // comes from RECOVERY, which returned before the segment block ran, so nothing was
+  // recorded - and once the round completes its own handles are gone and the delta will not
+  // show the message again.
+  assert.strictEqual(r1.run.outcome, 'committed', summarize(r1))
+  assert.strictEqual(r1.run.created, 0, 'one side is not an exchange')
+  assert.deepStrictEqual(r1.run.entry_skipped, { not_two_sided: 1 }, summarize(r1))
+  assert.strictEqual(afterRound1.candidates, 0, 'nothing written for one side')
+  assert.strictEqual(afterRound1.hints.length, 1, 'the unanswered half is recorded')
+  const hintCfp = afterRound1.hints[0][0]
+  const hintPairs = afterRound1.hints[0][1]
+  assert.strictEqual(hintPairs.length, 1, 'one unpaired message')
+  assert.match(hintPairs[0].fp, /^[0-9a-f]{64}$/, 'recorded as a fingerprint, never a Graph id')
+  assert.strictEqual(hintPairs[0].at, '2026-09-02T09:00:00.000Z', 'with the instant a window needs')
+  // Round 2 completed the exchange from Outlook and proposed it ONCE.
+  assert.strictEqual(r2.run.outcome, 'committed', summarize(r2))
+  assert.deepStrictEqual(r2.run.write_results, { created: 1 }, summarize(r2))
+  assert.strictEqual(ports.candidates.length, 1)
+  const sent = counts.modelBodies[counts.modelBodies.length - 1]
+  assert.ok(carries(sent, 'SPLIT-OUT'), 'the half from the EARLIER round is missing from the request')
+  assert.ok(carries(sent, 'SPLIT-IN'), 'the half from this round is missing from the request')
+  // The suggestion is for the thread the hint named, and CLAIMS the remembered half - which
+  // is what resolves the hint rather than leaving a floor that never rises.
+  assert.strictEqual(ports.candidates[0].args.p_conversation_fingerprint, hintCfp)
+  assert.ok(ports.candidates[0].args.p_covered_fingerprints.includes(hintPairs[0].fp),
+    'the write claims the remembered half')
+  assert.strictEqual(ports.hints.size, 0, 'so the hint is resolved by the write that covered it')
+})
+
+await test('D6. a third round REPLAYS the whole thread: the accepted exchange is never written again', async () => {
+  const t = thread({ party: KNOWN, conv: 'AAQkAD-d6-replay-all', turns: LATER_TURNS })
+  // Round 3 delivers every message again - the delta replay a reset or a resync produces.
+  const { runs, ports } = await runThreads({
+    threads: [t], schedule: [t.ids.slice(0, 2), t.ids.slice(2), t.ids], invocations: 3,
+    beforeInvocation: (i, p) => { if (i === 1) p.decide(p.candidates[0].args.p_episode_fingerprint) },
+  })
+  const [r1, r2, r3] = runs
+  assert.strictEqual(r1.run.created, 1, summarize(r1))
+  const settledEfp = ports.candidates[0].args.p_episode_fingerprint
+  const settledCall = JSON.stringify(ports.candidates[0])
+  assert.strictEqual(r2.run.created, 1, summarize(r2))
+  const laterEfp = ports.candidates[1].args.p_episode_fingerprint
+
+  // Round 3: the whole thread is visible again. The settled half is already covered and the
+  // later half belongs to the open segment, so this is ONE refresh of the pending row.
+  assert.strictEqual(r3.run.outcome, 'committed', summarize(r3))
+  assert.deepStrictEqual(r3.run.write_results, { refreshed: 1 }, summarize(r3))
+  assert.strictEqual(ports.candidates.length, 3)
+  assert.strictEqual(ports.candidates[2].args.p_episode_fingerprint, laterEfp,
+    'the refresh lands on the PENDING segment, not on the accepted one')
+  assert.strictEqual(r3.run.created, 0, 'and no third suggestion is invented')
+
+  // The accepted exchange: written once, in round 1, and untouched since.
+  assert.strictEqual(ports.candidates.filter((c) =>
+    c.args.p_episode_fingerprint === settledEfp).length, 1)
+  assert.strictEqual(JSON.stringify(ports.candidates[0]), settledCall)
+})
+
+await test('D5. an UNANSWERED message produces no draft, no suggestion and no model call', async () => {
+  const t = thread({ party: STRANGER, conv: 'AAQkAD-d5-onesided', turns: [
+    ['me', 2, 9, 'ONLY-OUT may I ask about the analyst programme?'],
+  ] })
+  const { runs, ports, counts } = await runThreads({ threads: [t], schedule: [t.ids], invocations: 1 })
+  const [r1] = runs
+  assert.strictEqual(r1.run.outcome, 'committed', summarize(r1))
+  assert.strictEqual(r1.run.created, 0)
+  assert.strictEqual(ports.candidates.length, 0, 'nothing written')
+  assert.strictEqual(r1.run.content.model_calls, 0, 'the model is never called')
+  assert.strictEqual(counts.modelBodies.length, 0)
+  assert.strictEqual(counts.bodies, 0, 'and no body is read')
+  assert.deepStrictEqual(r1.run.entry_skipped, { not_two_sided: 1 }, summarize(r1))
+  assert.strictEqual(r1.run.cursors_advanced, 2, 'a one-sided thread is a decision: the round commits')
+})
+
+// D7. A REQUIRED PERSISTENCE OPERATION FAILS. Each of the three new RPCs is required for a
+// different reason, and none of them may be treated as best-effort: without the coverage read
+// the run cannot tell a settled exchange from a new one; without the hint an unanswered half
+// is lost for good; without the baseline a legacy thread would be guessed at. So each failure
+// forfeits the cursor and the round is retried from where it last committed.
+for (const [rpcName, refusal, turns] of [
+  ['get_outlook_thread_coverage', 'coverage_read_failed', LATER_TURNS.slice(0, 2)],
+  ['record_outlook_thread_recovery', 'hint_write_failed', [LATER_TURNS[0]]],
+]) {
+  await test('D7. ' + rpcName + ' FAILS -> ' + refusal + ', no cursor advances, nothing committed', async () => {
+    const t = thread({ party: STRANGER, conv: 'AAQkAD-d7-' + refusal, turns })
+    const envelopes = t.envelopes
+    const ports = await makePorts({ contacts: [{ id: KNOWN_CONTACT, user_id: PILOT, email: KNOWN }] })
+    const counts = newCounts()
+    const fetchImpl = makeFetch({
+      rounds: {
+        inbox: [t.ids.filter((id) => t.folderOf[id] === 'inbox').map((id) => envelopes[id])],
+        sentitems: [t.ids.filter((id) => t.folderOf[id] === 'sentitems').map((id) => envelopes[id])],
+      },
+      envelopes, folderOf: t.folderOf, bodies: t.bodies, counts, model: MODEL,
+    })
+    // The ONE operation under test fails the way a database error reaches the worker.
+    const failing = {
+      ...ports,
+      rpc: async (name, args) => (name === rpcName
+        ? { data: null, error: { message: 'simulated failure' } }
+        : ports.rpc(name, args)),
+    }
+    const r = await invoke(failing, fetchImpl)
+    assert.strictEqual(r.run.refusal, refusal, summarize(r))
+    assert.strictEqual(r.run.cursors_advanced, 0, 'a lost required write must not be committed around')
+    assert.strictEqual(ports.candidates.length, 0, 'and nothing is written')
+    assert.strictEqual(r.run.finalize.cursor_advanced, false, 'nor does the write cursor move')
+  })
+}
+
+await test('the port models the EPISODE-ALIAS TOMBSTONE, which the real function applies', async () => {
+  // THIS MODEL WAS WRONG, and the wrongness hid an integration defect completely: it keyed
+  // `terminal` on the exact episode fingerprint, while the real function selects by
+  // `source_fingerprint = ANY(p_lookup_fingerprints || p_episode_fingerprint)` and answers
+  // exists_terminal for anything not pending. So for a rotated thread whose segment had
+  // taken the thread's first message as its anchor, this port said `created` where the real
+  // function says `exists_terminal` - proven against the real function in
+  // tests/local/outlook-thread-segments-flow.mjs. The guard keeps the port honest.
+  const ports = await makePorts({ contacts: [{ id: KNOWN_CONTACT, user_id: PILOT, email: KNOWN }] })
+  const fpA = 'a'.repeat(64)
+  const fpB = 'b'.repeat(64)
+  ports.decide(fpA)                       // the reviewer decided the exchange anchored at A
+  // A later write arrives under a DIFFERENT anchor but offers A among its lookup aliases,
+  // which is exactly what a rotated or re-anchored episode does.
+  const res = await ports.rpc('upsert_outlook_interaction_candidate', {
+    p_episode_fingerprint: fpB,
+    p_lookup_fingerprints: [fpA],
+    p_conversation_fingerprint: null,
+  })
+  assert.strictEqual(res.data.result, 'exists_terminal',
+    'an ALIAS of a decided exchange is a tombstone, not just its exact value')
+})
 
 console.log((passed + failed) + ' tests: ' + passed + ' passed, ' + failed + ' failed')
 console.log('')

@@ -85,7 +85,11 @@ import {
 import {
   TERMINAL_DEFERRALS, RETRYABLE_DEFERRALS, DEFERRAL_CLASS,
   CONTENT_DEFERRAL_CODES, CONTENT_REPORT_COUNTS, CONTENT_REPORT_MAPS, planContentWrite,
+  summarizeContentStage,
 } from '../supabase/functions/shared/outlookContentStage.js'
+import { readFileSync as _readFileSync } from 'node:fs'
+import { fileURLToPath as _fileURLToPath } from 'node:url'
+import { dirname as _dirname, join as _join } from 'node:path'
 import { DEFER_REASONS } from '../supabase/functions/shared/outlookContentPass.js'
 import { makeRoundStore } from './harness/outlookRoundStore.js'
 
@@ -233,6 +237,23 @@ async function makePorts (opts = {}) {
   }
 
   const rpc = async (name, args) => {
+    // ── THREAD SEGMENTS: nothing settled in this fixture ──────────────────────
+    // No decided exchange here, so the honest answer is no coverage and the run takes the
+    // single-exchange path it always took. The segment behaviour is proven against the real
+    // model in tests/outlook-two-sided-rounds.test.js.
+    if (name === 'get_outlook_thread_coverage') {
+      return { data: { result: 'ok', threads: [] }, error: null }
+    }
+    if (name === 'baseline_outlook_thread_window') {
+      return { data: { result: 'ok', absorbed: 0 }, error: null }
+    }
+    if (name === 'baseline_outlook_thread_coverage') {
+      return { data: { result: 'ok', initialized: 0 }, error: null }
+    }
+    if (name === 'record_outlook_thread_recovery') {
+      return { data: { result: 'ok', earliest_unpaired_at: null, unpaired: 1, dropped: 0 },
+               error: null }
+    }
     rpcNames.push(name)
     if (name === 'reserve_due_outlook_connection') {
       return { data: { result: 'reserved', connection_id: CONN, user_id: PILOT, run_id: 'run-1' },
@@ -623,6 +644,52 @@ check('the report still holds only counters and the controlled maps',
   JSON.stringify(Object.keys(repA || {})))
 
 console.log('')
+console.log('')
+console.log('7. EVERY deferral the RUN emits is reportable')
+
+// REPRODUCED AS A SILENT HOLE: the identity step emitted `identity_unresolved`, which is not
+// in DEFERRAL_CLASS, so sanitizeContentReport dropped it - the run stopped without committing
+// and the report said nothing about why. A code that cannot be reported is not a diagnostic.
+{
+  const _ROOT = _join(_dirname(_fileURLToPath(import.meta.url)), '..')
+  const RUN_SRC = _readFileSync(
+    _join(_ROOT, 'supabase/functions/shared/outlookImportRun.js'), 'utf8')
+  const CODE = RUN_SRC.split(String.fromCharCode(10))
+    .filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join(String.fromCharCode(10))
+  // EVERY literal passed to bumpDeferral, whatever the call shape - the identity site
+  // chooses between two with a ternary, and a regex that only matched the simple form
+  // would have passed this guard while missing exactly the code that was broken.
+  const emitted = [...new Set(
+    [...CODE.matchAll(/bumpDeferral\(([^)]*)\)/g)]
+      .flatMap((m) => [...m[1].matchAll(/'([a-z_]+)'/g)].map((q) => q[1])))].sort()
+
+  check('the run emits at least one deferral code, so this guard is not vacuous',
+    emitted.length > 0, JSON.stringify(emitted))
+  for (const c of emitted) {
+    check('the run deferral ' + c + ' is in the controlled vocabulary',
+      CONTENT_DEFERRAL_CODES.includes(c),
+      c + ' is not in CONTENT_DEFERRAL_CODES, so the report would DROP it')
+  }
+  check('and identity failure is reported as a retryable fetch_failed',
+    emitted.includes('fetch_failed') && DEFERRAL_CLASS.fetch_failed === 'retryable',
+    JSON.stringify(emitted))
+  check('identity_unresolved is gone from the code entirely',
+    !/bumpDeferral\('identity_unresolved'\)/.test(CODE), 'it would be dropped by the report')
+
+  // And the sanitized output genuinely carries it.
+  const sanitized = summarizeContentStage({
+    ...CONTENT_REPORT_COUNTS.reduce((a, k) => ({ ...a, [k]: 0 }), {}),
+    deferred: { fetch_failed: 2, identity_unresolved: 7 },
+    ignored: {}, refusalCategories: {}, modelFailures: {}, modelHttpStatus: {},
+    missingHeaders: {}, modelBadRequest: {}, recoveryOutcomes: {},
+  })
+  check('sanitized output KEEPS fetch_failed', sanitized.deferred.fetch_failed === 2,
+    JSON.stringify(sanitized.deferred))
+  check('and still DROPS an unknown code, which is why the vocabulary matters',
+    sanitized.deferred.identity_unresolved === undefined,
+    JSON.stringify(sanitized.deferred))
+}
+
 console.log((passed + failed) + ' checks: ' + passed + ' passed, ' + failed + ' failed')
 console.log('')
 if (failed > 0) process.exit(1)

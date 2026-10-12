@@ -126,6 +126,61 @@ function lookupFailure (code) {
 }
 
 /**
+ * THE THREAD'S RAW CONVERSATION KEY, from a message the round already holds.
+ *
+ * WHY THIS IS CALLABLE ON ITS OWN. A fingerprint cannot be re-hashed, so the run cannot
+ * compute a thread's ring variants from the fingerprint it holds - it needs the raw key, and
+ * this envelope GET is the one place that key exists. Asking for coverage WITHOUT those
+ * variants is what hid a settled exchange written under a retired key: reproduced against
+ * the real producer, which then answered `exists_terminal` while the round committed and the
+ * new exchange was never suggested.
+ *
+ * It is the SAME request recovery makes - not an additional one. `recoverConversation`
+ * accepts the answer and skips its own fetch.
+ *
+ * IN MEMORY ONLY. The key is returned so ring variants can be computed from it; it is never
+ * persisted and never logged.
+ *
+ * @returns {Promise<{outcome:'ok', conversationKey:string, stats:object}
+ *                  |{outcome:'settled'|'retry', reason:string, stats:object}>}
+ */
+export async function resolveConversationIdentity (p) {
+  const { handles, decryptHandle, accessToken, deps, budgetAllows } = p || {}
+  const stats = { envelopeFetches: 0 }
+  const exec = typeof deps?.executeGraphRequest === 'function'
+    ? deps.executeGraphRequest : executeGraphRequest
+  const allows = typeof budgetAllows === 'function' ? budgetAllows : () => true
+
+  const stored = (Array.isArray(handles) ? handles : [])
+    .filter((h) => isPlainObject(h) && typeof h.midCt === 'string' && h.midCt.length > 0)
+  if (stored.length === 0) return settled('recovery_no_handles', stats)
+  if (!allows(RECOVERY_REQUEST_ADMIT_MS)) return retry('budget_exhausted', stats)
+
+  let messageId
+  try {
+    messageId = await decryptHandle({ ciphertext: stored[0].midCt, nonce: stored[0].midNonce })
+  } catch {
+    return retry('recovery_fetch_failed', stats)
+  }
+  if (!isUsableGraphId(messageId)) return settled('recovery_mismatch', stats)
+  let envelopeReq
+  try {
+    envelopeReq = buildMessageEnvelopeRequest({ messageId })
+  } catch {
+    return settled('recovery_mismatch', stats)
+  }
+  stats.envelopeFetches += 1
+  const env = await exec({
+    request: envelopeReq, accessToken, fetchImpl: deps?.fetchImpl, sleepImpl: deps?.sleepImpl,
+    now: deps?.now, budgetAllows: allows,
+  })
+  if (!env?.ok) return retryOrSettle(envelopeFailure(env?.code), stats)
+  const conversationKey = env.json?.conversationId
+  if (!isUsableGraphId(conversationKey)) return settled('recovery_mismatch', stats)
+  return { outcome: 'ok', conversationKey, stats }
+}
+
+/**
  * Ask Outlook for the rest of ONE one-sided conversation and decide it the way a
  * same-round read would have.
  *
@@ -150,6 +205,14 @@ export async function recoverConversation (p) {
   const {
     row, handles, decryptHandle, accessToken, deps, budgetAllows, selfSet, contactIndex,
     connectionId, keyRing, produceHandles, localDateFor,
+    // THE SEGMENT WINDOW, optional. Supplied for a thread that already has settled
+    // coverage, so the one bounded page per folder is spent on the exchange being
+    // assembled instead of on history that is already summarized. Absent - a first pass, or
+    // a thread nobody has decided yet - the request is exactly the one that shipped.
+    sinceIso,
+    // THE THREAD'S RAW KEY, optional. When the caller has already resolved it - which it
+    // must, to ask for coverage under a rotated ring - the envelope GET is NOT repeated.
+    conversationId: knownConversationId,
   } = p || {}
   const stats = { envelopeFetches: 0, lookups: 0, recoveredMessages: 0, dedupedAgainstStored: 0 }
   const exec = typeof deps?.executeGraphRequest === 'function' ? deps.executeGraphRequest : executeGraphRequest
@@ -162,28 +225,21 @@ export async function recoverConversation (p) {
   if (stored.length === 0) return settled('recovery_no_handles', stats)
 
   // ── 1. the conversation id, from a message the round already holds ─────────
-  if (!allows(RECOVERY_REQUEST_ADMIT_MS)) return retry('budget_exhausted', stats)
-  let messageId
-  try {
-    messageId = await decryptHandle({ ciphertext: stored[0].midCt, nonce: stored[0].midNonce })
-  } catch {
-    return retry('recovery_fetch_failed', stats)
+  // ALREADY RESOLVED? Then this is the same value the caller computed its ring variants
+  // from, and fetching it again would be a second identical request.
+  let conversationId = isUsableGraphId(knownConversationId) ? knownConversationId : null
+  if (conversationId === null) {
+    const ident = await resolveConversationIdentity({
+      handles: stored, decryptHandle, accessToken, deps, budgetAllows: allows,
+    })
+    stats.envelopeFetches += ident.stats?.envelopeFetches ?? 0
+    if (ident.outcome !== 'ok') {
+      return ident.outcome === 'retry'
+        ? retry(ident.reason, stats)
+        : settled(ident.reason, stats)
+    }
+    conversationId = ident.conversationKey
   }
-  if (!isUsableGraphId(messageId)) return settled('recovery_mismatch', stats)
-  let envelopeReq
-  try {
-    envelopeReq = buildMessageEnvelopeRequest({ messageId })
-  } catch {
-    return settled('recovery_mismatch', stats)
-  }
-  stats.envelopeFetches += 1
-  const env = await exec({
-    request: envelopeReq, accessToken, fetchImpl: deps?.fetchImpl, sleepImpl: deps?.sleepImpl,
-    now: deps?.now, budgetAllows: allows,
-  })
-  if (!env?.ok) return retryOrSettle(envelopeFailure(env?.code), stats)
-  const conversationId = env.json?.conversationId
-  if (!isUsableGraphId(conversationId)) return settled('recovery_mismatch', stats)
 
   // ── 2. the thread, folder by folder, envelopes only ──────────────────────
   const entries = []
@@ -191,7 +247,10 @@ export async function recoverConversation (p) {
     if (!allows(RECOVERY_REQUEST_ADMIT_MS)) return retry('budget_exhausted', stats)
     let req
     try {
-      req = buildConversationLookupRequest({ folder, conversationId, top: MAX_RECOVERY_MESSAGES_PER_FOLDER })
+      req = buildConversationLookupRequest({
+        folder, conversationId, top: MAX_RECOVERY_MESSAGES_PER_FOLDER,
+        ...(typeof sinceIso === 'string' && sinceIso.length > 0 ? { sinceIso } : {}),
+      })
     } catch {
       return settled('recovery_mismatch', stats)
     }
@@ -203,7 +262,12 @@ export async function recoverConversation (p) {
     if (!res?.ok) return retryOrSettle(lookupFailure(res?.code), stats)
     const page = readConversationLookupPage(res.json)
     if (page.ok !== true) return retry('recovery_fetch_failed', stats)
-    if (page.truncated) return settled('recovery_truncated', stats)
+    if (page.truncated) {
+      // THE KEY GOES BACK WITH THE TRUNCATION, so the caller's one bounded retry can reuse
+      // it instead of making the same envelope GET a second time. Memory only, like every
+      // other place this value appears.
+      return { ...settled('recovery_truncated', stats), conversationKey: conversationId }
+    }
     // The SAME normalizer the delta read uses: it refuses a body it was not supposed to
     // receive, drops drafts and malformed envelopes, and attaches the folder.
     const norm = normalizeGraphPage(page.items, folder)
@@ -228,7 +292,14 @@ export async function recoverConversation (p) {
   // The fingerprint is HMAC(connection, conversation key). A thread that does not fold
   // to the record the round holds is not the conversation it was asked about.
   if (!contribution) return settled('recovery_mismatch', stats)
-  if (contribution.inbound === 0 || contribution.outbound === 0) return settled('not_two_sided', stats)
+  if (contribution.inbound === 0 || contribution.outbound === 0) {
+    // STILL ONE-SIDED after asking Outlook. The caller must REMEMBER the unanswered
+    // message, or a reply that arrives in a later round can never be paired with it:
+    // this round's own records go when it completes, and the delta will not show the
+    // message again. Recording that needs the thread's ring variants, so the raw key
+    // goes back with the settlement - in memory only, like the recovered case below.
+    return { ...settled('not_two_sided', stats), conversationKey: conversationId }
+  }
 
   // The same decision the finalisation makes for a round-held record, including the one
   // resolvable taint: an unknown counterparty whose headers the content pass must screen.
@@ -252,7 +323,11 @@ export async function recoverConversation (p) {
       keyVersion: Number.isInteger(h.key_version) ? h.key_version : 1,
     })
   }
-  return { outcome: 'recovered', entry: decided.entry, extraHandles, stats }
+  // THE RAW CONVERSATION KEY, IN MEMORY ONLY. The run cannot compute the thread's or its
+  // messages' ring variants from a fingerprint - a fingerprint cannot be re-hashed - and this
+  // envelope GET is the one place the key is already in hand. It is handed back for that and
+  // nothing else: it is never persisted, never logged, and never leaves the invocation.
+  return { outcome: 'recovered', entry: decided.entry, extraHandles, stats, conversationKey: conversationId }
 }
 
 function retryOrSettle (reason, stats) {

@@ -105,7 +105,17 @@ import {
 } from './outlookContentStage.js'
 import { contentPermissions, backgroundOperationAllowed, REQUIRED_BACKGROUND_CONSENT_VERSION } from './outlookContentConsent.js'
 import {
-  recoverConversation, MAX_RECOVERIES_PER_INVOCATION, RECOVERY_ADMIT_MS,
+  decideSegment, normalizeCoverage, recoveryFloorIso, coverageForSegment, segmentIsTwoSided,
+  uncoveredMessages, MAX_UNPAIRED_HINT_PAIRS, orderMessages, truncatedRetryFloorIso,
+  splitAtKnowledgeFloor,
+} from './outlookThreadSegments.js'
+import {
+  conversationVariants, episodeVariants, withMessageVariants, resolveClaim,
+  segmentEpisodeFingerprint,
+} from './outlookThreadVariants.js'
+import {
+  recoverConversation, resolveConversationIdentity,
+  MAX_RECOVERIES_PER_INVOCATION, RECOVERY_ADMIT_MS, RECOVERY_REQUEST_ADMIT_MS,
 } from './outlookConversationRecovery.js'
 import { buildSelfIdentitySet, indexContactsByEmail } from './outlookParticipants.js'
 import { maintainSubscription, summarizeSubscriptionStep } from './outlookSubscriptions.js'
@@ -1095,7 +1105,7 @@ export async function runOutlookImport (p) {
     bodiesRead: 0, modelCalls: 0,
     // CONVERSATION RECOVERY: one-sided threads asked about, how many came back two-sided,
     // and the envelopes it took. Counts only; the outcomes map below carries the codes.
-    recoveriesAttempted: 0, recoveriesTwoSided: 0, recoveredMessages: 0,
+    recoveriesAttempted: 0, recoveriesTwoSided: 0, recoveredMessages: 0, recoveryRetries: 0,
     deferred: Object.create(null), ignored: Object.create(null),
     // WHICH CATEGORY the privacy guard objected to, when it did. Controlled labels
     // only; the offending value is never returned by the guard and is never read here.
@@ -1243,6 +1253,50 @@ export async function runOutlookImport (p) {
       // Clearing a rejected cursor does not turn a previously synced mailbox into
       // a first import. Keep canonical thread recovery on during the catch-up read,
       // including continuations, so a later first-visible message cannot change identity.
+      // ── THE THREADS' COVERAGE, ONE READ PER PAGE ──────────────────────────
+      // Not one call per conversation: the page's threads are asked about together, bounded
+      // by the page. Each is named by its current conversation fingerprint and by its episode
+      // aliases, which is how a row written before this feature existed - carrying no
+      // conversation fingerprint at all - is still found.
+      //
+      // A FAILED READ FORFEITS THE CURSOR. Writing segments without knowing what the thread
+      // has already summarized is how an accepted exchange gets suggested twice, so this is a
+      // refusal rather than a shrug: the round stops and the next one re-lists from here.
+      const coverageByCfp = new Map()
+      if (contentStageOn && rows.length > 0) {
+        const threads = []
+        for (const row of rows) {
+          const tcfp = typeof row?.cfp === 'string' ? row.cfp : null
+          if (tcfp === null) continue
+          const aliases = Array.isArray(row?.elookup)
+            ? row.elookup.filter((f) => typeof f === 'string') : []
+          threads.push({
+            cfp: tcfp,
+            efp: typeof row?.efp === 'string' ? row.efp : null,
+            efps: aliases,
+          })
+        }
+        if (threads.length > 0) {
+          const covRes = await rpc('get_outlook_thread_coverage', {
+            p_connection_id: connectionId, p_run_id: runId, p_threads: threads,
+          })
+          const covCode = covRes?.error ? 'rpc_error' : (covRes?.data?.result ?? 'unknown')
+          if (covCode !== 'ok') {
+            if (firstRefusal === null) firstRefusal = 'coverage_read_failed'
+            break
+          }
+          for (const t of Array.isArray(covRes.data.threads) ? covRes.data.threads : []) {
+            if (typeof t?.conversation_fingerprint === 'string') {
+              coverageByCfp.set(t.conversation_fingerprint, normalizeCoverage(t))
+            }
+          }
+        }
+      }
+
+      // How many keys the thread could be on record under. ONE means rotation cannot
+      // have happened and the batch coverage answer above is authoritative.
+      const ringSize = 1 + (Array.isArray(context.keyRing?.accepted)
+        ? context.keyRing.accepted.length : 0)
       const deltaRound = reserved.data.inbox_initial_import_done === true
         || reserved.data.sentitems_initial_import_done === true
         || GRAPH_FOLDERS.some((f) =>
@@ -1279,11 +1333,278 @@ export async function runOutlookImport (p) {
       }
       intended += decisions.filter((x) => x.entry !== null).length
 
+      /**
+       * REMEMBER AN UNANSWERED MESSAGE, so a reply arriving in a later round can still be
+       * paired with it.
+       *
+       * Both places that conclude "one-sided" must do this, and the one that did not was a
+       * defect: a thread whose first half is seen in a delta round is settled by RECOVERY
+       * (`not_two_sided`, no entry), which returned before the segment block ran. The round's
+       * own handles go when it completes and the delta will not show the message again, so
+       * without this record the half is unreachable - and for a thread that already has
+       * settled coverage the recovery floor would then be the settled watermark, which
+       * excludes the earlier half permanently.
+       *
+       * Required, not best-effort: losing the hint loses the half it protects, so a failure
+       * forfeits the cursor rather than passing the conversation.
+       *
+       * @returns {'ok'|string} 'ok', or the controlled refusal code to stop on
+       */
+      /**
+       * ABSORB messages against the THREAD, forward-only.
+       *
+       * Used where there is no candidate to hang coverage on: a pre-feature row that cannot
+       * be located, or messages older than the thread's start of continuous knowledge. The
+       * RPC unions the set and only ever extends the span.
+       *
+       * Required, not best-effort: absorbing is what stops the same window being read for
+       * ever, so a failure forfeits the cursor.
+       *
+       * @returns {'ok'|string} 'ok', or the controlled refusal code to stop on
+       */
+      const absorbWindow = async ({ cfp, messages, cfps }) => {
+        const pairs = (Array.isArray(messages) ? messages : [])
+          .filter((m) => typeof m?.messageFingerprint === 'string' && m?.timestampIso)
+        if (pairs.length === 0) return 'ok'
+        const instants = pairs.map((m) => m.timestampIso).sort()
+        const res = await rpc('baseline_outlook_thread_window', {
+          p_connection_id: connectionId,
+          p_run_id: runId,
+          p_conversation_fingerprint: cfp,
+          p_covered_fingerprints: [...new Set(pairs.map((m) => m.messageFingerprint))],
+          p_coverage_from_at: instants[0] ?? null,
+          p_coverage_through_at: instants[instants.length - 1] ?? null,
+          p_conversation_lookup_fingerprints: cfps?.length ? cfps : null,
+        })
+        const code = res?.error ? 'rpc_error' : (res?.data?.result ?? 'unknown')
+        if (code !== 'ok') return 'coverage_baseline_failed'
+        content.coverageBaselined = (content.coverageBaselined || 0) + 1
+        return 'ok'
+      }
+
+      const recordUnpairedHint = async ({ cfp, handles, conversationKey }) => {
+        const pairs = []
+        const seen = new Set()
+        for (const h of Array.isArray(handles) ? handles : []) {
+          const fp = h?.mfp
+          const at = h?.sentAt
+          if (typeof fp !== 'string' || !/^[0-9a-f]{64}$/.test(fp)) continue
+          if (typeof at !== 'string' || at.length === 0) continue
+          if (seen.has(fp)) continue
+          seen.add(fp)
+          pairs.push({ fp, at })
+          if (pairs.length >= MAX_UNPAIRED_HINT_PAIRS) break
+        }
+        if (pairs.length === 0) return 'ok'
+        let cfps = null
+        if (typeof conversationKey === 'string' && conversationKey.length > 0) {
+          const variants = await conversationVariants({
+            connectionId, conversationKey, keyRing: context.keyRing,
+          })
+          cfps = variants.length > 0 ? variants : null
+        }
+        const res = await rpc('record_outlook_thread_recovery', {
+          p_connection_id: connectionId,
+          p_run_id: runId,
+          p_conversation_fingerprint: cfp,
+          p_unpaired: pairs,
+          p_conversation_lookup_fingerprints: cfps,
+        })
+        const code = res?.error ? 'rpc_error' : (res?.data?.result ?? 'unknown')
+        if (code !== 'ok') return 'hint_write_failed'
+        content.hintsRecorded = (content.hintsRecorded || 0) + 1
+        return 'ok'
+      }
+
       for (const decision of decisions) {
         const cfp = decision.cfp
         let entry = decision.entry
         // Handles recovered from Outlook for this conversation, in memory only.
         let extraHandles = []
+        // The thread's raw Graph key, when recovery fetched it. Memory only.
+        let conversationKey = null
+        // What this write will claim, what it may compare against, and which bodies it reads.
+        let segmentCoverage = null
+        let conversationLookupFingerprints = null
+        // The legacy anchor's variants, under BOTH contact forms, when they had to be
+        // computed to find a pre-feature row. The baseline needs the same set: the form the
+        // worker computes now is not the form an older proposal was written under.
+        let legacyAnchorEfps = null
+        // TRUE when the thread could only be completed by the NARROWED retry, which means
+        // the unbounded listing overflowed: there is history this round cannot see, and
+        // whether any of it is already logged is unknowable from here.
+        let completedByNarrowedRetry = false
+        let segmentMfps = null
+        // ── THIS THREAD'S COVERAGE ─────────────────────────────────────────────
+        let cov = cfp !== null ? (coverageByCfp.get(cfp) ?? null) : null
+        // The handles the round already stored, read once: they carry this conversation's
+        // message fingerprints and instants, which the floor and the segment both need.
+        // READ WHENEVER THE STAGE MIGHT DRAFT. Gating this on the thread already HAVING
+        // coverage was a defect: a fresh thread then claimed none, so it never acquired any
+        // and a later exchange could not be told from the first. Reproduced through this
+        // handler - round 2 of a replayed thread skipped with `no_fingerprinted_messages`
+        // because the segment had nothing to be built from.
+        // Read before recovery, because the floor is an input to it, and read for a
+        // conversation that will be RECOVERED as well as one that already has an entry: a
+        // thread that is one-sided this round has no entry yet and is exactly the case whose
+        // earlier half the segment has to include. Gating on `entry !== null` alone left the
+        // recovered half standing on its own and the exchange was called one-sided again.
+        let storedForFloor = null
+        if (contentStageOn && cfp !== null && (entry !== null || decision.recover)) {
+          const pre = await readConversationHandles({ rpc, connectionId, runId, roundId, cfp })
+          if (pre.ok !== true) {
+            // RETRYABLE, and reported in the vocabulary that already exists for it. Guessing
+            // the window or the segment from nothing is how mail gets lost, so the round
+            // stops WITHOUT passing this conversation and commits no cursor - but it is not
+            // a refusal: an earlier revision of this read forfeited the whole round, which
+            // let one thread's transient handle-read failure block every other thread in it.
+            bumpDeferral('handles_unreadable')
+            outOfBudget = true
+            break
+          }
+          storedForFloor = pre.handles
+        }
+
+        // ── A FULLY SETTLED THREAD IS NOT RE-READ ──────────────────────────────
+        // Every message this round can see is already summarized and there is no open
+        // segment, so there is nothing to draft and nothing to ask Outlook for. Deciding this
+        // BEFORE recovery matters: recovery would spend an envelope GET and two listings on a
+        // settled thread and could answer `recovery_no_messages`, which reads like a fault
+        // when it is simply a thread with nothing new in it.
+        if (contentStageOn && cfp !== null && cov !== null && cov.pending === null
+            && cov.covered.size > 0 && storedForFloor !== null
+            && cov.settledWithoutCoverage !== true
+            && uncoveredMessages(
+              storedForFloor.map((h) => ({
+                messageFingerprint: h.mfp,
+                timestampIso: typeof h.sentAt === 'string' ? h.sentAt : '',
+              })), cov.covered).length === 0) {
+          bumpSkip('nothing_new')
+          if (entry !== null) intended -= 1
+          rowsProcessed += 1
+          processedThrough = cfp
+          continue
+        }
+
+        // ── THE THREAD'S IDENTITY, BEFORE COVERAGE IS RELIED ON ────────────────
+        // WHY THIS IS HERE AND NOT LATER. The batch coverage read above matches a thread on
+        // the CURRENT conversation fingerprint and on the round's episode aliases. Neither
+        // finds a row written under a retired key, because a rotation changes the
+        // conversation fingerprint too and a fingerprint cannot be re-hashed. Reproduced
+        // against the real producer: coverage read empty, so there was no floor, recovery
+        // re-listed the whole thread, the segment took the thread's FIRST message as its
+        // anchor, the model was sent the settled exchange again, and the producer answered
+        // `exists_terminal` while the round committed - the new exchange never suggested.
+        //
+        // So when the ring carries more than one key the batch answer is not authoritative:
+        // the raw key is resolved first and that one thread's coverage is re-asked with its
+        // ring variants. With a single key - Production today - rotation cannot have
+        // happened, the batch answer stands, and not one extra request is made.
+        if (contentStageOn && cfp !== null && ringSize > 1
+            && (entry !== null || decision.recover)) {
+          await ensureLease(PROGRESS_STEP_MS + RECOVERY_REQUEST_ADMIT_MS)
+          const ident = await resolveConversationIdentity({
+            handles: storedForFloor ?? [],
+            decryptHandle: ({ ciphertext, nonce }) => decryptCursor(ciphertext, nonce),
+            accessToken: context.accessToken,
+            deps,
+            budgetAllows,
+          })
+          if (ident.outcome === 'retry') {
+            // Transient, or out of budget: preserve the work by stopping WITHOUT passing
+            // this conversation. The next invocation re-lists from the committed cursor.
+            //
+            // REPORTED IN THE CONTROLLED VOCABULARY. An earlier revision emitted
+            // `identity_unresolved`, which is not in DEFERRAL_CLASS, so sanitizeContentReport
+            // DROPPED it: the run stopped and the report said nothing about why. A transient
+            // failure on this envelope GET is a `fetch_failed` - "a transient Graph failure,
+            // or a moved message" - which is exactly what it is, and it is retryable.
+            bumpDeferral(ident.reason === 'budget_exhausted' ? 'budget_exhausted' : 'fetch_failed')
+            outOfBudget = true
+            break
+          }
+          if (ident.outcome !== 'ok') {
+            // A deterministic answer - the message no longer resolves, or the envelope is
+            // not this conversation. Reported and passed, exactly as recovery settles it.
+            content.recoveryOutcomes[ident.reason] =
+              (content.recoveryOutcomes[ident.reason] || 0) + 1
+            bumpSkip(ident.reason)
+            if (entry !== null) intended -= 1
+            rowsProcessed += 1
+            processedThrough = cfp
+            continue
+          }
+          conversationKey = ident.conversationKey
+          conversationLookupFingerprints = await conversationVariants({
+            connectionId, conversationKey, keyRing: context.keyRing,
+          })
+          // RE-ASK FOR THIS ONE THREAD, now that the question can be put properly. A
+          // failure here forfeits the cursor for the same reason the batch read does:
+          // writing segments without knowing what is already summarized is how an accepted
+          // exchange gets suggested twice.
+          const again = await rpc('get_outlook_thread_coverage', {
+            p_connection_id: connectionId,
+            p_run_id: runId,
+            p_threads: [{
+              cfp,
+              cfps: conversationLookupFingerprints.length > 0
+                ? conversationLookupFingerprints : undefined,
+              efp: typeof decision.entry?.episodeFingerprint === 'string'
+                ? decision.entry.episodeFingerprint : null,
+              efps: Array.isArray(decision.entry?.episodeLookupFingerprints)
+                ? decision.entry.episodeLookupFingerprints : [],
+            }],
+          })
+          const againCode = again?.error ? 'rpc_error' : (again?.data?.result ?? 'unknown')
+          if (againCode !== 'ok') {
+            if (firstRefusal === null) firstRefusal = 'coverage_read_failed'
+            break
+          }
+          const row0 = Array.isArray(again.data.threads) ? again.data.threads[0] : null
+          if (row0 && typeof row0.conversation_fingerprint === 'string') {
+            cov = normalizeCoverage(row0)
+            coverageByCfp.set(cfp, cov)
+          }
+        }
+
+        // ── A THREAD SETTLED BEFORE SEGMENTS EXISTED ───────────────────────────
+        // Its coverage cannot be reconstructed - the reviewer's date is editable and is a
+        // date, not a message, and the handles that named the messages went with the round.
+        // So it is given an explicit forward-only baseline from what is visible now, which
+        // produces NO suggestion, and the thread is left alone for the rest of this round.
+        if (cov?.settledWithoutCoverage === true && entry !== null) {
+          const pairs = (storedForFloor ?? []).filter((h) => typeof h.mfp === 'string')
+          if (pairs.length === 0) {
+            bumpSkip('coverage_uninitialized')
+            if (entry !== null) intended -= 1
+            rowsProcessed += 1
+            if (cfp !== null) processedThrough = cfp
+            continue
+          }
+          const instants = pairs.map((h) => h.sentAt).filter((t) => typeof t === 'string').sort()
+          const baseRes = await rpc('baseline_outlook_thread_coverage', {
+            p_connection_id: connectionId,
+            p_run_id: runId,
+            p_conversation_fingerprint: cfp,
+            p_episode_fingerprint: entry.episodeFingerprint,
+            p_episode_lookup_fingerprints: entry.episodeLookupFingerprints?.length
+              ? entry.episodeLookupFingerprints : null,
+            p_covered_fingerprints: pairs.map((h) => h.mfp),
+            p_coverage_from_at: instants[0] ?? null,
+            p_coverage_through_at: instants[instants.length - 1] ?? null,
+          })
+          const baseCode = baseRes?.error ? 'rpc_error' : (baseRes?.data?.result ?? 'unknown')
+          if (baseCode !== 'ok') {
+            if (firstRefusal === null) firstRefusal = 'coverage_baseline_failed'
+            break
+          }
+          content.coverageBaselined = (content.coverageBaselined || 0) + 1
+          bumpSkip('coverage_baselined')
+          intended -= 1
+          rowsProcessed += 1
+          if (cfp !== null) processedThrough = cfp
+          continue
+        }
         if (decision.recover) {
           // ── CONVERSATION RECOVERY, for ONE thread ──────────────────────────────
           // For a one-sided thread (no entry yet): asked about rather than given up on.
@@ -1310,6 +1631,19 @@ export async function runOutlookImport (p) {
             try {
               rec = await recoverConversation({
                 row: decision.recover,
+                // Already resolved above when the ring made it necessary: the same envelope
+                // GET, made once rather than twice.
+                ...(conversationKey === null ? {} : { conversationId: conversationKey }),
+                // THE SEGMENT WINDOW. The least of the settled instant, the pending segment's
+                // own span start and the durable unpaired hint - so a long thread stays inside
+                // one bounded page while a late-discovered half is still reachable. Absent
+                // coverage there is no floor and the request is the one that shipped.
+                sinceIso: recoveryFloorIso({
+                  messages: (storedForFloor ?? []).map((h) => ({ timestampIso: h.sentAt })),
+                  coverageThroughIso: cov?.coverageThroughIso ?? null,
+                  pendingFromIso: cov?.pendingFromIso ?? null,
+                  earliestUnpairedIso: cov?.earliestUnpairedIso ?? null,
+                }) ?? undefined,
                 handles: stored.handles,
                 decryptHandle: ({ ciphertext, nonce }) => decryptCursor(ciphertext, nonce),
                 accessToken: context.accessToken,
@@ -1326,6 +1660,73 @@ export async function runOutlookImport (p) {
               // Nothing from the thrown value is read: it can carry a URL, an address or a
               // provider message. Retryable, so nothing is settled for it.
               rec = { outcome: 'retry', reason: 'recovery_fetch_failed', stats: {} }
+            }
+
+            // ── ONE MORE BOUNDED ATTEMPT, when the thread is longer than a page ──────
+            // The provider has answered "there is more of this thread than one page". An
+            // unwindowed request cannot succeed however often it is repeated, so the choice
+            // is a bounded window or losing the exchange for good - and for a LEGACY thread
+            // it is for good, permanently: its refs row carries no conversation fingerprint,
+            // so the coverage read never finds it, so there is never a settled instant to
+            // floor the listing with. Reproduced against the real functions with the
+            // original candidate written by the shipped worker: every continuation settled
+            // `recovery_truncated` while the round committed, for ever.
+            //
+            // The retry floor is made only of instants the run legitimately holds (see
+            // truncatedRetryFloorIso) - never a reviewer's date - and it claims nothing: it
+            // narrows a listing, and what the narrowed listing returns is what the following
+            // write claims. ONE retry, inside the same recovery cap and the same budget
+            // admission; a truncated retry settles `recovery_truncated` exactly as before.
+            if (rec.outcome === 'settled' && rec.reason === 'recovery_truncated') {
+              const retryFloor = truncatedRetryFloorIso({
+                messages: (storedForFloor ?? []).map((h) => ({ timestampIso: h.sentAt })),
+                pendingFromIso: cov?.pendingFromIso ?? null,
+                earliestUnpairedIso: cov?.earliestUnpairedIso ?? null,
+              })
+              // A VIABLE RETRY THAT CANNOT BE ADMITTED IS NOT A SETTLEMENT. Reproduced
+              // against the real functions: with the clock advanced inside each request's
+              // own deadline, both lookups completed but the invocation could not admit the
+              // narrowed retry - and the truncated answer was then treated as a decision, so
+              // both cursors committed with `recovery_truncated`, zero retries and no
+              // suggestion. The exchange was gone. A floor exists, so the work is possible:
+              // it is preserved for the next invocation instead.
+              if (retryFloor !== null
+                  && !budgetAllows(RECOVERY_ADMIT_MS + WRITE_STEP_RESERVE_MS)) {
+                rec = { outcome: 'retry', reason: 'budget_exhausted', stats: rec.stats ?? {} }
+              } else if (retryFloor !== null) {
+                content.recoveryRetries = (content.recoveryRetries || 0) + 1
+                await ensureLease(PROGRESS_STEP_MS + RECOVERY_ADMIT_MS)
+                let again
+                try {
+                  const knownKey = conversationKey
+                    ?? (typeof rec.conversationKey === 'string' ? rec.conversationKey : null)
+                  again = await recoverConversation({
+                    row: decision.recover,
+                    // The truncated answer carried the key back, so the retry does NOT
+                    // repeat the envelope GET: one identity request per conversation.
+                    ...(knownKey === null ? {} : { conversationId: knownKey }),
+                    sinceIso: retryFloor,
+                    handles: stored.handles,
+                    decryptHandle: ({ ciphertext, nonce }) => decryptCursor(ciphertext, nonce),
+                    accessToken: context.accessToken,
+                    deps,
+                    budgetAllows,
+                    selfSet,
+                    contactIndex,
+                    connectionId,
+                    keyRing: context.keyRing,
+                    produceHandles: produceRecoveryHandles,
+                    localDateFor: (iso) => localDateFor(iso, context.timeZone),
+                  })
+                } catch {
+                  again = { outcome: 'retry', reason: 'recovery_fetch_failed', stats: {} }
+                }
+                // The retry's answer REPLACES the truncated one, whatever it is: a second
+                // truncation settles the same way the first did, and a transient failure is
+                // still preserved for the next invocation.
+                rec = again
+                if (again.outcome === 'recovered') completedByNarrowedRetry = true
+              }
             }
           }
           const code = rec.outcome === 'recovered' ? 'recovered' : rec.reason
@@ -1357,6 +1758,23 @@ export async function runOutlookImport (p) {
             // (that would never resolve) and nothing metadata-only is substituted. A later
             // round that can complete the thread refreshes the row. The write the pre-pass
             // counted for this entry is no longer needed.
+            // STILL ONE-SIDED, after asking Outlook. This is the conclusion that strands a
+            // half if nothing records it: the round's handles go when it completes, the delta
+            // will not show the message again, and for a thread that already has settled
+            // coverage the recovery floor would be the settled watermark - which excludes the
+            // earlier half permanently. Reproduced through this handler: round 1 saw one
+            // outbound message, recovery confirmed one-sided, and the hint table stayed empty.
+            // A deterministic REFUSAL (entry !== null) is a different case: the thread's
+            // identity could not be established at all, and nothing about it is known to
+            // record.
+            if (entry === null && cfp !== null) {
+              const hintCode = await recordUnpairedHint({
+                cfp,
+                handles: stored.ok === true ? stored.handles : [],
+                conversationKey: rec.conversationKey,
+              })
+              if (hintCode !== 'ok') { if (firstRefusal === null) firstRefusal = hintCode; break }
+            }
             if (entry !== null) intended -= 1
             bumpSkip(entry === null ? 'not_two_sided' : rec.reason)
             rowsProcessed += 1
@@ -1370,7 +1788,315 @@ export async function runOutlookImport (p) {
           if (entry === null) intended += 1
           entry = rec.entry
           extraHandles = rec.extraHandles
+          // IN MEMORY ONLY, and only to compute ring variants: a fingerprint cannot be
+          // re-hashed, so without the raw key a thread written under a retired key cannot be
+          // found and a settled exchange is suggested a second time. Never persisted, never
+          // logged.
+          conversationKey = typeof rec.conversationKey === 'string' ? rec.conversationKey : null
         }
+        // ── THE SEGMENT ────────────────────────────────────────────────────────
+        // A thread with no settled coverage is one exchange and behaves exactly as before.
+        // With coverage, what gets drafted is the part of the thread nobody has summarized.
+        // EVERY thread the stage will draft, not only one that already has coverage: the
+        // first segment is where a thread's coverage comes from.
+        if (contentStageOn && cfp !== null && entry !== null) {
+          const handles = (storedForFloor ?? []).concat(
+            extraHandles.filter((h) => h && typeof h.mfp === 'string'))
+          // Raw provider keys, decrypted here so the ring variants can be computed. A
+          // handle that will not decrypt is not guessed at.
+          const msgs = []
+          for (const h of handles) {
+            if (typeof h.mfp !== 'string') continue
+            let key = null
+            try { key = await decryptCursor(h.midCt, h.midNonce) } catch { key = null }
+            msgs.push({
+              providerMessageKey: key,
+              messageFingerprint: h.mfp,
+              timestampIso: typeof h.sentAt === 'string' ? h.sentAt : '',
+              direction: h.folder === 'sentitems' ? 'outbound' : 'inbound',
+            })
+          }
+          const withVariants = conversationKey !== null
+            ? await withMessageVariants({
+              connectionId, conversationKey, keyRing: context.keyRing, messages: msgs,
+            })
+            : msgs
+          if (conversationKey !== null) {
+            conversationLookupFingerprints = await conversationVariants({
+              connectionId, conversationKey, keyRing: context.keyRing,
+            })
+          }
+
+          // ── A SETTLED SEGMENT OLDER THAN ANYTHING THIS ROUND SAW ───────────────
+          // A row written before this feature has NO conversation fingerprint, so it can
+          // only be matched on its own EPISODE anchor - and that anchor is the thread's
+          // first message, which the round itself never delivered. Reproduced against the
+          // real functions with a proposal written by the shipped worker: the thread looked
+          // brand new, mail that was already a logged interaction was summarized again, and
+          // the accepted exchange went to the model a second time.
+          //
+          // Bounded, and only when it can matter: the thread appears to have no coverage AND
+          // recovery supplied mail older than this round's own. Both contact forms are
+          // offered, which is also the transition where an accepted proposal's person has
+          // since become a contact.
+          const nothingKnown = cov === null
+            || (cov.covered.size === 0 && cov.pending === null
+                && cov.settledWithoutCoverage !== true)
+          const ordered = orderMessages(withVariants)
+          const anchor = ordered[0] ?? null
+          if (nothingKnown && conversationKey !== null && extraHandles.length > 0
+              && anchor !== null && typeof anchor.providerMessageKey === 'string') {
+            const efps = await episodeVariants({
+              connectionId,
+              conversationKey,
+              firstMessageKey: anchor.providerMessageKey,
+              contactId: entry.contactId ?? null,
+              keyRing: context.keyRing,
+            })
+            if (efps.length > 0) {
+              legacyAnchorEfps = efps
+              const legacyRes = await rpc('get_outlook_thread_coverage', {
+                p_connection_id: connectionId,
+                p_run_id: runId,
+                p_threads: [{
+                  cfp,
+                  cfps: conversationLookupFingerprints?.length
+                    ? conversationLookupFingerprints : undefined,
+                  efp: efps[0],
+                  efps,
+                }],
+              })
+              const legacyCode = legacyRes?.error
+                ? 'rpc_error' : (legacyRes?.data?.result ?? 'unknown')
+              if (legacyCode !== 'ok') {
+                // Same reason the other coverage reads forfeit the cursor: drafting without
+                // knowing what is already summarized is how logged mail gets suggested
+                // twice.
+                if (firstRefusal === null) firstRefusal = 'coverage_read_failed'
+                break
+              }
+              const lrow = Array.isArray(legacyRes.data.threads)
+                ? legacyRes.data.threads[0] : null
+              if (lrow && typeof lrow.conversation_fingerprint === 'string') {
+                const found = normalizeCoverage(lrow)
+                if (found.covered.size > 0 || found.pending !== null
+                    || found.settledWithoutCoverage === true) {
+                  cov = found
+                  coverageByCfp.set(cfp, cov)
+                }
+              }
+            }
+          }
+
+          // ── UNKNOWN MEMBERSHIP IS NOT AN ASSERTION THAT THE WINDOW IS NEW ──────
+          // The thread was completed only by the narrowed retry, so there is history beyond
+          // one page that this round cannot see, and no coverage could be established for
+          // it - the pre-feature refs row has no conversation fingerprint and its episode
+          // anchor sits behind the back-catalogue, so no bounded window reaches it.
+          //
+          // REPRODUCED against the real functions: the next delta page re-delivered the
+          // accepted exchange's last inbound message beside a genuinely new pair, so the
+          // narrowed window contained a message the reviewer had already accepted. The
+          // worker drafted the WHOLE window - the model request carried the accepted inbound
+          // and the coverage row claimed all three messages. The earlier claim that the
+          // window "cannot reach the accepted exchange" was wrong: delta re-delivers.
+          //
+          // So the approved forward-only policy applies instead: absorb what the window
+          // covered, against the THREAD because there is no candidate to hang it on, and
+          // draft nothing. The next exchange is decided against this set and captured
+          // normally. Not a permanent skip - the absorption is recorded, so the thread is
+          // never re-absorbed - and nothing is inferred from a reviewer's date.
+          // RE-TESTED against the CURRENT coverage: the legacy anchor lookup above may have
+          // found the thread after all, and a thread whose coverage is known needs no
+          // baseline - it gets an ordinary segment.
+          const stillNothingKnown = cov === null
+            || (cov.covered.size === 0 && cov.pending === null
+                && cov.settledWithoutCoverage !== true)
+          if (completedByNarrowedRetry && stillNothingKnown) {
+            const pairs = orderMessages(withVariants)
+              .filter((m) => typeof m.messageFingerprint === 'string' && m.timestampIso)
+            if (pairs.length === 0) {
+              bumpSkip('coverage_uninitialized')
+              intended -= 1
+              rowsProcessed += 1
+              processedThrough = cfp
+              continue
+            }
+            const winCode = await absorbWindow({
+              cfp, messages: pairs, cfps: conversationLookupFingerprints,
+            })
+            if (winCode !== 'ok') { if (firstRefusal === null) firstRefusal = winCode; break }
+            bumpSkip('coverage_baselined')
+            intended -= 1
+            rowsProcessed += 1
+            processedThrough = cfp
+            continue
+          }
+
+          const decided = decideSegment({
+            messages: withVariants,
+            coverage: cov ?? normalizeCoverage({}),
+          })
+          if (decided.action === 'baseline') {
+            // A THREAD SETTLED BEFORE SEGMENTS EXISTED, discovered here because its anchor
+            // only became known when recovery completed the thread. Its coverage cannot be
+            // reconstructed - the reviewer's date is editable and is a date, not a message -
+            // so it is given an explicit FORWARD-ONLY baseline from everything visible now,
+            // which produces NO suggestion. Only mail arriving after it becomes a segment.
+            const pairs = (decided.messages ?? []).filter((m) =>
+              typeof m.messageFingerprint === 'string' && m.timestampIso)
+            if (pairs.length === 0) {
+              bumpSkip('coverage_uninitialized')
+              intended -= 1
+              rowsProcessed += 1
+              processedThrough = cfp
+              continue
+            }
+            const instants = pairs.map((m) => m.timestampIso).sort()
+            const baseRes = await rpc('baseline_outlook_thread_coverage', {
+              p_connection_id: connectionId,
+              p_run_id: runId,
+              p_conversation_fingerprint: cfp,
+              p_episode_fingerprint: entry.episodeFingerprint,
+              // BOTH the round's own anchor aliases and, when the legacy row was found by
+              // its own anchor, that anchor under both contact forms.
+              p_episode_lookup_fingerprints: (() => {
+                const u = [...new Set([
+                  ...(entry.episodeLookupFingerprints ?? []),
+                  ...(legacyAnchorEfps ?? []),
+                ])]
+                return u.length > 0 ? u : null
+              })(),
+              p_covered_fingerprints: pairs.map((m) => m.messageFingerprint),
+              p_coverage_from_at: instants[0] ?? null,
+              p_coverage_through_at: instants[instants.length - 1] ?? null,
+            })
+            const baseCode = baseRes?.error ? 'rpc_error' : (baseRes?.data?.result ?? 'unknown')
+            if (baseCode !== 'ok') {
+              if (firstRefusal === null) firstRefusal = 'coverage_baseline_failed'
+              break
+            }
+            content.coverageBaselined = (content.coverageBaselined || 0) + 1
+            bumpSkip('coverage_baselined')
+            intended -= 1
+            rowsProcessed += 1
+            processedThrough = cfp
+            continue
+          }
+          if (decided.action === 'nothing_new') {
+            // Every message of this thread is already summarized. Not a failure: a settled
+            // thread the round happened to re-read.
+            bumpSkip('nothing_new')
+            intended -= 1
+            rowsProcessed += 1
+            processedThrough = cfp
+            continue
+          }
+          if (decided.action === 'defer') {
+            bumpSkip(decided.code)
+            intended -= 1
+            rowsProcessed += 1
+            processedThrough = cfp
+            continue
+          }
+          // ── SPLIT AT THE THREAD'S START OF CONTINUOUS KNOWLEDGE ────────────────
+          // Only for a thread that carries a baseline, which is the durable marker that its
+          // history could never be located. Below that instant a message may belong to the
+          // pre-feature accepted exchange, so it is ABSORBED and never drafted; at or after
+          // it, the ordinary rules decide. Reproduced against the real functions: delta
+          // re-delivered the accepted exchange's last inbound beside a genuinely new pair,
+          // and without this split the accepted message went to the model and the coverage
+          // row claimed all three.
+          let segment = decided.segment
+          // THE FIXED INITIALIZATION BOUNDARY, never the absorbed span's minimum. Using the
+          // minimum was reproduced as a defect: absorbing one older message lowered it, and a
+          // different accepted message in the interval that opened was then drafted.
+          if (typeof cov?.threadBaselineBoundaryIso === 'string') {
+            const split = splitAtKnowledgeFloor(segment, cov.threadBaselineBoundaryIso)
+            if (split.older.length > 0) {
+              const code = await absorbWindow({
+                cfp, messages: split.older, cfps: conversationLookupFingerprints,
+              })
+              if (code !== 'ok') { if (firstRefusal === null) firstRefusal = code; break }
+              segment = split.drafted
+              if (segment.length === 0) {
+                // The whole segment predated our knowledge of the thread. Absorbed, and
+                // nothing is left to draft.
+                bumpSkip('coverage_baselined')
+                intended -= 1
+                rowsProcessed += 1
+                processedThrough = cfp
+                continue
+              }
+            }
+          }
+          // THE TWO-WAY RULE, APPLIED TO THE SEGMENT. A thread answered once does not make
+          // every later one-sided message a suggestion.
+          if (!segmentIsTwoSided(segment)) {
+            // The unresolved half is remembered so a later round can still pair it.
+            const hintCode = await recordUnpairedHint({
+              cfp,
+              handles: segment.map((m) => ({ mfp: m.messageFingerprint, sentAt: m.timestampIso })),
+              conversationKey,
+            })
+            if (hintCode !== 'ok') { if (firstRefusal === null) firstRefusal = hintCode; break }
+            bumpSkip('not_two_sided')
+            intended -= 1
+            rowsProcessed += 1
+            processedThrough = cfp
+            continue
+          }
+          const span = coverageForSegment(segment)
+          // EVERY VALUE THE THREAD IS ALREADY ON RECORD UNDER - settled AND pending. Not the
+          // settled set alone: reproduced against the real producer, a thread whose pending
+          // coverage held the mail under a retired key produced a claim entirely of
+          // current-key values, so the overlap with the coverage that acceptance then
+          // settled was invisible and the write was accepted as `exists_terminal` while the
+          // new exchange was lost. A thread with no coverage at all still claims its own
+          // first segment: the set is empty, so each message claims its current-key value.
+          const onRecord = new Set([
+            ...(cov?.covered ?? []),
+            ...(cov?.pending?.covered ?? []),
+          ])
+          const resolved = resolveClaim(segment, onRecord)
+          segmentCoverage = {
+            fingerprints: resolved.claim,
+            aliases: resolved.aliases,
+            fromIso: span.fromIso,
+            throughIso: span.throughIso,
+          }
+          // Only the segment's bodies are read, so the model request carries this exchange
+          // and not the settled history beside it.
+          segmentMfps = segment.map((m) => m.messageFingerprint)
+          // IDENTITY. A pending segment keeps the one it was created under; a NEW segment is
+          // anchored on ITS OWN first message. Leaving a new segment on the thread's anchor
+          // made every segment compute the same episode value, and `source_fingerprint` is
+          // unique per user - reproduced through this handler as a second write carrying the
+          // first segment's fingerprint.
+          if (decided.action === 'refresh_pending') {
+            entry = { ...entry, episodeFingerprint: decided.episodeFingerprint }
+          } else if (conversationKey !== null
+                     && typeof decided.anchor?.providerMessageKey === 'string') {
+            const anchored = await segmentEpisodeFingerprint({
+              connectionId,
+              conversationKey,
+              firstMessageKey: decided.anchor.providerMessageKey,
+              contactId: entry.contactId ?? null,
+              keyRing: context.keyRing,
+            })
+            entry = {
+              ...entry,
+              episodeFingerprint: anchored.write,
+              episodeLookupFingerprints: anchored.lookups,
+            }
+          }
+          if (typeof cov?.matchedConversationFingerprint === 'string') {
+            conversationLookupFingerprints = [
+              ...new Set([...(conversationLookupFingerprints ?? []), cov.matchedConversationFingerprint]),
+            ]
+          }
+        }
+
         if (entry === null) {
           // Skipped on purpose - a one-sided or unsupported conversation. A skip is a
           // decision, not unfinished work, so finalisation may pass it.
@@ -1424,6 +2150,8 @@ export async function runOutlookImport (p) {
               },
               // Recovered from Outlook for a thread this round only half saw; empty otherwise.
               extraHandles,
+              // Null for a thread with no settled coverage: the whole exchange, as before.
+              segmentMfps,
               rpc,
               connectionId,
               runId,
@@ -1481,7 +2209,9 @@ export async function runOutlookImport (p) {
           break
         }
 
-        const plan = planContentWrite(entry, pass, { consentOpen })
+        const plan = planContentWrite(
+          { ...entry, segmentCoverage, conversationFingerprint: cfp, conversationLookupFingerprints },
+          pass, { consentOpen })
         if (plan.deferral !== null) bumpDeferral(plan.deferral)
         // THE SAFE DIAGNOSTIC for a withheld request. Keyed on the PASS's own reason
         // rather than the plan's, because planContentWrite substitutes a default when
