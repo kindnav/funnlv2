@@ -254,11 +254,19 @@ carries coverage is never rewritten, so a baseline can be attempted twice with n
 cost was "at most one exchange per legacy thread". That was wrong. A baseline marks **every
 message visible when it runs** as covered, which on a long thread can be **several exchanges** -
 proven in the runtime file with a twelve-message legacy thread covering three exchanges, all
-absorbed, no suggestion produced. **That does not establish the beyond-page-cap case**: twelve
-messages fit inside one bounded recovery page, so a legacy thread whose history exceeds
-`MAX_RECOVERY_MESSAGES_PER_FOLDER` is still undemonstrated, and so is a baseline for a genuine
-pre-feature new-contact proposal built from the real two anchor forms rather than a hand-made
-row. Only mail arriving *after* the baseline becomes a segment.
+absorbed, no suggestion produced. Only mail arriving *after* the baseline becomes a segment.
+
+Both cases that were open when that correction was first written are now demonstrated against
+the real functions in `tests/local/outlook-thread-segments-flow.mjs`: a legacy thread whose
+history exceeds `MAX_RECOVERY_MESSAGES_PER_FOLDER`, and a baseline for a genuine pre-feature
+new-contact proposal written by the **shipped** worker under the real anchor forms rather than
+a hand-made row. Nothing in this file should be read as saying either remains untested.
+
+**A baseline is not what happens to every pre-existing thread.** It is reached on exactly two
+conditions: a settled candidate that is reachable but carries no coverage set
+(`settled_without_coverage`), and a thread whose coverage could not be established at all and
+that only the narrowed retry could complete. A thread whose earlier coverage is locatable gets
+ordinary segments, and a thread with no new mail is never touched.
 
 That is the price of never duplicating an interaction the reviewer has already accepted, and it
 is paid once per legacy thread. It is also why the baseline is recorded as
@@ -277,47 +285,28 @@ baseline onward.
 
 ## 8. Disclosure — exact changes, and the cutover they force
 
-### 8a. `/privacy`, the provenance bullet
+### 8a / 8b. The exact wording — in the rollout packet
 
-The published sentence already says "so the same **exchange** is not suggested twice", which stays
-accurate. What is not disclosed is the **retained coverage state** and the **later-exchange
-behaviour**. Replace the provenance bullet's first sentence:
+The complete, unpublished replacement for the `/privacy` provenance bullet and the one notice
+clause lives in **`docs/outlook-thread-segments-rollout.md` section 2**, together with a table
+binding every sentence to the column or condition it is accountable to. It is kept in one place
+on purpose: two drafts of a disclosure diverge, and the one that gets published is then the one
+nobody reviewed.
 
-> one-way keyed fingerprints (with the key version) of the conversation and of the person, so the
-> same exchange is not suggested twice.
+What that wording has to carry, and what an earlier draft got wrong:
 
-with:
+- the **thread-level baseline**, including that it produces **no suggestion** from what it
+  absorbs;
+- that it absorbs **the whole first visible batch**, which may be several exchanges — the
+  earlier "costs one exchange" phrasing was wrong (see section 3);
+- its bound of **50** fingerprints;
+- that `baseline_boundary_at` is **a time taken from the messages themselves**, fixed once —
+  not the wall-clock moment initialization ran — and that the measured span widens separately;
+- the **25** unanswered `{fingerprint, time}` pairs;
+- that baselining happens only where older coverage **cannot be established**, not on every
+  pre-existing thread.
 
-> one-way keyed fingerprints (with the key version) of the conversation, of the person, and of
-> the individual messages a suggestion was drawn from, together with the times of the first and
-> last of those messages, so the same exchange is not suggested twice and a later exchange in the
-> same thread can be recognised as new. Accepting or dismissing a suggestion settles that
-> exchange; if you and the same person exchange messages again in that thread, Funnl prepares a
-> new suggestion for the new messages only, and the interaction you already accepted is never
-> changed. Where Funnl has seen a message it could not yet pair with a reply, it also keeps a
-> short list for that conversation of those messages' fingerprints and the time of each - at
-> most twenty-five of them - so the two halves can still be brought together when the reply
-> arrives in a later check, and so each entry can be removed once its message has been
-> accounted for. These fingerprints and times are stored against your account; none of them is
-> a message, an address or a subject line.
-
-The rest of the bullet is unchanged, including "Funnl does not store Microsoft message or
-conversation identifiers, mailbox addresses, or subject lines in these provenance records", which
-remains true: a message **fingerprint** is not a message identifier.
-
-### 8b. The just-in-time notice — this is the expensive one
-
-The notice currently says:
-
-> ... and one-way fingerprints of the exchange, so the same **conversation** is not suggested
-> twice.
-
-Under segments that is **wrong**: the same conversation can be suggested again, for a later
-exchange. Replace that clause with:
-
-> ... and one-way fingerprints of the exchange and of the messages it was drawn from, so the same
-> exchange is not suggested twice. A later exchange in the same thread is prepared as a new
-> suggestion for the new messages only.
+### 8c. The cutover the wording forces
 
 **This moves the derived consent version.** The version is a digest of the whole notice, so
 changing the text changes `DISCLOSURE_FINGERPRINT`, and all three worker consent requirements
@@ -327,40 +316,28 @@ would publish a claim the feature contradicts.
 
 **If you want to pay re-consent once**, batch this notice change with the next one.
 
-### 8c. Ordered cutover
+### 8d. The ordered cutover — in the rollout packet
 
-Not interchangeable:
+The order is **not** the one an earlier revision of this section gave. That revision published
+and deployed before aligning the version, and it had no pause at all: the newly deployed worker
+would have run the feature while its three requirements still named the OLD notice, doing
+segmenting, absorption and baselining under a disclosure that described none of it.
 
-1. Review and approve the 8a and 8b wording.
-2. **Apply migration `20261011000000`.** Behaviour is unchanged until a caller passes coverage,
-   so this is safe ahead of everything else.
-3. **Publish 8a and 8b together**, and set `/privacy` "Last updated" to the publication date.
-4. **Derive the new notice version** from the shipped notice, and carry that one value into the
-   browser constant, the server `OUTLOOK_DISCLOSURE_VERSION`, and **all three** worker consent
-   requirements. Never one alone.
-5. **Deploy the worker** from merged main.
-6. **Pilot re-consents through the SAME-ACCOUNT OAuth update path.** Not
-   disconnect/reconnect. Verified from the catalog in the runtime file:
-   `finalize_microsoft_connection` upserts `ON CONFLICT (user_id) DO UPDATE` and returns the
-   same connection id, refuses a different Microsoft account outright (`different_account`)
-   rather than swapping it, writes the new `consent_policy_version` onto that existing row, and
-   deletes nothing. So the connection identity, the cursors, the coverage and the recovery
-   hints all survive.
+The corrected order, with a gate per step and execution **disabled** across the whole cutover,
+is **`docs/outlook-thread-segments-rollout.md` section 3**. Kept in one place for the same
+reason as the wording.
 
-   **Disconnect would destroy them.** `outlook_sync_state`, `outlook_candidate_refs` and
-   `outlook_thread_recovery` all cascade from the connection, so a disconnect/reconnect cycle
-   would erase every cursor and every dedup reference and the thread history would restart from
-   a legacy baseline. That is asserted from the catalog, which is why this step names the
-   update path and nothing else.
+**The one fact worth repeating here, because it is catalog-verified rather than asserted:**
+re-consent goes through the SAME-ACCOUNT OAuth update path, never disconnect/reconnect.
+`finalize_microsoft_connection` upserts `ON CONFLICT (user_id) DO UPDATE`, returns the same
+connection id, refuses a different Microsoft account outright (`different_account`) rather than
+swapping it, writes the new `consent_policy_version` onto that existing row, and deletes
+nothing. So connection identity, cursors, coverage and recovery hints all survive.
 
-   Until the pilot re-consents the background gate fails closed and the worker reads nothing -
-   the designed posture, not an outage.
-7. Watch the first continuation of a real thread, and the first legacy baseline.
+**Disconnect would destroy them.** `outlook_sync_state`, `outlook_candidate_refs` and
+`outlook_thread_recovery` all cascade from the connection, so a disconnect/reconnect cycle
+would take the coverage this feature depends on with it and re-import the mailbox from scratch.
 
-**Rollback.** Revert the worker and leave the four columns in place. They are additive and
-nullable, every producer parameter defaults to NULL, and with no coverage passed the producers
-behave exactly as the applied versions. No stored note, candidate or interaction is touched by
-the migration or by a rollback.
 
 ## 9. What is demonstrated, and what is not
 
