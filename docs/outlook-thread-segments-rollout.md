@@ -263,8 +263,20 @@ back - it would let a run proceed. The only things stopping it are the **absent
 the pause is essential rather than belt-and-braces, and why neither may be touched until the
 requirements are raised, the worker is redeployed with them, and the pilot has re-consented.
 
-An earlier revision of this packet said the gate would fail closed during this window. It will
-not. Treating it as a backstop was wrong, and nothing in the rollout should rely on it.
+An earlier revision of this packet said the gate would fail closed during that window. It did
+not, and treating it as a backstop was wrong.
+
+**That window closed at step 8 (2026-10-12).** With all three requirements now naming the
+published version, the pilot's stored consent - which still carries the previous one - no longer
+satisfies them, so the gate IS a real control again: a run would be released with
+**`background_consent_missing`** before any read and before any subscription request. The flag
+and the cron pause remain in place regardless, because a gate that refuses work is not the same
+as work that never starts.
+
+**Two codes, not interchangeable.** `background_consent_missing` means the connection records no
+version or a different one - no consent yet. `background_consent_not_configured` means the
+REQUIREMENT itself is unconfigured or malformed - a configuration fault. Earlier notes in this
+packet used the second where the first belongs.
 
 | # | Step | Gate |
 |---|---|---|
@@ -280,7 +292,7 @@ not. Treating it as a backstop was wrong, and nothing in the rollout should rely
 | 8 | Carry that one version into the browser constant, `OUTLOOK_DISCLOSURE_VERSION`, and **all three** worker requirements, in one commit | All five read the same value. No partial cutover. |
 | 9 | **Redeploy `outlook-import-worker`** so the deployed closure contains the new requirements | Download the deployed source again and verify byte equality with the post-cutover closure. Execution still disabled. |
 | 10 | Pilot re-consents via the **same-account OAuth update** | `consent_policy_version` equals the new value, **and** the connection `id`, both `delta_link_ciphertext` cursors and the candidate/`outlook_candidate_refs` references match the step-3a baseline exactly. |
-| 11 | **RESUME** — only now | Re-enable the flag, then `SELECT cron.alter_job(1, active := true);`. Resume is conditional on step 10 having passed; if stored consent does not match, the gate fails closed anyway and every run releases with `background_consent_not_configured`, but do not rely on that as the control. |
+| 11 | **RESUME** — only now | Re-enable the flag, then `SELECT cron.alter_job(1, active := true);`. Resume is conditional on step 10 having passed. If stored consent does not match, the gate does fail closed - every run releases with **`background_consent_missing`**, which is the code for a connection carrying no version or a different one. `background_consent_not_configured` is a different fault entirely: an unconfigured or malformed REQUIREMENT. Neither is a substitute for checking step 10. |
 | 12 | Live acceptance (§4) | As defined below. |
 
 ### Step 7, as executed 2026-10-12

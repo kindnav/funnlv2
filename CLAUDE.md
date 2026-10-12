@@ -1341,8 +1341,15 @@ makes its output discoverable. Full plan, latency target, measurement and next w
 **Rollout state (2026-10-10): LIVE, unattended, single pilot account.** Migrations `20261009000000`,
 `20261010050349` and `20261010120000` APPLIED; `outlook-notifications` v1 and `outlook-import-worker` v49
 DEPLOYED (verify_jwt=false, closures byte-identical to main); background disclosure PUBLISHED (notice
-version `ol-disc-6d1ddd67f51d5b3bfd8d3801c50271a7`, policy "Last updated" October 9, 2026); server
-`OUTLOOK_DISCLOSURE_VERSION` and all three worker consent requirements at that version; pilot
+version `ol-disc-6d1ddd67f51d5b3bfd8d3801c50271a7`, policy "Last updated" October 9, 2026 - both
+SUPERSEDED on 2026-10-12 by the thread-segments publication, notice version
+`ol-disc-e1107c0221c89ded0b6a2134df848eea`, policy "Last updated" October 12, 2026, with the
+server `OUTLOOK_DISCLOSURE_VERSION` and all three worker requirements cut over to it together
+and `outlook-import-worker` redeployed; the pilot's stored consent still names the October 9
+value, so a run is now refused with `background_consent_missing` until a same-account OAuth
+re-consent); server
+`OUTLOOK_DISCLOSURE_VERSION` and all three worker consent requirements at the October 9 version
+until that cutover; pilot
 re-consented, subscription active, Vault names present; `OUTLOOK_IMPORT_WORKER_ENABLED` PRESENT and
 `outlook-worker-tick` ACTIVE since 2026-10-10 05:49Z (first tick: committed; later ticks none_due until
 due). Rollback: `cron.alter_job(1, active := false)` then `scripts/outlook-worker-flag.ps1 disable`.
