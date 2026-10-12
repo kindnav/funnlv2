@@ -1612,9 +1612,11 @@ await test('the port models the EPISODE-ALIAS TOMBSTONE, which the real function
 })
 
 // ── THE OCTOBER 12 PILOT FAILURE, AT THE HANDLER ─────────────────────────────
-// A real two-way exchange produced NO suggestion: the run reported minimization_failed
-// with categories ["address"], before any model request. Two causes, both present in
-// real mail and both exercised here together, through the real worker:
+// A real two-way exchange produced NO suggestion. The cause was established by running
+// its four actual messages through the real content path OFFLINE - minimization_failed,
+// categories ["address"], before the model - because the notification-kicked run's own
+// report was not retained. Two causes, both present in real mail and both exercised here
+// together, through the real worker:
 //   * the inbound signature carried the sender's own address - and a signature is the
 //     one place this product accepts a company or a title from, so it cannot be dropped;
 //   * the provider display name WAS the address, which went into the request and was

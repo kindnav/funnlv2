@@ -135,9 +135,19 @@ export function htmlToText(html) {
 // WHY THIS EXISTS. assertRequestMinimization refuses a request containing ANY bare
 // email address, which is correct: an address is the one identifier this product will
 // not hand to a third party. But a signature block is also the only place this product
-// accepts a company or a job title from, and signatures almost always carry an address -
-// so without redaction the guard refused every real exchange, before any model call.
-// That is the October 12 pilot failure: `minimization_failed`, categories ["address"].
+// accepts a company or a job title from, and signatures commonly carry an address - so
+// without redaction the guard refused any exchange carrying an address in a model-bound
+// field (body, signature or subject), before any model call. Exchanges with no address
+// in those fields were never affected.
+//
+// EVIDENCE, stated precisely. This is the October 12 pilot failure, established by an
+// OFFLINE reproduction over the four actual messages of that exchange through this same
+// path, which returns `minimization_failed` with categories ["address"] both for the
+// first pair and for the complete four-message exchange. The notification-kicked run's
+// own report was NOT retained - the kick path discards the worker response - so no live
+// report names this cause. The scheduled report that was retained, from the earlier run,
+// says `not_two_sided: 1, recovered_messages: 1, bodies_read: 0, model_calls: 0,
+// created: 0`, which describes that round only.
 //
 // The redaction is SURGICAL. Only the address token is replaced; the name, company,
 // role, phone number and surrounding prose are left exactly as written, because they
@@ -151,19 +161,27 @@ export function htmlToText(html) {
 /** What replaces a removed address. Contains no '@', so no guard can trip on it. */
 export const EMAIL_REDACTED = '[email removed]'
 
+// A scheme prefix must go WITH the address, or `mailto:` survives as a meaningless
+// stub - so it is part of the address patterns below rather than a separate pass.
+//
+// REPRODUCED AS A BUG: stripping it unconditionally rewrote ordinary prose. "The
+// mailto: protocol opens an email app." lost the word it was about. The prefix is
+// only ever removed when it is attached to an address that is being redacted.
+const MAILTO_PREFIX = '(?:\\bmailto:\\s*)?'
+
 // Deliberately close to the guard's own structural rule, so nothing can pass here and
 // fail there. Apostrophes are admitted in the local part because real addresses use them.
-const EMAIL_RE = /[A-Za-z0-9._%+'-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g
-// A scheme prefix must go with the address, or `mailto:` survives as a meaningless stub.
-const MAILTO_RE = /\bmailto:\s*/gi
+const EMAIL_RE = new RegExp(
+  MAILTO_PREFIX + "[A-Za-z0-9._%+'-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}", 'g')
 // An '@' written as an entity or a percent escape. Graph's HTML bodies are decoded
 // upstream, but a TEXT body is deliberately not decoded at all - decoding plain text
 // would rewrite characters the sender actually typed. So the encoded forms are matched
 // HERE, in place, rather than by decoding the whole message: obfuscation a reader can
 // reverse at a glance is still an address. Only the matched address is replaced, so an
 // unrelated `&amp;` or `%40` elsewhere in the text is left exactly as written.
-const ENCODED_EMAIL_RE =
-  /[A-Za-z0-9._%+'-]+(?:&#64;|&#x40;|&commat;|%40)[A-Za-z0-9.-]+\.[A-Za-z]{2,}/gi
+const ENCODED_EMAIL_RE = new RegExp(
+  MAILTO_PREFIX
+  + "[A-Za-z0-9._%+'-]+(?:&#64;|&#x40;|&commat;|%40)[A-Za-z0-9.-]+\\.[A-Za-z]{2,}", 'gi')
 
 /**
  * Replace every email address with EMAIL_REDACTED, leaving everything else intact.
@@ -173,7 +191,6 @@ const ENCODED_EMAIL_RE =
 export function redactEmailAddresses(s) {
   if (typeof s !== 'string' || s.length === 0) return s
   return s
-    .replace(MAILTO_RE, '')
     .replace(EMAIL_RE, EMAIL_REDACTED)
     .replace(ENCODED_EMAIL_RE, EMAIL_REDACTED)
 }

@@ -120,7 +120,9 @@ const PARTY_STRANGER = 'cleo' + AT + 'ventures.test'
 // This fixture used to leak the counterparty's own address in a signature block. That
 // shape NO LONGER refuses: addresses are redacted from model-bound text, signatures and
 // subjects before the request is built, which is the fix for the October 12 pilot
-// failure (tests/outlook-address-minimization.test.js reproduces both halves of it).
+// failure - a failure established by an offline reproduction over that exchange's actual
+// messages, not by a retained live report
+// (tests/outlook-address-minimization.test.js reproduces both halves of it).
 // Keeping the old fixture here would have asserted the bug.
 //
 // The leak is therefore a TOKEN pasted into the message body - someone forwarding a

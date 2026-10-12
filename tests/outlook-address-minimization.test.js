@@ -2,17 +2,28 @@
 //
 // What happened in Production: a genuine four-message, two-sided exchange - two in Inbox,
 // two in Sent Items, one external participant, same conversationId, none drafts, clean
-// automation headers - produced no suggestion. The run reported
-// `minimization_failed` with categories ["address"], BEFORE any model request.
+// automation headers - produced no suggestion.
+//
+// HOW THE CAUSE WAS ESTABLISHED, and how it was not. The notification-kicked run's report
+// was NOT retained: the kick path discards the worker's response, so no live report names
+// this cause. The retained scheduled report, from the earlier round, says
+// `not_two_sided: 1, recovered_messages: 1, bodies_read: 0, model_calls: 0, created: 0` -
+// that round only. The cause was established by running the FOUR ACTUAL MESSAGES through
+// this same path OFFLINE: both the first pair and the complete four-message exchange
+// return `minimization_failed` with categories ["address"], before the model, and a
+// control that redacts signature addresses and omits the unsafe display name passes every
+// pre-model check. No Anthropic request was made in establishing any of that.
 //
 // TWO INDEPENDENT CAUSES, and each is reproduced here on its own:
 //
 //   1. SIGNATURE / BODY ADDRESSES. `sanitizeMessageContent` decodes HTML and entities,
 //      strips unsafe characters, trims quotes and footers and splits the signature - but
 //      never removed an email address. A signature block (the one place this product
-//      accepts a company or title from) almost always contains one, so the drafted
-//      request carried it and `assertRequestMinimization`'s structural rule - any bare
-//      address anywhere in the payload is a leak - correctly refused the request.
+//      accepts a company or title from) commonly contains one, so where a model-bound
+//      field carried an address the drafted request carried it too, and
+//      `assertRequestMinimization`'s structural rule - any bare address anywhere in the
+//      payload is a leak - correctly refused the request. An exchange with no address in
+//      a model-bound field was unaffected.
 //
 //   2. AN ADDRESS-VALUED PROVIDER DISPLAY NAME. `counterpartyFromEnvelopes` returned the
 //      provider's display name verbatim. Many providers set it to the address itself
@@ -104,7 +115,7 @@ test('REPRODUCED: the pre-fix shape is refused by the guard, with category "addr
   const verdict = assertRequestMinimization(requestFor(unredacted), { addresses: [THEM, ME] })
   assert.strictEqual(verdict.ok, false)
   assert.deepStrictEqual(verdict.found, ['address'],
-    'exactly what Production reported: minimization_failed, categories ["address"]')
+    'the same refusal the offline reproduction over the four actual messages produced')
 })
 
 test('FIXED: the sanitized message carries no address, and the request passes', () => {
@@ -150,6 +161,22 @@ test('a subject line carrying an address is redacted as well', () => {
   assert.ok(!ADDRESS_RE.test(subj), subj)
   assert.ok(subj.includes('intro to') && subj.includes('about Thursday'),
     'the rest of the subject is preserved')
+})
+
+test('REPRODUCED: `mailto:` was stripped from ordinary prose, and no longer is', () => {
+  // The first version removed every `mailto:` before matching addresses, so a sentence
+  // ABOUT the scheme lost the word it was about. The prefix now only travels with an
+  // address that is actually being redacted.
+  assert.strictEqual(
+    redactEmailAddresses('The mailto: protocol opens an email app.'),
+    'The mailto: protocol opens an email app.')
+  assert.strictEqual(redactEmailAddresses('See RFC 6068 for mailto: syntax.'),
+    'See RFC 6068 for mailto: syntax.')
+  // Attached to an address, the whole thing goes - no dangling scheme left behind.
+  assert.strictEqual(redactEmailAddresses('write to mailto:noor@fund.test now'),
+    'write to ' + EMAIL_REDACTED + ' now')
+  assert.strictEqual(redactEmailAddresses('mailto:noor&#64;fund.test'), EMAIL_REDACTED)
+  assert.ok(!redactEmailAddresses('mailto:noor@fund.test').includes('mailto'))
 })
 
 test('redaction is surgical: ordinary text and @-handles are untouched', () => {
