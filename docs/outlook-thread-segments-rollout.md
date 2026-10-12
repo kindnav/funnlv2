@@ -264,10 +264,10 @@ consent all agree.
 |---|---|---|
 | 0 | **Owner-run filter check** (§1) | **DONE — PASS, owner-verified 2026-10-12** (figures in §1): both B exact inclusive-boundary tests, both D demonstrating the per-folder property, no 400. |
 | 1 | Approve the wording in §2 | Your explicit approval of the exact text. |
-| 2 | **PAUSE — you authorize this explicitly.** `SELECT cron.alter_job(1, active := false);` then `scripts/outlook-worker-flag.ps1 disable` | Verify **both**: `SELECT jobid, active FROM cron.job;` shows `active = false`, and the flag helper reports the secret ABSENT. UNVERIFIED/UNKNOWN is not absent — re-run rather than assume. |
-| 3 | **Wait for in-flight runs to release.** | `SELECT connection_id, folder, sync_status, sync_lease_until FROM public.outlook_sync_state;` — every row `sync_status <> 'running'` **and** `sync_lease_until IS NULL OR sync_lease_until < now()`. Do not force a lease; a run that is mid-round releases on its own, and forcing one is how a round loses work. |
-| 3a | **Capture the pre-cutover baseline — only once quiescent** (see the note below the table). The connection `id`, both `delta_link_ciphertext` cursors, and the candidate / `outlook_candidate_refs` references that step 10 must find unchanged. | Held as **digests or in-database comparisons**: no identifier, ciphertext or mailbox content is printed. Read it twice, a minute apart, and get the same digest — that is what makes it a baseline rather than a sample. |
-| 4 | **Apply migration `20261011000000` only** | `supabase migration list --linked` shows exactly one pending first. Afterwards verify: the five coverage columns and their CHECKs on `outlook_candidate_refs`; `outlook_thread_recovery` with RLS on and no user policy; the four worker RPCs present with one overload each, SECURITY DEFINER, `service_role`-only; both producers at 19 and 20 arguments; **the two acceptance RPCs unchanged**. |
+| 2 | **DONE 2026-10-12** — **PAUSE — you authorize this explicitly.** `SELECT cron.alter_job(1, active := false);` then `scripts/outlook-worker-flag.ps1 disable` | Verify **both**: `SELECT jobid, active FROM cron.job;` shows `active = false`, and the flag helper reports the secret ABSENT. UNVERIFIED/UNKNOWN is not absent — re-run rather than assume. |
+| 3 | **DONE 2026-10-12** — **Wait for in-flight runs to release.** | `SELECT connection_id, folder, sync_status, sync_lease_until FROM public.outlook_sync_state;` — every row `sync_status <> 'running'` **and** `sync_lease_until IS NULL OR sync_lease_until < now()`. Do not force a lease; a run that is mid-round releases on its own, and forcing one is how a round loses work. |
+| 3a | **DONE 2026-10-12** — **Capture the pre-cutover baseline — only once quiescent** (see the note below the table). The connection `id`, both `delta_link_ciphertext` cursors, and the candidate / `outlook_candidate_refs` references that step 10 must find unchanged. | Held as **digests or in-database comparisons**: no identifier, ciphertext or mailbox content is printed. Read it twice, a minute apart, and get the same digest — that is what makes it a baseline rather than a sample. |
+| 4 | **DONE 2026-10-12** — **Apply migration `20261011000000` only** | `supabase migration list --linked` shows exactly one pending first. Afterwards verify: the five coverage columns and their CHECKs on `outlook_candidate_refs`; `outlook_thread_recovery` with RLS on and no user policy; the four worker RPCs present with one overload each, SECURITY DEFINER, `service_role`-only; both producers at 19 and 20 arguments; **the two acceptance RPCs unchanged**. |
 | 5 | Merge PR #85 pinned to the reviewed head | Vercel build READY. The frontend bundle is functionally unchanged by this PR. |
 | 6 | **Deploy `outlook-import-worker`** from merged main | Execution is still disabled — re-verify step 2's two states before and after. Download the deployed source and verify file-set equality and byte equality with the complete import closure (normalise CRLF). |
 | 7 | Publish the approved wording, derive the new version | The published page matches §2 exactly; the date is the publication date. |
@@ -276,6 +276,74 @@ consent all agree.
 | 10 | Pilot re-consents via the **same-account OAuth update** | `consent_policy_version` equals the new value, **and** the connection `id`, both `delta_link_ciphertext` cursors and the candidate/`outlook_candidate_refs` references match the step-3a baseline exactly. |
 | 11 | **RESUME** — only now | Re-enable the flag, then `SELECT cron.alter_job(1, active := true);`. Resume is conditional on step 10 having passed; if stored consent does not match, the gate fails closed anyway and every run releases with `background_consent_not_configured`, but do not rely on that as the control. |
 | 12 | Live acceptance (§4) | As defined below. |
+
+### Steps 2-4, as executed 2026-10-12
+
+**Pause (steps 2-3).** `cron.alter_job(1, active := false)` — re-read of `cron.job` shows
+`outlook-worker-tick` `active = false`. `scripts/outlook-worker-flag.ps1 disable` — `ABSENT
+(verified)`, re-verified by a separate `status` call rather than inferred from the unset
+succeeding. Quiescence arrived on its own: both `outlook_sync_state` rows `idle`, no lease, no
+open round, `last_run_complete = true`, `retry_count = 0`, last attempt ~700 s before the pause.
+No lease was forced.
+
+**Baseline (step 3a).** Two reads two minutes apart, identical, digests only — no identifier,
+ciphertext or mailbox content printed or stored: connection identity `4e0f77d53e63`,
+`consent_policy_version` `f2a306801f9b` (the one value re-consent is meant to change), committed
+cursors `e69ae3b524f0` (2 present), transient cursors `8e1dab45e1ee`, `outlook_candidate_refs`
+`47e56af5eafd` over 3 rows under the column-explicit definition above.
+
+**Acceptance RPCs, captured before applying and re-captured after:** definition, identity
+signature, `prosecdef`, `proconfig` and ACL digests for `accept_interaction_candidate` and
+`accept_new_contact_candidate` — **byte-identical across the migration**, one overload each.
+
+**Migration (step 4).** `supabase db push --linked --dry-run` listed exactly
+`20261011000000_outlook_thread_segments.sql`; the file was byte-identical to the reviewed one and
+was not modified. Applied with `--yes`. Verified afterwards:
+
+| Check | Result |
+|---|---|
+| Ledger | `20261011000000` recorded; **nothing pending**, and no remote-only entry |
+| Coverage columns on `outlook_candidate_refs` | 5 present, with all four CHECKs (`ocr_conversation_fp_shape`, `ocr_coverage_shape`, `ocr_coverage_source_known`, `ocr_coverage_together`) and the conversation-fingerprint index |
+| `outlook_thread_recovery` | RLS **on**, **0 policies**, constraints `otr_cfp_shape`, `otr_unpaired_shape`, `otr_unpaired_together`, `otr_baseline_together`, `otr_not_empty`, `otr_conn_user_fk` |
+| Its privileges | grantees `postgres, service_role` only, 14 privilege rows — **identical in shape to `outlook_sync_state`, `outlook_candidate_refs` and `outlook_subscriptions`**; `anon`, `authenticated` and PUBLIC have nothing |
+| Four worker RPCs | one overload each, SECURITY DEFINER, `search_path=""`, `service_role`-only execute (plus owner), and the lease fence (`sync_run_id = p_run_id` with `sync_lease_until > now()`) present in every one |
+| Producers | `upsert_outlook_interaction_candidate` **19** args, `upsert_new_contact_candidate` **20** args, same hardening |
+| Acceptance RPCs | unchanged, as above |
+| Baseline | every field identical to the pre-migration reading, including both cursor digests and the refs digest |
+| Execution | still paused: tick inactive, flag `ABSENT (verified)` again afterwards; `outlook_thread_recovery` 0 rows and 0 refs carry coverage, so nothing has run |
+
+**Two things worth carrying forward.**
+
+1. **The CLI's post-push step errored while the apply itself succeeded.** `db push` printed
+   `Failed to read certificate file '.../pgdelta/pgdelta-target-ca.crt'` and `main worker has
+   been destroyed`, then `Finished supabase db push.` That is its post-push schema-diff
+   component, not the migration. The apply is confirmed by the ledger row and by every object
+   check above. Do not read that error as a failed migration, and do not re-run `db push`
+   because of it.
+2. **`public.outlook_unpaired_valid(jsonb)` carries the default public execute grant** -
+   `PUBLIC`, `anon` and `authenticated` can execute it - because the migration adds no REVOKE
+   for it, unlike every other function it ships. It is the CHECK-constraint validator: SECURITY
+   INVOKER, `search_path=""`, takes a jsonb and returns boolean, touches no table, and grants no
+   access to anything. Harmless as it stands, and worth an explicit REVOKE in a later migration
+   for consistency with the rest of the hardening. Not changed here: the reviewed migration was
+   applied unmodified.
+
+**What the baseline must compare — a correction found while applying.** The first baseline
+query digested **whole rows** (`md5(string_agg(r::text, ...))`) of `outlook_candidate_refs`. That
+is wrong for this rollout and would have failed in a way that looked like data loss: the
+migration ADDS five columns, so `r::text` gains five fields and the digest changes even when
+every pre-existing value is untouched. The baseline therefore digests the **ten pre-migration
+columns explicitly** - `id`, `user_id`, `connection_id`, `interaction_candidate_id`,
+`new_contact_candidate_id`, `episode_fingerprint`, `person_fingerprint`, `key_version`,
+`created_at`, `updated_at` - and the same query is re-run for every later comparison. A
+comparison whose definition changes with the schema is not a comparison.
+
+**Pending wakes are preserved, never a gate.** A change notification arriving during the pause
+sets `wake_requested_at`, and the count **may grow** while execution is off. That is correct
+behaviour: the wake is the record that something arrived, the worker services it when it
+resumes, and clearing one would discard that. So the baseline **records** the pending-wake count
+and never requires it to be zero, and nothing in this rollout clears a wake. What must be zero
+is different and remains strict: **no open round and no active lease.**
 
 **Baseline order — a correction.** An earlier version of this packet said to capture the
 step-10 comparison values *before* the pause. That is wrong: while a round is in flight the
