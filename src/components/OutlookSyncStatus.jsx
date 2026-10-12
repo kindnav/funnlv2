@@ -81,7 +81,7 @@ export default function OutlookSyncStatus () {
         </p>
       )}
       {view.reconnect && (
-        <p className="mt-2 text-sm">Use <span className="font-semibold">Disconnect Outlook</span> below, then connect again.</p>
+        <p className="mt-2 text-sm">Use <span className="font-semibold">Update Outlook permissions</span> below. Your connection and everything Funnl has already matched stay as they are; disconnecting is not needed.</p>
       )}
     </div>
   )

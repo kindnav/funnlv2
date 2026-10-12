@@ -32,6 +32,7 @@ import {
   outlookConnectionEnabled, OUTLOOK_CONNECTION_ENABLED, canRequestConsent,
   buildConsentRequest, classifyStartResponse, messageForOutcome,
   DISCLOSURE_PARAGRAPH_COUNT, startOutlookConsent,
+  outlookUpdateNeeded,
 } from '../src/lib/outlookConnection.js'
 import { resolveOauthStartUrl, OAUTH_START_PATHS } from '../src/lib/oauthStartEndpoint.js'
 
@@ -908,6 +909,98 @@ test('a disconnect path really exists, matching the wording', () => {
   assert.ok(CARD.includes("runOutlookDisconnect"), 'it must go through the reviewed flow')
   assert.ok(CARD.includes("supabase.rpc('disconnect_my_outlook')"),
     'and reach the applied user RPC')
+})
+
+console.log('\nupdating an EXISTING connection, without disconnecting')
+
+test('outlookUpdateNeeded: superseded consent, or an authorisation to renew', () => {
+  const current = { consentVersion: OUTLOOK_DISCLOSURE_VERSION, needsReauth: false }
+  assert.deepStrictEqual(outlookUpdateNeeded(current),
+    { needed: false, consentSuperseded: false, needsReauth: false },
+    'a connection already on the published version needs nothing')
+
+  const superseded = { consentVersion: 'ol-disc-6d1ddd67f51d5b3bfd8d3801c50271a7', needsReauth: false }
+  assert.deepStrictEqual(outlookUpdateNeeded(superseded),
+    { needed: true, consentSuperseded: true, needsReauth: false })
+
+  const reauth = { consentVersion: OUTLOOK_DISCLOSURE_VERSION, needsReauth: true }
+  assert.deepStrictEqual(outlookUpdateNeeded(reauth),
+    { needed: true, consentSuperseded: false, needsReauth: true })
+
+  const both = { consentVersion: 'ol-disc-81fe8944fd2be59ac3c059c229b4d28e', needsReauth: true }
+  assert.deepStrictEqual(outlookUpdateNeeded(both),
+    { needed: true, consentSuperseded: true, needsReauth: true })
+
+  // A connection recording nothing at all is superseded, not exempt.
+  assert.strictEqual(outlookUpdateNeeded({ consentVersion: null }).needed, true)
+  assert.strictEqual(outlookUpdateNeeded({ consentVersion: undefined }).needed, true)
+  // No connection: nothing to update. The not-connected branch owns that case.
+  assert.strictEqual(outlookUpdateNeeded(null).needed, false)
+  assert.strictEqual(outlookUpdateNeeded(undefined).needed, false)
+})
+
+test('the update control renders the FULL notice, unchecked, and disabled until ticked', () => {
+  const panel = CARD.slice(CARD.indexOf('outlook-update-panel'), CARD.indexOf('{!confirmingDisconnect &&'))
+  assert.ok(panel.length > 400, 'the update panel must exist in the connected branch')
+  // The same array, not a summary of it.
+  assert.ok(panel.includes('OUTLOOK_DISCLOSURE_PARAGRAPHS.map'),
+    'the update path renders every shipped paragraph')
+  assert.ok(panel.includes('Disclosure version {OUTLOOK_DISCLOSURE_VERSION}'),
+    'and names the version being agreed to')
+  // One acknowledgement state, defaulting to false, and it gates the button.
+  assert.ok(panel.includes('checked={acknowledged}'), 'bound to the same unchecked state')
+  assert.ok(panel.includes('disabled={!canConnect}'), 'the button is gated by buildConsentRequest')
+  assert.ok(CARD.includes('useState(false)   // never defaults true'),
+    'the acknowledgement still defaults to unchecked')
+  assert.ok(panel.includes('Update Outlook permissions'), 'and is labelled as an update')
+})
+
+test('starting an update goes through the consent flow, and NEVER through disconnect', () => {
+  // Bounded to the PANEL, deliberately: the disconnect control lives after it in the same
+  // connected branch and is meant to - what must be absent is a disconnect path INSIDE the
+  // update panel.
+  const panel = CARD.slice(CARD.indexOf('outlook-update-panel'), CARD.indexOf('{!confirmingDisconnect &&'))
+  assert.ok(panel.includes('onClick={handleConnect}'),
+    'the update button reuses the reviewed start flow')
+  assert.ok(!/handleDisconnect|disconnect_my_outlook|runOutlookDisconnect/.test(panel),
+    'nothing in the update panel can disconnect')
+  // The request body is built by the same function for both paths, so the version sent is
+  // the one rendered above it.
+  const built = buildConsentRequest({
+    acknowledged: true, originOk: true, connecting: false, pageOrigin: 'https://www.getfunnl.com',
+  })
+  assert.strictEqual(built.ok, true)
+  assert.strictEqual(built.body.consentPolicyVersion, OUTLOOK_DISCLOSURE_VERSION)
+})
+
+test('a failed update is VISIBLE, and does not claim the connection vanished', () => {
+  // The old condition hid every ?outlook=error whenever the row said connected, which is
+  // exactly the case an update failure lands in.
+  assert.ok(CARD.includes("readOutlookCallbackResult(searchParams) === 'error' && status === 'connected'"),
+    'the connected branch must read the error redirect')
+  assert.ok(CARD.includes("{messageForOutcome('update_failed')}"), 'and show it')
+
+  const copy = messageForOutcome('update_failed')
+  assert.ok(/still connected/i.test(copy), 'it says the connection survives')
+  assert.ok(/did not finish|did not complete/i.test(copy), 'and that the update did not happen')
+  assert.ok(!/nothing was connected/i.test(copy),
+    'the connect-path copy would be false here')
+  assert.notStrictEqual(copy, messageForOutcome('callback_failed'))
+})
+
+test('no screen recommends disconnecting in order to renew', () => {
+  const reauth = CARD.slice(CARD.indexOf('connection.needsReauth'), CARD.indexOf('outlook-update-panel'))
+  assert.ok(!/Disconnect and reconnect/i.test(reauth),
+    'the renewal notice must point at the update control')
+  assert.ok(/Update Outlook permissions/.test(reauth))
+  const sync = readFileSync(
+    new URL('../src/components/OutlookSyncStatus.jsx', import.meta.url), 'utf8')
+  assert.ok(!/Disconnect Outlook<\/span> below, then connect again/.test(sync),
+    'the sync status must not send the user through a disconnect either')
+  assert.ok(/Update Outlook permissions/.test(sync))
+  // Disconnect itself is preserved as its own, separate action.
+  assert.ok(CARD.includes('Disconnect Outlook'), 'explicit disconnection still exists')
+  assert.ok(CARD.includes("supabase.rpc('disconnect_my_outlook')"))
 })
 
 async function finish () {
