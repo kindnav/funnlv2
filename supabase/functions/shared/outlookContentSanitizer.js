@@ -131,6 +131,115 @@ export function htmlToText(html) {
   return s
 }
 
+// ── Address redaction ─────────────────────────────────────────────────────────
+// WHY THIS EXISTS. assertRequestMinimization refuses a request containing ANY bare
+// email address, which is correct: an address is the one identifier this product will
+// not hand to a third party. But a signature block is also the only place this product
+// accepts a company or a job title from, and signatures commonly carry an address - so
+// without redaction the guard refused any exchange carrying an address in a model-bound
+// field (body, signature or subject), before any model call. Exchanges with no address
+// in those fields were never affected.
+//
+// EVIDENCE, stated precisely. This is the October 12 pilot failure, established by an
+// OFFLINE reproduction over the four actual messages of that exchange through this same
+// path, which returns `minimization_failed` with categories ["address"] both for the
+// first pair and for the complete four-message exchange. The notification-kicked run's
+// own report was NOT retained - the kick path discards the worker response - so no live
+// report names this cause. The scheduled report that was retained, from the earlier run,
+// says `not_two_sided: 1, recovered_messages: 1, bodies_read: 0, model_calls: 0,
+// created: 0`, which describes that round only.
+//
+// The redaction is SURGICAL. Only the address token is replaced; the name, company,
+// role, phone number and surrounding prose are left exactly as written, because they
+// are the evidence the draft is allowed to rest on.
+//
+// IT RUNS AFTER DECODING, always. `&#64;` decodes to '@' downstream of here, so a
+// redaction applied to raw HTML would miss an encoded address that later decodes inside
+// the request. Every caller below redacts text that htmlToText and decodeEntities have
+// already been through.
+
+/** What replaces a removed address. Contains no '@', so no guard can trip on it. */
+export const EMAIL_REDACTED = '[email removed]'
+
+// A scheme prefix must go WITH the address, or `mailto:` survives as a meaningless
+// stub - so it is part of the address patterns below rather than a separate pass.
+//
+// REPRODUCED AS A BUG: stripping it unconditionally rewrote ordinary prose. "The
+// mailto: protocol opens an email app." lost the word it was about. The prefix is
+// only ever removed when it is attached to an address that is being redacted.
+const MAILTO_PREFIX = '(?:\\bmailto:\\s*)?'
+
+// Deliberately close to the guard's own structural rule, so nothing can pass here and
+// fail there. Apostrophes are admitted in the local part because real addresses use them.
+//
+// CASE-INSENSITIVE, and that is load-bearing rather than tidiness. This pattern carried
+// the 'g' flag while its encoded twin carried 'gi', so `MAILTO:` and `MailTo:` did not
+// match the prefix: only the address after them was replaced, leaving `MAILTO:[email
+// removed]` in the text - and a display name of nothing but `MAILTO:address` then came
+// back from safeProviderDisplayName as the person's name, "MAILTO". A scheme is never a
+// name. Both patterns now ignore case.
+const EMAIL_RE = new RegExp(
+  MAILTO_PREFIX + "[A-Za-z0-9._%+'-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}", 'gi')
+// An '@' written as an entity or a percent escape. Graph's HTML bodies are decoded
+// upstream, but a TEXT body is deliberately not decoded at all - decoding plain text
+// would rewrite characters the sender actually typed. So the encoded forms are matched
+// HERE, in place, rather than by decoding the whole message: obfuscation a reader can
+// reverse at a glance is still an address. Only the matched address is replaced, so an
+// unrelated `&amp;` or `%40` elsewhere in the text is left exactly as written.
+const ENCODED_EMAIL_RE = new RegExp(
+  MAILTO_PREFIX
+  + "[A-Za-z0-9._%+'-]+(?:&#64;|&#x40;|&commat;|%40)[A-Za-z0-9.-]+\\.[A-Za-z]{2,}", 'gi')
+
+/**
+ * Replace every email address with EMAIL_REDACTED, leaving everything else intact.
+ * Non-strings pass through unchanged so callers can redact an optional field directly.
+ * @param {string|null|undefined} s
+ */
+export function redactEmailAddresses(s) {
+  if (typeof s !== 'string' || s.length === 0) return s
+  return s
+    .replace(EMAIL_RE, EMAIL_REDACTED)
+    .replace(ENCODED_EMAIL_RE, EMAIL_REDACTED)
+}
+
+// Brackets or separators left around a removed address, plus the placeholder itself:
+// stripped from a DISPLAY NAME only, where "Noor Haddad <[email removed]>" should read
+// "Noor Haddad" rather than keep a hole in it. Message text keeps the placeholder, so a
+// reviewer can see something was removed.
+const NAME_PLACEHOLDER_RE =
+  /[<([{"']?\s*\[email removed\]\s*[>)\]}"']?/g
+const NAME_EDGE_RE = /^[\s,;:|/\\<>()[\]{}"'\u2018\u2019\u201C\u201D.-]+|[\s,;:|/\\<>()[\]{}"'\u2018\u2019\u201C\u201D-]+$/g
+const MAX_DISPLAY_NAME_CHARS = 200
+
+/**
+ * A provider display name that is safe to put in a model request and to offer as a
+ * fallback contact name - or null when nothing name-like is left.
+ *
+ * WHY NULL RATHER THAN A GUESS. Providers commonly set the display name to the address
+ * itself, or to "Name <address>". The first contains no name at all, and this product
+ * must NEVER invent one from the local part: "noor@fund.test" does not establish that
+ * anybody is called Noor, and a proposal is supposed to carry only evidence a reviewer
+ * could check. So the address is removed, and if what remains has no word in it the
+ * answer is null - the proposal then has no name until the model finds one in the
+ * signature, or the reviewer types one.
+ *
+ * The ENVELOPE address is unaffected by this and remains authoritative for contact
+ * matching and for proposed_email.
+ * @param {string|null|undefined} name
+ * @returns {string|null}
+ */
+export function safeProviderDisplayName(name) {
+  if (typeof name !== 'string' || name.length === 0) return null
+  let s = stripUnsafeCharacters(decodeEntities(name))
+  s = redactEmailAddresses(s)
+  s = s.replace(NAME_PLACEHOLDER_RE, ' ').replace(/\s{2,}/g, ' ')
+  s = s.replace(NAME_EDGE_RE, '').trim()
+  if (s.length < 2) return null
+  // At least one real word, so punctuation or a bare number is not offered as a name.
+  if (!/\p{L}{2,}/u.test(s)) return null
+  return s.slice(0, MAX_DISPLAY_NAME_CHARS)
+}
+
 /** Remove control, bidi and nonprinting characters, then normalize whitespace. */
 export function stripUnsafeCharacters(s) {
   if (typeof s !== 'string') return ''
@@ -287,7 +396,10 @@ export function looksBinary(s) {
 /** Bounded, control-free subject suitable for `retained_subject` (<= 160 chars). */
 export function sanitizeSubject(subject) {
   if (typeof subject !== 'string') return null
-  const s = stripUnsafeCharacters(subject).replace(/\n+/g, ' ').trim()
+  // A forwarded subject ("FW: intro to someone@example.com") carries an address as
+  // readily as a body does, and the subject goes into the request too.
+  const s = redactEmailAddresses(
+    stripUnsafeCharacters(subject).replace(/\n+/g, ' ').trim())
   if (s.length === 0) return null
   return s.slice(0, MAX_SUBJECT_CHARS)
 }
@@ -344,7 +456,13 @@ export function sanitizeMessageContent(input) {
 
   const s = splitSignature(text)
   text = s.text
-  const signature = s.signature
+  let signature = s.signature
+
+  // AFTER the split, deliberately: the signature cues are matched on the text as
+  // written, so redaction cannot change which trailing block is treated as a signature.
+  // BEFORE the bounds, so what is kept and measured is what the model will actually see.
+  text = redactEmailAddresses(text)
+  signature = redactEmailAddresses(signature)
 
   if (text.length < MIN_USABLE_CHARS) return { ok: false, code: 'no_usable_text' }
   if (looksBinary(text)) return { ok: false, code: 'binary_like' }

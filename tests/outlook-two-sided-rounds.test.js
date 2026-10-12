@@ -93,11 +93,14 @@ const THEM_REPLY = 'Happy to. I am free Thursday afternoon; send a couple of tim
   + 'I will confirm one.'
 const THEM_THIRD = 'Thursday at three is confirmed then; the dial-in is in the calendar invite.'
 
-const envelope = (id, conv, from, to, sent, subject) => ({
+const envelope = (id, conv, from, to, sent, subject, partyName) => ({
   id, conversationId: conv, receivedDateTime: sent, sentDateTime: sent, isDraft: false,
-  subject, from: { emailAddress: { address: from, name: 'x' } },
-  sender: { emailAddress: { address: from, name: 'x' } },
-  toRecipients: to.map((a) => ({ emailAddress: { address: a, name: 'x' } })),
+  subject,
+  from: { emailAddress: { address: from, name: from === ME ? 'x' : (partyName ?? 'x') } },
+  sender: { emailAddress: { address: from, name: from === ME ? 'x' : (partyName ?? 'x') } },
+  toRecipients: to.map((a) => ({
+    emailAddress: { address: a, name: a === ME ? 'x' : (partyName ?? 'x') },
+  })),
   ccRecipients: [],
 })
 
@@ -105,14 +108,16 @@ const envelope = (id, conv, from, to, sent, subject) => ({
  * One exchange with `party`: who wrote first, the two (optionally three) envelopes, their
  * folders and bodies. Ids and conversation ids are invented.
  */
-function exchange ({ party, order, conv }) {
+function exchange ({ party, order, conv, partyName, bodies: bodyOverrides }) {
   const themFirst = order === 'them_first'
   const inId = 'AAkALgAA' + conv + '-in'
   const outId = 'AAkALgAA' + conv + '-out'
   const thirdId = 'AAkALgAA' + conv + '-in2'
-  const inbound = envelope(inId, conv, party, [ME], themFirst ? '2026-09-21T14:00:00Z' : '2026-09-21T11:00:00Z', 'Following up')
-  const outbound = envelope(outId, conv, ME, [party], themFirst ? '2026-09-21T16:00:00Z' : '2026-09-21T08:00:00Z', 'RE: Following up')
-  const third = envelope(thirdId, conv, party, [ME], '2026-09-22T09:00:00Z', 'RE: Following up')
+  // `partyName` is the PROVIDER display name for the other side. Providers routinely set
+  // it to the address itself, which is why it is overridable here.
+  const inbound = envelope(inId, conv, party, [ME], themFirst ? '2026-09-21T14:00:00Z' : '2026-09-21T11:00:00Z', 'Following up', partyName)
+  const outbound = envelope(outId, conv, ME, [party], themFirst ? '2026-09-21T16:00:00Z' : '2026-09-21T08:00:00Z', 'RE: Following up', partyName)
+  const third = envelope(thirdId, conv, party, [ME], '2026-09-22T09:00:00Z', 'RE: Following up', partyName)
   return {
     inbound, outbound, third,
     folderOf: { [inId]: 'inbox', [outId]: 'sentitems', [thirdId]: 'inbox' },
@@ -120,6 +125,9 @@ function exchange ({ party, order, conv }) {
       [inId]: themFirst ? THEM_FIRST : THEM_REPLY,
       [outId]: themFirst ? ME_REPLY : ME_FIRST,
       [thirdId]: THEM_THIRD,
+      ...(bodyOverrides && bodyOverrides.inbound ? { [inId]: bodyOverrides.inbound } : {}),
+      ...(bodyOverrides && bodyOverrides.outbound ? { [outId]: bodyOverrides.outbound } : {}),
+      ...(bodyOverrides && bodyOverrides.third ? { [thirdId]: bodyOverrides.third } : {}),
     },
   }
 }
@@ -523,8 +531,11 @@ async function invoke (ports, fetchImpl, clock) {
 }
 
 /** Build a scenario: who the party is, which side wrote first, and how the messages are spread over rounds. */
-function scenario ({ party, order, inboxRounds, sentRounds }) {
-  const ex = exchange({ party, order, conv: 'AAQkAD-' + order + '-' + (party === KNOWN ? 'known' : 'new') })
+function scenario ({ party, order, inboxRounds, sentRounds, partyName, bodies, convSuffix }) {
+  const ex = exchange({
+    party, order, partyName, bodies,
+    conv: 'AAQkAD-' + order + '-' + (party === KNOWN ? 'known' : 'new') + (convSuffix ?? ''),
+  })
   const pick = (spec) => spec.map((which) => (which === 'in' ? [ex.inbound] : which === 'out' ? [ex.outbound]
     : which === 'in2' ? [ex.third] : []))
   const rounds = { inbox: pick(inboxRounds), sentitems: pick(sentRounds) }
@@ -532,8 +543,8 @@ function scenario ({ party, order, inboxRounds, sentRounds }) {
   return { ex, rounds, envelopes, folderOf: ex.folderOf, bodies: ex.bodies }
 }
 
-async function runScenario ({ party, order, inboxRounds, sentRounds, invocations = 1, faults, clock, beforeInvocation }) {
-  const s = scenario({ party, order, inboxRounds, sentRounds })
+async function runScenario ({ party, order, inboxRounds, sentRounds, invocations = 1, faults, clock, beforeInvocation, partyName, bodies, convSuffix }) {
+  const s = scenario({ party, order, inboxRounds, sentRounds, partyName, bodies, convSuffix })
   const ports = await makePorts({ contacts: [{ id: KNOWN_CONTACT, user_id: PILOT, email: KNOWN }] })  // the stranger is never a contact
   const counts = newCounts()
   const fetchImpl = makeFetch({ rounds: s.rounds, envelopes: s.envelopes, folderOf: s.folderOf, bodies: s.bodies, counts, model: MODEL, faults, clock })
@@ -1598,6 +1609,88 @@ await test('the port models the EPISODE-ALIAS TOMBSTONE, which the real function
   })
   assert.strictEqual(res.data.result, 'exists_terminal',
     'an ALIAS of a decided exchange is a tombstone, not just its exact value')
+})
+
+// ── THE OCTOBER 12 PILOT FAILURE, AT THE HANDLER ─────────────────────────────
+// A real two-way exchange produced NO suggestion. The cause was established by running
+// its four actual messages through the real content path OFFLINE - minimization_failed,
+// categories ["address"], before the model - because the notification-kicked run's own
+// report was not retained. Two causes, both present in real mail and both exercised here
+// together, through the real worker:
+//   * the inbound signature carried the sender's own address - and a signature is the
+//     one place this product accepts a company or a title from, so it cannot be dropped;
+//   * the provider display name WAS the address, which went into the request and was
+//     also the fallback proposed name.
+// The exchange is split across rounds, so the inbound half is recovered in round 2 - the
+// same shape the pilot hit.
+await test('a cross-round exchange whose signature and display name carry addresses still drafts, with no address in the request', async () => {
+  const SIGNED_REPLY = THEM_REPLY
+    + ' Thursday afternoon suits me.\n--\nNoor Haddad\nDirector, Credit Desk\n'
+    + 'Fund Partners\nnoor&#64;fund.test\n+1 555 0100'
+  const { runs, ports, counts } = await runScenario({
+    party: STRANGER,
+    order: 'me_first',
+    sentRounds: ['out', []],      // my message in round 1
+    inboxRounds: [[], 'in'],      // their reply only arrives in round 2
+    invocations: 2,
+    partyName: STRANGER,          // the provider display name IS the address
+    bodies: { inbound: SIGNED_REPLY },
+    convSuffix: '-addr',
+  })
+
+  const second = runs[1]
+  assert.strictEqual(second.status, 200, summarize(second))
+  // THE REGRESSION ITSELF: before the fix this was 0 written, 0 model calls, and a
+  // minimization_failed deferral.
+  assert.strictEqual(second.run.content.model_calls, 1, summarize(second))
+  assert.strictEqual(second.run.content.proposals_written, 1, summarize(second))
+  assert.deepStrictEqual(second.run.content.deferred, {}, summarize(second))
+
+  // NOTHING ADDRESS-SHAPED REACHED THE MODEL.
+  assert.strictEqual(counts.modelBodies.length, 1)
+  const sent = counts.modelBodies[0]
+  assert.ok(sent.indexOf(STRANGER) < 0, 'the counterparty address is absent')
+  assert.ok(sent.indexOf(ME) < 0, 'the self address is absent')
+  assert.ok(!/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/.test(sent),
+    'no address of any kind survives in the request')
+  assert.ok(sent.indexOf('&#64;') < 0, 'and not in encoded form either')
+  // The evidence a draft is allowed to rest on DID reach it.
+  assert.ok(sent.indexOf('Noor Haddad') >= 0, 'the signature name reached the model')
+  assert.ok(sent.indexOf('Director, Credit Desk') >= 0, 'the role reached the model')
+  assert.ok(sent.indexOf('Fund Partners') >= 0, 'the company reached the model')
+
+  // THE PROPOSAL KEEPS THE AUTHORITATIVE ENVELOPE ADDRESS.
+  assert.strictEqual(ports.candidates.length, 1)
+  const w = ports.candidates[0]
+  assert.strictEqual(w.rpc, 'upsert_new_contact_candidate')
+  assert.strictEqual(w.args.p_proposed_email, STRANGER,
+    'the envelope address is still what the proposal carries')
+  // The name comes from the signature, via the model - never from the address local part.
+  assert.strictEqual(w.args.p_proposed_name, 'Noor Haddad')
+  assert.strictEqual(w.args.p_name_evidence, 'explicit_signature')
+  assert.notStrictEqual(w.args.p_proposed_name, 'noor', 'a local part is never a name')
+  assert.ok(!String(w.args.p_proposed_name).includes('@'))
+})
+
+// The same two hazards with NO model name to fall back on: the display name must not
+// become the proposed name, and nothing may be invented from the local part.
+await test('an address-valued display name never becomes the proposed name', async () => {
+  const { ports, counts } = await runScenario({
+    party: STRANGER,
+    order: 'them_first',
+    inboxRounds: ['in'],
+    sentRounds: ['out'],
+    partyName: 'noor@fund.test',
+    convSuffix: '-dn',
+  })
+  assert.strictEqual(counts.modelBodies.length, 1)
+  assert.ok(counts.modelBodies[0].indexOf('noor@fund.test') < 0,
+    'the display name must not carry the address into the request')
+  assert.ok(counts.modelBodies[0].indexOf('display name') < 0,
+    'with nothing name-like left, no display-name line is sent at all')
+  assert.strictEqual(ports.candidates.length, 1)
+  assert.strictEqual(ports.candidates[0].args.p_proposed_email, STRANGER)
+  assert.ok(!String(ports.candidates[0].args.p_proposed_name).includes('@'))
 })
 
 console.log((passed + failed) + ' tests: ' + passed + ' passed, ' + failed + ' failed')
