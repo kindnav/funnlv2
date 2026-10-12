@@ -76,10 +76,18 @@ export const CONTENT_CONSENT_CODES = Object.freeze([
 // the cutover rule at the top of this file.
 //
 // A connection must match this EXACTLY. It is a content digest, so there is no ordering
-// and no near-enough: the envelope-only pilot (ol-disc-81fe8944fd2be59ac3c059c229b4d28e)
-// and the content-release consent (ol-disc-e3e2b1714b453c2904e3ed08cb232097) are both
-// stale against it and must disconnect and reconnect under the published notice.
-export const REQUIRED_CONTENT_CONSENT_VERSION = 'ol-disc-6d1ddd67f51d5b3bfd8d3801c50271a7'
+// and no near-enough: the envelope-only pilot (ol-disc-81fe8944fd2be59ac3c059c229b4d28e),
+// the content-release consent (ol-disc-e3e2b1714b453c2904e3ed08cb232097) and the
+// background-sync consent (ol-disc-6d1ddd67f51d5b3bfd8d3801c50271a7) are all stale against
+// it. Clearing that is a SAME-ACCOUNT OAUTH UPDATE under the published notice, which
+// rewrites consent_policy_version on the SAME connection row: disconnecting is not required
+// and would cascade away the cursors and the dedup references.
+//
+// CUT OVER 2026-10-12 (thread-segments rollout, packet step 8) from
+// ol-disc-6d1ddd67f51d5b3bfd8d3801c50271a7, together with the other two requirements and the
+// server's OUTLOOK_DISCLOSURE_VERSION - never one alone - after the wording was published on
+// 2026-10-12 and the browser derived this same value from it.
+export const REQUIRED_CONTENT_CONSENT_VERSION = 'ol-disc-e1107c0221c89ded0b6a2134df848eea'
 
 /**
  * The disclosure version an account must have consented to before any part of a
@@ -100,11 +108,12 @@ export const REQUIRED_CONTENT_CONSENT_VERSION = 'ol-disc-6d1ddd67f51d5b3bfd8d380
  * Approved and set, for the same reason as above: the notice the owner approved
  * discloses the third-party send explicitly, so this gate has a version to name.
  */
-// APPROVED AND SET; CUT OVER 2026-10-09 with the other two, separately from the body
-// gate even though both carry the same value. They stay two constants because they
-// answer two questions, and a later decision to stop sending anything to Anthropic while
-// still reading bodies must remain expressible by changing one of them.
-export const REQUIRED_THIRD_PARTY_CONSENT_VERSION = 'ol-disc-6d1ddd67f51d5b3bfd8d3801c50271a7'
+// APPROVED AND SET; CUT OVER 2026-10-09 with the other two, and again 2026-10-12 for the
+// thread-segments wording, separately from the body gate even though both carry the same
+// value. They stay two constants because they answer two questions, and a later decision to
+// stop sending anything to Anthropic while still reading bodies must remain expressible by
+// changing one of them.
+export const REQUIRED_THIRD_PARTY_CONSENT_VERSION = 'ol-disc-e1107c0221c89ded0b6a2134df848eea'
 
 /** Codes the background gate can return. Controlled, and safe to log. */
 export const BACKGROUND_CONSENT_CODES = Object.freeze([
@@ -118,8 +127,10 @@ export const BACKGROUND_CONSENT_CODES = Object.freeze([
  * automatically (on a signal, or on the schedule) while the user is not using the app.
  *
  * SET ON 2026-10-09 (activation packet step 5) to the version derived from the PUBLISHED
- * background-sync notice (October 9, 2026), together with the other two requirements and the
- * server's OUTLOOK_DISCLOSURE_VERSION - never one alone. It was null until then, and while
+ * background-sync notice (October 9, 2026), and CUT OVER AGAIN ON 2026-10-12 (thread-segments
+ * rollout, packet step 8) to the version derived from the thread-segments notice published that
+ * day - both times together with the other two requirements and the server's
+ * OUTLOOK_DISCLOSURE_VERSION, never one alone. It was null until 2026-10-09, and while
  * null the gate was CLOSED: an unconfigured requirement authorizes nothing, because no
  * account can have agreed to wording that does not exist yet (an earlier revision treated
  * null as "open"; that let a deployed worker subscribe and read unattended on the strength
@@ -127,13 +138,23 @@ export const BACKGROUND_CONSENT_CODES = Object.freeze([
  * fail-closed behaviour for any unconfigured or malformed value a test may pass.
  *
  * A connection whose recorded consent_policy_version equals this value may be operated
- * unattended; one whose version differs - the content-release consent the pilot holds
- * today included - is released with `background_consent_missing`, before any read and
- * before any subscription request, until the account disconnects and reconnects under the
- * published notice. Recorded consent is never upgraded in place. The run this gate refuses
- * is released untouched with a retry backoff, so nothing is lost - it waits for consent.
+ * unattended; one whose version differs - the background-sync consent the pilot holds as of
+ * this cutover included - is released with `background_consent_missing`, before any read and
+ * before any subscription request, until that account consents again under the published
+ * notice. TWO DISTINCT CODES, AND THEY ARE NOT INTERCHANGEABLE: a connection carrying no
+ * version or a different one gets `background_consent_missing`; only an unconfigured or
+ * malformed REQUIREMENT gets `background_consent_not_configured`. Writing the second where
+ * the first belongs would describe a configuration fault where there is simply no consent yet.
+ *
+ * Consenting again is a SAME-ACCOUNT OAUTH UPDATE: finalize_microsoft_connection upserts on
+ * (user_id) and returns the SAME connection id, writing the new consent_policy_version and
+ * deleting nothing. Disconnecting is NOT the path - outlook_sync_state,
+ * outlook_candidate_refs and outlook_thread_recovery all cascade from the connection, so a
+ * disconnect would erase every cursor and dedup reference. Recorded consent is never upgraded
+ * in place by the worker. The run this gate refuses is released untouched with a retry
+ * backoff, so nothing is lost - it waits for consent.
  */
-export const REQUIRED_BACKGROUND_CONSENT_VERSION = 'ol-disc-6d1ddd67f51d5b3bfd8d3801c50271a7'
+export const REQUIRED_BACKGROUND_CONSENT_VERSION = 'ol-disc-e1107c0221c89ded0b6a2134df848eea'
 
 /**
  * Pure: may this connection be operated unattended, given what it consented to?

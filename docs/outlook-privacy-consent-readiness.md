@@ -129,19 +129,23 @@ The derived version for this text is **`ol-disc-e1107c0221c89ded0b6a2134df848eea
 (fingerprint `e1107c0221c89ded0b6a2134df848eea`, 24 paragraphs), **published October 12, 2026**
 (thread-segments wording approved from `docs/outlook-thread-segments-rollout.md` section 2).
 
-**What publication moved, and what it did not.** The notice and the browser's
-`DISCLOSURE_FINGERPRINT` moved together in the publishing commit, so the card renders the new
-text and sends the new derived version. The three worker requirements in
-`supabase/functions/shared/outlookContentConsent.js` and the server's
-`OUTLOOK_DISCLOSURE_VERSION` **still name the previous value,
-`ol-disc-6d1ddd67f51d5b3bfd8d3801c50271a7`** (published October 9, 2026, background-sync
-wording approved at PR #76 head 505523f). That is deliberate and it has a consequence worth
-stating plainly: the pilot's stored consent carries that previous value, so it still
-**satisfies** those requirements, and the deployed worker would read mail if it were allowed to
-run. What stops it is the absent `OUTLOOK_IMPORT_WORKER_ENABLED` flag and the inactive
-`outlook-worker-tick` job - not the consent gate. Raising all three requirements and the server
-variable to the value above, redeploying the worker so its closure carries them, and only then
-having the pilot re-consent, is the next step, in that order.
+**Publication, then the cutover - in that order, both on October 12, 2026.** The notice and the
+browser's `DISCLOSURE_FINGERPRINT` moved together in the publishing commit, so the card renders
+the new text and sends the new derived version. For one commit the three worker requirements and
+the server's `OUTLOOK_DISCLOSURE_VERSION` still named the previous value,
+`ol-disc-6d1ddd67f51d5b3bfd8d3801c50271a7` (published October 9, 2026, background-sync wording
+approved at PR #76 head 505523f) - during which the pilot's stored consent still satisfied them
+and only the absent `OUTLOOK_IMPORT_WORKER_ENABLED` flag and the inactive `outlook-worker-tick`
+job held the feature back. All three requirements and the server variable then moved to the
+published value together, and the worker was redeployed so its closure carries them.
+
+**What that means now:** the pilot's stored consent names the previous version, so it no longer
+satisfies the requirements and a run would be released with `background_consent_missing` before
+any read. Clearing that is a **same-account OAuth update** under the published notice -
+`finalize_microsoft_connection` upserts on `(user_id)`, returns the same connection id and
+rewrites `consent_policy_version`, deleting nothing. **Disconnecting is not the path:** the
+synchronisation state, the candidate references and the thread-recovery rows all cascade from
+the connection.
 
 The content-release version `ol-disc-e3e2b1714b453c2904e3ed08cb232097` (October 6, 2026) was
 what the three requirements named until the cutover of 2026-10-09 (activation packet step 5)

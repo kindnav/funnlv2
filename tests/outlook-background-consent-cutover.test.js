@@ -258,7 +258,7 @@ console.log('the pure gate: closed while unconfigured, closed to stale or missin
 await test('an unconfigured requirement (null, undefined, malformed) authorizes nothing', () => {
   // CUT OVER 2026-10-09: the requirement now carries the published notice version, the same
   // value as the other two requirements (one cutover, never one alone).
-  assert.strictEqual(consent.REQUIRED_BACKGROUND_CONSENT_VERSION, 'ol-disc-6d1ddd67f51d5b3bfd8d3801c50271a7')
+  assert.strictEqual(consent.REQUIRED_BACKGROUND_CONSENT_VERSION, 'ol-disc-e1107c0221c89ded0b6a2134df848eea')
   assert.strictEqual(consent.REQUIRED_BACKGROUND_CONSENT_VERSION, consent.REQUIRED_CONTENT_CONSENT_VERSION)
   assert.strictEqual(consent.REQUIRED_BACKGROUND_CONSENT_VERSION, consent.REQUIRED_THIRD_PARTY_CONSENT_VERSION)
   // The gate still fails closed for any unconfigured or malformed requirement a caller passes.
