@@ -290,8 +290,8 @@ packet used the second where the first belongs.
 | 6 | **DONE 2026-10-12** — **Deploy `outlook-import-worker`** from merged main | Execution is still disabled — re-verify step 2's two states before and after. Download the deployed source and verify file-set equality and byte equality with the complete import closure (normalise CRLF). |
 | 7 | **DONE 2026-10-12** — Publish the approved wording, derive the new version | The published page matches §2 exactly; the date is the publication date. |
 | 8 | **DONE 2026-10-12** — Carry that one version into the browser constant, `OUTLOOK_DISCLOSURE_VERSION`, and **all three** worker requirements, in one commit | All five read the same value. No partial cutover. |
-| 9 | **Redeploy `outlook-import-worker`** so the deployed closure contains the new requirements | Download the deployed source again and verify byte equality with the post-cutover closure. Execution still disabled. |
-| 10 | Pilot re-consents via the **same-account OAuth update** | `consent_policy_version` equals the new value, **and** the connection `id`, both `delta_link_ciphertext` cursors and the candidate/`outlook_candidate_refs` references match the step-3a baseline exactly. |
+| 9 | **DONE 2026-10-12** — **Redeploy `outlook-import-worker`** so the deployed closure contains the new requirements | Download the deployed source again and verify byte equality with the post-cutover closure. Execution still disabled. |
+| 10 | **DONE 2026-10-12** — Pilot re-consents via the **same-account OAuth update** | `consent_policy_version` equals the new value, **and** the connection `id`, both `delta_link_ciphertext` cursors and the candidate/`outlook_candidate_refs` references match the step-3a baseline exactly. |
 | 11 | **RESUME** — only now | Re-enable the flag, then `SELECT cron.alter_job(1, active := true);`. Resume is conditional on step 10 having passed. If stored consent does not match, the gate does fail closed - every run releases with **`background_consent_missing`**, which is the code for a connection carrying no version or a different one. `background_consent_not_configured` is a different fault entirely: an unconfigured or malformed REQUIREMENT. Neither is a substitute for checking step 10. |
 | 12 | Live acceptance (§4) | As defined below. |
 
@@ -345,6 +345,55 @@ JavaScript and hashed it with the module's own rule: **24 paragraphs**, independ
 published version. Every approved policy sentence is present, including the fifty-fingerprint
 and twenty-five-unpaired bounds, "only then", "a time taken from the messages in that first
 look, not the time Funnl happened to look", and `Last updated: October 12, 2026`.
+
+### Steps 9-10, as executed 2026-10-12
+
+**Before step 9 could happen at all, a UI gap had to be closed.** The connection card rendered
+the disclosure and the consent control only while the account was `not_connected`, and both the
+card and the sync status told a connected user to disconnect and reconnect - which cascades the
+synchronisation state, the candidate references and the thread-recovery rows away. PR **#88**,
+merged as **`7767144d3135b6a4a48473b46d48a8a559662ab1`**, adds **Update Outlook permissions** to
+the connected branch: the same paragraph array, the same unchecked acknowledgement, the same
+request builder and the same OAuth start, with disconnect preserved as its own separate action
+and nothing in the update panel able to reach it. A failed update is now visible too - an
+`?outlook=error` landing on a page whose row still says connected was previously shown nowhere -
+and its copy says the account is still connected rather than reusing the connect path's
+"nothing was connected", which would have been false. Verified in the browser harness
+(section 8b): **185 checks, 185 passed**, including that starting an update never calls
+`disconnect_my_outlook` and leaves the connection row untouched.
+
+**Deployment, with the two kinds of evidence kept apart.** Vercel's own API independently
+confirms **`dpl_EZ2ULpR7ukcgUeisAynhRX8uoivY`**, target Production, state **READY** for merge
+`7767144d3135b6a4a48473b46d48a8a559662ab1` (owner-confirmed; the working session has no usable
+Vercel credential - the `VERCEL_OIDC_TOKEN` in `.env.local` is refused with 403). Independently
+of that, the **served** bundle was checked directly: the update control, its explanations, the
+update acknowledgement wording and the corrected failure copy are all served; both old
+disconnect instructions are gone; and the disclosure is unchanged - 24 paragraphs re-extracted
+from the served JavaScript and re-hashed to `e1107c0221c89ded0b6a2134df848eea`.
+
+**Step 9 was performed by the owner** in Settings, as a same-account OAuth update. Nothing was
+disconnected.
+
+**Step 10, read-only, against the step-3a baseline:**
+
+| What | Result |
+|---|---|
+| Stored `consent_policy_version` | **1 connection at the published version, 0 at any other** |
+| Connection identity (`id` + account + tenant) | **unchanged** (`4e0f77d53e63`) |
+| Committed delta cursors | **unchanged** (`e69ae3b524f0`), both present |
+| Transient cursors (`pending_delta`, `next_link`) | **unchanged** (`8e1dab45e1ee`) |
+| `outlook_candidate_refs` | **unchanged** (`47e56af5eafd`), still **3 rows**, 3 interaction / 0 new-contact |
+| Consent digest | moved off the superseded value, and equals the digest of the published version - the **only** field expected to change |
+| `needs_reauth` | 0 rows |
+| Sync-state rows / subscription row | 2 / 1, as before |
+| Pending wakes | recorded (0 at the time), **never required to be zero** |
+| `last_attempt_at` | still `2026-10-12 17:30:02`, i.e. before the pause |
+| `outlook_thread_recovery` / refs carrying coverage | 0 / 0 - nothing has run |
+| Cron `outlook-worker-tick` | **inactive** (job row present) |
+| `OUTLOOK_IMPORT_WORKER_ENABLED` | **ABSENT (verified)** |
+
+The re-consent therefore did exactly what the same-account update is supposed to do: it rewrote
+one field and preserved everything the rollout depends on.
 
 ### Step 8, as executed 2026-10-12
 
