@@ -171,8 +171,15 @@ const MAILTO_PREFIX = '(?:\\bmailto:\\s*)?'
 
 // Deliberately close to the guard's own structural rule, so nothing can pass here and
 // fail there. Apostrophes are admitted in the local part because real addresses use them.
+//
+// CASE-INSENSITIVE, and that is load-bearing rather than tidiness. This pattern carried
+// the 'g' flag while its encoded twin carried 'gi', so `MAILTO:` and `MailTo:` did not
+// match the prefix: only the address after them was replaced, leaving `MAILTO:[email
+// removed]` in the text - and a display name of nothing but `MAILTO:address` then came
+// back from safeProviderDisplayName as the person's name, "MAILTO". A scheme is never a
+// name. Both patterns now ignore case.
 const EMAIL_RE = new RegExp(
-  MAILTO_PREFIX + "[A-Za-z0-9._%+'-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}", 'g')
+  MAILTO_PREFIX + "[A-Za-z0-9._%+'-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}", 'gi')
 // An '@' written as an entity or a percent escape. Graph's HTML bodies are decoded
 // upstream, but a TEXT body is deliberately not decoded at all - decoding plain text
 // would rewrite characters the sender actually typed. So the encoded forms are matched

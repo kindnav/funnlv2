@@ -179,6 +179,40 @@ test('REPRODUCED: `mailto:` was stripped from ordinary prose, and no longer is',
   assert.ok(!redactEmailAddresses('mailto:noor@fund.test').includes('mailto'))
 })
 
+test('REPRODUCED: an UPPERCASE or mixed-case attached scheme survived as a word', () => {
+  // The plain pattern was case-sensitive while the encoded one was not, so `MAILTO:` and
+  // `MailTo:` were left behind with only the address replaced.
+  for (const s of ['write to MAILTO:noor@fund.test now', 'write to MailTo:noor@fund.test now',
+    'write to mailto:noor@fund.test now', 'write to Mailto:noor&#64;fund.test now']) {
+    const out = redactEmailAddresses(s)
+    assert.strictEqual(out, 'write to ' + EMAIL_REDACTED + ' now', s)
+    assert.ok(!/mailto/i.test(out), 'no scheme fragment may survive: ' + out)
+  }
+})
+
+test('REPRODUCED: an address-only display name returned the SCHEME as the name', () => {
+  // safeProviderDisplayName strips the placeholder, so `MAILTO:address` used to leave
+  // "MAILTO" - two letters, so it passed the name check and was offered as the person.
+  for (const n of ['MAILTO:noor@fund.test', 'MailTo:noor@fund.test', 'mailto:noor@fund.test',
+    'MAILTO:noor&#64;fund.test', '<MAILTO:noor@fund.test>']) {
+    const out = safeProviderDisplayName(n)
+    assert.strictEqual(out, null, n + ' -> ' + JSON.stringify(out))
+  }
+  // And a real name in front of an uppercase scheme still survives, intact.
+  assert.strictEqual(safeProviderDisplayName('Noor Haddad <MAILTO:noor@fund.test>'), 'Noor Haddad')
+})
+
+test('prose about the scheme is unchanged in any case', () => {
+  for (const s of ['The mailto: protocol opens an email app.',
+    'The MAILTO: protocol opens an email app.',
+    'MailTo: is the scheme name, and Mailto: is how some docs write it.',
+    'See RFC 6068 for MAILTO: syntax.']) {
+    assert.strictEqual(redactEmailAddresses(s), s, s)
+  }
+  // A display name is not a sentence, but the same rule holds: no address, no rewrite.
+  assert.strictEqual(safeProviderDisplayName('Mailto Working Group'), 'Mailto Working Group')
+})
+
 test('redaction is surgical: ordinary text and @-handles are untouched', () => {
   assert.strictEqual(redactEmailAddresses('Thursday at three works.'), 'Thursday at three works.')
   // Not an address: no dotted TLD. Left alone rather than mangled.
