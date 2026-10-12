@@ -5,15 +5,17 @@ it is. The reviewed worker and migration behaviour is frozen at `91a3f33`; every
 is documentation and one owner-run, no-network check script.
 
 Design, evidence and the defect record live in `docs/outlook-thread-segments.md`. This file is
-the operational companion: the one provider fact still open, the exact wording to approve, and
-the ordered steps.
+the operational companion: the provider fact and its owner verification, the exact wording to
+approve, and the ordered steps.
 
 ---
 
-## 1. The one provider fact still open
+## 1. The provider filter — owner-verified 2026-10-12
 
-**What is unverified:** whether this tenant actually applies the conversation-lookup filter —
+**What was in question:** whether this tenant actually applies the conversation-lookup filter —
 both the `conversationId eq` clause and the per-folder instant window the narrowed retry adds.
+The result is recorded at the end of this section; the reasoning is kept because it is what the
+result means.
 
 **Why HTTP 200 is not the answer.** A silently ignored `$filter` returns 200 with a perfectly
 plausible body. An empty `value` array proves nothing either: it is what an ignored filter
@@ -118,6 +120,42 @@ the script did not say NOT AVAILABLE.
 
 A **400** means the tenant refuses the filter shape. That path is handled, but it **blocks**
 this rollout: without the narrowed window a long legacy thread can never be completed.
+
+### RESULT — PASS, owner-verified 2026-10-12
+
+Run in Graph Explorer, owner-authenticated as the **verified pilot mailbox**, using the requests
+this head's own builder prints. Browser-observed, reported by the owner:
+
+| Request | Status | Count | Chosen message present | conversationIds match | `@odata.nextLink` |
+|---|---|---|---|---|---|
+| A-inbox | 200 | 1 | — | yes | none |
+| A-sentitems | 200 | 1 | — | yes | none |
+| B-inbox | 200 | 1 | **yes** | yes | none |
+| C-inbox | 200 | 0 | no | yes | none |
+| B-sentitems | 200 | 1 | **yes** | yes | none |
+| C-sentitems | 200 | 0 | no | yes | none |
+| D-inbox | 200 | 1 | **yes** | yes | none |
+| D-sentitems | 200 | 0 | no | yes | none |
+
+Every verdict condition is satisfied: `positive_control_non_empty` (both A counts above zero),
+`window_complete` (no `@odata.nextLink` anywhere), `conversation_ids_match` (every item, both
+folders), `inclusion_at_cutoff` (both B), `exclusion_works` (both C are zero, so C is below B in
+both folders), `inbox_property_is_received` and `sent_property_is_sent`.
+
+**Both B requests were exact inclusive-boundary tests:** the transmitted cutoff equalled the
+chosen message's own timestamp, so the inclusive boundary itself was probed rather than mere
+inclusion. **Both D requests demonstrated the expected property** — Inbox filters on
+`receivedDateTime`, Sent Items on `sentDateTime`, which is exactly what the worker relies on per
+folder. No request returned NOT AVAILABLE, and none returned 400.
+
+These are the owner's browser observations, recorded as reported; no request made from this
+repository ever reaches Microsoft.
+
+**What it unblocks:** step 0 of §3 is satisfied, and the narrowed per-folder window is evidenced
+as applied rather than silently ignored. **Scope: this mailbox and this tenant** — not a general
+claim about Microsoft Graph. Another tenant, or a mailbox under different Exchange policy, would
+need the same check before the same claim could be made. Response order remains unasserted and is
+not an activation requirement.
 
 ---
 
@@ -224,19 +262,28 @@ consent all agree.
 
 | # | Step | Gate |
 |---|---|---|
-| 0 | **Owner-run filter check** (§1) | Every boolean holds. A 400 stops the rollout. |
+| 0 | **Owner-run filter check** (§1) | **DONE — PASS, owner-verified 2026-10-12** (figures in §1): both B exact inclusive-boundary tests, both D demonstrating the per-folder property, no 400. |
 | 1 | Approve the wording in §2 | Your explicit approval of the exact text. |
 | 2 | **PAUSE — you authorize this explicitly.** `SELECT cron.alter_job(1, active := false);` then `scripts/outlook-worker-flag.ps1 disable` | Verify **both**: `SELECT jobid, active FROM cron.job;` shows `active = false`, and the flag helper reports the secret ABSENT. UNVERIFIED/UNKNOWN is not absent — re-run rather than assume. |
 | 3 | **Wait for in-flight runs to release.** | `SELECT connection_id, folder, sync_status, sync_lease_until FROM public.outlook_sync_state;` — every row `sync_status <> 'running'` **and** `sync_lease_until IS NULL OR sync_lease_until < now()`. Do not force a lease; a run that is mid-round releases on its own, and forcing one is how a round loses work. |
+| 3a | **Capture the pre-cutover baseline — only once quiescent** (see the note below the table). The connection `id`, both `delta_link_ciphertext` cursors, and the candidate / `outlook_candidate_refs` references that step 10 must find unchanged. | Held as **digests or in-database comparisons**: no identifier, ciphertext or mailbox content is printed. Read it twice, a minute apart, and get the same digest — that is what makes it a baseline rather than a sample. |
 | 4 | **Apply migration `20261011000000` only** | `supabase migration list --linked` shows exactly one pending first. Afterwards verify: the five coverage columns and their CHECKs on `outlook_candidate_refs`; `outlook_thread_recovery` with RLS on and no user policy; the four worker RPCs present with one overload each, SECURITY DEFINER, `service_role`-only; both producers at 19 and 20 arguments; **the two acceptance RPCs unchanged**. |
 | 5 | Merge PR #85 pinned to the reviewed head | Vercel build READY. The frontend bundle is functionally unchanged by this PR. |
 | 6 | **Deploy `outlook-import-worker`** from merged main | Execution is still disabled — re-verify step 2's two states before and after. Download the deployed source and verify file-set equality and byte equality with the complete import closure (normalise CRLF). |
 | 7 | Publish the approved wording, derive the new version | The published page matches §2 exactly; the date is the publication date. |
 | 8 | Carry that one version into the browser constant, `OUTLOOK_DISCLOSURE_VERSION`, and **all three** worker requirements, in one commit | All five read the same value. No partial cutover. |
 | 9 | **Redeploy `outlook-import-worker`** so the deployed closure contains the new requirements | Download the deployed source again and verify byte equality with the post-cutover closure. Execution still disabled. |
-| 10 | Pilot re-consents via the **same-account OAuth update** | `consent_policy_version` equals the new value, **and** the connection `id`, both `delta_link_ciphertext` cursors and the candidate/`outlook_candidate_refs` references are byte-identical to what they were at step 3. Capture those before step 2 so the comparison is real. |
+| 10 | Pilot re-consents via the **same-account OAuth update** | `consent_policy_version` equals the new value, **and** the connection `id`, both `delta_link_ciphertext` cursors and the candidate/`outlook_candidate_refs` references match the step-3a baseline exactly. |
 | 11 | **RESUME** — only now | Re-enable the flag, then `SELECT cron.alter_job(1, active := true);`. Resume is conditional on step 10 having passed; if stored consent does not match, the gate fails closed anyway and every run releases with `background_consent_not_configured`, but do not rely on that as the control. |
 | 12 | Live acceptance (§4) | As defined below. |
+
+**Baseline order — a correction.** An earlier version of this packet said to capture the
+step-10 comparison values *before* the pause. That is wrong: while a round is in flight the
+cursors are exactly what is being written, so a snapshot taken then records a value that may
+change again before quiescence and the later comparison would fail for a reason that is not a
+fault. The baseline is therefore captured at **step 3a** — after the pause and after every lease
+has released on its own, and still before the migration, the deploy, the publication and the
+re-consent, which is all the comparison needs.
 
 **Migration before worker deployment, without exception.** This head's worker calls
 `get_outlook_thread_coverage`; against a database without the migration it refuses the round
@@ -288,7 +335,9 @@ mentions the earlier exchange; or the first interaction's note has changed in an
    suggested — which may be several exchanges, not one.** That is the approved forward-only
    policy and it is disclosed in §2. It applies only to the two conditions in §2c; a thread
    whose earlier coverage is locatable is unaffected.
-4. **The provider fact in §1 is open** until the owner-run check passes.
+4. **The provider fact in §1 is settled for this mailbox and tenant only** (owner-verified
+   2026-10-12; figures in §1). It is not a general claim about Graph: another tenant, or a
+   mailbox under different Exchange policy, needs the same check.
 5. **Real-mail writing quality** remains under observation, as it has been since the detailed
    notes rollout. This feature changes which messages are drafted from, not how the note reads.
 

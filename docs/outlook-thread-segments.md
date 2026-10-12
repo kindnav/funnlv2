@@ -588,17 +588,24 @@ producer write; retry admission failure and its resumption; delta re-delivering 
 message; the first hint on a baseline-only row; and the fixed suppression boundary. Nothing in
 this file should be read as saying those remain untested.
 
+### Verified by the owner, outside this repository
+
+- **That this tenant applies the lookup filter** - both the `conversationId eq` clause and the
+  per-folder instant window. Owner-run on **2026-10-12**, owner-authenticated as the verified
+  pilot mailbox, using the requests `scripts/outlook-filter-check.mjs` prints from this head's own
+  builder. **PASS, with figures** (rollout packet section 1): both positive controls 200 with one
+  item and no `@odata.nextLink`; both inclusion requests returned the chosen message and were
+  **exact inclusive-boundary** tests, the transmitted cutoff equalling the message's own
+  timestamp; both exclusion requests returned zero; and both discrimination requests demonstrated
+  the per-folder property - Inbox on `receivedDateTime`, Sent Items on `sentDateTime`. Every
+  response carried matching conversation ids. HTTP 200 alone would have shown none of that, which
+  is why the check is built the way it is. These are the owner's browser observations, recorded as
+  reported: **no automated test in this repository talks to Microsoft**. The 400 path remains
+  handled (`recovery_unsupported`, settle rather than retry). **Scope is this mailbox and this
+  tenant**, not Microsoft Graph in general.
+
 ### Not demonstrated
 
-- **Whether this tenant actually applies the lookup filter.** The 400 path is handled - the
-  worker reports `recovery_unsupported` and settles the conversation rather than retrying -
-  but a silently IGNORED `$filter` returns HTTP 200 with a plausible body, so 200 is not the
-  test. `scripts/outlook-filter-check.mjs` prints the exact requests, built by this head's own
-  builder, for the owner to run signed in as the pilot mailbox; the verdict it asks for is
-  inclusion at the boundary, exclusion one second past it, matching conversation ids, a
-  non-empty positive control with no `@odata.nextLink`, and - where a message's two instants
-  differ - which property is actually filtered. **This blocks rollout of the narrowed window**,
-  because without it a long legacy thread could never be completed.
 - Response ORDER is deliberately not asserted and is not an activation requirement: the
   recovery path never sends `$orderby` and refuses `@odata.nextLink` rather than relying on
   order.
