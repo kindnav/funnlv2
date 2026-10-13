@@ -6,7 +6,8 @@ migration `20261013060000_preserve_new_contact_context_deadline.sql` was applied
 linked CLI. Nothing else moved: no Edge Function was deployed (`outlook-import-worker` is
 still v57), the notice version is still `ol-disc-e1107c0221c89ded0b6a2134df848eea`, the cron
 tick is still active and the worker flag was not touched. §5 records the rollout as it ran,
-and §7 records the one thing still outstanding - a **live** refresh has not been observed.
+§6 the ordinary synchronization that followed it, and §7 the **live refresh and acceptance**,
+observed later the same day.
 
 ---
 
@@ -250,22 +251,42 @@ this migration contains no DML, so nothing it did would move them.
 
 ---
 
-## 7. Still outstanding: a live refresh
+## 7. The live refresh and acceptance — demonstrated 13 October 2026
 
-The refresh branch applies only to a proposal whose status is `pending` or `deferred`. At the
-time of the rollout `new_contact_candidates` held **only accepted rows**, so a refresh was
-structurally impossible, however many rounds ran.
+A pilot thread was driven through the whole path with **scripted emails through the real
+services**. What was observed, in order:
 
-What would demonstrate it: a pilot thread whose new-contact proposal is still **pending** or
-**deferred** receives another message, and the next automatic round **commits** and advances
-its cursors where the same situation previously returned `write_failed` with
-`cursors_advanced: 0`. Read the run's own counters; do not reset a round, clear a cursor or
-invoke the worker to provoke it.
+| Instant (UTC) | What the database shows |
+|---|---|
+| **18:26:26.448821** | the new-contact proposal is **created**, `pending`, covering **two** messages; `context_expires_at` set to **2026-11-12 18:26:26.448821** — thirty days from creation |
+| **18:31:38.457294** | the **same** proposal is **refreshed**, now covering **four** messages. This is the write that could not previously succeed: it is 5 minutes 12 seconds after creation, and the old definition would have set `context_expires_at = now() + 30 days`, exceeding the ceiling by that interval and raising `23514 / ncc_context_ceiling` |
+| | the generated note grew from **718** to **1,007 characters** |
+| | `created_at` **unchanged**, and the original deadline **2026-11-12 18:26:26.448821 unchanged** — the window still runs from creation, which is the whole point of the fix |
+| **18:34:30.197494** | the proposal is **accepted** |
+| | **exactly one** interaction saved, and the digest of the refreshed note is **unchanged** by acceptance — what was reviewed is what was stored |
+| | the **13** interactions present at the first-proposal checkpoint are **unchanged** |
 
-Until that is seen in Production, the evidence for the fix is the reproduction and the proofs
-in §3 — real producer, real worker, real PostgREST — and the catalog verification in §5.
-Those establish that the deployed function is the reviewed one and that it no longer reissues
-the deadline. They do not establish a live refresh.
+**What this establishes: this refresh and this acceptance.** The deployed producer takes its
+refresh branch on a live pending proposal, preserves `created_at` and the original deadline,
+carries the later part of the exchange into the draft, and the reviewed note survives
+acceptance intact.
+
+**What it does not establish, and is not claimed:**
+
+- **not** general note accuracy. One exchange, scripted, says nothing about how the model
+  handles mail it did not expect. The outstanding note-quality check is still reading
+  naturally generated pilot notes against their source exchanges.
+- **not** replay behaviour. Nothing here re-delivered a message or re-ran a settled round.
+- **not** cohort latency. There is still no throughput or latency measurement with more than
+  one real mailbox, and the 5 min p95 / 2 min median figure remains an unmeasured target.
+
+**One unreconciled observation, stated rather than smoothed over.** An earlier checkpoint in
+this session recorded **15** interactions; by the time the first proposal was created the
+count was **13**. The 13 held steady from that checkpoint through acceptance, which is what
+the table above asserts. The reduction from 15 to 13 happened during setup and **has not been
+explained**, so no claim is made that the earlier 15-interaction baseline was preserved. It
+is a loose end, not a demonstrated deletion by anything in this change — this migration
+contains no DML — and it is recorded here so it is not quietly lost.
 
 ---
 
