@@ -1339,6 +1339,21 @@ and the user reviews before anything is saved. This slice makes the pipeline run
 makes its output discoverable. Full plan, latency target, measurement and next workstreams:
 `docs/outlook-background-sync-plan.md`. Disclosure wording for review: `docs/outlook-content-disclosure-draft.md` section F.
 
+**Cohort rollout state (2026-10-13): PAUSED mid-rollout, single pilot.** Activation packet
+`docs/outlook-cohort-activation-packet.md`. Execution paused at 19:32:43Z (cron `outlook-worker-tick`
+inactive, `OUTLOOK_IMPORT_WORKER_ENABLED` absent). Migration `20261013120000` APPLIED - one
+`reserve_due_outlook_connection(integer, integer, uuid, uuid[])` overload, eligibility decided in SQL.
+PR #90 merged as `7a9f0cd`; `outlook-oauth-start` v44 (verify_jwt=true) and `outlook-import-worker` v59
+(verify_jwt=false) deployed, closures byte-identical to merged main. Cohort wording PUBLISHED
+2026-10-13 ("Last updated: October 13, 2026"; notice paragraph 2 and the /privacy heading
+"Outlook connection (invited accounts only)" plus its opening), deriving browser notice version
+`ol-disc-6f904c3f7313353acbbc39e1edf2e278`. **Publication window OPEN:** the three worker
+requirements and the server `OUTLOOK_DISCLOSURE_VERSION` deliberately still name
+`ol-disc-e1107c0221c89ded0b6a2134df848eea`, so the pilot's stored consent still satisfies the
+worker (only the pause prevents execution) while an Update attempted from Settings is refused with
+409 `consent_version_mismatch`. Next is step 8 (cutover), then the same-account re-consent, then resume.
+Both allowlists still hold only the pilot.
+
 **Rollout state (2026-10-10): LIVE, unattended, single pilot account.** Migrations `20261009000000`,
 `20261010050349` and `20261010120000` APPLIED; `outlook-notifications` v1 and `outlook-import-worker` v49
 DEPLOYED (verify_jwt=false, closures byte-identical to main); background disclosure PUBLISHED (notice

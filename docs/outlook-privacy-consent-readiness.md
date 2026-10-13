@@ -66,13 +66,13 @@ than adding to them: three of those eleven state the opposite of what this relea
 and a notice that both promises and denies body reading is evidence of nothing. The
 replacements are tabulated in `docs/outlook-content-disclosure-draft.md` section A.
 
-The twenty-three paragraphs below are **quoted from `src/lib/outlookDisclosure.js` verbatim**,
+The twenty-four paragraphs below are **quoted from `src/lib/outlookDisclosure.js` verbatim**,
 character for character, because the version is derived from those exact strings. A test
 re-reads the array and fails if this section paraphrases any of them.
 
 > 1. Connecting Outlook is optional. Funnl works fully without it.
 
-> 2. Access is restricted to one designated Funnl-controlled test account. Funnl’s servers refuse a connection request from any other account.
+> 2. Access is restricted to a small number of invited accounts. Funnl's servers refuse a connection request from any account that has not been invited, and an invitation can be withdrawn. Once that change has taken effect, Funnl stops starting new checks of your mailbox, and it deletes nothing: your connection, everything Funnl has already matched and every suggestion you accepted are all still there, and you can disconnect whenever you want to. A check that has already started may finish, and Microsoft may keep telling Funnl that new mail has arrived for a few days until that arrangement lapses — Funnl records that a message arrived and then does nothing with it.
 
 > 3. You would grant six Microsoft scopes. Two of them read data, and both are read-only: Mail.Read (“Read user mail”) and User.Read (“Sign in and read user profile”). Three are the standard sign-in scopes openid, profile and email. The sixth, offline_access, grants no new access of its own — it is what lets Funnl keep using those two read permissions while you are not using the app, so a read can run without asking you to sign in again. Funnl also asks Microsoft to tell its servers when new mail arrives, so a check can start automatically within minutes while Funnl is closed.
 
@@ -125,27 +125,45 @@ each as a paragraph and shows nothing else as disclosure.
 `ol-disc-<first 32 hex of SHA-256 over the paragraphs joined by newline>`, so any edit
 produces a different version and the server's exact-string gate refuses the stale one.
 
-The derived version for this text is **`ol-disc-e1107c0221c89ded0b6a2134df848eea`**
-(fingerprint `e1107c0221c89ded0b6a2134df848eea`, 24 paragraphs), **published October 12, 2026**
-(thread-segments wording approved from `docs/outlook-thread-segments-rollout.md` section 2).
+The derived version for this text is **`ol-disc-6f904c3f7313353acbbc39e1edf2e278`**
+(fingerprint `6f904c3f7313353acbbc39e1edf2e278`, 24 paragraphs), **published October 13, 2026**
+(cohort wording approved from `docs/outlook-cohort-activation-packet.md` section 1a at PR #90
+head 4161368). Only paragraph 2 changed. It is quoted exactly as approved, including its plain
+apostrophe in "Funnl's"; normalising it to match the other paragraphs would publish words
+nobody approved and derive a different version.
 
-**Publication, then the cutover - in that order, both on October 12, 2026.** The notice and the
-browser's `DISCLOSURE_FINGERPRINT` moved together in the publishing commit, so the card renders
-the new text and sends the new derived version. For one commit the three worker requirements and
-the server's `OUTLOOK_DISCLOSURE_VERSION` still named the previous value,
-`ol-disc-6d1ddd67f51d5b3bfd8d3801c50271a7` (published October 9, 2026, background-sync wording
-approved at PR #76 head 505523f) - during which the pilot's stored consent still satisfied them
-and only the absent `OUTLOOK_IMPORT_WORKER_ENABLED` flag and the inactive `outlook-worker-tick`
-job held the feature back. All three requirements and the server variable then moved to the
-published value together, and the worker was redeployed so its closure carries them.
+**THE PUBLICATION WINDOW IS OPEN (cohort activation packet step 7, October 13, 2026).** The
+notice and the browser's `DISCLOSURE_FINGERPRINT` moved together in the publishing commit, so
+the card renders the new text and derives the new version. The three worker requirements in
+`supabase/functions/shared/outlookContentConsent.js` and the server's `OUTLOOK_DISCLOSURE_VERSION`
+**deliberately still name the previous value**, `ol-disc-e1107c0221c89ded0b6a2134df848eea`
+(published October 12, 2026, thread-segments wording). Until the cutover (step 8):
 
-**What that means now:** the pilot's stored consent names the previous version, so it no longer
-satisfies the requirements and a run would be released with `background_consent_missing` before
-any read. Clearing that is a **same-account OAuth update** under the published notice -
+- **The pilot's stored consent still SATISFIES the deployed worker.** It names
+  `ol-disc-e1107c02...`, which is exactly what the worker requires, so the worker would read mail
+  if it were allowed to run. The absent `OUTLOOK_IMPORT_WORKER_ENABLED` flag and the inactive
+  `outlook-worker-tick` job are the **only** controls holding it back. Nothing may rely on the
+  consent gate failing closed in this window - it will not.
+- **The Settings card will read that consent as superseded** and offer *Update Outlook
+  permissions*, because the browser now derives the new version. An update attempted now is
+  **refused** by `outlook-oauth-start` with `409 consent_version_mismatch` before anything is
+  stored, because the server variable still names the old value - and the card's "reload this
+  page" advice cannot help until step 8. Nothing is lost by the refusal; the connection, its
+  cursors, its candidates and its provenance are untouched. **Re-consent belongs after the
+  cutover, never in this window.**
+
+**Closing the window (step 8):** all three requirements and the server variable move to the
+published value together, the worker is redeployed so its closure carries them, and only then
+does the pilot re-consent - through a **same-account OAuth update** under the published notice.
 `finalize_microsoft_connection` upserts on `(user_id)`, returns the same connection id and
 rewrites `consent_policy_version`, deleting nothing. **Disconnecting is not the path:** the
 synchronisation state, the candidate references and the thread-recovery rows all cascade from
 the connection.
+
+The thread-segments window was opened and closed the same way on October 12, 2026: the notice
+was published first, then the requirements, the server variable and the worker moved together
+from the background-sync value `ol-disc-6d1ddd67f51d5b3bfd8d3801c50271a7` (published October 9,
+2026, approved at PR #76 head 505523f).
 
 The content-release version `ol-disc-e3e2b1714b453c2904e3ed08cb232097` (October 6, 2026) was
 what the three requirements named until the cutover of 2026-10-09 (activation packet step 5)

@@ -960,10 +960,21 @@ test('the disclosure does NOT claim the Microsoft grant is revoked', () => {
   // Checked by NEGATION rather than by banned words: the sentence that mentions
   // withdrawal is exactly the one that says it does not happen. So every sentence
   // mentioning revocation or withdrawal must be a negative one.
+  //
+  // ONE EXEMPTION, AND ONLY ONE. The cohort release (October 13, 2026) says "an invitation can
+  // be withdrawn" - Funnl withdrawing an INVITATION, a different subject from Microsoft's grant,
+  // and approved word for word. A word-level check cannot tell the two apart, so exactly that
+  // phrase is removed before the check runs. Every other mention of withdrawal or revocation in
+  // the same sentence, or anywhere else, is still checked - a sentence saying a disconnect
+  // withdraws the grant would still fail.
+  const INVITATION = /an invitation can be withdrawn/gi
+  assert.strictEqual((text.match(INVITATION) || []).length, 1,
+    'the invitation exemption covers exactly the one approved phrase')
   const sentences = text.split(/(?<=[.])\s+/)
   for (const s of sentences) {
-    if (!/revok|withdraw/i.test(s)) continue
-    assert.ok(/does not|do not|cannot|never/i.test(s),
+    const checked = s.replace(INVITATION, '')
+    if (!/revok|withdraw/i.test(checked)) continue
+    assert.ok(/does not|do not|cannot|never/i.test(checked),
       `a sentence claims revocation happens: ${s}`)
   }
 })
