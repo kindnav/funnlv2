@@ -143,7 +143,6 @@ export default function OutlookConnectionCard({
   //     read had failed that they were not connected - a claim the failure cannot support.
   //   * neither, and the status says not_connected -> nothing, which is what every other
   //     user of the product sees.
-  const statusUnknown = status === 'error' || status === 'loading'
   const showCard = status === 'connected' || mayConnect || status === 'error'
   if (!showCard) return null
 
@@ -283,18 +282,26 @@ export default function OutlookConnectionCard({
           )}
 
           {/* A removed viewer is told the truth rather than pointed at a control they do not
-              have: imports have stopped, nothing was deleted, and disconnecting is theirs to
-              do whenever they want. Deliberately says nothing about WHY they were removed -
-              the card does not know, and guessing would be worse than silence. */}
+              have: nothing was deleted, and disconnecting is theirs to do whenever they want.
+              Deliberately says nothing about WHY they were removed - the card does not know,
+              and guessing would be worse than silence.
+
+              AND IT DOES NOT CLAIM A STOP. All this page knows is that the viewer's id is not
+              in the configured value; the server reads that value per invocation, and a round
+              already reserved still finishes. So the sentence is qualified with "once the
+              change has taken effect" instead of reporting a stop it cannot observe. The same
+              qualification is in describeAutomation() and the listener line, so the three do
+              not contradict each other. */}
           {!mayConnect && (
             <p
               className="mt-3 rounded-xl border border-line-2 bg-elevated p-3 text-sm text-muted"
               data-testid="outlook-not-invited"
             >
-              Automatic Outlook checks are not running for this account at the moment. Nothing
-              has been deleted: your connection, the conversations Funnl has already matched and
-              every interaction you accepted are all still here. You can disconnect below
-              whenever you want to.
+              This account is not on Funnl&rsquo;s invited list for Outlook, so once that change
+              has taken effect Funnl does not start new automatic checks of this mailbox. A check
+              that had already started may still finish. Nothing has been deleted: your
+              connection, the conversations Funnl has already matched and every interaction you
+              accepted are all still here. You can disconnect below whenever you want to.
             </p>
           )}
 

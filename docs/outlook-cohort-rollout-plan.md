@@ -234,12 +234,25 @@ Ordered. Each is a check, not a hope.
    the frontend predicate and the server predicate agree on every case. Extends
    `tests/outlook-pilot-gate.test.js` and the consent-UI suite.
 2. **Composed proof: the real worker, the real reservation, over real PostgREST.**
-   `tests/local/outlook-cohort-composed.mjs` runs two eligible accounts and a third excluded
-   one with separate mailbox fixtures, each round's RPCs going over HTTP to PostgREST against
-   this project's Postgres image. It also measures what an OLD deployment answers a
-   four-argument call, and proves the three-argument call still resolves **by omitting** the
-   defaulted fourth argument rather than passing an explicit NULL - which is a different
-   request and would not have tested the rollout order at all.
+   `tests/local/outlook-cohort-composed.mjs` runs **one cohort value holding two invited
+   accounts** plus a third excluded one with separate mailbox fixtures, each round's RPCs going
+   over HTTP to PostgREST against this project's Postgres image. The reservation - not the
+   harness - chooses whose mailbox each invocation reads, and the fixture dispatches the
+   mailbox from that request's **own bearer token**, so a round that read the wrong mailbox
+   could not be handed the right answer. Both accounts write candidates of both kinds; each
+   invocation leaves the other account's rows unchanged; isolation is proved with **positive
+   controls**, so a missing grant or a missing RPC cannot pass for ownership enforcement. It
+   also measures what an OLD deployment answers a four-argument call, and proves the
+   three-argument call still resolves **by omitting** the defaulted fourth argument rather than
+   passing an explicit NULL - which is a different request and would not have tested the
+   rollout order at all. 18 checks, all required; **18 pass**.
+
+   It also depends on aligning `auth.uid()` with the Production definition. This Postgres
+   image reads the singular legacy claim that PostgREST v14 does not set, so without the
+   alignment `auth.uid()` is NULL for every HTTP request, RLS hides every row from everybody,
+   and the whole isolation section passes **without proving anything**. That is why the
+   positive controls come first: each user reads and accepts their own rows before any
+   cross-account refusal is believed.
 3. **Two-account handler proof, through the real worker** — extends the existing
    `tests/outlook-two-sided-rounds.test.js` harness with a second connection: both due, each
    reserved in turn, and assert the **fairness order** (longest-unserved first, a signalled account
@@ -278,7 +291,27 @@ Ordered. Each is a check, not a hope.
    window, which this session cannot do and the owner can. Until one is chosen and run, the
    5 min p95 / 2 min median figure stays an **unmeasured target**, and no cohort rollout
    report may describe it otherwise.
-9. **A real second account end to end** — one invited person connects from Settings, reads the
+9. **A follow-up this harness found, which is NOT part of this slice.**
+   `upsert_new_contact_candidate` fails whenever it refreshes an existing proposal. Its UPDATE
+   branch sets `context_expires_at = now() + interval '30 days'` while `created_at` keeps the
+   original insert time, and the table's own ceiling is
+   `context_expires_at <= created_at + interval '30 days'` - so a refresh violates the check by
+   however long the row has already existed, which a second is enough to do. Reproduced over
+   real PostgREST as `23514 / ncc_context_ceiling`; the run surfaces it as `rpc_error` and
+   `write_failed` with **no cursor advanced**, so the affected folder re-reads the same page
+   until the user accepts or dismisses that proposal (either of which makes the status terminal
+   and takes the clean `exists_terminal` path).
+
+   **When it bites:** a new message arrives in a thread whose new-contact proposal is still
+   `pending` or `deferred`. It is pre-existing on `main` - the refresh branch dates from
+   `20261006000000` and the current definition from `20261010180000`, both applied - and the
+   cohort change neither causes nor worsens it, though more accounts means more unresolved
+   proposals. **It is deliberately not fixed in this slice:** the correction is a one-statement
+   schema change (stop extending the ceiling on refresh), and it belongs in its own reviewed
+   migration with its own rollout, not folded into a change about who is eligible. The composed
+   harness documents it at the resume check and uses a token-aware delta fixture, which is what
+   a real resumed delta does, so the resume check tests resuming rather than this.
+10. **A real second account end to end** — one invited person connects from Settings, reads the
    notice, consents, completes a two-way exchange with Funnl closed, and accepts the suggestion;
    then the pilot account's records are re-verified unchanged against their pinned digests.
 

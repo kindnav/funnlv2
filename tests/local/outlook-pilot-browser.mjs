@@ -1554,11 +1554,19 @@ VALUES ('${CONN_ID}', '${PILOT_USER}', 'sub-browser', repeat('a', 64), 'active',
   check('8c: NO Connect, NO Update and NO disclosure are offered',
     removed.connect === false && removed.update === false && removed.panel === false
     && removed.disclosure === false, JSON.stringify(removed))
-  check('8c: the automation line does not promise checks for this mailbox',
-    removed.automationOn === 'false' && /not running for this mailbox/.test(removed.automation),
+  // THE LINE REPORTS THE LIST, AND QUALIFIES THE CONSEQUENCE. It may not assert that the
+  // server has stopped: the configured value is read per invocation and a reserved round
+  // still finishes, neither of which this page can see.
+  check('8c: the automation line reports the invitation, not a stop it cannot observe',
+    removed.automationOn === 'false'
+    && /not on Funnl\u2019s invited list/.test(removed.automation)
+    && /once that change has taken effect/.test(removed.automation)
+    && !/are not running/i.test(removed.automation),
     JSON.stringify(removed.automation))
-  check('8c: the notice says nothing was deleted, and guesses no reason',
+  check('8c: the notice says nothing was deleted, guesses no reason, and qualifies the change',
     /Nothing has been deleted/.test(removed.notice)
+    && /once that change has taken effect/.test(removed.notice)
+    && /had already started may still finish/.test(removed.notice)
     && !/removed|revoked|suspended|violat/i.test(removed.notice), JSON.stringify(removed.notice))
   await sleep(600)
   check('8c: and no consent request was made for them',
@@ -1605,6 +1613,62 @@ VALUES ('${CONN_ID}', '${PILOT_USER}', 'sub-browser', repeat('a', 64), 'active',
     reauth.disconnect === true && reauth.update === false, JSON.stringify(reauth))
   psql(`UPDATE public.microsoft_connections SET needs_reauth = false WHERE id = '${CONN_ID}';`,
   { tuplesOnly: false })
+
+  // ── removed WHILE A RUN IS IN FLIGHT ──
+  // The reproduced contradiction: a live lease made the block say "Checking your mailbox
+  // now" directly above a line saying checks were not running. A reserved round does finish
+  // - cancelling one mid-way is how a round loses work - so the lease is reported, as the
+  // round that had already started.
+  psql(`UPDATE public.outlook_sync_state
+           SET sync_status = 'running', sync_lease_until = now() + interval '5 minutes',
+               sync_run_id = gen_random_uuid()
+         WHERE connection_id = '${CONN_ID}' AND folder = 'inbox';`, { tuplesOnly: false })
+  await page.goto(`${ORIGIN}/settings`)
+  await page.waitFor('document.querySelector(\'[data-testid="outlook-sync-status"]\') !== null',
+    20000, 'the status block')
+  const inFlight = await page.eval(`
+    const st = document.querySelector('[data-testid="outlook-sync-status"]')
+    return {
+      tone: st ? st.getAttribute('data-tone') : null,
+      status: st ? st.innerText : '',
+      automation: (document.querySelector('[data-testid="outlook-automation"]') || {}).innerText || '',
+    }`)
+  check('8c: a run already in flight is reported to a removed viewer as what it is',
+    /A check is still under way/.test(inFlight.status)
+    && /had already started/.test(inFlight.status)
+    && !/Checking your mailbox now/.test(inFlight.status), JSON.stringify(inFlight.status))
+  check('8c: and the automation line beside it does not deny that run',
+    !/are not running/i.test(inFlight.automation)
+    && /once that change has taken effect/.test(inFlight.automation),
+    JSON.stringify(inFlight.automation))
+
+  // ── removed WITH A RETRY ALREADY SCHEDULED ──
+  // next_retry_at is a recorded moment and is shown. What must not be shown is "Funnl will
+  // try again", which is a promise about a future run this page cannot make either way.
+  psql(`UPDATE public.outlook_sync_state
+           SET sync_status = 'idle', sync_lease_until = NULL, sync_run_id = NULL,
+               next_retry_at = now() + interval '20 minutes', retry_count = 1,
+               last_error_code = 'graph_failed', last_run_complete = false
+         WHERE connection_id = '${CONN_ID}';`, { tuplesOnly: false })
+  await page.goto(`${ORIGIN}/settings`)
+  await page.waitFor('document.querySelector(\'[data-testid="outlook-sync-status"]\') !== null',
+    20000, 'the status block')
+  const scheduled = await page.eval(`
+    const st = document.querySelector('[data-testid="outlook-sync-status"]')
+    return { tone: st ? st.getAttribute('data-tone') : null, status: st ? st.innerText : '' }`)
+  check('8c: a scheduled retry is shown to a removed viewer as a record, not a promise',
+    /A retry is recorded for/.test(scheduled.status)
+    && /graph_failed/.test(scheduled.status)
+    && !/will try again/i.test(scheduled.status), JSON.stringify(scheduled.status))
+  check('8c: and it says plainly that this page cannot promise the retry runs',
+    /cannot say whether that retry runs/.test(scheduled.status), JSON.stringify(scheduled.status))
+
+  // Back to the settled state the remaining sections read.
+  psql(`UPDATE public.outlook_sync_state
+           SET sync_status = 'idle', sync_lease_until = NULL, sync_run_id = NULL,
+               next_retry_at = NULL, retry_count = 0, last_error_code = NULL,
+               last_run_complete = true, last_success_at = now() - interval '7 minutes'
+         WHERE connection_id = '${CONN_ID}';`, { tuplesOnly: false })
 
   // ── the connection status cannot be READ ──
   restFaults.add('/rest/v1/rpc/get_my_outlook_connection')

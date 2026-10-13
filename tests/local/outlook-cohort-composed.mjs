@@ -14,12 +14,20 @@
 //   2. after the migration, a THREE-named-parameter call still works by OMITTING the
 //      defaulted fourth - which is the compatibility that matters, and is not what passing
 //      an explicit NULL tests;
-//   3. two eligible accounts and a third excluded one through the real worker, each with its
-//      own mailbox, and per-account cursors, candidates, provenance refs and recovery state;
-//   4. removal and re-addition against the SAME durable fixture: the removed account's state
-//      is untouched and it resumes from its own committed cursor;
-//   5. authenticated user A cannot read, accept or dismiss user B's candidates, and neither
-//      of them can reach the worker-only tables at all.
+//   3. TWO INVITED ACCOUNTS UNDER ONE COHORT VALUE, with the REAL RESERVATION choosing
+//      which one each invocation serves, each mailbox dispatched from that request's own
+//      bearer token, each writing its own candidates of BOTH kinds, and each invocation
+//      leaving the other account's rows byte-for-byte as they were;
+//   4. a third account that is not in the cohort is never reserved, and removal then
+//      re-addition against the SAME durable fixture leaves state untouched and resumes
+//      from the account's own committed cursor;
+//   5. account isolation with POSITIVE CONTROLS: each user can read and accept their own
+//      candidates of both kinds, and the other user's identical request on the same row is
+//      refused without changing it - so a missing grant or a missing RPC cannot pass for
+//      ownership enforcement.
+//
+// EVERY CHECK HERE IS REQUIRED. There is no "pending" or "known-not-yet" category: a
+// failure, or a prerequisite that did not happen, exits non-zero.
 //
 // NOT part of `npm test`: it needs Docker. Teardown is unconditional.
 // RUN: node tests/local/outlook-cohort-composed.mjs
@@ -32,6 +40,7 @@ import { dirname, join } from 'node:path'
 import assert from 'node:assert'
 import { runOutlookImport, summarizeRun } from '../../supabase/functions/shared/outlookImportRun.js'
 import { GRAPH_BASE } from '../../supabase/functions/shared/outlookGraphTransport.js'
+import { ANTHROPIC_MESSAGES_URL } from '../../supabase/functions/shared/outlookDraftContract.js'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const PG = 'funnl-cohortc-pg'
@@ -41,45 +50,44 @@ const PG_IMAGE = 'public.ecr.aws/supabase/postgres:17.6.1.140'
 const REST_IMAGE = 'public.ecr.aws/supabase/postgrest:v14.14'
 const BASE = 'http://127.0.0.1:53997'
 const JWT_SECRET = randomBytes(32).toString('hex')
+const FIXTURE_KEY = 'sk-ant-fixture-not-a-real-key'
 
 const COHORT_MIGRATION = '20261013000000_outlook_cohort_reservation.sql'
 
-// A and B are invited; C is not. Identical in every other way.
+// A and B are invited; C is not. Identical in every other way. Each account has TWO
+// conversations: one with a party Funnl already knows (which yields an interaction
+// suggestion) and one with a stranger (which yields a new-contact proposal). Both owners
+// therefore end up with a candidate of BOTH kinds, which is what the isolation checks at
+// the end need in order to be about ownership rather than about an empty table.
 const ACC = {
   A: { user: '00000000-0000-4000-8000-0000000000aa', conn: '10000000-0000-4000-8000-0000000000aa',
-       me: 'a@cohort.test', party: 'ava@firm.test', conv: 'AAQkA-cohort-A' },
+       me: 'a@cohort.test', known: 'ava@firm.test', stranger: 'zoe@firm.test',
+       knownName: 'Ava Recruiter', strangerName: 'Zoe Adeyemi' },
   B: { user: '00000000-0000-4000-8000-0000000000bb', conn: '10000000-0000-4000-8000-0000000000bb',
-       me: 'b@cohort.test', party: 'noor@fund.test', conv: 'AAQkA-cohort-B' },
+       me: 'b@cohort.test', known: 'noor@fund.test', stranger: 'kai@fund.test',
+       knownName: 'Noor Analyst', strangerName: 'Kai Lindqvist' },
   C: { user: '00000000-0000-4000-8000-0000000000cc', conn: '10000000-0000-4000-8000-0000000000cc',
-       me: 'c@cohort.test', party: 'omar@desk.test', conv: 'AAQkA-cohort-C' },
+       me: 'c@cohort.test', known: 'omar@desk.test', stranger: 'rhea@desk.test',
+       knownName: 'Omar Desk', strangerName: 'Rhea Byrne' },
 }
+const KEYS = ['A', 'B', 'C']
+const ALL_ADDRESSES = KEYS.flatMap((k) => [ACC[k].me, ACC[k].known, ACC[k].stranger])
+
 const CONSENT = `ol-disc-${'e'.repeat(32)}`
+// THE SHAPE contentPermissions() EXPECTS, and the reason the first revision of this harness
+// never completed a round. It passed the bare string, and contentPermissions does
+// `'content' in required`, which THROWS on a string: "Cannot use 'in' operator to search
+// for 'content' in ol-disc-ee...". The run reported that as `released_error` with no RPC
+// rejection and no injected port of its own throwing - which is exactly how a fixture fault
+// can be mistaken for a worker fault. The background requirement stays a separate scalar,
+// because that is the parameter's real shape.
+const REQUIRED_CONSENT = { content: CONSENT, thirdParty: CONSENT }
 
 let passed = 0
 let failed = 0
-let pending = 0
 async function test (name, fn) {
   try { await fn(); console.log(`  ok   ${name}`); passed += 1 }
   catch (e) { console.error(`  FAIL ${name}\n       ${e && e.message}`); failed += 1 }
-}
-
-/**
- * A check that is KNOWN not to pass yet, for a stated reason.
- *
- * It still runs, and it still prints what happened - what it does not do is pretend. The
- * alternative was deleting the check, which would have made the harness look complete while
- * covering less, or leaving it as a failure, which would make a usable gate unusable.
- */
-async function notYet (name, why, fn) {
-  pending += 1
-  try {
-    await fn()
-    console.log(`  NOW PASSES (remove the notYet wrapper)   ${name}`)
-  } catch (e) {
-    console.log(`  pending  ${name}`)
-    console.log(`           why: ${why}`)
-    console.log(`           got: ${(e && e.message || '').slice(0, 300)}`)
-  }
 }
 
 // ── docker plumbing ──────────────────────────────────────────────────────────
@@ -96,6 +104,32 @@ const psqlFile = (p, user = 'postgres') =>
   psql(readFileSync(join(ROOT, p), 'utf8'), { user, tuplesOnly: false })
 const rows = (sql) => psql(sql).trim().split('\n').filter(Boolean).map((l) => l.split('|'))
 const one = (sql) => psql(sql).trim()
+
+/**
+ * Align auth.uid() with the PRODUCTION definition.
+ *
+ * THE REASON THIS IS NOT OPTIONAL. This image defines auth.uid() as
+ * `current_setting('request.jwt.claim.sub')` - the SINGULAR legacy form - while PostgREST
+ * v14 sets the JSON form, `request.jwt.claims`. Against the image as shipped, auth.uid() is
+ * therefore NULL for every HTTP request, RLS hides every row from everybody, and the
+ * acceptance RPCs answer `not_found` to their own owner. An isolation suite run that way
+ * PASSES COMPLETELY WITHOUT PROVING ANYTHING: "A cannot see B's rows" is true because
+ * nobody can see any row. Production's auth.uid() reads the JSON form, which is why
+ * Production works; aligning the definition makes the local database behave like Production
+ * and is what lets the positive controls below mean something. Nothing in the repo changes.
+ *
+ * tests/sql/_bootstrap-disposable-db.sql records the mismatch, and
+ * tests/local/outlook-pilot-browser.mjs makes the same substitution for the same reason.
+ */
+function alignAuthUidWithProduction () {
+  psql(`
+CREATE OR REPLACE FUNCTION auth.uid() RETURNS uuid LANGUAGE sql STABLE AS $f$
+  select coalesce(
+    nullif(current_setting('request.jwt.claim.sub', true), ''),
+    (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')
+  )::uuid;
+$f$;`, { user: 'supabase_admin', tuplesOnly: false })
+}
 
 function waitForPg (timeoutMs = 180000) {
   const deadline = Date.now() + timeoutMs
@@ -152,8 +186,7 @@ async function http (method, path, { token, body } = {}) {
 }
 
 // ── the worker's ports, over HTTP ────────────────────────────────────────────
-const calls = []
-function workerRpc () {
+function workerRpc (calls) {
   return async (name, args) => {
     calls.push({ name, args })
     const r = await http('POST', `/rpc/${name}`, { token: TOK.worker(), body: args })
@@ -161,8 +194,11 @@ function workerRpc () {
       // NAMED, not swallowed. Every RPC here goes to the real function, so a rejection is
       // either a real contract mismatch or a fixture that does not match the schema - and
       // the run's own report cannot tell the difference, because it never forwards a message.
-      console.error(`       [rpc ${r.status}] ${name}: ${r.raw.slice(0, 200)}`)
-      return { data: null, error: { status: r.status, raw: r.raw.slice(0, 300) } }
+      // LONG ENOUGH TO NAME THE CONSTRAINT. A 23514 whose message is cut off before the
+      // constraint name tells you a check failed and nothing about which one, and these
+      // rows are synthetic fixtures, so there is nothing here to withhold.
+      console.error(`       [rpc ${r.status}] ${name}: ${r.raw.slice(0, 900)}`)
+      return { data: null, error: { status: r.status, raw: r.raw.slice(0, 900) } }
     }
     return { data: r.body, error: null }
   }
@@ -202,6 +238,9 @@ async function committedCursors (connId) {
  * The context the run loads AFTER the reservation has chosen a connection - so it is built
  * from the reserved owner, which is what makes a cohort run realistic: the harness does not
  * decide whose mailbox is read, the reservation does.
+ *
+ * THE ACCESS TOKEN IS PER ACCOUNT (`token-A`, `token-B`, `token-C`). The provider dispatches
+ * on it, so whichever mailbox a round reads is the one its own reservation chose.
  */
 function contextLoader () {
   // THE REAL SIGNATURE is loadRunContext(connectionId, runId, { deadlineMs, now }) -
@@ -209,7 +248,7 @@ function contextLoader () {
   // an options object made every round throw, which the run correctly reported as
   // `released_error`: the harness was wrong, not the worker.
   return async (connectionId) => {
-    const key = Object.keys(ACC).find((k) => ACC[k].conn === connectionId)
+    const key = KEYS.find((k) => ACC[k].conn === connectionId)
     const acc = ACC[key]
     if (!acc) throw new Error(`context for an unknown connection: ${connectionId}`)
     const contacts = rows(
@@ -229,65 +268,233 @@ function contextLoader () {
   }
 }
 
-// ── one mailbox per account, each with its own two-way exchange ──────────────
+// ── one mailbox per account: two threads each, one known party and one stranger ──
 const okRes = (body) => ({ status: 200, headers: { get: () => null }, json: async () => body })
-const addr = (e) => ({ emailAddress: { address: e, name: 'x' } })
+const addr = (e, n) => ({ emailAddress: { address: e, name: n } })
+const qp = (u, name) => {
+  const m = String(u).match(new RegExp('[?&]' + name.replace('$', '\\$') + '=([^&]*)'))
+  return m ? decodeURIComponent(m[1]) : null
+}
+
+/**
+ * The source text of each message, TAGGED so the model fixture can tell the four threads
+ * apart - that tag is all the model request carries about which exchange it is. No address
+ * appears in any body: an address in a model request is refused by the real minimization
+ * guard, and a fixture that smuggled one in would be testing the guard rather than the
+ * cohort.
+ */
+const BODIES = {
+  'A-KNOWN': 'A-KNOWN-BODY Good to speak at the panel. Your name has gone forward for the '
+    + 'spring programme and the team would like a short call next week.',
+  'A-NEW': 'A-NEW-BODY I introduced myself after the panel - happy to read your resume if '
+    + 'you send it over, and I can flag anything that stands out.',
+  'B-KNOWN': 'B-KNOWN-BODY Thursday afternoon works on my side. Send two or three times and '
+    + 'I will confirm one of them.',
+  'B-NEW': 'B-NEW-BODY Good to meet you at the society dinner. Tell me which modules you '
+    + 'took and I will pass your name to the desk.',
+  'C-KNOWN': 'C-KNOWN-BODY This thread belongs to the account that was never invited and '
+    + 'must never be read.',
+  'C-NEW': 'C-NEW-BODY This thread belongs to the account that was never invited and must '
+    + 'never be read.',
+}
+const DRAFT_NOTES = {
+  'A-KNOWN': 'She confirmed your name went forward for the spring programme and asked for a '
+    + 'short call next week. Left open: which day.',
+  'A-NEW': 'He introduced himself after the panel and offered to read your resume. Left '
+    + 'open: when you send it.',
+  'B-KNOWN': 'She offered Thursday afternoon and asked for two or three times. Left open: '
+    + 'which one is confirmed.',
+  'B-NEW': 'He asked which modules you took and offered to pass your name to the desk. Left '
+    + 'open: whether a referral follows.',
+}
+const TAGS = Object.keys(BODIES)
 
 function mailboxes () {
   const world = {}
-  for (const [key, a] of Object.entries(ACC)) {
-    const inId = `msg-${key}-in`
-    const outId = `msg-${key}-out`
-    const env = (id, from, to, sent) => ({
-      id, conversationId: a.conv, receivedDateTime: sent, sentDateTime: sent, isDraft: false,
-      subject: `Thread ${key}`, from: addr(from), sender: addr(from),
-      toRecipients: to.map(addr), ccRecipients: [],
-    })
-    world[key] = {
-      inbox: [env(inId, a.party, [a.me], '2026-09-21T14:00:00Z')],
-      sentitems: [env(outId, a.me, [a.party], '2026-09-21T16:00:00Z')],
+  for (const key of KEYS) {
+    const a = ACC[key]
+    const w = { inbox: [], sentitems: [], envelopes: {}, bodies: {}, folderOf: {} }
+    for (const kind of ['KNOWN', 'NEW']) {
+      const tag = `${key}-${kind}`
+      const party = kind === 'KNOWN' ? a.known : a.stranger
+      const partyName = kind === 'KNOWN' ? a.knownName : a.strangerName
+      const conv = `AAQkA-${key}-${kind}`
+      const inId = `msg-${tag}-in`
+      const outId = `msg-${tag}-out`
+      const env = (id, from, fromName, to, toName, sent) => ({
+        id, conversationId: conv, receivedDateTime: sent, sentDateTime: sent, isDraft: false,
+        subject: `Thread ${tag}`, from: addr(from, fromName), sender: addr(from, fromName),
+        toRecipients: [addr(to, toName)], ccRecipients: [],
+      })
+      const inbound = env(inId, party, partyName, a.me, 'Me', '2026-09-21T14:00:00Z')
+      const outbound = env(outId, a.me, 'Me', party, partyName, '2026-09-21T16:00:00Z')
+      w.inbox.push(inbound)
+      w.sentitems.push(outbound)
+      w.envelopes[inId] = inbound
+      w.envelopes[outId] = outbound
+      w.folderOf[inId] = 'inbox'
+      w.folderOf[outId] = 'sentitems'
+      // Both halves carry the thread's tag, so a body read from either side routes the
+      // model fixture to the same draft.
+      w.bodies[inId] = BODIES[tag]
+      w.bodies[outId] = `${tag}-BODY Thanks - noted, and I will come back to you.`
     }
+    world[key] = w
   }
   return world
 }
 const WORLD = mailboxes()
-/** Every Graph request's bearer token, with the account the round was for. */
-const tokensSeen = []
 
-/** Graph, served per ACCOUNT: the token the run was given says whose mailbox it is. */
-function provider (key) {
-  const w = WORLD[key]
+function contentResponse (env, text) {
+  return okRes({
+    id: env.id,
+    conversationId: env.conversationId,
+    receivedDateTime: env.receivedDateTime,
+    sentDateTime: env.sentDateTime,
+    subject: env.subject,
+    from: env.from,
+    sender: env.sender,
+    toRecipients: env.toRecipients,
+    ccRecipients: [],
+    body: { contentType: 'text', content: text },
+    uniqueBody: { contentType: 'text', content: text },
+    // Present and clean, so the screening stage has something to ASSESS rather than a
+    // missing-headers deferral.
+    internetMessageHeaders: [{ name: 'Received', value: 'by fixture' }],
+  })
+}
+
+function modelResponse (payload) {
+  return okRes({
+    id: 'msg_fixture', type: 'message', role: 'assistant', stop_reason: 'end_turn',
+    content: [{ type: 'text', text: JSON.stringify(payload) }],
+    usage: { input_tokens: 100, output_tokens: 50 },
+  })
+}
+
+/**
+ * The draft a model request earns, chosen from the body tag the request actually carries.
+ *
+ * It also RECORDS which schema the request asked for. Whether a thread yields a
+ * new-contact proposal or an interaction suggestion is the worker's decision, made from
+ * whether the other party is already one of that user's contacts - so the correlation
+ * between the tag and the schema is an assertion worth making, and it is made after the
+ * round rather than thrown here, where a throw would surface as `released_error`.
+ */
+function draftFor (requestBody, counts) {
+  const tag = TAGS.find((t) => requestBody.indexOf(`${t}-BODY`) >= 0) ?? null
+  const isNew = requestBody.indexOf('new_contact_suggestion') >= 0
+  counts.drafts.push({ tag, isNew })
+  if (!tag) return modelResponse({ result: 'no_suggestion', reason: 'fixture: untagged body' })
+  const which = tag.endsWith('-NEW') ? 'stranger' : 'known'
+  const key = tag.slice(0, 1)
+  const base = {
+    summary: DRAFT_NOTES[tag] ?? 'Fixture note.',
+    summary_evidence: 'explicit_body',
+    follow_up: 'Send the times and confirm one of them.',
+    interaction_date: null,
+  }
+  return modelResponse(isNew
+    ? { result: 'new_contact_suggestion',
+        name: which === 'stranger' ? ACC[key].strangerName : ACC[key].knownName,
+        name_evidence: 'explicit_signature', name_confidence: 'high', ...base }
+    : { result: 'interaction_draft', ...base })
+}
+
+/**
+ * Graph and Anthropic, with the mailbox chosen by the REQUEST'S OWN BEARER TOKEN.
+ *
+ * WHY THE TOKEN AND NOT A CALLER-SUPPLIED KEY. The first revision took the account key from
+ * the test and served that mailbox whatever token arrived, so a round that read the WRONG
+ * mailbox would still have been handed the "right" answer and the check would still have
+ * passed. The token is minted per account by the context loader, which runs only after the
+ * reservation has chosen a connection - so dispatching on it means the mailbox a round sees
+ * is the one its own reservation and context load chose, and nothing else. A request whose
+ * token names no account is refused loudly rather than served.
+ */
+function provider (counts) {
   return async (url, init) => {
     const u = String(url)
-    // WHOSE TOKEN CAME WITH THE REQUEST. Recorded rather than thrown: a header shape this
-    // fixture does not recognise would otherwise abort the round and be reported as
-    // `released_error`, which is a harness fault dressed up as a worker fault. The
-    // assertions below read `tokensSeen`, so a genuine mix-up still fails a check.
+    if (u === ANTHROPIC_MESSAGES_URL) {
+      counts.model += 1
+      const sent = String(init?.body ?? '')
+      // The privacy guards here are PRODUCTION's: the request was built and checked by the
+      // real contract before it reached this fixture. This is the belt that proves the
+      // braces held.
+      for (const a of ALL_ADDRESSES) {
+        if (sent.includes(a)) counts.leakedAddresses.push(a)
+      }
+      return draftFor(sent, counts)
+    }
+
     const h = init?.headers
     const auth = String(
       (h && typeof h.get === 'function' ? h.get('authorization') : null)
       ?? h?.Authorization ?? h?.authorization ?? '')
-    tokensSeen.push({ key, auth: auth.replace(/^Bearer\s+/i, '').slice(0, 20) })
-    const folder = u.includes('/mailFolders/inbox/') ? 'inbox' : 'sentitems'
-    const m = u.match(/\/me\/messages\/([^?]+)\?/)
-    if (m) {
-      const id = decodeURIComponent(m[1])
-      const env = [...w.inbox, ...w.sentitems].find((e) => e.id === id)
-      return env ? okRes({ ...env })
-        : { status: 404, headers: { get: () => null }, json: async () => ({ error: { code: 'ErrorItemNotFound' } }) }
-    }
-    if (u.includes('/messages/delta')) {
-      return okRes({
-        value: w[folder],
-        '@odata.deltaLink': `${GRAPH_BASE}/me/mailFolders/${folder}/messages/delta?$deltatoken=${key}-1`,
-      })
-    }
+    const key = KEYS.find((k) => auth.includes(`token-${k}`)) ?? null
+    counts.tokens.push({ key, url: u.slice(0, 70) })
+    if (!key) throw new Error(`a Graph request carried no account token: ${auth.slice(0, 24)}`)
+    const w = WORLD[key]
+
     if (u.includes('/subscriptions')) {
       return { status: 403, headers: { get: () => null },
         json: async () => ({ error: { code: 'ExtensionError', message: 'fixture: no subscription' } }) }
     }
+
+    const m = u.match(/\/me\/messages\/([^?]+)\?/)
+    if (m) {
+      const id = decodeURIComponent(m[1])
+      const env = w.envelopes[id]
+      const select = qp(u, '$select') || ''
+      if (select.indexOf('uniqueBody') < 0) {
+        counts.envelopes.push({ key, id })
+        if (!env) {
+          return { status: 404, headers: { get: () => null },
+            json: async () => ({ error: { code: 'ErrorItemNotFound' } }) }
+        }
+        return okRes({ ...env })
+      }
+      counts.bodies.push({ key, id })
+      const text = w.bodies[id]
+      if (!env || !text) {
+        return { status: 404, headers: { get: () => null },
+          json: async () => ({ error: { code: 'ErrorItemNotFound' } }) }
+      }
+      return contentResponse(env, text)
+    }
+
+    const folder = u.includes('/mailFolders/inbox/') || u.includes('/mailFolders/inbox?')
+      || u.includes("/mailFolders('inbox')") ? 'inbox' : 'sentitems'
+    if (u.includes('/messages/delta')) {
+      // THE TOKEN DECIDES, as it does at Graph. A first listing has no $deltatoken and
+      // returns the folder; a resumed listing presents the token it was given and returns
+      // only what arrived since - here, nothing. Re-serving the whole folder to a resumed
+      // request, which the first version of this fixture did, is behaviour no mailbox has.
+      const token = qp(u, '$deltatoken')
+      counts.deltas.push({ key, folder, token })
+      const link = `${GRAPH_BASE}/me/mailFolders/${folder}/messages/delta?$deltatoken=${key}-1`
+      return okRes({ value: token ? [] : w[folder], '@odata.deltaLink': link })
+    }
+    const filter = qp(u, '$filter')
+    if (filter !== null) {
+      const conv = (filter.match(/^conversationId eq '([^']*)'/) || [])[1] ?? null
+      counts.lookups.push({ key, folder, conv })
+      const value = w[folder].filter((e) => e.conversationId === conv)
+      return okRes({ value })
+    }
     return okRes({ value: [] })
   }
+}
+
+const newCounts = () => ({ model: 0, drafts: [], leakedAddresses: [], bodies: [],
+  envelopes: [], deltas: [], lookups: [], tokens: [] })
+
+/** Which single account a round actually talked to, from the tokens its requests carried. */
+function servedAccount (counts) {
+  const seen = [...new Set(counts.tokens.map((t) => t.key))]
+  assert.strictEqual(seen.length, 1,
+    `exactly one account's mailbox may be read per invocation, saw ${JSON.stringify(seen)}`)
+  return seen[0]
 }
 
 /** Make every account due again, so each round is a fresh reservation decision. */
@@ -318,31 +525,53 @@ function traced (name, fn) {
 }
 
 /** One invocation of the REAL run, with the cohort it is configured with. */
-async function round (cohort, graphKey) {
-  return runOutlookImport({
-    rpc: traced('rpc', workerRpc()),
+async function round (cohort, { fetchWrap } = {}) {
+  const counts = newCounts()
+  const calls = []
+  const base = provider(counts)
+  const run = await runOutlookImport({
+    rpc: traced('rpc', workerRpc(calls)),
     pilotUserId: cohort,
     encryptCursor: traced('encryptCursor', encryptCursor),
     decryptCursor: traced('decryptCursor', decryptCursor),
     loadRunContext: traced('loadRunContext', contextLoader()),
-    anthropicApiKey: 'fixture-key-not-used',
-    requiredConsent: CONSENT,
+    anthropicApiKey: FIXTURE_KEY,
+    requiredConsent: REQUIRED_CONSENT,
     requiredBackgroundConsent: CONSENT,
-    deps: { fetchImpl: traced('graph', provider(graphKey)) },
+    deps: { fetchImpl: traced('graph', fetchWrap ? fetchWrap(base) : base) },
   })
+  return { run, report: summarizeRun(run), counts, calls }
 }
 
+/**
+ * Everything durable about one account, in a form two snapshots can be compared with.
+ * Candidate ids AND statuses are included, so "unchanged" means the rows themselves, not
+ * just how many there are.
+ */
 const stateOf = (key) => ({
   cursors: rows(`SELECT folder, coalesce(delta_link_ciphertext,'none')
                    FROM public.outlook_sync_state WHERE connection_id='${ACC[key].conn}'
                   ORDER BY folder;`),
-  candidates: Number(one(`SELECT count(*) FROM public.interaction_candidates WHERE user_id='${ACC[key].user}';`)),
-  newContacts: Number(one(`SELECT count(*) FROM public.new_contact_candidates WHERE user_id='${ACC[key].user}';`)),
+  leases: rows(`SELECT folder, sync_status, coalesce((sync_lease_until > now())::text,'none')
+                  FROM public.outlook_sync_state WHERE connection_id='${ACC[key].conn}'
+                 ORDER BY folder;`),
+  interactions: rows(`SELECT id, status FROM public.interaction_candidates
+                        WHERE user_id='${ACC[key].user}' ORDER BY id;`),
+  newContacts: rows(`SELECT id, status FROM public.new_contact_candidates
+                       WHERE user_id='${ACC[key].user}' ORDER BY id;`),
   refs: Number(one(`SELECT count(*) FROM public.outlook_candidate_refs WHERE user_id='${ACC[key].user}';`)),
   recovery: Number(one(`SELECT count(*) FROM public.outlook_thread_recovery WHERE user_id='${ACC[key].user}';`)),
   lastSuccess: one(`SELECT coalesce(max(last_success_at)::text,'never') FROM public.outlook_sync_state
                      WHERE connection_id='${ACC[key].conn}';`),
 })
+
+/** Every lease this account holds is released and no folder is left running. */
+function assertLeasesReleased (key) {
+  for (const [folder, status, future] of stateOf(key).leases) {
+    assert.notStrictEqual(status, 'running', `${key}/${folder} is still running`)
+    assert.notStrictEqual(future, 't', `${key}/${folder} still holds a live lease`)
+  }
+}
 
 let harnessError = null
 try {
@@ -352,6 +581,7 @@ try {
   docker(['run', '-d', '--name', PG, '--network', NET, '-e', 'POSTGRES_PASSWORD=disposable', PG_IMAGE])
   waitForPg()
   psqlFile('tests/sql/_bootstrap-disposable-db.sql', 'supabase_admin')
+  alignAuthUidWithProduction()
 
   const all = readdirSync(join(ROOT, 'supabase/migrations')).filter((f) => f.endsWith('.sql')).sort()
   assert.ok(all.includes(COHORT_MIGRATION), 'the cohort migration must exist')
@@ -361,12 +591,13 @@ try {
 
   psql("ALTER ROLE authenticator WITH PASSWORD 'disposable';", { user: 'supabase_admin', tuplesOnly: false })
   // PRODUCTION GRANT SHAPE, reproduced deliberately. Supabase grants table privileges to
-  // `authenticated` by default - the app reads interaction_candidates with the viewer's own
-  // JWT - while this image does not. Without the grant a cross-account read is refused for
-  // the WRONG reason (no privilege at all) and the RLS policy is never exercised, which would
-  // make the isolation proof weaker while looking stronger.
-  psql(`GRANT SELECT, UPDATE ON public.interaction_candidates TO authenticated;
-        GRANT SELECT, UPDATE ON public.new_contact_candidates TO authenticated;`,
+  // `authenticated` by default - the review queue reads both candidate tables with the
+  // viewer's own JWT - while this image does not. Without the grant a cross-account read is
+  // refused for the WRONG reason (no privilege at all), the RLS policy is never exercised,
+  // and the owner cannot read their own rows either - so the suite would look stronger
+  // while proving less.
+  psql(`GRANT SELECT ON public.interaction_candidates TO authenticated;
+        GRANT SELECT ON public.new_contact_candidates TO authenticated;`,
   { user: 'supabase_admin', tuplesOnly: false })
   docker(['run', '-d', '--name', REST, '--network', NET, '-p', '53997:3000',
     '-e', `PGRST_DB_URI=postgres://authenticator:disposable@${PG}:5432/postgres`,
@@ -390,7 +621,7 @@ try {
   await test('a FOUR-parameter call is REFUSED, not silently narrowed or ignored', async () => {
     const r = await http('POST', '/rpc/reserve_due_outlook_connection',
       { token: TOK.worker(), body: { ...threeArgBody, p_pilot_user_ids: [ACC.A.user] } })
-    oldFourArgAnswer = { status: r.status, code: r.body?.code ?? null, message: r.body?.message ?? null }
+    oldFourArgAnswer = { status: r.status, code: r.body?.code ?? null }
     // MEASURED, because a comment in the first revision of this work asserted the opposite.
     // PostgREST resolves a function by the named arguments in the body; an unknown argument
     // means no candidate matches, which is a 404 with PGRST202 - the request never reaches
@@ -434,8 +665,9 @@ try {
   })
 
   // ══ 3. three accounts, three mailboxes, one excluded ═══════════════════════
-  console.log('\n3. the real worker over PostgREST, with two invited accounts and one excluded')
-  for (const [key, a] of Object.entries(ACC)) {
+  console.log('\n3. the real worker over PostgREST: ONE cohort value, two invited accounts')
+  for (const key of KEYS) {
+    const a = ACC[key]
     psql(`INSERT INTO auth.users (id, email, email_confirmed_at, created_at, updated_at)
           VALUES ('${a.user}', '${a.me}', now(), now(), now()) ON CONFLICT (id) DO NOTHING;
           INSERT INTO public.microsoft_connections
@@ -443,6 +675,10 @@ try {
              needs_reauth, consented_at, consent_policy_version)
           VALUES ('${a.conn}', '${a.user}', 'acct-${key}', 'consumers', 'personal', '${a.me}',
                   ARRAY['Mail.Read','User.Read','offline_access'], 'active', false, now(), '${CONSENT}');
+          -- ONE party per account is already a contact and one is a stranger, so each
+          -- account's round produces an interaction suggestion AND a new-contact proposal.
+          INSERT INTO public.contacts (user_id, name, email)
+          VALUES ('${a.user}', '${a.knownName}', '${a.known}');
           -- initial_import_done FALSE and no cursor, which is what a newly invited account
           -- actually looks like. Marking a folder done while it holds no delta link is a
           -- state the worker never writes, and seeding it that way made the first round
@@ -454,63 +690,112 @@ try {
                  ('${a.conn}','${a.user}','sentitems','idle',false, now() - interval '2 hours', now() - interval '2 hours', true);`,
     { tuplesOnly: false })
   }
+  // THE SAME VALUE FOR BOTH INVOCATIONS. The first revision configured one eligible user at
+  // a time, which made the harness - not the reservation - decide whose mailbox was read,
+  // and so proved nothing about serving a cohort.
   const COHORT = `${ACC.A.user},${ACC.B.user}`
+  const served = []
+  // Accumulated from the invocations that actually read a mailbox. Asserting over a later
+  // invocation's counts would be vacuous: by then nothing is due, so there are no drafts to
+  // examine and an empty loop passes.
+  const allDrafts = []
+  const allLeaks = []
 
-  await notYet('each invited account is imported from its OWN mailbox',
-    'the round ends in released_error with NO rpc rejection logged and NO harness port throwing, so the fixture is not yet a shape the round-state machine accepts; the write path itself is covered by tests/outlook-pilot-gate.test.js and tests/outlook-two-sided-rounds.test.js against the real run module', async () => {
+  await test('with both invited accounts due, each invocation serves ONE of them, chosen by the reservation', async () => {
+    makeDue()
+    const before = { A: stateOf('A'), B: stateOf('B'), C: stateOf('C') }
+    assert.ok(before.A.cursors.every(([, ct]) => ct === 'none'), 'A starts with no cursor')
+    assert.ok(before.B.cursors.every(([, ct]) => ct === 'none'), 'B starts with no cursor')
+
+    const r1 = await round(COHORT)
+    allDrafts.push(...r1.counts.drafts); allLeaks.push(...r1.counts.leakedAddresses)
+    assert.ok(['committed', 'ok'].includes(r1.run.outcome), JSON.stringify(r1.report))
+    const first = servedAccount(r1.counts)
+    assert.ok(first === 'A' || first === 'B', `an invited account must be served, got ${first}`)
+    served.push(first)
+    const other = first === 'A' ? 'B' : 'A'
+    // The account it did NOT choose is byte-for-byte as it was, and so is the excluded one.
+    assert.deepStrictEqual(stateOf(other), before[other],
+      `${other} must be untouched by a round that served ${first}`)
+    assert.deepStrictEqual(stateOf('C'), before.C, 'the excluded account must be untouched')
+
+    const r2 = await round(COHORT)
+    allDrafts.push(...r2.counts.drafts); allLeaks.push(...r2.counts.leakedAddresses)
+    assert.ok(['committed', 'ok'].includes(r2.run.outcome), JSON.stringify(r2.report))
+    const second = servedAccount(r2.counts)
+    served.push(second)
+    // THE RESERVATION'S OWN CHOICE, not the harness's: the longest-unserved connection is
+    // preferred, so the second invocation takes the one the first left alone.
+    assert.strictEqual(second, other,
+      `the second invocation must serve the other invited account, got ${second}`)
+    assert.deepStrictEqual(stateOf('C'), before.C, 'the excluded account is still untouched')
+  })
+
+  await test('each served account read its OWN mailbox, and wrote candidates of BOTH kinds', async () => {
+    assert.deepStrictEqual([...served].sort(), ['A', 'B'],
+      `both invited accounts must have been served: ${JSON.stringify(served)}`)
     for (const key of ['A', 'B']) {
-      makeDue()
-      // Only this account is eligible for this invocation, so the reservation must pick it
-      // and the provider must see that account's token - which it asserts for itself.
-      const r = await round(ACC[key].user, key)
-      assert.ok(['committed', 'ok'].includes(r.outcome),
-        `${key}: ${JSON.stringify(summarizeRun(r))}`)
       const s = stateOf(key)
       assert.ok(s.cursors.every(([, ct]) => ct !== 'none'),
-        `${key}: both folders must have committed a cursor`)
-      // Every Graph request in this round carried THIS account's token, so the mailbox read
-      // was the reserved account's and not another's.
-      const wrong = tokensSeen.filter((t) => t.key === key && t.auth && !t.auth.includes(key))
-      assert.strictEqual(wrong.length, 0,
-        `${key}: a request carried another account's token: ${JSON.stringify(wrong.slice(0, 3))}`)
-      assert.ok(tokensSeen.some((t) => t.key === key && t.auth.includes(`token-${key}`)),
-        `${key}: no request carried its own token: ${JSON.stringify(tokensSeen.slice(-3))}`)
+        `${key} must have committed a cursor for both folders: ${JSON.stringify(s.cursors)}`)
+      assert.ok(s.interactions.length >= 1,
+        `${key} must have an interaction suggestion for its KNOWN party`)
+      assert.ok(s.newContacts.length >= 1,
+        `${key} must have a new-contact proposal for its STRANGER`)
+      assert.ok(s.refs >= 2, `${key} must have a provenance row per candidate, got ${s.refs}`)
+      assertLeasesReleased(key)
     }
+  })
+
+  await test('no model request carried an address, and each thread asked for the right schema', async () => {
+    // FROM THE TWO INVOCATIONS THAT READ MAIL. Four threads in all - a known party and a
+    // stranger for each invited account - so an empty list here is itself a failure.
+    assert.deepStrictEqual(allLeaks, [],
+      `an address reached the model request: ${JSON.stringify(allLeaks)}`)
+    assert.ok(allDrafts.length >= 4,
+      `expected a model request per thread, got ${allDrafts.length}`)
+    const kinds = new Set()
+    for (const d of allDrafts) {
+      assert.ok(d.tag, 'every model request must carry a fixture body tag')
+      // WHICH SCHEMA IS THE WORKER'S DECISION, made from whether the other party is already
+      // one of that user's contacts. The tag says which thread it was, so the two must agree.
+      assert.strictEqual(d.isNew, d.tag.endsWith('-NEW'),
+        `${d.tag} asked for the wrong schema (new_contact_suggestion=${d.isNew})`)
+      kinds.add(d.isNew ? 'new' : 'interaction')
+      assert.ok(d.tag.startsWith('A-') || d.tag.startsWith('B-'),
+        `a thread outside the cohort reached the model: ${d.tag}`)
+    }
+    assert.deepStrictEqual([...kinds].sort(), ['interaction', 'new'],
+      'both schemas must have been exercised')
   })
 
   await test('the EXCLUDED account is never reserved, even while it is the only one due', async () => {
     makeDue()
-    // Make A and B un-due so C is the only candidate the reservation could pick.
+    // Make A and B un-due so C is the only connection the reservation could pick.
     psql(`UPDATE public.outlook_sync_state SET last_success_at = now()
            WHERE connection_id IN ('${ACC.A.conn}','${ACC.B.conn}');`, { tuplesOnly: false })
     const beforeC = stateOf('C')
-    const r = await round(COHORT, 'C')
-    assert.strictEqual(r.outcome, 'none_due', JSON.stringify(summarizeRun(r)))
-    const afterC = stateOf('C')
-    assert.deepStrictEqual(afterC, beforeC, 'nothing of the excluded account may change')
-    assert.strictEqual(afterC.cursors.filter(([, ct]) => ct !== 'none').length, 0,
+    const r = await round(COHORT)
+    assert.strictEqual(r.run.outcome, 'none_due', JSON.stringify(r.report))
+    assert.strictEqual(r.counts.tokens.length, 0, 'the excluded mailbox must not be touched')
+    assert.deepStrictEqual(stateOf('C'), beforeC, 'nothing of the excluded account may change')
+    assert.strictEqual(stateOf('C').cursors.filter(([, ct]) => ct !== 'none').length, 0,
       'the excluded account has no committed cursor')
   })
 
-  await notYet('per-account state is separate: cursors, candidates, refs and recovery',
-    'depends on the round above completing', async () => {
-    const a = stateOf('A')
-    const b = stateOf('B')
-    const c = stateOf('C')
-    // The two invited accounts each did their own work.
-    assert.ok(a.candidates + a.newContacts >= 1, `A wrote nothing: ${JSON.stringify(a)}`)
-    assert.ok(b.candidates + b.newContacts >= 1, `B wrote nothing: ${JSON.stringify(b)}`)
-    // And neither wrote into the other's rows, nor into the excluded account's.
-    assert.strictEqual(c.candidates + c.newContacts + c.refs + c.recovery, 0,
-      `the excluded account has state: ${JSON.stringify(c)}`)
+  await test('cross-account rows are impossible: no provenance or candidate points elsewhere', async () => {
     const crossed = Number(one(`SELECT count(*) FROM public.outlook_candidate_refs r
-                                 JOIN public.microsoft_connections m ON m.id = r.connection_id
-                                WHERE r.user_id <> m.user_id;`))
-    assert.strictEqual(crossed, 0, "no provenance row may belong to one user under another account's connection")
+                                  JOIN public.microsoft_connections m ON m.id = r.connection_id
+                                 WHERE r.user_id <> m.user_id;`))
+    assert.strictEqual(crossed, 0,
+      "no provenance row may belong to one user under another account's connection")
     const mixed = Number(one(`SELECT count(*) FROM public.interaction_candidates ic
                                 JOIN public.contacts ct ON ct.id = ic.contact_id
                                WHERE ct.user_id <> ic.user_id;`))
     assert.strictEqual(mixed, 0, "no candidate may point at another user's contact")
+    const cRows = stateOf('C')
+    assert.strictEqual(cRows.interactions.length + cRows.newContacts.length + cRows.refs
+      + cRows.recovery, 0, `the excluded account has state: ${JSON.stringify(cRows)}`)
   })
 
   // ══ 4. removal and re-addition, same durable fixture ══════════════════════
@@ -518,88 +803,178 @@ try {
   await test('a removed account is refused, and its durable state is untouched', async () => {
     makeDue()
     const before = stateOf('B')
-    // B is removed: the cohort is A alone. B is the only account made due.
+    // B is removed: the cohort is A alone. B is the only account left due.
     psql(`UPDATE public.outlook_sync_state SET last_success_at = now()
            WHERE connection_id IN ('${ACC.A.conn}','${ACC.C.conn}');`, { tuplesOnly: false })
-    const r = await round(ACC.A.user, 'B')
-    assert.strictEqual(r.outcome, 'none_due', JSON.stringify(summarizeRun(r)))
-    const after = stateOf('B')
-    assert.deepStrictEqual(after, before, "removal must not change one row of B's state")
+    const r = await round(ACC.A.user)
+    assert.strictEqual(r.run.outcome, 'none_due', JSON.stringify(r.report))
+    assert.strictEqual(r.counts.tokens.length, 0, "the removed account's mailbox must not be read")
+    assert.deepStrictEqual(stateOf('B'), before, "removal must not change one row of B's state")
   })
 
-  await notYet('re-added, the same account resumes from its OWN committed cursor',
-    'depends on a first round having committed a cursor', async () => {
+  await test('re-added, the same account resumes from its OWN committed cursor', async () => {
     const cursorsBefore = await committedCursors(ACC.B.conn)
     assert.ok(cursorsBefore.inbox && cursorsBefore.sentitems,
       'B must still hold the cursors it committed before removal')
     makeDue()
     psql(`UPDATE public.outlook_sync_state SET last_success_at = now()
            WHERE connection_id IN ('${ACC.A.conn}','${ACC.C.conn}');`, { tuplesOnly: false })
+    const beforeCandidates = stateOf('B').newContacts
     const seen = []
-    const r = await runOutlookImport({
-      rpc: workerRpc(),
-      pilotUserId: COHORT,
-      encryptCursor,
-      decryptCursor,
-      loadRunContext: contextLoader(),
-      anthropicApiKey: 'fixture-key-not-used',
-      requiredConsent: CONSENT,
-      requiredBackgroundConsent: CONSENT,
-      deps: {
-        fetchImpl: async (url, init) => {
-          const u = String(url)
-          if (u.includes('/messages/delta')) seen.push(u)
-          return provider('B')(url, init)
-        },
+    const r = await round(COHORT, {
+      fetchWrap: (base) => async (url, init) => {
+        const u = String(url)
+        if (u.includes('/messages/delta')) seen.push(u)
+        return base(url, init)
       },
     })
-    assert.ok(['committed', 'ok'].includes(r.outcome), JSON.stringify(summarizeRun(r)))
-    // RESUMED, not restarted: the delta request carried the token B had committed.
-    assert.ok(seen.length > 0, 'a delta request must have been made')
-    assert.ok(seen.some((u) => u.includes('deltatoken=B-1')),
-      `the resumed round must use B's own committed delta token: ${seen.join(' ')}`)
+    assert.ok(['committed', 'ok'].includes(r.run.outcome), JSON.stringify(r.report))
+    assert.strictEqual(servedAccount(r.counts), 'B', 'the re-added account is the one served')
+    // RESUMED, not restarted: both delta requests presented the token B had committed, so
+    // the mailbox returned only what arrived since - nothing - rather than the folder again.
+    assert.strictEqual(seen.length, 2, `one delta request per folder: ${seen.length}`)
+    for (const u of seen) {
+      assert.ok(u.includes('deltatoken=B-1'),
+        `the resumed round must use B's own committed delta token: ${u}`)
+    }
+    assert.deepStrictEqual(stateOf('B').newContacts, beforeCandidates,
+      'a resumed round with no new mail must not re-propose anything')
+    assertLeasesReleased('B')
+    // A DEFECT THIS HARNESS FOUND, recorded where it was found rather than worked around.
+    // When a NEW message does arrive in a thread whose new-contact proposal is still
+    // 'pending' or 'deferred', upsert_new_contact_candidate takes its refresh branch and
+    // sets `context_expires_at = now() + interval '30 days'` while `created_at` keeps the
+    // original insert time. The table's own ceiling is
+    // `context_expires_at <= created_at + interval '30 days'`, so the refresh violates it
+    // by however long the row has existed - a second is enough. Reproduced here as
+    // 23514 / ncc_context_ceiling, which the run surfaces as `rpc_error` and `write_failed`
+    // with no cursor advanced. It is pre-existing on main (the refresh branch dates from
+    // 20261006000000 and the current definition from 20261010180000), it is NOT caused by
+    // the cohort change, and it is not fixed here: a schema correction belongs in its own
+    // reviewed migration, not folded into this one. docs/outlook-cohort-rollout-plan.md
+    // records it as a named follow-up.
   })
 
   // ══ 5. one user cannot reach another's review surface ══════════════════════
-  console.log('\n5. account isolation over HTTP, as the browser sees it')
-  const bCandidate = one(`SELECT id FROM public.interaction_candidates
-                           WHERE user_id='${ACC.B.user}' ORDER BY created_at LIMIT 1;`)
-  const bNewContact = one(`SELECT id FROM public.new_contact_candidates
-                            WHERE user_id='${ACC.B.user}' ORDER BY created_at LIMIT 1;`)
+  console.log('\n5. account isolation over HTTP, with positive controls')
+  const own = {}
+  for (const key of ['A', 'B']) {
+    own[key] = {
+      interaction: one(`SELECT id FROM public.interaction_candidates
+                         WHERE user_id='${ACC[key].user}' AND status='pending'
+                         ORDER BY created_at LIMIT 1;`),
+      newContact: one(`SELECT id FROM public.new_contact_candidates
+                        WHERE user_id='${ACC[key].user}' AND status='pending'
+                        ORDER BY created_at LIMIT 1;`),
+    }
+  }
 
-  await test("user A cannot SEE user B's candidates", async () => {
-    // With the grant in place this exercises the POLICY: the read is permitted and must come
-    // back filtered to the viewer's own rows. A refusal would also be safe, but it would prove
-    // the grant rather than the policy, so it is not accepted here.
-    for (const table of ['interaction_candidates', 'new_contact_candidates']) {
-      const r = await http('GET', `/${table}?select=id,user_id`, { token: TOK.user(ACC.A.user) })
-      assert.strictEqual(r.status, 200, `${table}: ${r.raw.slice(0, 200)}`)
-      const owners = [...new Set((r.body ?? []).map((row) => row.user_id))]
-      assert.ok(!owners.includes(ACC.B.user), `${table}: A saw B rows: ${JSON.stringify(owners)}`)
-      assert.ok(owners.every((o) => o === ACC.A.user), `${table}: ${JSON.stringify(owners)}`)
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+  await test('PREREQUISITE: both users hold a pending candidate of BOTH kinds', async () => {
+    // Without this, every refusal below could be a refusal about a row that does not exist.
+    for (const key of ['A', 'B']) {
+      assert.ok(UUID.test(own[key].interaction),
+        `${key} has no pending interaction candidate: ${JSON.stringify(own[key])}`)
+      assert.ok(UUID.test(own[key].newContact),
+        `${key} has no pending new-contact candidate: ${JSON.stringify(own[key])}`)
     }
   })
 
-  await test("user A cannot ACCEPT or DISMISS user B's candidates", async () => {
-    if (bCandidate) {
+  await test('CONTROL: each user can READ their own candidates of both kinds', async () => {
+    // If this fails, every "cannot see the other's rows" result below is vacuous - that is
+    // precisely what happened while auth.uid() read the claim form PostgREST does not set.
+    for (const key of ['A', 'B']) {
+      for (const [table, id] of [['interaction_candidates', own[key].interaction],
+        ['new_contact_candidates', own[key].newContact]]) {
+        const r = await http('GET', `/${table}?select=id,user_id&id=eq.${id}`,
+          { token: TOK.user(ACC[key].user) })
+        assert.strictEqual(r.status, 200, `${key}/${table}: ${r.raw.slice(0, 200)}`)
+        assert.strictEqual((r.body ?? []).length, 1,
+          `${key} cannot read its own ${table} row: ${r.raw.slice(0, 200)}`)
+        assert.strictEqual(r.body[0].user_id, ACC[key].user)
+      }
+    }
+  })
+
+  await test("neither user SEES the other's candidates, in an open read or a targeted one", async () => {
+    for (const [viewer, owner] of [['A', 'B'], ['B', 'A']]) {
+      for (const [table, id] of [['interaction_candidates', own[owner].interaction],
+        ['new_contact_candidates', own[owner].newContact]]) {
+        const open = await http('GET', `/${table}?select=id,user_id`,
+          { token: TOK.user(ACC[viewer].user) })
+        assert.strictEqual(open.status, 200, `${table}: ${open.raw.slice(0, 200)}`)
+        const owners = [...new Set((open.body ?? []).map((row) => row.user_id))]
+        assert.ok(owners.length > 0, `${viewer} saw no rows at all, so this proves nothing`)
+        assert.ok(owners.every((o) => o === ACC[viewer].user),
+          `${viewer} saw other owners in ${table}: ${JSON.stringify(owners)}`)
+        // And asking for the other user's row BY ID returns nothing rather than the row.
+        const aimed = await http('GET', `/${table}?select=id&id=eq.${id}`,
+          { token: TOK.user(ACC[viewer].user) })
+        assert.strictEqual(aimed.status, 200, aimed.raw.slice(0, 200))
+        assert.strictEqual((aimed.body ?? []).length, 0,
+          `${viewer} read ${owner}'s ${table} row by id`)
+      }
+    }
+  })
+
+  await test("a valid accept or dismiss of the OTHER user's candidate is refused, and changes nothing", async () => {
+    for (const [intruder, owner] of [['A', 'B'], ['B', 'A']]) {
+      const asIntruder = TOK.user(ACC[intruder].user)
+      const iid = own[owner].interaction
+      const nid = own[owner].newContact
+      const beforeI = one(`SELECT status || '|' || coalesce(interaction_id::text,'none')
+                             FROM public.interaction_candidates WHERE id='${iid}';`)
+      // new_contact_candidates records its acceptance in accepted_contact_id; there is no
+      // contact_id column on it, which is what the first version of this query assumed.
+      const beforeN = one(`SELECT status || '|' || coalesce(accepted_contact_id::text,'none')
+                             FROM public.new_contact_candidates WHERE id='${nid}';`)
+      for (const [rpc, body] of [
+        ['accept_interaction_candidate', { p_candidate_id: iid, p_override_notes: 'intruder' }],
+        ['dismiss_interaction_candidate', { p_candidate_id: iid }],
+      ]) {
+        const r = await http('POST', `/rpc/${rpc}`, { token: asIntruder, body })
+        assert.strictEqual(r.body?.result, 'not_found',
+          `${intruder} got ${JSON.stringify(r.body)} from ${rpc} on ${owner}'s row`)
+      }
+      for (const [rpc, body] of [
+        ['accept_new_contact_candidate', { p_candidate_id: nid, p_name: 'Intruder' }],
+        ['dismiss_new_contact_candidate', { p_candidate_id: nid }],
+      ]) {
+        const r = await http('POST', `/rpc/${rpc}`, { token: asIntruder, body })
+        assert.strictEqual(r.body?.result, 'not_found',
+          `${intruder} got ${JSON.stringify(r.body)} from ${rpc} on ${owner}'s row`)
+      }
+      assert.strictEqual(one(`SELECT status || '|' || coalesce(interaction_id::text,'none')
+                                FROM public.interaction_candidates WHERE id='${iid}';`), beforeI,
+      `${owner}'s interaction candidate changed`)
+      assert.strictEqual(one(`SELECT status || '|' || coalesce(accepted_contact_id::text,'none')
+                                FROM public.new_contact_candidates WHERE id='${nid}';`), beforeN,
+      `${owner}'s new-contact candidate changed`)
+    }
+  })
+
+  await test('CONTROL: the OWNER accepts the very rows the other user could not', async () => {
+    // The strongest form of the control: same row, same request shape, different caller.
+    // A refusal that flips to 'accepted' when the owner asks cannot have been a missing
+    // grant, a malformed request or an absent function.
+    for (const key of ['A', 'B']) {
+      const asOwner = TOK.user(ACC[key].user)
       const acc = await http('POST', '/rpc/accept_interaction_candidate',
-        { token: TOK.user(ACC.A.user), body: { p_candidate_id: bCandidate } })
-      assert.notStrictEqual(acc.body?.result, 'accepted',
-        `A accepted B's candidate: ${acc.raw.slice(0, 200)}`)
-      const dis = await http('POST', '/rpc/dismiss_interaction_candidate',
-        { token: TOK.user(ACC.A.user), body: { p_candidate_id: bCandidate } })
-      assert.notStrictEqual(dis.body?.result, 'dismissed',
-        `A dismissed B's candidate: ${dis.raw.slice(0, 200)}`)
-      // And B's row is still exactly where it was.
-      assert.strictEqual(
-        one(`SELECT status FROM public.interaction_candidates WHERE id='${bCandidate}';`),
-        'pending', "B's candidate must still be pending")
+        { token: asOwner, body: { p_candidate_id: own[key].interaction,
+          p_override_notes: 'Reviewed by the owner.' } })
+      assert.strictEqual(acc.body?.result, 'accepted',
+        `${key} could not accept its own interaction candidate: ${acc.raw.slice(0, 200)}`)
+      const nc = await http('POST', '/rpc/accept_new_contact_candidate',
+        { token: asOwner, body: { p_candidate_id: own[key].newContact,
+          p_name: ACC[key].strangerName } })
+      assert.strictEqual(nc.body?.result, 'accepted',
+        `${key} could not accept its own new-contact candidate: ${nc.raw.slice(0, 200)}`)
     }
-    if (bNewContact) {
-      const acc = await http('POST', '/rpc/accept_new_contact_candidate',
-        { token: TOK.user(ACC.A.user), body: { p_candidate_id: bNewContact, p_name: 'X' } })
-      assert.notStrictEqual(acc.body?.result, 'accepted', acc.raw.slice(0, 200))
-    }
+    // And the interactions and contacts that resulted belong to the right owners.
+    const mixed = Number(one(`SELECT count(*) FROM public.interactions i
+                                JOIN public.contacts c ON c.id = i.contact_id
+                               WHERE c.user_id <> i.user_id;`))
+    assert.strictEqual(mixed, 0, 'an accepted interaction landed under the wrong owner')
   })
 
   await test('neither user can read ANY worker-only table', async () => {
@@ -614,15 +989,7 @@ try {
     }
   })
 
-  console.log(`\n${passed + failed} checks: ${passed} passed, ${failed} failed`
-    + (pending ? `, plus ${pending} labelled NOT YET DEMONSTRATED` : ''))
-  if (pending) {
-    console.log('\nWHAT THIS HARNESS DOES NOT YET PROVE, stated so it is not mistaken for')
-    console.log('something it does: the two-account WRITE path composed over PostgREST. The')
-    console.log('eligibility filter, the compatibility of the three- and four-argument calls,')
-    console.log('the refusal of an excluded account, the untouched state of a removed account')
-    console.log('and the user-versus-user isolation are all demonstrated above.')
-  }
+  console.log(`\n${passed + failed} checks: ${passed} passed, ${failed} failed`)
 } catch (e) {
   harnessError = e
   console.error(`\nHARNESS ERROR: ${e.message}\n${e.stack}`)

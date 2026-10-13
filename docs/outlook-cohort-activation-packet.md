@@ -25,12 +25,12 @@ Proposed replacement:
 
 > Access is restricted to a small number of invited accounts. Funnl's servers refuse a
 > connection request from any account that has not been invited, and an invitation can be
-> withdrawn. Withdrawing it stops Funnl starting new checks of your mailbox, and **deletes
-> nothing**: your connection, everything Funnl has already matched and every suggestion you
-> accepted are all still there, and you can disconnect whenever you want to. A check that has
-> already started may finish, and Microsoft may keep telling Funnl that new mail has arrived
-> for a few days until that arrangement lapses — Funnl records that a message arrived and then
-> does nothing with it.
+> withdrawn. Once that change has taken effect, Funnl stops starting new checks of your
+> mailbox, and it **deletes nothing**: your connection, everything Funnl has already matched
+> and every suggestion you accepted are all still there, and you can disconnect whenever you
+> want to. A check that has already started may finish, and Microsoft may keep telling Funnl
+> that new mail has arrived for a few days until that arrangement lapses — Funnl records that
+> a message arrived and then does nothing with it.
 
 **What each clause is accountable to**
 
@@ -38,9 +38,9 @@ Proposed replacement:
 |---|---|
 | "a small number of invited accounts" | `OUTLOOK_PILOT_USER_ID` holding up to **10** ids, enforced in the parser **and** in `reserve_due_outlook_connection` |
 | "refuse a connection request from any account that has not been invited" | `outlook-oauth-start` returning `403 not_in_pilot` |
-| "an invitation can be withdrawn. Withdrawing it stops Funnl starting new checks" | the reservation never selects an uninvited account, so no NEW run starts for it. Deliberately "starting new checks" rather than "stops checking": the configuration is a function-environment variable, so it takes effect for invocations after it propagates, not atomically |
+| "Once that change has taken effect, Funnl stops starting new checks" | the reservation never selects an uninvited account, so no NEW run starts for it. Deliberately "starting new checks", and deliberately qualified: the configuration is a function-environment variable read per invocation, so it takes effect for invocations after it propagates, not atomically. The same qualification appears verbatim in the Settings card notice, the automation line and the listener line, so the published wording and the product do not say different things |
 | "deletes nothing … all still there" | removal writes nothing and removes nothing: no cursor advanced or cleared, no candidate, no provenance row, no conversation state, no token. It is **not** a claim that no record ever changes again - a run already under way still writes what it was reserved to write, and the wake fields below keep moving |
-| "A check that has already started may finish" | a run holding a live lease completes; it was reserved while the account was still eligible, and cancelling it mid-round is how a round loses work. The lease ceiling is `LEASE_SECONDS` (420 s), which bounds how long a lease can be HELD - it is **not** a deadline by which removal has taken effect |
+| "A check that has already started may finish" | a run holding a live lease completes; it was reserved while the account was still eligible, and cancelling it mid-round is how a round loses work. `LEASE_SECONDS` (420 s) is the **duration a lease is granted or renewed for** - the reservation stamps `sync_lease_until = now() + 420 s`, and a run that is still working renews it, so the elapsed time a lease is held is **not** bounded by 420 s and this number is **not** a deadline by which removal has taken effect |
 | "Microsoft may keep telling Funnl that new mail has arrived … Funnl records that a message arrived and then does nothing with it" | the Graph subscription is not deleted by removal, so notifications continue until it lapses (3-day lifetime, and no renewal happens because renewal needs a run). Each one still sets `wake_requested_at` and increments `wake_count`, so **wake metadata on a withdrawn account keeps changing** - which is why the notice does not promise a frozen record |
 | "you can disconnect whenever you want to" | the Settings card keeps the mailbox details, the persisted history and the Disconnect control for a removed-but-connected account, and stops offering Connect and Update |
 
@@ -129,6 +129,16 @@ Cursors are never cleared, and `reset_outlook_round` is not a replay mechanism.
   excluded account never reserved, empty/over-cap/NULL-bearing sets, the single-id and both-null
   compatibility paths, ordering, lease and backoff, one overload, the ACL, per-account
   subscriptions and wake routing, and RLS on every worker-only table
+- **`tests/local/outlook-cohort-composed.mjs` — required, and every check in it is required.**
+  The real worker and the real reservation over real PostgREST: ONE cohort value holding two
+  invited accounts, the reservation choosing which account each invocation serves, each mailbox
+  dispatched from that request's own bearer token, both accounts writing candidates of **both**
+  kinds, each invocation leaving the other account's rows unchanged, the excluded account never
+  reserved, removal and re-addition against the same durable fixture, and account isolation
+  with positive controls (each user reads and accepts their own rows; the other user's
+  identical request on the same row is refused and changes nothing). There is no
+  "known-not-yet" category in it: a failure or an unmet prerequisite exits non-zero.
+  It needs Docker, so it is run deliberately rather than by `npm test`
 - the full repository suite, `npm run lint` at its pre-existing baseline, and `npm run build`
 
 ---
