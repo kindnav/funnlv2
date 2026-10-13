@@ -541,12 +541,25 @@ export async function runOutlookImport (p) {
   // zero writes, and what stops an excluded connection taking an invited account's turn
   // every time its backoff elapses. See migrations 20261003000000 and 20261013000000.
   //
-  // BOTH ARGUMENTS, deliberately. `p_pilot_user_ids` is the one that decides; the scalar
-  // is sent only when the cohort is exactly one account, so a database still carrying the
-  // pre-cohort three-argument function - the ordering requires the migration first, but a
-  // rollback would put it back - narrows correctly instead of reserving everybody. With a
-  // list of more than one the scalar is null, and against the old function that would
-  // widen rather than narrow, which is why the owner checks below are not optional.
+  // BOTH ARGUMENTS, deliberately - and MEASURED, because the first version of this comment
+  // guessed wrong about what an old deployment does with the extra one.
+  //
+  // WHAT ACTUALLY HAPPENS against a database that still has only the three-argument function:
+  // PostgREST resolves a function by the named arguments in the request body, so an unknown
+  // argument matches no candidate and the call is REFUSED - HTTP 404, code PGRST202, "Could
+  // not find the function public.reserve_due_outlook_connection(p_due_after_seconds,
+  // p_lease_seconds, p_pilot_user_id, p_pilot_user_ids) in the schema cache". It does not
+  // silently ignore the argument and it does not reserve anybody, which means a worker
+  // deployed ahead of its migration imports NOTHING rather than importing too much. Measured
+  // in tests/local/outlook-cohort-composed.mjs against real PostgREST.
+  //
+  // So the scalar is not a fallback for that case - nothing is. It is sent only when the
+  // cohort is exactly one account, which keeps the request identical to today's for the
+  // single-account configuration. With more than one invited account it is null, because a
+  // scalar cannot express a set and a stale one would narrow to a single member. The
+  // ordering - migration BEFORE worker deploy - is therefore a requirement, not a
+  // preference, and the owner checks below remain the backstop for a reservation that
+  // answers with somebody else's connection.
   const reserved = await rpc('reserve_due_outlook_connection', {
     p_lease_seconds: LEASE_SECONDS,
     p_due_after_seconds: DUE_AFTER_SECONDS,

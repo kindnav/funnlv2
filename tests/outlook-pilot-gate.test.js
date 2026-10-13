@@ -716,9 +716,42 @@ test('checkPilotUser accepts the ALREADY-PARSED cohort, so the worker cannot re-
   assert.deepStrictEqual(checkPilotUser([U1, U2], U2), { ok: true })
   assert.deepStrictEqual(checkPilotUser([U1, U2], U3), { ok: false, reason: 'not_in_pilot' })
   assert.deepStrictEqual(checkPilotUser([], U1), { ok: false, reason: 'pilot_not_configured' })
-  // A junk member in an array is ignored rather than trusted.
-  assert.deepStrictEqual(checkPilotUser(['nonsense'], 'nonsense'),
-    { ok: false, reason: 'pilot_not_configured' })
+  assert.deepStrictEqual(checkPilotUser([U1], U1), { ok: true }, 'a list of one still works')
+  // Normalisation applies to the array form too, so a value that round-tripped through a
+  // dashboard still matches.
+  assert.deepStrictEqual(checkPilotUser([U1, ` ${U2.toUpperCase()} `], U2), { ok: true })
+  assert.deepStrictEqual(checkPilotUser([U1, U1], U1), { ok: true }, 'duplicates are fine')
+})
+
+test('REPRODUCED: the ARRAY form was fail-OPEN, and now refuses exactly as the string does', () => {
+  // THE DEFECT. The array branch FILTERED its members, keeping the well-formed ones. So
+  // `[validUuid, 'nonsense']` admitted the valid one and eleven copies of a valid uuid passed
+  // the cap - while the identical STRING inputs correctly refused. Filtering turns a
+  // malformed configuration into a partially valid cohort, which is the exact guess the
+  // string parser exists to refuse.
+  const ELEVEN_ARRAY = Array.from({ length: 11 }, () => U1)
+  assert.deepStrictEqual(checkPilotUser([U1, 'nonsense'], U1),
+    { ok: false, reason: 'pilot_not_configured' },
+    'a malformed member invites nobody - not even the valid member beside it')
+  assert.deepStrictEqual(checkPilotUser(ELEVEN_ARRAY, U1),
+    { ok: false, reason: 'pilot_not_configured' },
+    'the cap is measured on the RAW array length, as it is for the string')
+
+  // THE PARITY RULE, asserted as a rule rather than case by case: for every configuration in
+  // the table, the array of its segments must give the same verdict as the string.
+  for (const [value] of COHORT_CASES) {
+    const asArray = value.split(',')
+    const viaString = checkPilotUser(value, U1)
+    const viaArray = checkPilotUser(asArray, U1)
+    assert.deepStrictEqual(viaArray, viaString,
+      `the array form must match the string form for ${JSON.stringify(value)}`)
+  }
+
+  // Non-string members are refused rather than coerced.
+  for (const member of [null, undefined, 42, {}, [], true]) {
+    assert.deepStrictEqual(checkPilotUser([U1, member], U1),
+      { ok: false, reason: 'pilot_not_configured' }, String(member))
+  }
 })
 
 test('designatedPilotUser stays a SCALAR accessor, and refuses to stand in for a list', () => {

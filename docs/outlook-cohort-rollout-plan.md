@@ -233,23 +233,30 @@ Ordered. Each is a check, not a hope.
    empty, `*`, `true`, a bare comma, a too-long list and a non-uuid member all yield **nobody**;
    the frontend predicate and the server predicate agree on every case. Extends
    `tests/outlook-pilot-gate.test.js` and the consent-UI suite.
-2. **Two-account handler proof, through the real worker** — extends the existing
+2. **Composed proof: the real worker, the real reservation, over real PostgREST.**
+   `tests/local/outlook-cohort-composed.mjs` runs two eligible accounts and a third excluded
+   one with separate mailbox fixtures, each round's RPCs going over HTTP to PostgREST against
+   this project's Postgres image. It also measures what an OLD deployment answers a
+   four-argument call, and proves the three-argument call still resolves **by omitting** the
+   defaulted fourth argument rather than passing an explicit NULL - which is a different
+   request and would not have tested the rollout order at all.
+3. **Two-account handler proof, through the real worker** — extends the existing
    `tests/outlook-two-sided-rounds.test.js` harness with a second connection: both due, each
    reserved in turn, and assert the **fairness order** (longest-unserved first, a signalled account
    first), that neither account's cursors, candidates, refs or recovery rows are touched by the
    other's round, and that one account's failure backoff does not block the other.
-3. **Isolation at the database, with two real users** — on the disposable Postgres harness: user B
+4. **Isolation at the database, with two real users** — on the disposable Postgres harness: user B
    cannot see or write user A's candidates, refs or recovery rows; the producers refuse a
    cross-account episode; the person fingerprints for the same counterparty in two accounts differ.
-4. **Subscription per account** — two connections, two subscription rows, renewal only within the
+5. **Subscription per account** — two connections, two subscription rows, renewal only within the
    24 h window, and a notification for one connection recording a wake on **that** connection only.
-5. **Consent** — a cohort member who has not consented under the published notice is refused with
+6. **Consent** — a cohort member who has not consented under the published notice is refused with
    `background_consent_missing` before any read; one who has is admitted. (Already true; assert it
    with two connections.)
-6. **The wording check** — the published notice and `/privacy` no longer claim a single account,
+7. **The wording check** — the published notice and `/privacy` no longer claim a single account,
    the derived version matches the published text, `verifyDisclosureIntegrity()` passes, and the
    served bundle is verified after publication the way the last two publications were.
-7. **Capacity: a synthetic rehearsal BEFORE rollout, and a measurement AFTER it. They are not
+8. **Capacity: a synthetic rehearsal BEFORE rollout, and a measurement AFTER it. They are not
    the same thing and must not be reported as one.**
 
    *Before* — synthetic, offline, no Production: the local harness reserves and releases N
@@ -271,7 +278,7 @@ Ordered. Each is a check, not a hope.
    window, which this session cannot do and the owner can. Until one is chosen and run, the
    5 min p95 / 2 min median figure stays an **unmeasured target**, and no cohort rollout
    report may describe it otherwise.
-8. **A real second account end to end** — one invited person connects from Settings, reads the
+9. **A real second account end to end** — one invited person connects from Settings, reads the
    notice, consents, completes a two-way exchange with Funnl closed, and accepts the suggestion;
    then the pilot account's records are re-verified unchanged against their pinned digests.
 

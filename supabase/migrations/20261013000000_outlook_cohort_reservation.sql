@@ -15,6 +15,13 @@
 -- resolves, because the fourth parameter is defaulted. That is what makes the migration
 -- safe to apply BEFORE the cohort worker is deployed, which is the required order.
 --
+-- THE ORDER IS A REQUIREMENT, AND THAT IS MEASURED. Against a database still carrying only
+-- the three-argument function, a four-argument call is not quietly narrowed and the extra
+-- argument is not ignored: PostgREST resolves by named arguments, finds no candidate, and
+-- answers 404 PGRST202. A worker deployed ahead of this migration therefore imports NOTHING.
+-- Demonstrated over real PostgREST in tests/local/outlook-cohort-composed.mjs, which runs the
+-- probe BEFORE applying this file and again after.
+--
 -- WHY THE FILTER AND NOT A POST-HOC REJECTION. An ineligible account must never be
 -- reserved: a reservation takes a lease, stamps last_attempt_at and can move wake_cutoff_at.
 -- Reserving and then refusing in the worker would do all three to an account nobody may

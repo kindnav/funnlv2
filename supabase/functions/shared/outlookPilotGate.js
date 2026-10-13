@@ -85,6 +85,27 @@ export const MAX_COHORT_USERS = 10
  * @param {unknown} configured  the raw environment value
  * @returns {string|null}
  */
+/**
+ * The array form of a cohort, validated WHOLE rather than filtered.
+ *
+ * Same rules as the string parser, and deliberately the same fail-closed answer: an empty
+ * array, a raw length over MAX_COHORT_USERS, or ANY member that is not a well-formed uuid
+ * yields nobody. Members are trimmed and lowercased, then deduplicated.
+ * @param {unknown[]} ids
+ * @returns {readonly string[]}
+ */
+function validateCohortArray (ids) {
+  if (ids.length === 0 || ids.length > MAX_COHORT_USERS) return EMPTY_COHORT
+  const out = []
+  for (const raw of ids) {
+    if (typeof raw !== 'string') return EMPTY_COHORT
+    const id = raw.trim().toLowerCase()
+    if (!UUID_RE.test(id)) return EMPTY_COHORT
+    if (!out.includes(id)) out.push(id)
+  }
+  return Object.freeze(out)
+}
+
 export function designatedPilotUsers (configured) {
   if (typeof configured !== 'string') return EMPTY_COHORT
   const trimmed = configured.trim()
@@ -117,8 +138,17 @@ export function checkPilotUser (configured, userId) {
   // `configured` may be the raw environment value or an already-parsed cohort array, so the
   // worker can check the owner of a reserved connection against the same list it sent to
   // the reservation rather than re-parsing - and re-parsing cannot drift from it.
+  //
+  // THE ARRAY FORM IS VALIDATED WHOLE, and this was a REPRODUCED DEFECT. The first version
+  // FILTERED the array, keeping the well-formed members: `[validUuid, 'nonsense']` admitted
+  // the valid one, and eleven copies of a valid uuid passed the cap, while the identical
+  // STRING inputs correctly refused. Filtering turns a malformed configuration into a
+  // partially valid cohort, which is exactly the guess the string parser refuses to make -
+  // so the array takes the same answer: any malformed member, or a raw length over the cap,
+  // invites NOBODY. Deduplication still happens, and the cap is still measured on the RAW
+  // length, so a valid parsed array from the worker is unaffected.
   const designated = Array.isArray(configured)
-    ? configured.filter((id) => typeof id === 'string' && UUID_RE.test(id))
+    ? validateCohortArray(configured)
     : designatedPilotUsers(configured)
   if (designated.length === 0) return { ok: false, reason: 'pilot_not_configured' }
   // The CANDIDATE is only required to be a non-empty string that matches. Demanding a

@@ -94,13 +94,53 @@ await test('a scheduled retry -> warn with when and the code; a bare error -> wa
   const off = describeSyncStatus(base({ activity: 'error', last_error_code: 'token_refresh_failed', schedule_active: false }), NOW)
   assert.ok(off.detail.includes('The next check will try again.') && !off.detail.includes('scheduled'), off.detail)
 })
-await test('needs_reauth or a non-active status -> error with the reconnect instruction, whatever else the row says', () => {
+await test('needs_reauth or a non-active status -> error, and NEVER a disconnect instruction', () => {
+  // The old flag was called `reconnect` and the detail line said to disconnect and reconnect.
+  // That instruction would have erased the synchronisation state, the provenance references
+  // and the thread-recovery rows, all of which cascade from the connection. Renewal is a
+  // same-account OAuth update, so the flag is now `renew` and the copy says so.
   for (const over of [{ needs_reauth: true }, { status: 'needs_reauth' }, { status: 'revoked', activity: 'running' }]) {
     const v = describeSyncStatus(base(over), NOW)
     assert.strictEqual(v.tone, 'error', JSON.stringify(over))
     assert.strictEqual(v.headline, 'Needs your permission again')
-    assert.strictEqual(v.reconnect, true)
+    assert.strictEqual(v.renew, true, 'an invited viewer is pointed at the update control')
+    assert.strictEqual(v.reconnect, false, 'and never at a disconnect')
+    assert.ok(/update your Outlook permissions/.test(v.detail), v.detail)
+    assert.ok(!/disconnect and reconnect/i.test(v.detail), v.detail)
   }
+})
+
+await test('a viewer who is NOT invited is never pointed at a control they do not have', () => {
+  // The removed-but-connected case. They keep the history, the mailbox details and
+  // Disconnect; what they must not get is an instruction that cannot work for them.
+  const v = describeSyncStatus(base({ needs_reauth: true }), NOW, false)
+  assert.strictEqual(v.tone, 'error')
+  assert.strictEqual(v.renew, false, 'no renew affordance is claimed')
+  assert.strictEqual(v.reconnect, false)
+  assert.ok(/not something you can do from here/.test(v.detail), v.detail)
+  assert.ok(/Nothing has been deleted/.test(v.detail), v.detail)
+  assert.ok(!/disconnect and reconnect/i.test(v.detail))
+})
+
+await test('the automation line stops promising checks the schedule will not make for them', () => {
+  // THE REPRODUCED INCONSISTENCY: `schedule_active` is a property of the cron job, not of
+  // this account, so an uninvited viewer was shown "Automatic checks are on" directly above a
+  // panel saying checks were not running for them. Both were true of different things.
+  const on = describeSyncStatus(base({}), NOW, true)
+  assert.strictEqual(on.automation.on, true)
+  assert.ok(/Automatic checks are on/.test(on.automation.text))
+
+  const off = describeSyncStatus(base({}), NOW, false)
+  assert.strictEqual(off.automation.on, false)
+  assert.ok(/not running for this mailbox at the moment/.test(off.automation.text),
+    off.automation.text)
+  assert.ok(/Nothing has been deleted/.test(off.automation.text))
+  // Presentation only: it says nothing about when a configuration change takes effect, and
+  // claims no immediate stop.
+  assert.ok(!/stopped|revoked|immediately|instantly/i.test(off.automation.text),
+    off.automation.text)
+  // And the listening line stops promising a scheduled fallback to someone who is passed over.
+  assert.ok(!/Scheduled checks continue/.test(off.listening.text), off.listening.text)
 })
 await test('never synced: the first-check promise depends on the schedule flag', () => {
   const on = describeSyncStatus(base({ activity: 'never_synced', last_success_at: null, subscription: null }), NOW)
@@ -286,8 +326,11 @@ await test('the Suggestions page polls the SIGNATURE, merges card by card from a
 })
 await test('the Settings card mounts the sync status on the CONNECTED branch only; the component shows the activation line from the RPC', () => {
   const card = read('src/components/OutlookConnectionCard.jsx')
-  const idx = card.indexOf('<OutlookSyncStatus />')
-  assert.ok(idx > card.indexOf("status === 'connected' && connection && (") && idx < card.indexOf("status === 'not_connected'"))
+  const idx = card.indexOf('<OutlookSyncStatus invited={mayConnect} />')
+  assert.ok(idx > 0, 'the card must pass the invitation down to the status component')
+  assert.ok(idx > card.indexOf("status === 'connected' && connection && (")
+    && idx < card.indexOf("status === 'not_connected'"),
+    'and still mount it on the connected branch only')
   const comp = read('src/components/OutlookSyncStatus.jsx')
   assert.ok(comp.includes("supabase.rpc('get_my_outlook_sync_status')"))
   assert.ok(comp.includes('data-testid="outlook-automation"'))

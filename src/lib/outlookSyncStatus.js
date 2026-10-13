@@ -44,8 +44,30 @@ export function formatRelativeFuture (iso, nowMs) {
   return `in ${n} day${n === 1 ? '' : 's'}`
 }
 
-/** What an automatic check can honestly be promised, given the schedule's own flag. */
-export function describeAutomation (scheduleActive) {
+/**
+ * What an automatic check can honestly be promised, given the schedule's own flag - and, when
+ * the viewer is not currently invited, the fact that the schedule will pass this mailbox over.
+ *
+ * WHY THE SECOND ARGUMENT EXISTS. `schedule_active` is a property of the CRON JOB, not of this
+ * account, so on a removed account the unqualified line said "Automatic checks are on" directly
+ * above a panel saying checks are not running for you. Both were true of different things and
+ * together they were misleading.
+ *
+ * WHAT IT DOES NOT CLAIM. The frontend list is presentation, never the authority on server
+ * eligibility, and it cannot know when a configuration change propagates or whether a run is
+ * in flight. So the wording says checks are not running FOR THIS MAILBOX AT THE MOMENT - not
+ * that they have stopped, not that they stopped instantly, and not that they can never resume.
+ * @param {boolean} scheduleActive
+ * @param {boolean} [invited]  false when this viewer is not in the configured list
+ */
+export function describeAutomation (scheduleActive, invited = true) {
+  if (invited !== true) {
+    return {
+      text: 'Automatic checks are not running for this mailbox at the moment. Nothing has been '
+        + 'deleted, and you can disconnect below whenever you want to.',
+      on: false,
+    }
+  }
   return scheduleActive === true
     ? { text: 'Automatic checks are on: about every 15 minutes, and within minutes of new mail.', on: true }
     : { text: 'Automatic checks are not switched on yet. Checks run only when started by Funnl.', on: false }
@@ -83,21 +105,37 @@ export function describeListening (sub, nowMs, scheduleActive = false) {
  * @param {object|null} s   the get_my_outlook_sync_status() answer
  * @param {number} nowMs    the reference clock (the RPC's server_now when available)
  */
-export function describeSyncStatus (s, nowMs) {
+export function describeSyncStatus (s, nowMs, invited = true) {
   if (!s || typeof s !== 'object' || s.result !== 'connected') return null
   const now = Number.isFinite(nowMs) ? nowMs : Date.parse(s.server_now ?? '') || Date.now()
-  const scheduleActive = s.schedule_active === true
+  // A viewer who is not in the configured list will not be picked up by the schedule, so the
+  // schedule's own flag must not be read to them as a promise about their mailbox.
+  const scheduleActive = s.schedule_active === true && invited === true
   const listening = describeListening(s.subscription, now, scheduleActive)
-  const automation = describeAutomation(scheduleActive)
+  const automation = describeAutomation(s.schedule_active === true, invited)
   const lastOk = formatRelativePast(s.last_success_at, now)
   const queued = s.wake_pending === true
   const incomplete = s.last_run_complete === false && !!lastOk
   const base = { listening, automation, reconnect: false, queued }
 
   if (s.needs_reauth === true || s.status !== 'active') {
+    // NO DISCONNECT-TO-RENEW, anywhere. Renewal is a same-account OAuth update, and the
+    // instruction this used to carry would have erased the synchronisation state, the
+    // provenance references and the thread-recovery rows, all of which cascade from the
+    // connection. Where the viewer has no update control - not currently invited - the detail
+    // says what is true and offers nothing that would fail.
     return {
-      ...base, tone: 'error', headline: 'Needs your permission again',
-      detail: 'Funnl cannot check this mailbox until you disconnect and reconnect Outlook.', reconnect: true, queued: false,
+      ...base,
+      tone: 'error',
+      headline: 'Needs your permission again',
+      detail: invited === true
+        ? 'Funnl cannot check this mailbox until you update your Outlook permissions below. '
+          + 'Your connection and everything Funnl has already matched stay as they are.'
+        : 'Funnl cannot check this mailbox until its permissions are updated, and that is not '
+          + 'something you can do from here at the moment. Nothing has been deleted.',
+      reconnect: false,
+      renew: invited === true,
+      queued: false,
     }
   }
   if (s.activity === 'running') {

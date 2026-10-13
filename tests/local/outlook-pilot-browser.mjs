@@ -141,6 +141,8 @@ function mintJwt (claims) {
 
 // ── the GoTrue sink + PostgREST proxy ───────────────────────────────────────
 const sinkCalls = []
+/** PostgREST paths this run is making fail, e.g. '/rest/v1/rpc/get_my_outlook_connection'. */
+const restFaults = new Set()
 function startSink () {
   const srv = createHttp(async (req, res) => {
     const chunks = []
@@ -179,6 +181,12 @@ function startSink () {
     if (path === '/auth/v1/logout') { res.writeHead(204, cors); return res.end() }
 
     if (path.startsWith('/rest/v1/')) {
+      // FAULT INJECTION, for the one case that cannot be staged with data: a status read that
+      // FAILS. Only paths this run has explicitly armed are affected, and only while armed.
+      if (restFaults.has(path)) {
+        res.writeHead(500, { ...cors, 'Content-Type': 'application/json' })
+        return res.end(JSON.stringify({ message: 'fixture: injected failure' }))
+      }
       const target = PGRST + path.slice('/rest/v1'.length) + (req.url.includes('?') ? '?' + req.url.split('?')[1] : '')
       const headers = {}
       for (const [k, v] of Object.entries(req.headers)) {
@@ -380,6 +388,11 @@ function ensureCert () {
 
 const DIST_OFF = join(WORK, 'dist-off')
 const DIST_ON = join(WORK, 'dist-on')
+// A bundle whose configured cohort names SOMEBODY ELSE. That is what a withdrawn invitation
+// looks like to this viewer's browser, and it cannot be faked by flipping a flag at runtime -
+// the list is baked in at build time, so the case needs its own build.
+const DIST_REMOVED = join(WORK, 'dist-removed')
+const NOT_THIS_USER = '55555555-5555-4555-8555-555555555555'
 
 function buildApp (outDir, env) {
   execFileSync('npx', ['vite', 'build', '--outDir', outDir, '--emptyOutDir'], {
@@ -446,7 +459,14 @@ async function main () {
     VITE_OUTLOOK_PILOT_USER_ID: PILOT_USER,
     VITE_OUTLOOK_REVIEW_ENABLED: 'true',
   })
-  console.log('  two bundles built')
+  buildApp(DIST_REMOVED, {
+    ...common,
+    VITE_OUTLOOK_CONNECTION_ENABLED: 'true',
+    // The cohort names another account entirely: the signed-in pilot has been removed.
+    VITE_OUTLOOK_PILOT_USER_ID: NOT_THIS_USER,
+    VITE_OUTLOOK_REVIEW_ENABLED: 'true',
+  })
+  console.log('  three bundles built')
 
   console.log('\nbuilding a disposable Postgres + PostgREST')
   // Awaited: teardown is async, and this pre-run sweep must finish removing any container
@@ -1470,6 +1490,141 @@ VALUES ('${CONN_ID}', '${PILOT_USER}', 'sub-browser', repeat('a', 64), 'active',
   psql(`UPDATE public.microsoft_connections
           SET consent_policy_version = '${mod.OUTLOOK_DISCLOSURE_VERSION}' WHERE id = '${CONN_ID}';`,
     { tuplesOnly: false })
+
+  // ══ 8c. THE FOUR VIEWER CASES, in a real browser ═════════════════════════
+  // The cohort slice changes who sees what. Three of these cases are about a viewer whose
+  // invitation has been WITHDRAWN while their connection is untouched - the case that must
+  // not strand them - and the fourth is a status read that fails, which must not be reported
+  // as "not connected".
+  console.log('\n8c. invited, removed-but-connected, removed-with-reauth, and an unreadable status')
+
+  // The connection row from section 8 is reused: same mailbox, same consent, same history.
+  psql(`UPDATE public.microsoft_connections SET needs_reauth = false WHERE id = '${CONN_ID}';
+        UPDATE public.outlook_sync_state SET sync_status='idle', sync_lease_until=NULL,
+               last_success_at = now() - interval '7 minutes', last_run_complete = true,
+               last_error_code = NULL, next_retry_at = NULL
+         WHERE connection_id = '${CONN_ID}';`, { tuplesOnly: false })
+
+  // ── invited: the controls are there ──
+  setServeDir(DIST_ON)
+  await page.goto(`${ORIGIN}/settings`)
+  await page.waitFor('/Outlook/i.test(document.body.innerText)', 20000, 'the Outlook card')
+  const invitedView = await page.eval(`
+    const body = document.body.innerText
+    return {
+      connected: /Connected to/.test(body),
+      disconnect: [...document.querySelectorAll('button')].some((b) => /^Disconnect Outlook$/.test(b.innerText.trim())),
+      status: document.querySelector('[data-testid="outlook-sync-status"]') !== null,
+      automation: (document.querySelector('[data-testid="outlook-automation"]') || {}).innerText || '',
+      notInvited: document.querySelector('[data-testid="outlook-not-invited"]') !== null,
+    }`)
+  check('8c: an INVITED viewer sees the connection, its status and Disconnect',
+    invitedView.connected && invitedView.status && invitedView.disconnect, JSON.stringify(invitedView))
+  check('8c: and no not-invited notice', invitedView.notInvited === false)
+
+  // ── removed, still connected ──
+  setServeDir(DIST_REMOVED)
+  startCalls.length = 0
+  sinkCalls.length = 0
+  await page.goto(`${ORIGIN}/settings`)
+  await page.waitFor('document.querySelector(\'[data-testid="outlook-not-invited"]\') !== null',
+    20000, 'the not-invited notice')
+  const removed = await page.eval(`
+    const body = document.body.innerText
+    const btns = [...document.querySelectorAll('button')].map((b) => b.innerText.trim())
+    return {
+      body,
+      connected: /Connected to/.test(body),
+      mailboxShown: body.includes(${JSON.stringify(PILOT_EMAIL)}),
+      disconnect: btns.some((t) => /^Disconnect Outlook$/.test(t)),
+      connect: btns.some((t) => /Connect Outlook/.test(t)),
+      update: btns.some((t) => /Update Outlook permissions/.test(t)),
+      panel: document.querySelector('[data-testid="outlook-update-panel"]') !== null,
+      status: document.querySelector('[data-testid="outlook-sync-status"]') !== null,
+      automation: (document.querySelector('[data-testid="outlook-automation"]') || {}).innerText || '',
+      automationOn: (document.querySelector('[data-testid="outlook-automation"]') || {}).getAttribute
+        ? document.querySelector('[data-testid="outlook-automation"]').getAttribute('data-on') : null,
+      notice: (document.querySelector('[data-testid="outlook-not-invited"]') || {}).innerText || '',
+      disclosure: /Connecting Outlook is optional/.test(body),
+    }`)
+  check('8c: a REMOVED viewer still sees the connection and its mailbox',
+    removed.connected && removed.mailboxShown, JSON.stringify({ c: removed.connected, m: removed.mailboxShown }))
+  check('8c: their persisted sync history is still shown', removed.status === true)
+  check('8c: Disconnect is still theirs to use', removed.disconnect === true)
+  check('8c: NO Connect, NO Update and NO disclosure are offered',
+    removed.connect === false && removed.update === false && removed.panel === false
+    && removed.disclosure === false, JSON.stringify(removed))
+  check('8c: the automation line does not promise checks for this mailbox',
+    removed.automationOn === 'false' && /not running for this mailbox/.test(removed.automation),
+    JSON.stringify(removed.automation))
+  check('8c: the notice says nothing was deleted, and guesses no reason',
+    /Nothing has been deleted/.test(removed.notice)
+    && !/removed|revoked|suspended|violat/i.test(removed.notice), JSON.stringify(removed.notice))
+  await sleep(600)
+  check('8c: and no consent request was made for them',
+    startCalls.length === 0 && !sinkCalls.some((c) => /oauth-start/.test(c.url)),
+    `startCalls=${startCalls.length}`)
+
+  // Their Disconnect path still works end to end - the confirmation opens and the RPC is the
+  // reviewed one. The confirm button itself is NOT pressed: this harness is not here to
+  // destroy the fixture the later sections rely on.
+  await page.click('Disconnect Outlook', { byText: true })
+  await sleep(400)
+  const confirmView = await page.eval(`
+    const body = document.body.innerText
+    return { panel: /Disconnect .*\\?/.test(body) || /Disconnect/.test(body),
+             confirm: [...document.querySelectorAll('button')].some((b) => /Yes, disconnect/i.test(b.innerText)) }`)
+  check('8c: a removed viewer can still open the Disconnect confirmation',
+    confirmView.confirm === true, JSON.stringify(confirmView))
+
+  // ── removed AND needing permission again ──
+  psql(`UPDATE public.microsoft_connections SET needs_reauth = true WHERE id = '${CONN_ID}';`,
+  { tuplesOnly: false })
+  await page.goto(`${ORIGIN}/settings`)
+  await page.waitFor('document.querySelector(\'[data-testid="outlook-sync-status"]\') !== null',
+    20000, 'the status block')
+  const reauth = await page.eval(`
+    const body = document.body.innerText
+    const st = document.querySelector('[data-testid="outlook-sync-status"]')
+    return {
+      tone: st ? st.getAttribute('data-tone') : null,
+      status: st ? st.innerText : '',
+      update: [...document.querySelectorAll('button')].some((b) => /Update Outlook permissions/.test(b.innerText)),
+      disconnect: [...document.querySelectorAll('button')].some((b) => /^Disconnect Outlook$/.test(b.innerText.trim())),
+      disconnectToRenew: /disconnect and reconnect/i.test(body),
+    }`)
+  check('8c: needs_reauth on a removed account is an error WITHOUT an update instruction',
+    reauth.tone === 'error' && !/Update Outlook permissions/.test(reauth.status),
+    JSON.stringify(reauth.status))
+  check('8c: it says this is not something they can do from here, and nothing was deleted',
+    /not something you can do from here/.test(reauth.status)
+    && /Nothing has been deleted/.test(reauth.status), JSON.stringify(reauth.status))
+  check('8c: no screen anywhere tells them to disconnect and reconnect',
+    reauth.disconnectToRenew === false)
+  check('8c: and Disconnect is still available while Update is not',
+    reauth.disconnect === true && reauth.update === false, JSON.stringify(reauth))
+  psql(`UPDATE public.microsoft_connections SET needs_reauth = false WHERE id = '${CONN_ID}';`,
+  { tuplesOnly: false })
+
+  // ── the connection status cannot be READ ──
+  restFaults.add('/rest/v1/rpc/get_my_outlook_connection')
+  await page.goto(`${ORIGIN}/settings`)
+  await page.waitFor('document.querySelector(\'[data-testid="outlook-status-unreadable"]\') !== null',
+    20000, 'the unreadable-status panel')
+  const unreadable = await page.eval(`
+    const el = document.querySelector('[data-testid="outlook-status-unreadable"]')
+    const body = document.body.innerText
+    return {
+      text: el ? el.innerText : '',
+      retry: [...document.querySelectorAll('button')].some((b) => /Try again/.test(b.innerText)),
+      claimsDisconnected: /not connected|Connect Outlook/i.test(body),
+    }`)
+  check('8c: an unreadable status is SHOWN to a removed viewer, not hidden',
+    /could not read the state/.test(unreadable.text), JSON.stringify(unreadable.text))
+  check('8c: it does not claim they are disconnected, and it is retriable',
+    unreadable.claimsDisconnected === false && unreadable.retry === true, JSON.stringify(unreadable))
+  restFaults.delete('/rest/v1/rpc/get_my_outlook_connection')
+  setServeDir(DIST_ON)
 
   // ══ 9. a proposal that ARRIVES while the queue is open becomes visible ════
   // SIMULATED ARRIVAL: the background worker is not run here. The row it would write is

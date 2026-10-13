@@ -135,7 +135,16 @@ export default function OutlookConnectionCard({
   // it themselves. So: the mailbox, the recorded scopes and version, the persisted sync
   // status, and Disconnect. No Connect, no Update, no disclosure: offering consent to an
   // account the server will refuse would be a dead end dressed up as a control.
-  const showCard = status === 'connected' || mayConnect
+  // WHO SEES THE CARD AT ALL.
+  //   * connected -> always, invited or not: it is their connection and their way out;
+  //   * invited -> always, so a first connection can be made;
+  //   * NEITHER, and the status could not be READ -> also yes, with an honest retriable
+  //     error. The first version hid this case, which silently told a viewer whose status
+  //     read had failed that they were not connected - a claim the failure cannot support.
+  //   * neither, and the status says not_connected -> nothing, which is what every other
+  //     user of the product sees.
+  const statusUnknown = status === 'error' || status === 'loading'
+  const showCard = status === 'connected' || mayConnect || status === 'error'
   if (!showCard) return null
 
   const request = buildConsentRequest({
@@ -210,7 +219,24 @@ export default function OutlookConnectionCard({
         <p className="mt-2 text-sm text-muted">Checking your Outlook connection…</p>
       )}
 
-      {(status === 'signed_out' || status === 'error') && (
+      {status === 'error' && (
+        <div className="mt-2" data-testid="outlook-status-unreadable">
+          <p className="text-sm text-muted">
+            Funnl could not read the state of your Outlook connection just now. This does not
+            change anything about it: if it was connected it still is, and nothing has been
+            deleted.
+          </p>
+          <button
+            type="button"
+            onClick={() => { setStatus('loading'); refreshStatus() }}
+            className="mt-3 rounded-xl border border-line-3 bg-elevated px-4 py-2 text-sm font-semibold text-hi"
+          >
+            Try again
+          </button>
+        </div>
+      )}
+
+      {(status === 'signed_out') && (
         <p className="mt-2 text-sm text-danger" role="status" aria-live="polite">
           {statusMessage}
         </p>
@@ -232,7 +258,9 @@ export default function OutlookConnectionCard({
 
           {/* Persisted import state - last success, current activity, retry, listener - read by
               a child from one authenticated RPC. The card itself still only connects. */}
-          <OutlookSyncStatus />
+          {/* The persisted history is shown to a removed viewer too - it is their own record -
+              but the wording it chooses has to match the controls below it. */}
+          <OutlookSyncStatus invited={mayConnect} />
 
           {updateFailed && (
             <p

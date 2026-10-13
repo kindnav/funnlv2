@@ -87,8 +87,8 @@ test('REMOVED FROM THE COHORT: the connection, its status and Disconnect all sur
   const connectedBranch = CARD.slice(
     CARD.indexOf("status === 'connected' && connection && ("),
     CARD.indexOf("status === 'not_connected'"))
-  assert.ok(connectedBranch.includes('<OutlookSyncStatus />'),
-    'the persisted sync status stays visible')
+  assert.ok(connectedBranch.includes('<OutlookSyncStatus invited={mayConnect} />'),
+    'the persisted sync status stays visible, with wording matched to the controls')
   assert.ok(connectedBranch.includes('Disconnect Outlook'),
     'and so does the way out')
   // Neither of those is behind the invitation.
@@ -99,6 +99,21 @@ test('REMOVED FROM THE COHORT: the connection, its status and Disconnect all sur
   assert.ok(/Nothing\s+has been deleted/.test(notice), notice.slice(0, 200))
   assert.ok(!/removed|revoked|suspended|violat/i.test(notice),
     'it must not guess at a reason it does not know')
+})
+
+test('an UNREADABLE connection status is reported, not treated as disconnected', () => {
+  // THE DEFECT: `showCard = connected || mayConnect` hid the error branch from an uninvited
+  // viewer, which silently told somebody whose status read had FAILED that they had no
+  // connection - a claim a failed read cannot support.
+  assert.ok(CARD.includes("const showCard = status === 'connected' || mayConnect || status === 'error'"),
+    'a failed status read must still render the card')
+  assert.ok(CARD.includes('outlook-status-unreadable'), 'with its own honest message')
+  const panel = CARD.slice(CARD.indexOf('outlook-status-unreadable'),
+    CARD.indexOf("{(status === 'signed_out')"))
+  assert.ok(/could not read the state/.test(panel), panel.slice(0, 160))
+  assert.ok(/if it was connected it still is/.test(panel), 'it must not imply disconnection')
+  assert.ok(/Try again/.test(panel), 'and it must be retriable')
+  assert.ok(panel.includes('refreshStatus()'), 'the retry re-reads the status')
 })
 
 test('consent is offered ONLY to an invited viewer', () => {

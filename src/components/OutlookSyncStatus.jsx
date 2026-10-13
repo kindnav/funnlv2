@@ -22,7 +22,7 @@ const TONE_CLASS = {
   muted: 'border-line-2 bg-elevated text-muted',
 }
 
-export default function OutlookSyncStatus () {
+export default function OutlookSyncStatus ({ invited = true }) {
   const [answer, setAnswer] = useState(null)      // the RPC's jsonb, or null
   const [failed, setFailed] = useState(false)
 
@@ -57,7 +57,11 @@ export default function OutlookSyncStatus () {
       </p>
     )
   }
-  const view = describeSyncStatus(answer, Date.parse(answer?.server_now ?? '') || Date.now())
+  // `invited` is PRESENTATION ONLY and the describer treats it that way: it decides which
+  // wording is honest for a viewer who has no consent control, and never asserts what the
+  // server will do. The server's own gate is the authority on eligibility.
+  const view = describeSyncStatus(
+    answer, Date.parse(answer?.server_now ?? '') || Date.now(), invited)
   if (!view) return null
 
   return (
@@ -80,7 +84,10 @@ export default function OutlookSyncStatus () {
           {answer.pending_suggestions} {answer.pending_suggestions === 1 ? 'suggestion' : 'suggestions'} waiting for your review.
         </p>
       )}
-      {view.reconnect && (
+      {/* The renew instruction points at a control, so it is only shown where that control
+          exists. A viewer without it gets the describer's own detail line instead, which says
+          what is true without offering a dead end. */}
+      {view.renew === true && (
         <p className="mt-2 text-sm">Use <span className="font-semibold">Update Outlook permissions</span> below. Your connection and everything Funnl has already matched stay as they are; disconnecting is not needed.</p>
       )}
     </div>
