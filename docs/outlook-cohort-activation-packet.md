@@ -1,6 +1,6 @@
 # Outlook cohort — the wording to approve, and the ordered activation
 
-**Progress (2026-10-13).** Steps 0-7 are done; **execution is PAUSED** (cron
+**Progress (2026-10-13).** Steps 0-9 are done; **execution is PAUSED** (cron
 `outlook-worker-tick` inactive, `OUTLOOK_IMPORT_WORKER_ENABLED` absent) and stays paused until
 step 11. The section 1a/1b wording was approved at PR #90 head `4161368`; migration
 `20261013120000` is applied; PR #90 merged as `7a9f0cd`; `outlook-oauth-start` v44
@@ -8,13 +8,13 @@ step 11. The section 1a/1b wording was approved at PR #90 head `4161368`; migrat
 closures byte-identical to merged main; and the wording is **PUBLISHED** (step 7), deriving
 notice version **`ol-disc-6f904c3f7313353acbbc39e1edf2e278`**.
 
-**The publication window is open until step 8.** The browser derives the new version; the three
-worker requirements and the server's `OUTLOOK_DISCLOSURE_VERSION` still name the previous one,
-`ol-disc-e1107c0221c89ded0b6a2134df848eea`. So the pilot's stored consent still satisfies the
-deployed worker - the inactive cron job and the absent flag are the only controls preventing
-execution - while the Settings card reads that consent as superseded and offers an update that
-`outlook-oauth-start` would refuse with `409 consent_version_mismatch` until step 8. Re-consent
-belongs after step 8, never in this window. Both single-pilot allowlists are unchanged.
+**The publication window closes with steps 8 and 9.** The three worker requirements carry
+`ol-disc-6f904c3f7313353acbbc39e1edf2e278` from the merge of the cutover change, the server's
+`OUTLOOK_DISCLOSURE_VERSION` is set to the same value, and `outlook-import-worker` is redeployed
+from that merge so its closure carries it - each verified by digest or by downloaded source. The pilot's stored consent still names the previous value,
+`ol-disc-e1107c0221c89ded0b6a2134df848eea`, so it no longer satisfies the requirements - a run
+would be refused with `background_consent_missing` before any read. The next step is the
+pilot's same-account re-consent (step 10). Both single-pilot allowlists are unchanged.
 
 Design, capacity and the test plan: `docs/outlook-cohort-rollout-plan.md`.
 

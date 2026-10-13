@@ -1347,11 +1347,11 @@ PR #90 merged as `7a9f0cd`; `outlook-oauth-start` v44 (verify_jwt=true) and `out
 (verify_jwt=false) deployed, closures byte-identical to merged main. Cohort wording PUBLISHED
 2026-10-13 ("Last updated: October 13, 2026"; notice paragraph 2 and the /privacy heading
 "Outlook connection (invited accounts only)" plus its opening), deriving browser notice version
-`ol-disc-6f904c3f7313353acbbc39e1edf2e278`. **Publication window OPEN:** the three worker
-requirements and the server `OUTLOOK_DISCLOSURE_VERSION` deliberately still name
-`ol-disc-e1107c0221c89ded0b6a2134df848eea`, so the pilot's stored consent still satisfies the
-worker (only the pause prevents execution) while an Update attempted from Settings is refused with
-409 `consent_version_mismatch`. Next is step 8 (cutover), then the same-account re-consent, then resume.
+`ol-disc-6f904c3f7313353acbbc39e1edf2e278`. **Publication window CLOSED (steps 8-9, 2026-10-13):**
+the three worker requirements carry that value from the cutover merge, with the server
+`OUTLOOK_DISCLOSURE_VERSION` set to it and `outlook-import-worker` redeployed from that merge in the same step. The pilot's stored consent still
+names `ol-disc-e1107c0221c89ded0b6a2134df848eea`, so it no longer satisfies them; a run would be
+refused with `background_consent_missing`. Next is the same-account re-consent (step 10), then resume.
 Both allowlists still hold only the pilot.
 
 **Rollout state (2026-10-10): LIVE, unattended, single pilot account.** Migrations `20261009000000`,
