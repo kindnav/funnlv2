@@ -258,10 +258,11 @@ console.log('the pure gate: closed while unconfigured, closed to stale or missin
 await test('an unconfigured requirement (null, undefined, malformed) authorizes nothing', () => {
   // CUT OVER 2026-10-09: the requirement now carries the published notice version, the same
   // value as the other two requirements (one cutover, never one alone).
-  assert.strictEqual(consent.REQUIRED_BACKGROUND_CONSENT_VERSION, 'ol-disc-6f904c3f7313353acbbc39e1edf2e278')
+  assert.strictEqual(consent.REQUIRED_BACKGROUND_CONSENT_VERSION, 'ol-disc-1b6906af498ccff0f1e3292027ca0539')
   // CUT OVER AGAIN 2026-10-13 (cohort, packet step 8): the pilot's thread-segments consent is
   // now stale against it, and is refused as MISSING consent - not as a configuration fault.
-  assert.deepStrictEqual(consent.backgroundOperationAllowed('ol-disc-e1107c0221c89ded0b6a2134df848eea'),
+  // PREPARED (administrator-consent correction): the cohort consent becomes stale in turn.
+  assert.deepStrictEqual(consent.backgroundOperationAllowed('ol-disc-6f904c3f7313353acbbc39e1edf2e278'),
     { ok: false, reason: 'background_consent_missing' })
   assert.strictEqual(consent.REQUIRED_BACKGROUND_CONSENT_VERSION, consent.REQUIRED_CONTENT_CONSENT_VERSION)
   assert.strictEqual(consent.REQUIRED_BACKGROUND_CONSENT_VERSION, consent.REQUIRED_THIRD_PARTY_CONSENT_VERSION)

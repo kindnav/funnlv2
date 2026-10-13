@@ -124,9 +124,10 @@ export const OUTLOOK_DISCLOSURE_PARAGRAPHS = Object.freeze([
     + 'the mailbox level: it would technically permit reading message bodies and attachments '
     + 'anywhere in your mailbox. User.Read permits your profile and basic company '
     + 'information; Funnl asks it for three fields and uses them only to record which mailbox '
-    + 'is connected. Neither requires administrator consent by default, but a work or school '
-    + 'tenant can be configured to require an administrator to approve the app, and then you '
-    + 'may not be able to consent for yourself.',
+    + 'is connected. With a personal Microsoft account you approve them yourself. A work or '
+    + 'school organisation can require an administrator to approve an app that reads mail — '
+    + "Microsoft's recommended setting for organisations does — and then you cannot connect "
+    + 'it until an administrator approves Funnl.',
   'Funnl reads message envelopes — who sent each message, who it was addressed to, the '
     + 'subject, the times, which conversation it belongs to and whether it is a draft — from '
     + 'your Inbox and Sent Items. Where you and one other person have both written in the '
@@ -295,6 +296,14 @@ export function disclosureFingerprint (paragraphs) {
 // and normalising it would publish words nobody approved and derive a different version.
 // The previous value, e1107c0221c89ded0b6a2134df848eea, identified the thread-segments text.
 //
+// ADMINISTRATOR-CONSENT CORRECTION (prepared 2026-10-13, unpublished). Paragraph 4's last
+// sentence said neither permission "requires administrator consent by default". That is
+// true of Microsoft's per-permission metadata, but Microsoft's recommended organisational
+// consent policy - the default for new tenants - does not let users approve Mail.Read, so it
+// misled in practice. The sentence is replaced with the owner-reviewed wording; every other
+// paragraph is byte-identical and there are still 24. 6f904c3f7313353acbbc39e1edf2e278
+// identified the cohort text this replaces.
+//
 // PUBLISHING THIS DOES NOT CHANGE WHAT THE DEPLOYED WORKER REQUIRES, AND THAT IS A TEMPORARY,
 // KNOWN MISMATCH. The three requirements in supabase/functions/shared/outlookContentConsent.js
 // and the server's OUTLOOK_DISCLOSURE_VERSION still name the thread-segments value. Until the
@@ -337,7 +346,7 @@ export function disclosureFingerprint (paragraphs) {
 // October 9, 2026 (activation packet, step 5), after publication - so no requirement was
 // ever raised ahead of its approval, and a connection that consents under this notice
 // satisfies all three.
-export const DISCLOSURE_FINGERPRINT = '6f904c3f7313353acbbc39e1edf2e278'
+export const DISCLOSURE_FINGERPRINT = '1b6906af498ccff0f1e3292027ca0539'
 
 /**
  * True only when the paragraphs still match the fingerprint the version was

@@ -249,10 +249,13 @@ test('the disclosure names every requested scope, and offline_access honestly', 
     "must state what User.Read permits, in Microsoft's own terms")
   assert.ok(/more broadly than Funnl uses them/i.test(text),
     'must distinguish what is permitted from what is requested')
-  // Administrator consent must not be promised away for work tenants.
-  assert.ok(/Neither requires administrator consent by default/i.test(text))
-  assert.ok(/tenant can be configured to require an administrator/i.test(text),
-    'a work or school tenant may still demand admin approval')
+  // Administrator consent must not be promised away for work tenants - and since the
+  // correction, the notice must not claim mail access is admin-free "by default": Microsoft's
+  // recommended organisational policy does not let users approve Mail.Read.
+  assert.ok(text.includes("With a personal Microsoft account you approve them yourself. A work or school organisation can require an administrator to approve an app that reads mail — Microsoft's recommended setting for organisations does — and then you cannot connect it until an administrator approves Funnl."),
+    'the corrected administrator-consent sentence, exactly as approved')
+  assert.ok(!/requires administrator consent by default/i.test(text),
+    'the misleading by-default claim is gone')
   assert.ok(!/no administrator (approval|consent) is (ever |)required/i.test(text),
     'must not promise administrator-free consent')
 })

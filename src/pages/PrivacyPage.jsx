@@ -230,9 +230,10 @@ function PrivacyPage() {
               bodies and attachments anywhere in your mailbox. Microsoft describes <strong className="text-hi font-semibold">User.Read</strong>
               as allowing an app to read the signed-in user’s profile and basic company information; Funnl asks it for three fields
               only — your account id, your mail address and your user principal name — and uses them only to record and display which
-              mailbox is connected. None of these scopes requires administrator consent by default,
-              <strong className="text-hi font-semibold">but a work or school tenant may be configured to require an administrator to approve the app anyway</strong>,
-              in which case you may not be able to consent for yourself. Funnl would never request Microsoft contacts, calendars, files,
+              mailbox is connected. With a personal Microsoft account you approve them yourself.
+              <strong className="text-hi font-semibold">A work or school organisation can require an administrator to approve an app that reads mail</strong>
+              — Microsoft's recommended setting for organisations does — and then you cannot connect it until an
+              administrator approves Funnl. Funnl would never request Microsoft contacts, calendars, files,
               shared or delegated mailboxes, your organization’s directory, or any application-level (organization-wide) mail
               permission, and would never send, reply to, delete, move or change anything in your mailbox.</li>
 

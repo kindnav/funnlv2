@@ -311,10 +311,15 @@ test('all six requested scopes are disclosed, and offline_access is not called a
     .test(OUTLOOK_PROSE), 'does not hide the authority the permission grants')
   assert.ok(/never send, reply to, delete, move or change anything in your mailbox/
     .test(OUTLOOK_PROSE), 'read-only is stated as a behaviour')
-  // Admin consent: not required by default, but a tenant may demand it anyway.
-  assert.ok(/requires administrator consent by default/.test(OUTLOOK_PROSE))
-  assert.ok(/work or school tenant may be configured to require an administrator/
+  // Admin consent, corrected: personal accounts approve themselves; an organisation can
+  // require an administrator for mail access, and Microsoft's recommended setting does.
+  assert.ok(/With a personal Microsoft account you approve them yourself\./.test(OUTLOOK_PROSE))
+  assert.ok(/A work or school organisation can require an administrator to approve an app that reads mail/
     .test(OUTLOOK_PROSE), 'tenant policy caveat present')
+  assert.ok(/Microsoft's recommended setting for organisations does/.test(OUTLOOK_PROSE))
+  assert.ok(/you cannot connect it until an\s+administrator approves Funnl/.test(OUTLOOK_PROSE))
+  assert.ok(!/requires administrator consent by default/.test(OUTLOOK_PROSE),
+    'the misleading by-default claim is gone')
   assert.ok(TRANSPORT.includes("GRAPH_MAIL_READ_SCOPE = 'Mail.Read'"), 'matches the code constant')
 })
 
