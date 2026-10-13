@@ -56,9 +56,14 @@ and has no code change. The website changes through Vercel on merge.
 
 ## Order relative to the other work
 
-1. **#97 (one owner per Microsoft account)** is rolled out completely first. The pilot's
-   re-consent in C6 then runs through the new `finalize_microsoft_connection`, whose same-user
-   update path is proven in `tests/local/outlook-one-owner.mjs`.
+1. **#97 (one owner per Microsoft account): LIVE since 2026-10-13.**
+   - Migration `20261014000000` applied; catalog verified with prosrc md5
+     `90ecb2d60c3a22e23d758263ed5604a7`.
+   - Merged as `2d7acb3`; website `index-CQRpBHcc.js`.
+   - `outlook-oauth-callback` v49, bundle `81206e0ea83d4432`, closure byte-verified.
+   The pilot's re-consent in C6 runs through this new `finalize_microsoft_connection`. Its
+   same-user update path is proven in `tests/local/outlook-one-owner.mjs`, against a body
+   byte-identical to the live one.
 2. **This cutover.**
 3. **Only then** the second-account acceptance (`docs/outlook-second-account-acceptance.md`), so
    the second account consents once, under the corrected text.
@@ -67,6 +72,13 @@ and has no code change. The website changes through Vercel on merge.
 
 - `origin/main` and the PR head are pinned, and the PR is rebased onto current main if main moved.
   `npm test`, lint and build pass at that head.
+- Bundles as of 2026-10-13, after #97:
+  - `outlook-import-worker` v63 `c59372d81fadfdba`
+  - `outlook-oauth-callback` v49 `81206e0ea83d4432`
+  - `outlook-oauth-start` v47 `5c57453ea55d0e60`
+  - `outlook-notifications` v16 `4d1af69a17c9c9bb`
+  Only the worker may change in C5. Cron `outlook-worker-tick` is active, and
+  `OUTLOOK_IMPORT_WORKER_ENABLED` is present.
 - The pilot is healthy: recent ticks `committed`/`none_due`, no refusal.
 - Server `OUTLOOK_DISCLOSURE_VERSION` digest = sha256(`ol-disc-6f904c3f7313353acbbc39e1edf2e278`).
 - The pilot's stored consent = `ol-disc-6f904c3f…`.
