@@ -492,6 +492,11 @@ test('applied migrations are unmodified; the only addition is the forward scope 
     // apply after that file. Renumbered from 20261013000000 so it sorts AFTER the refresh
     // fix above - see docs/outlook-new-contact-refresh-expiry.md section 4.
     '20261013120000_outlook_cohort_reservation.sql',
+    // One Funnl owner per Microsoft account, UNAPPLIED: a unique index on (tenant, object id)
+    // and finalize_microsoft_connection re-issued with the body copied from 20260928000000
+    // plus a fenced cross-user refusal, so it must apply after the file it was copied from.
+    // It refuses to run while a duplicate exists and deletes nothing.
+    '20261014000000_outlook_one_owner_per_microsoft_account.sql',
   ]
   assert.deepStrictEqual(files.slice(-FORWARD_TAIL.length), FORWARD_TAIL,
     'the forward migrations must be the newest, in this order')

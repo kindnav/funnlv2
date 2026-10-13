@@ -122,6 +122,11 @@ export default function OutlookConnectionCard({
   const updateFailed =
     readOutlookCallbackResult(searchParams) === 'error' && status === 'connected'
 
+  // The Microsoft account is already connected to a DIFFERENT Funnl account, so nothing was
+  // written. Like callbackFailed, shown only while this account is not connected.
+  const accountInUse =
+    readOutlookCallbackResult(searchParams) === 'in_use' && status !== 'connected'
+
   // Why the connected branch may need the consent control: a superseded recorded version, or
   // an authorisation Microsoft wants renewed. Same control for both - and only for a viewer
   // who is still invited, because consent is how a connection BEGINS or is RENEWED, and
@@ -216,6 +221,17 @@ export default function OutlookConnectionCard({
 
       {status === 'loading' && (
         <p className="mt-2 text-sm text-muted">Checking your Outlook connection…</p>
+      )}
+
+      {accountInUse && (
+        <p
+          className="mt-3 rounded-xl border border-warning/40 bg-warning/10 p-3 text-sm text-warning"
+          role="status"
+          aria-live="polite"
+          data-testid="outlook-account-in-use"
+        >
+          {messageForOutcome('callback_in_use')}
+        </p>
       )}
 
       {status === 'error' && (

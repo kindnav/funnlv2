@@ -460,6 +460,15 @@ async function run () {
     r = await post(`${COOKIE}=${state}`)
     check('a NON-stored RPC result is NOT treated as success',
       r.status === 303 && String(r.location).includes('outlook=error'), String(r.location))
+
+    // One Funnl owner per Microsoft account (migration 20261014000000): the one refusal with
+    // its own controlled value, and only on the trusted origin.
+    scenario.rpcResult = { result: 'account_in_use' }
+    r = await post(`${COOKIE}=${state}`)
+    check('account_in_use redirects to ?outlook=in_use, not success and not the generic error',
+      r.status === 303 && String(r.location).endsWith('/settings?outlook=in_use'), String(r.location))
+    check('account_in_use: the query string is exactly outlook=in_use and nothing else',
+      String(r.location).split('?')[1] === 'outlook=in_use', String(r.location))
     scenario.rpcResult = { result: 'stored', connection_id: 'conn-1' }
 
     // ── a wrong but NON-EMPTY callback URI must send no code anywhere ───────

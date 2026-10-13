@@ -190,8 +190,15 @@ export function classifyStartResponse (status, body) {
 // detail to surface, and none must be invented - the reason lives in the Edge
 // log alone.
 
-/** The only two values the callback can produce. Anything else is ignored. */
-export const OUTLOOK_CALLBACK_RESULTS = Object.freeze(['connected', 'error'])
+/**
+ * The only values the callback can produce. Anything else is ignored.
+ *
+ * `in_use` (added with migration 20261014000000) is the one refusal with its own value: the
+ * Microsoft account the person just signed in to is already connected to a DIFFERENT Funnl
+ * account, so finalize_microsoft_connection refused it and wrote nothing. It is sent only
+ * after the browser binding passed, and it never says which Funnl account holds it.
+ */
+export const OUTLOOK_CALLBACK_RESULTS = Object.freeze(['connected', 'error', 'in_use'])
 
 /**
  * Read the callback result from a query string or a URLSearchParams-like value.
@@ -272,6 +279,10 @@ export function messageForOutcome (kind) {
       return 'Please continue at www.getfunnl.com to connect Outlook.'
     case 'disclosure_integrity_failed':
       return 'This disclosure could not be verified, so connecting is disabled. Please reload the page.'
+    case 'callback_in_use':
+      // Accurate and no more: the database refused because ANOTHER Funnl account holds this
+      // Microsoft account. It does not say which, and nothing in either account changed.
+      return 'That Microsoft account is already connected to a different Funnl account, so it was not connected here. Nothing changed in either account. Connect a different Microsoft account, or disconnect it from the other Funnl account first.'
     default:
       return 'Could not start the Outlook connection. Please try again.'
   }

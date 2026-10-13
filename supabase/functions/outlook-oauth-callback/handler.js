@@ -357,6 +357,11 @@ export async function handleOutlookCallback (req, endpoints = PRODUCTION_ENDPOIN
     const result = finalized?.result ?? 'no_result'
     if (result !== 'stored') {
       console.error('outlook-oauth-callback finalize_refused', result)
+      // The one refusal the person can act on: this Microsoft account is already connected
+      // to a different Funnl account. Nothing was written; the other connection is untouched.
+      if (result === 'account_in_use' && trustedOrigin) {
+        return redirect(buildOutlookSettingsRedirect(trustedOrigin, 'in_use'))
+      }
       return redirect(failRedirect)
     }
 
