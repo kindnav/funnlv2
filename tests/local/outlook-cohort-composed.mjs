@@ -17,7 +17,11 @@
 //   3. TWO INVITED ACCOUNTS UNDER ONE COHORT VALUE, with the REAL RESERVATION choosing
 //      which one each invocation serves, each mailbox dispatched from that request's own
 //      bearer token, each writing its own candidates of BOTH kinds, and each invocation
-//      leaving the other account's rows byte-for-byte as they were;
+//      leaving EVERY COLUMN OF EVERY ROW of the other account unchanged - compared as an
+//      ordered full-row md5 per table plus the row count, not as a projection of a few
+//      columns, and in both directions: the account the first invocation served is compared
+//      again after the second one runs, by which point it has candidates, provenance rows
+//      and committed cursors to preserve;
 //   4. a third account that is not in the cohort is never reserved, and removal then
 //      re-addition against the SAME durable fixture leaves state untouched and resumes
 //      from the account's own committed cursor;
@@ -544,11 +548,53 @@ async function round (cohort, { fetchWrap } = {}) {
 }
 
 /**
- * Everything durable about one account, in a form two snapshots can be compared with.
- * Candidate ids AND statuses are included, so "unchanged" means the rows themselves, not
- * just how many there are.
+ * AN ORDERED FULL-ROW DIGEST PER TABLE, computed in the database.
+ *
+ * WHY NOT THE PROJECTION BELOW. `observedOf()` reads the few columns the positive checks
+ * need - a cursor is present, a lease is released. Comparing two of those and calling the
+ * result "byte-for-byte unchanged" was wrong: every column it does not read could have moved.
+ * A candidate's draft, its evidence codes, its `updated_at`, its `context_expires_at`, a
+ * provenance row's coverage columns, the connection's own fields and a recovery record were
+ * all outside the comparison.
+ *
+ * So each table in scope is reduced to `md5` over `t::text` of EVERY row, ordered by that
+ * table's own key, together with the row count. `t::text` is the whole row, so any change to
+ * any column in any row changes the digest; the explicit ORDER BY makes it stable across
+ * reads, and the count distinguishes "nothing there" from "one row that happens to digest
+ * the same". Nothing but the digest and the count is ever printed - no row, no identifier,
+ * no ciphertext - which is also why this is a digest rather than a row-by-row diff.
  */
-const stateOf = (key) => ({
+const DIGEST_SCOPES = (key) => [
+  ['connection', 'public.microsoft_connections', `t.id='${ACC[key].conn}'`, 't.id'],
+  ['sync_state', 'public.outlook_sync_state', `t.connection_id='${ACC[key].conn}'`, 't.folder'],
+  ['interaction_candidates', 'public.interaction_candidates', `t.user_id='${ACC[key].user}'`, 't.id'],
+  ['new_contact_candidates', 'public.new_contact_candidates', `t.user_id='${ACC[key].user}'`, 't.id'],
+  ['candidate_refs', 'public.outlook_candidate_refs', `t.user_id='${ACC[key].user}'`, 't.id'],
+  ['thread_recovery', 'public.outlook_thread_recovery', `t.user_id='${ACC[key].user}'`, 't.conversation_fingerprint'],
+]
+
+function digestOf (key) {
+  const out = {}
+  for (const [label, table, where, order] of DIGEST_SCOPES(key)) {
+    // E'\x1e' (record separator) joins the rows: a delimiter no fixture text contains, so
+    // two different row sets cannot collapse into one string.
+    const v = one(`SELECT coalesce(md5(string_agg(t::text, E'\\x1e' ORDER BY ${order})), 'empty')
+                     || ' x' || count(*)
+                     FROM ${table} t WHERE ${where};`)
+    out[label] = v
+  }
+  return out
+}
+
+/** Compare two digests and say which table moved, without printing a row. */
+function assertSameDigest (label, actual, expected) {
+  const moved = Object.keys(expected).filter((k) => actual[k] !== expected[k])
+  assert.deepStrictEqual(moved, [],
+    `${label}: ${moved.map((k) => `${k} ${expected[k]} -> ${actual[k]}`).join('; ')}`)
+}
+
+/** The few columns the POSITIVE checks read. Never used as a preservation comparison. */
+const observedOf = (key) => ({
   cursors: rows(`SELECT folder, coalesce(delta_link_ciphertext,'none')
                    FROM public.outlook_sync_state WHERE connection_id='${ACC[key].conn}'
                   ORDER BY folder;`),
@@ -567,7 +613,7 @@ const stateOf = (key) => ({
 
 /** Every lease this account holds is released and no folder is left running. */
 function assertLeasesReleased (key) {
-  for (const [folder, status, future] of stateOf(key).leases) {
+  for (const [folder, status, future] of observedOf(key).leases) {
     assert.notStrictEqual(status, 'running', `${key}/${folder} is still running`)
     assert.notStrictEqual(future, 't', `${key}/${folder} still holds a live lease`)
   }
@@ -703,9 +749,12 @@ try {
 
   await test('with both invited accounts due, each invocation serves ONE of them, chosen by the reservation', async () => {
     makeDue()
-    const before = { A: stateOf('A'), B: stateOf('B'), C: stateOf('C') }
-    assert.ok(before.A.cursors.every(([, ct]) => ct === 'none'), 'A starts with no cursor')
-    assert.ok(before.B.cursors.every(([, ct]) => ct === 'none'), 'B starts with no cursor')
+    const before = { A: digestOf('A'), B: digestOf('B'), C: digestOf('C') }
+    assert.ok(observedOf('A').cursors.every(([, ct]) => ct === 'none'), 'A starts with no cursor')
+    assert.ok(observedOf('B').cursors.every(([, ct]) => ct === 'none'), 'B starts with no cursor')
+    // A digest is only a preservation instrument if it is stable when nothing changes.
+    assertSameDigest('a digest read twice with nothing between must be identical',
+      digestOf('A'), before.A)
 
     const r1 = await round(COHORT)
     allDrafts.push(...r1.counts.drafts); allLeaks.push(...r1.counts.leakedAddresses)
@@ -714,10 +763,16 @@ try {
     assert.ok(first === 'A' || first === 'B', `an invited account must be served, got ${first}`)
     served.push(first)
     const other = first === 'A' ? 'B' : 'A'
-    // The account it did NOT choose is byte-for-byte as it was, and so is the excluded one.
-    assert.deepStrictEqual(stateOf(other), before[other],
-      `${other} must be untouched by a round that served ${first}`)
-    assert.deepStrictEqual(stateOf('C'), before.C, 'the excluded account must be untouched')
+    // Every row of the account it did NOT choose, and of the excluded one, is unchanged.
+    assertSameDigest(`${other} must be untouched by a round that served ${first}`,
+      digestOf(other), before[other])
+    assertSameDigest('the excluded account must be untouched', digestOf('C'), before.C)
+    // THE ROUND THAT RAN DID WRITE: a preservation check proves nothing if nothing moved
+    // anywhere, so the served account's own digest must have changed.
+    const movedFirst = Object.keys(before[first]).filter((k) => digestOf(first)[k] !== before[first][k])
+    assert.ok(movedFirst.length > 0, `${first} was served but nothing of it changed`)
+    // Pinned here, so the SECOND round is measured against it.
+    const afterFirst = digestOf(first)
 
     const r2 = await round(COHORT)
     allDrafts.push(...r2.counts.drafts); allLeaks.push(...r2.counts.leakedAddresses)
@@ -728,14 +783,22 @@ try {
     // preferred, so the second invocation takes the one the first left alone.
     assert.strictEqual(second, other,
       `the second invocation must serve the other invited account, got ${second}`)
-    assert.deepStrictEqual(stateOf('C'), before.C, 'the excluded account is still untouched')
+    // AND NOW THE OTHER DIRECTION. The first round's account has rows by this point -
+    // candidates, provenance, cursors - and the second round must not have touched one
+    // column of any of them. That is the case the earlier check could not make, because it
+    // only ever compared the account that had nothing yet.
+    assertSameDigest(`${first} must be untouched by the round that served ${second}`,
+      digestOf(first), afterFirst)
+    assertSameDigest('the excluded account is still untouched', digestOf('C'), before.C)
+    console.log(`       digests: ${first} and ${second} each served once;`
+      + ` ${first} unchanged across the second round; C unchanged throughout`)
   })
 
   await test('each served account read its OWN mailbox, and wrote candidates of BOTH kinds', async () => {
     assert.deepStrictEqual([...served].sort(), ['A', 'B'],
       `both invited accounts must have been served: ${JSON.stringify(served)}`)
     for (const key of ['A', 'B']) {
-      const s = stateOf(key)
+      const s = observedOf(key)
       assert.ok(s.cursors.every(([, ct]) => ct !== 'none'),
         `${key} must have committed a cursor for both folders: ${JSON.stringify(s.cursors)}`)
       assert.ok(s.interactions.length >= 1,
@@ -774,12 +837,12 @@ try {
     // Make A and B un-due so C is the only connection the reservation could pick.
     psql(`UPDATE public.outlook_sync_state SET last_success_at = now()
            WHERE connection_id IN ('${ACC.A.conn}','${ACC.B.conn}');`, { tuplesOnly: false })
-    const beforeC = stateOf('C')
+    const beforeC = digestOf('C')
     const r = await round(COHORT)
     assert.strictEqual(r.run.outcome, 'none_due', JSON.stringify(r.report))
     assert.strictEqual(r.counts.tokens.length, 0, 'the excluded mailbox must not be touched')
-    assert.deepStrictEqual(stateOf('C'), beforeC, 'nothing of the excluded account may change')
-    assert.strictEqual(stateOf('C').cursors.filter(([, ct]) => ct !== 'none').length, 0,
+    assertSameDigest('nothing of the excluded account may change', digestOf('C'), beforeC)
+    assert.strictEqual(observedOf('C').cursors.filter(([, ct]) => ct !== 'none').length, 0,
       'the excluded account has no committed cursor')
   })
 
@@ -793,7 +856,7 @@ try {
                                 JOIN public.contacts ct ON ct.id = ic.contact_id
                                WHERE ct.user_id <> ic.user_id;`))
     assert.strictEqual(mixed, 0, "no candidate may point at another user's contact")
-    const cRows = stateOf('C')
+    const cRows = observedOf('C')
     assert.strictEqual(cRows.interactions.length + cRows.newContacts.length + cRows.refs
       + cRows.recovery, 0, `the excluded account has state: ${JSON.stringify(cRows)}`)
   })
@@ -802,14 +865,14 @@ try {
   console.log('\n4. removal and re-addition against the same durable state')
   await test('a removed account is refused, and its durable state is untouched', async () => {
     makeDue()
-    const before = stateOf('B')
     // B is removed: the cohort is A alone. B is the only account left due.
     psql(`UPDATE public.outlook_sync_state SET last_success_at = now()
            WHERE connection_id IN ('${ACC.A.conn}','${ACC.C.conn}');`, { tuplesOnly: false })
+    const before = digestOf('B')
     const r = await round(ACC.A.user)
     assert.strictEqual(r.run.outcome, 'none_due', JSON.stringify(r.report))
     assert.strictEqual(r.counts.tokens.length, 0, "the removed account's mailbox must not be read")
-    assert.deepStrictEqual(stateOf('B'), before, "removal must not change one row of B's state")
+    assertSameDigest("removal must not change one row of B's state", digestOf('B'), before)
   })
 
   await test('re-added, the same account resumes from its OWN committed cursor', async () => {
@@ -819,7 +882,7 @@ try {
     makeDue()
     psql(`UPDATE public.outlook_sync_state SET last_success_at = now()
            WHERE connection_id IN ('${ACC.A.conn}','${ACC.C.conn}');`, { tuplesOnly: false })
-    const beforeCandidates = stateOf('B').newContacts
+    const beforeB = digestOf('B')
     const seen = []
     const r = await round(COHORT, {
       fetchWrap: (base) => async (url, init) => {
@@ -837,8 +900,16 @@ try {
       assert.ok(u.includes('deltatoken=B-1'),
         `the resumed round must use B's own committed delta token: ${u}`)
     }
-    assert.deepStrictEqual(stateOf('B').newContacts, beforeCandidates,
-      'a resumed round with no new mail must not re-propose anything')
+    // A resumed round with no new mail may advance its own sync state and nothing else: the
+    // candidates, the provenance rows, the recovery records and the connection must all
+    // digest exactly as they did before it ran.
+    const afterB = digestOf('B')
+    for (const table of ['connection', 'interaction_candidates', 'new_contact_candidates',
+      'candidate_refs', 'thread_recovery']) {
+      assert.strictEqual(afterB[table], beforeB[table],
+        `${table} moved during a resumed round with no new mail: `
+        + `${beforeB[table]} -> ${afterB[table]}`)
+    }
     assertLeasesReleased('B')
     // A DEFECT THIS HARNESS FOUND, recorded where it was found rather than worked around.
     // When a NEW message does arrive in a thread whose new-contact proposal is still

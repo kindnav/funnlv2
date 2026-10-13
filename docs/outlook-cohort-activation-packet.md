@@ -133,7 +133,8 @@ Cursors are never cleared, and `reset_outlook_round` is not a replay mechanism.
   The real worker and the real reservation over real PostgREST: ONE cohort value holding two
   invited accounts, the reservation choosing which account each invocation serves, each mailbox
   dispatched from that request's own bearer token, both accounts writing candidates of **both**
-  kinds, each invocation leaving the other account's rows unchanged, the excluded account never
+  kinds, each invocation leaving every column of every row of the other account unchanged
+  (ordered full-row digests per table, compared in both directions), the excluded account never
   reserved, removal and re-addition against the same durable fixture, and account isolation
   with positive controls (each user reads and accepts their own rows; the other user's
   identical request on the same row is refused and changes nothing). There is no

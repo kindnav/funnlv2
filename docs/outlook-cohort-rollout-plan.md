@@ -239,9 +239,20 @@ Ordered. Each is a check, not a hope.
    over HTTP to PostgREST against this project's Postgres image. The reservation - not the
    harness - chooses whose mailbox each invocation reads, and the fixture dispatches the
    mailbox from that request's **own bearer token**, so a round that read the wrong mailbox
-   could not be handed the right answer. Both accounts write candidates of both kinds; each
-   invocation leaves the other account's rows unchanged; isolation is proved with **positive
-   controls**, so a missing grant or a missing RPC cannot pass for ownership enforcement. It
+   could not be handed the right answer. Both accounts write candidates of both kinds.
+
+   Preservation is compared as an **ordered full-row digest per table** - `md5` over
+   `t::text` of every row in scope, ordered by that table's own key, with the row count -
+   covering the connection, the sync state, both candidate tables, the provenance rows and
+   the recovery records. A projection of a few columns was the earlier version and it could
+   not support the claim: every column it did not read was free to move. The comparison runs
+   **in both directions**, so the account the first invocation served is re-compared after the
+   second one runs, when it has candidates, provenance and cursors to preserve; a control
+   also requires the served account's own digest to have MOVED, since a preservation check
+   proves nothing if nothing changed anywhere. Only digests and counts are printed.
+
+   Isolation is proved with **positive controls**, so a missing grant or a missing RPC cannot
+   pass for ownership enforcement. It
    also measures what an OLD deployment answers a four-argument call, and proves the
    three-argument call still resolves **by omitting** the defaulted fourth argument rather than
    passing an explicit NULL - which is a different request and would not have tested the
