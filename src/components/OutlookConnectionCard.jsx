@@ -71,7 +71,13 @@ function formatConnectedAt (iso) {
   return Number.isNaN(d.getTime()) ? '' : d.toLocaleDateString()
 }
 
-export default function OutlookConnectionCard() {
+export default function OutlookConnectionCard({
+  // Whether THIS viewer is invited to connect. Defaults to false, so a caller that forgets
+  // to pass it cannot accidentally offer consent to everybody.
+  mayConnect = false,
+  sectionLabel = '',
+  cardClassName = 'rounded-2xl border border-line-2 bg-card p-6',
+}) {
   const [searchParams] = useSearchParams()
   const [acknowledged, setAcknowledged] = useState(false)   // never defaults true
   const [connecting, setConnecting] = useState(false)
@@ -117,8 +123,28 @@ export default function OutlookConnectionCard() {
     readOutlookCallbackResult(searchParams) === 'error' && status === 'connected'
 
   // Why the connected branch may need the consent control: a superseded recorded version, or
-  // an authorisation Microsoft wants renewed. Same control for both.
+  // an authorisation Microsoft wants renewed. Same control for both - and only for a viewer
+  // who is still invited, because consent is how a connection BEGINS or is RENEWED, and
+  // neither is something a removed account may do.
   const update = outlookUpdateNeeded(connection)
+  const offerUpdate = update.needed && mayConnect
+
+  // WHAT A REMOVED-BUT-CONNECTED VIEWER SEES, and why. Their imports have stopped - the
+  // server gate refuses the reservation - but their connection, its tokens, its cursors and
+  // everything already matched are untouched, and they are entitled to see that and to end
+  // it themselves. So: the mailbox, the recorded scopes and version, the persisted sync
+  // status, and Disconnect. No Connect, no Update, no disclosure: offering consent to an
+  // account the server will refuse would be a dead end dressed up as a control.
+  // WHO SEES THE CARD AT ALL.
+  //   * connected -> always, invited or not: it is their connection and their way out;
+  //   * invited -> always, so a first connection can be made;
+  //   * NEITHER, and the status could not be READ -> also yes, with an honest retriable
+  //     error. The first version hid this case, which silently told a viewer whose status
+  //     read had failed that they were not connected - a claim the failure cannot support.
+  //   * neither, and the status says not_connected -> nothing, which is what every other
+  //     user of the product sees.
+  const showCard = status === 'connected' || mayConnect || status === 'error'
+  if (!showCard) return null
 
   const request = buildConsentRequest({
     acknowledged,
@@ -172,7 +198,8 @@ export default function OutlookConnectionCard() {
   }
 
   return (
-    <div className="rounded-2xl border border-line-2 bg-card p-6">
+    <div className={cardClassName}>
+      {sectionLabel && <span className={sectionLabel}>Connected accounts</span>}
       <h3 className="font-display text-lg text-hi">Outlook</h3>
 
       {/* Outside every status branch on purpose: visible while the status is
@@ -191,7 +218,24 @@ export default function OutlookConnectionCard() {
         <p className="mt-2 text-sm text-muted">Checking your Outlook connection…</p>
       )}
 
-      {(status === 'signed_out' || status === 'error') && (
+      {status === 'error' && (
+        <div className="mt-2" data-testid="outlook-status-unreadable">
+          <p className="text-sm text-muted">
+            Funnl could not read the state of your Outlook connection just now. This does not
+            change anything about it: if it was connected it still is, and nothing has been
+            deleted.
+          </p>
+          <button
+            type="button"
+            onClick={() => { setStatus('loading'); refreshStatus() }}
+            className="mt-3 rounded-xl border border-line-3 bg-elevated px-4 py-2 text-sm font-semibold text-hi"
+          >
+            Try again
+          </button>
+        </div>
+      )}
+
+      {(status === 'signed_out') && (
         <p className="mt-2 text-sm text-danger" role="status" aria-live="polite">
           {statusMessage}
         </p>
@@ -213,7 +257,9 @@ export default function OutlookConnectionCard() {
 
           {/* Persisted import state - last success, current activity, retry, listener - read by
               a child from one authenticated RPC. The card itself still only connects. */}
-          <OutlookSyncStatus />
+          {/* The persisted history is shown to a removed viewer too - it is their own record -
+              but the wording it chooses has to match the controls below it. */}
+          <OutlookSyncStatus invited={mayConnect} />
 
           {updateFailed && (
             <p
@@ -226,7 +272,7 @@ export default function OutlookConnectionCard() {
             </p>
           )}
 
-          {connection.needsReauth && (
+          {connection.needsReauth && mayConnect && (
             <p className="mt-3 rounded-xl border border-warning/40 bg-warning/10 p-3 text-sm text-warning">
               This connection needs your permission again before Funnl can read
               anything. Use <span className="font-semibold">Update Outlook permissions</span> below
@@ -235,11 +281,35 @@ export default function OutlookConnectionCard() {
             </p>
           )}
 
+          {/* A removed viewer is told the truth rather than pointed at a control they do not
+              have: nothing was deleted, and disconnecting is theirs to do whenever they want.
+              Deliberately says nothing about WHY they were removed - the card does not know,
+              and guessing would be worse than silence.
+
+              AND IT DOES NOT CLAIM A STOP. All this page knows is that the viewer's id is not
+              in the configured value; the server reads that value per invocation, and a round
+              already reserved still finishes. So the sentence is qualified with "once the
+              change has taken effect" instead of reporting a stop it cannot observe. The same
+              qualification is in describeAutomation() and the listener line, so the three do
+              not contradict each other. */}
+          {!mayConnect && (
+            <p
+              className="mt-3 rounded-xl border border-line-2 bg-elevated p-3 text-sm text-muted"
+              data-testid="outlook-not-invited"
+            >
+              This account is not on Funnl&rsquo;s invited list for Outlook, so once that change
+              has taken effect Funnl does not start new automatic checks of this mailbox. A check
+              that had already started may still finish. Nothing has been deleted: your
+              connection, the conversations Funnl has already matched and every interaction you
+              accepted are all still here. You can disconnect below whenever you want to.
+            </p>
+          )}
+
           {/* ── UPDATE: the same disclosure, acknowledged again, on the SAME account ──
               Rendered only when the recorded version is superseded or Microsoft wants the
               authorisation renewed. Nothing here disconnects: the start flow is the one the
               not-connected branch uses, and the backend enforces the same account. */}
-          {update.needed && (
+          {offerUpdate && (
             <div className="mt-4" data-testid="outlook-update-panel">
               <p className="rounded-xl border border-accent/40 bg-accent/10 p-3 text-sm text-hi">
                 {update.consentSuperseded
@@ -341,7 +411,7 @@ export default function OutlookConnectionCard() {
       )}
 
       {/* ── NOT CONNECTED: the disclosure and the consent control ──────── */}
-      {status === 'not_connected' && (
+      {status === 'not_connected' && mayConnect && (
         <>
           <p className="mt-1 text-sm text-muted">
             Optional. Read the disclosure below before connecting.

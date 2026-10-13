@@ -162,20 +162,51 @@ test('the ceiling constraint it respects is still defined where it was', () => {
 console.log('')
 console.log('3. migration order')
 
-test('the fix is the newest migration on this branch', () => {
-  const files = readdirSync(join(ROOT, 'supabase/migrations')).filter((f) => f.endsWith('.sql')).sort()
-  assert.strictEqual(files[files.length - 1],
-    '20261013060000_preserve_new_contact_context_deadline.sql',
-    'the fix must sort last, so a push applies it after every applied migration')
+const MIGRATIONS = () =>
+  readdirSync(join(ROOT, 'supabase/migrations')).filter((f) => f.endsWith('.sql')).sort()
+const COPIED_FROM_FILE = '20261011000000_outlook_thread_segments.sql'
+const FIX_FILE = '20261013060000_preserve_new_contact_context_deadline.sql'
+const COHORT_FILE = '20261013120000_outlook_cohort_reservation.sql'
+
+test('the fix is present, and sorts AFTER the migration it copied its body from', () => {
+  // THE ONLY ORDER THIS FILE ITSELF REQUIRES. It re-issues a function that
+  // 20261011000000 created at its current signature, so applying it earlier would be
+  // overwritten by that file. It is deliberately NOT asserted to be the newest migration in
+  // the tree: that was true only while it was the newest thing on its own branch, and it
+  // broke the moment the cohort reservation migration landed beside it - an assertion about
+  // the checkout, not about the fix.
+  const files = MIGRATIONS()
+  assert.ok(files.includes(FIX_FILE), `${FIX_FILE} must exist`)
+  assert.ok(files.includes(COPIED_FROM_FILE), `${COPIED_FROM_FILE} must exist`)
+  assert.ok(files.indexOf(FIX_FILE) > files.indexOf(COPIED_FROM_FILE),
+    'the fix must sort after the definition it was copied from')
+  // And after every migration that precedes that one, which the sort already implies -
+  // stated so a renumbering below 20261011000000 fails here rather than silently.
+  assert.ok(FIX_FILE > COPIED_FROM_FILE, 'by version string too, not just by position')
 })
 
-test('its version leaves room before the cohort reservation migration', () => {
-  // The cohort-reservation migration lives on a separate unmerged branch at
-  // 20261013120000. 060000 < 120000, so whichever branch merges first, `db push` applies
-  // this fix before that one - which is the order the rollout for this change assumes.
-  // Recorded as a number rather than a sentence so a renumbering breaks a test.
-  assert.ok(20261013060000 < 20261013120000,
-    'the fix must sort before the cohort reservation migration')
+test('where the cohort reservation migration exists, the fix sorts BEFORE it', () => {
+  // CONDITIONAL ON PURPOSE. The cohort migration is unapplied and lives on its own branch,
+  // so on `main` it is absent and there is nothing to order against; on the cohort branch it
+  // is present and must come second, because the fix repairs a producer that currently fails
+  // on every refresh while the cohort change waits on disclosure approval. Asserting the
+  // relationship only when both files exist keeps one suite honest on both checkouts.
+  const files = MIGRATIONS()
+  if (!files.includes(COHORT_FILE)) {
+    console.log('       (the cohort reservation migration is not in this checkout)')
+    return
+  }
+  assert.ok(files.indexOf(FIX_FILE) < files.indexOf(COHORT_FILE),
+    'the applied fix must sort before the unapplied cohort migration')
+  assert.ok(FIX_FILE < COHORT_FILE, 'by version string too')
+})
+
+test('no two migrations share a version, so `db push` has one unambiguous order', () => {
+  // A renumbering is how the order above was established, and a collision is how it would
+  // be silently undone: two files with the same version prefix make the ledger ambiguous.
+  const versions = MIGRATIONS().map((f) => f.split('_')[0])
+  const dupes = versions.filter((v, i) => versions.indexOf(v) !== i)
+  assert.deepStrictEqual([...new Set(dupes)], [], `duplicate migration versions: ${dupes}`)
 })
 
 console.log('')

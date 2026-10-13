@@ -39,9 +39,10 @@ import assert from 'node:assert'
 import { readFileSync } from 'node:fs'
 import {
   PILOT_USER_ENV, PILOT_REFUSALS, checkPilotUser, summarizePilotDecision,
+  designatedPilotUser, designatedPilotUsers, MAX_COHORT_USERS,
 } from '../supabase/functions/shared/outlookPilotGate.js'
 import {
-  outlookPilotViewer, OUTLOOK_PILOT_VIEWER_ID,
+  outlookPilotViewer, OUTLOOK_PILOT_VIEWER_ID, outlookCohortIds, MAX_COHORT_VIEWERS,
 } from '../src/lib/outlookConnection.js'
 import {
   runOutlookImport, summarizeRun, RUN_OUTCOMES,
@@ -317,6 +318,115 @@ test('A SECOND AUTHENTICATED USER cannot be imported, and nothing is touched', a
   assert.strictEqual(rel[0].args.p_inbox_delta_ct, null)
 })
 
+// ══ A COHORT OF TWO, AND A THIRD ACCOUNT THAT IS NOT INVITED ══════════════════
+// Through the real run module, with the reservation deliberately NOT applying the filter -
+// it hands back whatever `owner` says - so what these exercise is the run's own refusal and
+// what it sends. The SQL filter itself is proved against a real Postgres in
+// tests/sql/outlook-cohort-reservation-runtime.sql, because a JavaScript double of a SQL
+// predicate proves nothing about the predicate.
+const COHORT = `${PILOT},${OTHER}`
+
+test('COHORT: the run sends the eligible SET, and the scalar only when it is unambiguous', async () => {
+  const h = await (async () => { const x = harness({ owner: PILOT, pilotUserId: COHORT }); await x.run(); return x })()
+  const res = h.calls.find((c) => c.name === 'reserve_due_outlook_connection')
+  assert.deepStrictEqual(res.args.p_pilot_user_ids, [PILOT, OTHER],
+    'the SET is what decides eligibility, and it is sent')
+  assert.strictEqual(res.args.p_pilot_user_id, null,
+    'with more than one invited account the scalar must be null: against a database still '
+    + 'carrying the pre-cohort function it would narrow to one member and skip the rest')
+
+  // One invited account is still a list of one, and then the scalar IS sent - so a database
+  // carrying the old three-argument function narrows correctly instead of reserving everybody.
+  const h1 = harness({ owner: PILOT, pilotUserId: PILOT })
+  await h1.run()
+  const res1 = h1.calls.find((c) => c.name === 'reserve_due_outlook_connection')
+  assert.strictEqual(res1.args.p_pilot_user_id, PILOT)
+  assert.deepStrictEqual(res1.args.p_pilot_user_ids, [PILOT])
+})
+
+test('COHORT: EITHER invited account is imported normally', async () => {
+  for (const owner of [PILOT, OTHER]) {
+    const h = harness({ owner, pilotUserId: COHORT })
+    const r = await h.run()
+    assert.strictEqual(r.outcome, 'committed', `${owner}: ${JSON.stringify(summarizeRun(r))}`)
+    assert.ok(h.graph.length > 0, `${owner}: the invited account IS read`)
+    assert.strictEqual(r.cursorsAdvanced, 2, owner)
+  }
+})
+
+test('COHORT: a THIRD account is refused, and nothing of its is touched', async () => {
+  // The case that matters for a cohort: not "someone else", but someone else WHILE other
+  // accounts are legitimately invited. The refusal must still be total.
+  const outsider = '99999999-9999-4999-8999-999999999999'
+  const h = harness({ owner: outsider, pilotUserId: COHORT })
+  const r = await h.run()
+  assert.strictEqual(r.outcome, 'not_in_pilot', JSON.stringify(summarizeRun(r)))
+  assert.strictEqual(r.reason, 'not_in_pilot')
+  assert.strictEqual(h.graph.length, 0, 'not one Graph request - so no token refresh either')
+  assert.strictEqual(r.accepted, 0)
+  assert.strictEqual(r.cursorsAdvanced, 0)
+  assert.strictEqual(
+    h.calls.filter((c) => c.name === 'upsert_outlook_interaction_candidate').length, 0)
+  assert.strictEqual(h.calls.filter((c) => c.name === 'record_outlook_page_progress').length, 0)
+  assert.strictEqual(h.store.conversations.size, 0)
+  for (const f of ['inbox', 'sentitems']) {
+    assert.strictEqual(h.store.folders[f].delta_link_ciphertext, null, f)
+  }
+  // The lease is handed back rather than held to expiry.
+  const rel = h.calls.filter((c) => c.name === 'release_outlook_sync_lease')
+  assert.strictEqual(rel.length, 1)
+  assert.strictEqual(rel[0].args.p_run_complete, false)
+})
+
+test('COHORT: removing somebody stops their next import, and deletes nothing', async () => {
+  // Removal is deleting an id from the variable. The next run for that account refuses at
+  // the gate - before any provider call - and the refusal writes nothing, which is what
+  // makes it a stop rather than a deletion: cursors, candidates and conversations are all
+  // untouched, so re-adding the id resumes from where the account left off.
+  const h = harness({ owner: OTHER, pilotUserId: PILOT })   // OTHER has just been removed
+  const r = await h.run()
+  assert.strictEqual(r.reason, 'not_in_pilot')
+  assert.strictEqual(h.graph.length, 0)
+  for (const f of ['inbox', 'sentitems']) {
+    assert.strictEqual(h.store.folders[f].delta_link_ciphertext, null,
+      `${f}: a refusal must not clear or advance a cursor`)
+  }
+  // Re-added, the same account imports again: nothing about the refusal was durable.
+  const back = harness({ owner: OTHER, pilotUserId: COHORT })
+  const r2 = await back.run()
+  assert.strictEqual(r2.outcome, 'committed', JSON.stringify(summarizeRun(r2)))
+})
+
+test('COHORT: a MALFORMED list imports nobody, invited or not', async () => {
+  // Half a mis-pasted list is not honoured: the account that IS named in it is refused too,
+  // and with `pilot_not_configured` rather than `not_in_pilot`, because the configuration is
+  // what is wrong.
+  for (const value of [`${PILOT},nonsense`, `${PILOT},`, `,${PILOT}`, `${PILOT},,${OTHER}`,
+    Array.from({ length: 11 }, () => PILOT).join(',')]) {
+    const h = harness({ owner: PILOT, pilotUserId: value })
+    const r = await h.run()
+    assert.strictEqual(r.outcome, 'not_in_pilot', value)
+    assert.strictEqual(r.reason, 'pilot_not_configured', value)
+    assert.strictEqual(h.graph.length, 0, value)
+    assert.strictEqual(
+      h.calls.filter((c) => c.name === 'reserve_due_outlook_connection').length, 0,
+      `${value}: not one database call may be made`)
+  }
+})
+
+test('COHORT: the owner check uses the SET that was sent, normalisation included', async () => {
+  // Written with surrounding whitespace, mixed case and a duplicate - the shapes a value
+  // pasted from a dashboard actually has. The member is still admitted, and the set sent to
+  // the reservation is the normalised one, so the two cannot disagree.
+  const messy = `  ${PILOT.toUpperCase()} , ${OTHER} , ${OTHER}  `
+  const h = harness({ owner: PILOT, pilotUserId: messy })
+  const r = await h.run()
+  assert.strictEqual(r.outcome, 'committed', JSON.stringify(summarizeRun(r)))
+  const res = h.calls.find((c) => c.name === 'reserve_due_outlook_connection')
+  assert.deepStrictEqual(res.args.p_pilot_user_ids, [PILOT, OTHER],
+    'normalised and deduplicated before it is sent')
+})
+
 test('with NO designation, NOBODY is imported - including the pilot account', async () => {
   for (const absent of [undefined, '', '*', 'true']) {
     const h = harness({ owner: PILOT, pilotUserId: absent })
@@ -520,6 +630,150 @@ test('the SERVER designation is never read from a VITE_ name', () => {
   assert.strictEqual(bare, prefixed,
     'src/ reads the server-side designation name without the VITE_ prefix')
   assert.ok(prefixed >= 1, 'the browser check must have its own variable')
+})
+
+// ══ THE COHORT: one variable, a short list, and the same fail-closed rules ══════
+// Every case below is asserted against BOTH implementations - the function-environment
+// parser and the browser one - from one table, because two parsers that disagree about
+// who is invited is exactly the bug worth preventing. The server's answer is the one that
+// restricts anything; the browser's only hides a dead end.
+const U1 = '11111111-1111-1111-1111-111111111111'
+const U2 = '22222222-2222-2222-2222-222222222222'
+const U3 = '33333333-3333-3333-3333-333333333333'
+const ELEVEN = Array.from({ length: 11 }, () => U1).join(String.fromCharCode(44))
+
+const COHORT_CASES = [
+  // [configured value, expected ids, why]
+  [U1, [U1], 'one id behaves exactly as it did before the list existed'],
+  [`${U1},${U2}`, [U1, U2], 'two invited accounts'],
+  [` ${U1} , ${U2} `, [U1, U2], 'whitespace around members is trimmed'],
+  [U1.toUpperCase(), [U1], 'uuids pasted in upper case still match stored ids'],
+  [`${U1},${U1}`, [U1], 'a duplicate is the same person twice, deduplicated, not an error'],
+  [`${U1},${U2},${U1}`, [U1, U2], 'and order of first appearance is kept'],
+  ['', [], 'absent configuration invites nobody'],
+  ['   ', [], 'whitespace is not a cohort'],
+  ['*', [], 'a wildcard is not a cohort'],
+  ['all', [], 'nor a word that looks like one'],
+  ['true', [], 'nor the string that enables other flags'],
+  [`${U1},nonsense`, [], 'a PARTIALLY valid list invites nobody - never half a mis-paste'],
+  [`${U1},`, [], 'a trailing comma is a malformed list'],
+  [`,${U1}`, [], 'so is a leading one'],
+  [`${U1},,${U2}`, [], 'and a doubled one'],
+  [`${U1.slice(0, -1)}`, [], 'a truncated uuid is not a uuid'],
+  [`${U1} ${U2}`, [], 'space is not the separator; one malformed member fails closed'],
+  [ELEVEN, [], 'over the cap, even naming one person eleven times'],
+]
+
+test('the cohort parses identically on both sides, and fails closed in every direction', () => {
+  for (const [value, expected, why] of COHORT_CASES) {
+    assert.deepStrictEqual([...designatedPilotUsers(value)], expected, `server: ${why}`)
+    assert.deepStrictEqual([...outlookCohortIds(value)], expected, `browser: ${why}`)
+  }
+  // Non-strings, which only the browser one can realistically see (an unset import.meta.env).
+  for (const value of [null, undefined, 42, {}, [], true]) {
+    assert.deepStrictEqual([...designatedPilotUsers(value)], [], String(value))
+    assert.deepStrictEqual([...outlookCohortIds(value)], [], String(value))
+  }
+})
+
+test('the cap is the same number on both sides, and is checked before deduplication', () => {
+  assert.strictEqual(MAX_COHORT_USERS, 10)
+  assert.strictEqual(MAX_COHORT_VIEWERS, MAX_COHORT_USERS)
+  const ten = Array.from({ length: 10 }, (_, i) => `${i}${U1.slice(1)}`)
+  assert.strictEqual(designatedPilotUsers(ten.join(',')).length, 10, 'ten is allowed')
+  assert.strictEqual(designatedPilotUsers([...ten, U2].join(',')).length, 0, 'eleven is not')
+  // Eleven entries naming one person is still eleven entries: a list that long is a mistake
+  // whatever it contains, and the cap is what catches a mis-pasted value.
+  assert.strictEqual(designatedPilotUsers(ELEVEN).length, 0)
+})
+
+test('the parsed cohort cannot be mutated by a caller', () => {
+  const ids = designatedPilotUsers(`${U1},${U2}`)
+  assert.throws(() => { ids.push(U3) })
+  assert.throws(() => { designatedPilotUsers('').push(U3) })
+})
+
+test('checkPilotUser admits every member and nobody else', () => {
+  const cohort = `${U1},${U2}`
+  assert.deepStrictEqual(checkPilotUser(cohort, U1), { ok: true })
+  assert.deepStrictEqual(checkPilotUser(cohort, U2), { ok: true })
+  assert.deepStrictEqual(checkPilotUser(cohort, U2.toUpperCase()), { ok: true })
+  assert.deepStrictEqual(checkPilotUser(cohort, U3), { ok: false, reason: 'not_in_pilot' })
+  assert.deepStrictEqual(checkPilotUser(cohort, ''), { ok: false, reason: 'not_in_pilot' })
+  assert.deepStrictEqual(checkPilotUser(cohort, null), { ok: false, reason: 'not_in_pilot' })
+  // A malformed cohort is not_configured, not not_in_pilot: the difference matters in a log.
+  assert.deepStrictEqual(checkPilotUser(`${U1},oops`, U1),
+    { ok: false, reason: 'pilot_not_configured' })
+  assert.deepStrictEqual(checkPilotUser('', U1), { ok: false, reason: 'pilot_not_configured' })
+  // Both reasons are in the controlled vocabulary, so both are safe to report.
+  for (const r of ['pilot_not_configured', 'not_in_pilot']) assert.ok(PILOT_REFUSALS.includes(r))
+})
+
+test('checkPilotUser accepts the ALREADY-PARSED cohort, so the worker cannot re-parse it wrong', () => {
+  // The run sends the parsed set to the reservation and then checks the owner it got back
+  // against that same array. Re-parsing the environment a second time could drift from what
+  // was actually sent; passing the array cannot.
+  assert.deepStrictEqual(checkPilotUser([U1, U2], U2), { ok: true })
+  assert.deepStrictEqual(checkPilotUser([U1, U2], U3), { ok: false, reason: 'not_in_pilot' })
+  assert.deepStrictEqual(checkPilotUser([], U1), { ok: false, reason: 'pilot_not_configured' })
+  assert.deepStrictEqual(checkPilotUser([U1], U1), { ok: true }, 'a list of one still works')
+  // Normalisation applies to the array form too, so a value that round-tripped through a
+  // dashboard still matches.
+  assert.deepStrictEqual(checkPilotUser([U1, ` ${U2.toUpperCase()} `], U2), { ok: true })
+  assert.deepStrictEqual(checkPilotUser([U1, U1], U1), { ok: true }, 'duplicates are fine')
+})
+
+test('REPRODUCED: the ARRAY form was fail-OPEN, and now refuses exactly as the string does', () => {
+  // THE DEFECT. The array branch FILTERED its members, keeping the well-formed ones. So
+  // `[validUuid, 'nonsense']` admitted the valid one and eleven copies of a valid uuid passed
+  // the cap - while the identical STRING inputs correctly refused. Filtering turns a
+  // malformed configuration into a partially valid cohort, which is the exact guess the
+  // string parser exists to refuse.
+  const ELEVEN_ARRAY = Array.from({ length: 11 }, () => U1)
+  assert.deepStrictEqual(checkPilotUser([U1, 'nonsense'], U1),
+    { ok: false, reason: 'pilot_not_configured' },
+    'a malformed member invites nobody - not even the valid member beside it')
+  assert.deepStrictEqual(checkPilotUser(ELEVEN_ARRAY, U1),
+    { ok: false, reason: 'pilot_not_configured' },
+    'the cap is measured on the RAW array length, as it is for the string')
+
+  // THE PARITY RULE, asserted as a rule rather than case by case: for every configuration in
+  // the table, the array of its segments must give the same verdict as the string.
+  for (const [value] of COHORT_CASES) {
+    const asArray = value.split(',')
+    const viaString = checkPilotUser(value, U1)
+    const viaArray = checkPilotUser(asArray, U1)
+    assert.deepStrictEqual(viaArray, viaString,
+      `the array form must match the string form for ${JSON.stringify(value)}`)
+  }
+
+  // Non-string members are refused rather than coerced.
+  for (const member of [null, undefined, 42, {}, [], true]) {
+    assert.deepStrictEqual(checkPilotUser([U1, member], U1),
+      { ok: false, reason: 'pilot_not_configured' }, String(member))
+  }
+})
+
+test('designatedPilotUser stays a SCALAR accessor, and refuses to stand in for a list', () => {
+  // Its one remaining caller is the p_pilot_user_id compatibility argument, which must be
+  // null whenever the cohort is not exactly one account - otherwise a database still
+  // carrying the pre-cohort function would narrow to one member and silently skip the rest.
+  assert.strictEqual(designatedPilotUser(U1), U1)
+  assert.strictEqual(designatedPilotUser(`${U1},${U2}`), null)
+  assert.strictEqual(designatedPilotUser(''), null)
+  assert.strictEqual(designatedPilotUser(`${U1},nonsense`), null)
+})
+
+test('the browser predicate admits every invited viewer and nobody else', () => {
+  const cohort = `${U1},${U2}`
+  assert.strictEqual(outlookPilotViewer(cohort, U1), true)
+  assert.strictEqual(outlookPilotViewer(cohort, U2), true)
+  assert.strictEqual(outlookPilotViewer(cohort, U2.toUpperCase()), true)
+  assert.strictEqual(outlookPilotViewer(cohort, U3), false)
+  assert.strictEqual(outlookPilotViewer(cohort, null), false, 'still loading shows nothing')
+  assert.strictEqual(outlookPilotViewer(cohort, ''), false)
+  assert.strictEqual(outlookPilotViewer(`${U1},oops`, U1), false, 'malformed invites nobody')
+  assert.strictEqual(OUTLOOK_PILOT_VIEWER_ID, null, 'and it is unset outside Vite')
 })
 
 test('the review flag is still a plain build flag, and names no account', () => {

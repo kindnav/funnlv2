@@ -94,13 +94,128 @@ await test('a scheduled retry -> warn with when and the code; a bare error -> wa
   const off = describeSyncStatus(base({ activity: 'error', last_error_code: 'token_refresh_failed', schedule_active: false }), NOW)
   assert.ok(off.detail.includes('The next check will try again.') && !off.detail.includes('scheduled'), off.detail)
 })
-await test('needs_reauth or a non-active status -> error with the reconnect instruction, whatever else the row says', () => {
+await test('needs_reauth or a non-active status -> error, and NEVER a disconnect instruction', () => {
+  // The old flag was called `reconnect` and the detail line said to disconnect and reconnect.
+  // That instruction would have erased the synchronisation state, the provenance references
+  // and the thread-recovery rows, all of which cascade from the connection. Renewal is a
+  // same-account OAuth update, so the flag is now `renew` and the copy says so.
   for (const over of [{ needs_reauth: true }, { status: 'needs_reauth' }, { status: 'revoked', activity: 'running' }]) {
     const v = describeSyncStatus(base(over), NOW)
     assert.strictEqual(v.tone, 'error', JSON.stringify(over))
     assert.strictEqual(v.headline, 'Needs your permission again')
-    assert.strictEqual(v.reconnect, true)
+    assert.strictEqual(v.renew, true, 'an invited viewer is pointed at the update control')
+    assert.strictEqual(v.reconnect, false, 'and never at a disconnect')
+    assert.ok(/update your Outlook permissions/.test(v.detail), v.detail)
+    assert.ok(!/disconnect and reconnect/i.test(v.detail), v.detail)
   }
+})
+
+await test('a viewer who is NOT invited is never pointed at a control they do not have', () => {
+  // The removed-but-connected case. They keep the history, the mailbox details and
+  // Disconnect; what they must not get is an instruction that cannot work for them.
+  const v = describeSyncStatus(base({ needs_reauth: true }), NOW, false)
+  assert.strictEqual(v.tone, 'error')
+  assert.strictEqual(v.renew, false, 'no renew affordance is claimed')
+  assert.strictEqual(v.reconnect, false)
+  assert.ok(/not something you can do from here/.test(v.detail), v.detail)
+  assert.ok(/Nothing has been deleted/.test(v.detail), v.detail)
+  assert.ok(!/disconnect and reconnect/i.test(v.detail))
+})
+
+await test('the automation line stops promising checks the schedule will not make for them', () => {
+  // THE REPRODUCED INCONSISTENCY: `schedule_active` is a property of the cron job, not of
+  // this account, so an uninvited viewer was shown "Automatic checks are on" directly above a
+  // panel saying checks were not running for them. Both were true of different things.
+  const on = describeSyncStatus(base({}), NOW, true)
+  assert.strictEqual(on.automation.on, true)
+  assert.ok(/Automatic checks are on/.test(on.automation.text))
+
+  const off = describeSyncStatus(base({}), NOW, false)
+  assert.strictEqual(off.automation.on, false)
+  // WHAT THE LIST CAN AND CANNOT ESTABLISH. The browser knows one thing: whether this
+  // viewer's id is in the configured value. It cannot know that the server has stopped - the
+  // value is read per invocation and a reserved round still finishes - so the line reports
+  // the membership and QUALIFIES the consequence.
+  assert.ok(/not on Funnl\u2019s invited list/.test(off.automation.text), off.automation.text)
+  assert.ok(/once that change has taken effect/.test(off.automation.text), off.automation.text)
+  assert.ok(/does not start new automatic checks/.test(off.automation.text), off.automation.text)
+  assert.ok(/Nothing has been deleted/.test(off.automation.text))
+  // No claim of an immediate or already-completed stop.
+  assert.ok(!/stopped|revoked|immediately|instantly/i.test(off.automation.text),
+    off.automation.text)
+  assert.ok(!/are not running/i.test(off.automation.text), off.automation.text)
+  // And the listening line stops promising a scheduled fallback to someone who is passed over.
+  assert.ok(!/Scheduled checks continue/.test(off.listening.text), off.listening.text)
+})
+
+await test('a live lease is still reported to a removed viewer, as the round that was already under way', () => {
+  // THE CONTRADICTION: "Checking your mailbox now" sat directly above a line saying checks
+  // were not running. A live lease is a recorded fact and is kept; what changes is the claim.
+  const on = describeSyncStatus(base({ activity: 'running' }), NOW, true)
+  assert.strictEqual(on.headline, 'Checking your mailbox now')
+
+  const off = describeSyncStatus(base({ activity: 'running' }), NOW, false)
+  assert.strictEqual(off.tone, 'info')
+  assert.strictEqual(off.headline, 'A check is still under way')
+  assert.ok(/had already started/.test(off.detail), off.detail)
+  assert.ok(/may\s+finish/.test(off.detail), off.detail)
+  assert.ok(/Last successful sync 7 minutes ago\./.test(off.detail), off.detail)
+  // Not a present-tense claim about work being done for them now, and not a stop either.
+  assert.ok(!/Checking your mailbox now/.test(off.headline + off.detail))
+  assert.ok(!/has stopped|was cancelled/i.test(off.detail), off.detail)
+  // The automation line beside it no longer denies what the headline reports.
+  assert.ok(!/are not running/i.test(off.automation.text), off.automation.text)
+})
+
+await test('a scheduled retry is reported to a removed viewer without promising it runs', () => {
+  const on = describeSyncStatus(base({ activity: 'retry_scheduled', next_retry_at: iso(20 * MIN), last_error_code: 'graph_failed' }), NOW, true)
+  assert.ok(/Funnl will try again in 20 minutes/.test(on.detail), on.detail)
+
+  const off = describeSyncStatus(base({ activity: 'retry_scheduled', next_retry_at: iso(20 * MIN), last_error_code: 'graph_failed' }), NOW, false)
+  assert.strictEqual(off.tone, 'warn')
+  assert.strictEqual(off.headline, 'The last check did not finish')
+  // next_retry_at IS recorded, so it is shown - as a record, not as a promise.
+  assert.ok(/A retry is recorded for 20 minutes from now/.test(off.detail), off.detail)
+  assert.ok(/\(graph_failed\)/.test(off.detail), off.detail)
+  assert.ok(/cannot say whether that retry runs/.test(off.detail), off.detail)
+  assert.ok(!/will try again/i.test(off.detail), off.detail)
+  assert.ok(/Last successful sync 7 minutes ago\./.test(off.detail), off.detail)
+})
+
+await test('a recorded error to a removed viewer keeps the reason and drops the next-check promise', () => {
+  const off = describeSyncStatus(base({ activity: 'error', last_error_code: 'graph_failed' }), NOW, false)
+  assert.strictEqual(off.headline, 'The last check did not finish')
+  assert.ok(/Reason: graph_failed\./.test(off.detail), off.detail)
+  assert.ok(/Last successful sync 7 minutes ago\./.test(off.detail), off.detail)
+  assert.ok(!/try again/i.test(off.detail), off.detail)
+  assert.ok(!/next scheduled check/i.test(off.detail), off.detail)
+})
+
+await test('the listener line promises no renewal to a removed viewer', () => {
+  // Renewal happens IN A RUN, so "renews in two days" is a promise about future runs. The
+  // record's own lapse is what is left.
+  const on = describeSyncStatus(base({}), NOW, true)
+  assert.strictEqual(on.listening.text, 'Listening for new mail (renews in 2 days).')
+
+  const off = describeSyncStatus(base({}), NOW, false)
+  assert.ok(/lapses in 2 days/.test(off.listening.text), off.listening.text)
+  assert.ok(!/renews/.test(off.listening.text), off.listening.text)
+  assert.strictEqual(off.listening.tone, 'muted')
+
+  // And every not-yet-listening state stops saying "the next check sets it up again".
+  for (const st of ['reauthorize', 'removed', 'failed', 'expired']) {
+    const v = describeSyncStatus(base({ subscription: { status: st, expires_at: iso(-HOUR) } }), NOW, false)
+    assert.ok(!/next check/i.test(v.listening.text), st + ': ' + v.listening.text)
+    assert.strictEqual(v.listening.tone, 'muted', st)
+  }
+})
+
+await test('a signalled wake to a removed viewer is a record, not a queue promise', () => {
+  const off = describeSyncStatus(base({ activity: 'never_synced', last_success_at: null, wake_pending: true, subscription: null }), NOW, false)
+  assert.strictEqual(off.headline, 'Not synced yet')
+  assert.strictEqual(off.detail, 'New mail was signalled and has not been checked yet.')
+  const on = describeSyncStatus(base({ activity: 'never_synced', last_success_at: null, wake_pending: true, subscription: null }), NOW, true)
+  assert.strictEqual(on.detail, 'New mail was signalled; the first check is queued.')
 })
 await test('never synced: the first-check promise depends on the schedule flag', () => {
   const on = describeSyncStatus(base({ activity: 'never_synced', last_success_at: null, subscription: null }), NOW)
@@ -286,8 +401,11 @@ await test('the Suggestions page polls the SIGNATURE, merges card by card from a
 })
 await test('the Settings card mounts the sync status on the CONNECTED branch only; the component shows the activation line from the RPC', () => {
   const card = read('src/components/OutlookConnectionCard.jsx')
-  const idx = card.indexOf('<OutlookSyncStatus />')
-  assert.ok(idx > card.indexOf("status === 'connected' && connection && (") && idx < card.indexOf("status === 'not_connected' && ("))
+  const idx = card.indexOf('<OutlookSyncStatus invited={mayConnect} />')
+  assert.ok(idx > 0, 'the card must pass the invitation down to the status component')
+  assert.ok(idx > card.indexOf("status === 'connected' && connection && (")
+    && idx < card.indexOf("status === 'not_connected'"),
+    'and still mount it on the connected branch only')
   const comp = read('src/components/OutlookSyncStatus.jsx')
   assert.ok(comp.includes("supabase.rpc('get_my_outlook_sync_status')"))
   assert.ok(comp.includes('data-testid="outlook-automation"'))

@@ -97,7 +97,7 @@ import {
 import {
   ROUND_TTL_SECONDS, finalizeConversation, summarizeRoundProgress,
 } from './outlookRoundState.js'
-import { checkPilotUser, designatedPilotUser } from './outlookPilotGate.js'
+import { checkPilotUser, designatedPilotUsers } from './outlookPilotGate.js'
 import { buildMessageHandles } from './outlookHandleProducer.js'
 import {
   summarizeOneConversation, planContentWrite, summarizeContentStage, CONTENT_WRITE_RPCS,
@@ -515,12 +515,13 @@ export async function runOutlookImport (p) {
   const clock = typeof deps?.now === 'function' ? deps.now : Date.now
 
   // ── THE PILOT GATE, PART 1: before a single RPC ──────────────────────────
-  // A missing or malformed designation refuses here, with NOTHING reserved and no
+  // A missing or malformed configuration refuses here, with NOTHING reserved and no
   // database call made at all. It also has to happen before the reservation because
-  // the designation is about to be passed to it as a uuid: 'true' or '*' would not
-  // narrow the selection, it would make the call fail on a cast.
-  const designated = designatedPilotUser(pilotUserId)
-  if (designated === null) {
+  // the value is about to be passed to it as uuids: 'true' or '*' would not narrow the
+  // selection, it would make the call fail on a cast. A partially valid list refuses
+  // too - see outlookPilotGate.js for why half a mis-pasted list is not honoured.
+  const designated = designatedPilotUsers(pilotUserId)
+  if (designated.length === 0) {
     return {
       outcome: 'not_in_pilot',
       reason: 'pilot_not_configured',
@@ -533,16 +534,37 @@ export async function runOutlookImport (p) {
 
   const reserveStartedMs = clock()
   // ── THE PILOT GATE, PART 2: the reservation itself is narrowed ───────────
-  // Without p_pilot_user_id the reservation takes whichever connection is DUE, for
+  // Without a narrowing argument the reservation takes whichever connection is DUE, for
   // ANY user - and then the run could only discover whose it was after loading the
   // context, which refreshes an expired token at Microsoft and persists the rotation.
-  // Narrowing it here is what makes a non-pilot account cost zero provider calls and
-  // zero writes, and what stops an excluded connection taking the pilot's turn every
-  // time its backoff elapses. See migration 20261003000000.
+  // Narrowing it here is what makes an ineligible account cost zero provider calls and
+  // zero writes, and what stops an excluded connection taking an invited account's turn
+  // every time its backoff elapses. See migrations 20261003000000 and 20261013120000.
+  //
+  // BOTH ARGUMENTS, deliberately - and MEASURED, because the first version of this comment
+  // guessed wrong about what an old deployment does with the extra one.
+  //
+  // WHAT ACTUALLY HAPPENS against a database that still has only the three-argument function:
+  // PostgREST resolves a function by the named arguments in the request body, so an unknown
+  // argument matches no candidate and the call is REFUSED - HTTP 404, code PGRST202, "Could
+  // not find the function public.reserve_due_outlook_connection(p_due_after_seconds,
+  // p_lease_seconds, p_pilot_user_id, p_pilot_user_ids) in the schema cache". It does not
+  // silently ignore the argument and it does not reserve anybody, which means a worker
+  // deployed ahead of its migration imports NOTHING rather than importing too much. Measured
+  // in tests/local/outlook-cohort-composed.mjs against real PostgREST.
+  //
+  // So the scalar is not a fallback for that case - nothing is. It is sent only when the
+  // cohort is exactly one account, which keeps the request identical to today's for the
+  // single-account configuration. With more than one invited account it is null, because a
+  // scalar cannot express a set and a stale one would narrow to a single member. The
+  // ordering - migration BEFORE worker deploy - is therefore a requirement, not a
+  // preference, and the owner checks below remain the backstop for a reservation that
+  // answers with somebody else's connection.
   const reserved = await rpc('reserve_due_outlook_connection', {
     p_lease_seconds: LEASE_SECONDS,
     p_due_after_seconds: DUE_AFTER_SECONDS,
-    p_pilot_user_id: designated,
+    p_pilot_user_id: designated.length === 1 ? designated[0] : null,
+    p_pilot_user_ids: designated,
   })
   if (reserved?.error || !isPlainObject(reserved?.data)) {
     return { outcome: 'reserve_failed' }
