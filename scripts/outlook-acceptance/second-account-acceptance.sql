@@ -17,6 +17,10 @@ union all select 'A1','distinct_mailbox_address_from_pilot',
 union all select 'A1','same_mailbox_on_any_other_user',
   coalesce((select (count(*) > 0)::text from public.microsoft_connections o, sc s
              where o.user_id <> s.user_id and o.ms_account_id = s.ms_account_id),'n/a')
+union all select 'A1','holders_of_this_microsoft_identity',
+  coalesce((select count(*)::text from public.microsoft_connections o, sc s
+             where coalesce(lower(o.ms_tenant_id),'') = coalesce(lower(s.ms_tenant_id),'')
+               and lower(o.ms_account_id) = lower(s.ms_account_id)),'n/a')
 union all select 'A1','account_type', coalesce((select account_type from sc),'n/a')
 union all select 'A1','tenant_is_consumers_msa',
   coalesce((select (ms_tenant_id = '9188040d-6c67-4c5b-b112-36a304b66dad')::text from sc),'n/a')
@@ -35,6 +39,25 @@ union all select 'A2','interaction_candidates_by_status', coalesce((select strin
   (select status, count(*)::text n from public.interaction_candidates where user_id in (select user_id from second) group by status) z),'none')
 union all select 'A2','new_contact_candidates_by_status', coalesce((select string_agg(status||'='||n,' ' order by status) from
   (select status, count(*)::text n from public.new_contact_candidates where user_id in (select user_id from second) group by status) z),'none')
+-- S4 attribution: the ten most recent second-account candidates, times and codes only. A
+-- candidate counts for the fresh exchange only if it was created after the exchange AND its
+-- message coverage window reaches the exchange's time (the operator compares with the time
+-- the owner reported - no content is read).
+union all select 'S4','recent_candidates', coalesce((select string_agg(x.line, ' || ' order by x.created_at desc) from (
+  select ic.created_at, 'interaction status='||ic.status||' created='||ic.created_at::text
+         ||' coverage='||coalesce(r.coverage_from_at::text,'none')||'..'||coalesce(r.coverage_through_at::text,'none')
+         ||' extraction='||coalesce(ic.extraction_status,'none') as line
+    from public.interaction_candidates ic
+    left join public.outlook_candidate_refs r on r.interaction_candidate_id = ic.id
+   where ic.user_id in (select user_id from second)
+  union all
+  select nc.created_at, 'new_contact status='||nc.status||' created='||nc.created_at::text
+         ||' coverage='||coalesce(r.coverage_from_at::text,'none')||'..'||coalesce(r.coverage_through_at::text,'none')
+         ||' extraction='||coalesce(nc.extraction_status,'none')
+    from public.new_contact_candidates nc
+    left join public.outlook_candidate_refs r on r.new_contact_candidate_id = nc.id
+   where nc.user_id in (select user_id from second)
+   order by 1 desc limit 10) x),'none')
 union all select 'A3','accepted_outlook_interactions', (select count(*) from public.interactions
   where user_id in (select user_id from second) and source = 'outlook')::text
 union all select 'A3','contacts_total', (select count(*) from public.contacts where user_id in (select user_id from second))::text

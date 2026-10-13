@@ -1350,7 +1350,12 @@ consent to `Mail.Read`, and publisher verification does not change that. Status 
 facts: the **cohort rollout is complete** (both allowlists hold two members; the server value and
 the rebuilt website were verified 2026-10-13), but the **second-account acceptance test has NOT
 passed**. The first attempt used a school mailbox and stopped at Microsoft's "Need admin
-approval". Acceptance definition and onboarding steps: `docs/outlook-second-account-acceptance.md`.
+approval". Acceptance (staged S0–S6) and onboarding: `docs/outlook-second-account-acceptance.md`.
+It is **blocked on Draft PR #97** (one Funnl owner per Microsoft account; reproduced defect). That
+document also records two disclosure findings. Workstream B (richer metadata) needs a new
+disclosure, because notice paragraph 14 promises Funnl will not guess company, role or how-you-met.
+The "no administrator consent by default" wording is a separate accuracy fix, with a proposed
+correction and its consent-version consequences.
 
 **Cohort rollout state (2026-10-13): PAUSED mid-rollout, single pilot.** Activation packet
 `docs/outlook-cohort-activation-packet.md`. Execution paused at 19:32:43Z (cron `outlook-worker-tick`
