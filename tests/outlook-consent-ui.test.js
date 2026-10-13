@@ -71,22 +71,71 @@ test('the flag is off unless it is exactly the string true', () => {
   }
 })
 
+test('a viewer with no invitation and no connection sees NOTHING', () => {
+  // The card renders null rather than an empty panel, so no other user gets an Outlook
+  // heading they cannot use. The wrapper is the card's own, which is what makes that work.
+  assert.ok(CARD.includes("const showCard = status === 'connected' || mayConnect"),
+    'the card must decide from the connection AND the invitation')
+  assert.ok(CARD.includes('if (!showCard) return null'), 'and render nothing otherwise')
+  assert.ok(CARD.includes('<div className={cardClassName}>'),
+    'the card owns its wrapper, so a null render leaves no empty section behind')
+})
+
+test('REMOVED FROM THE COHORT: the connection, its status and Disconnect all survive', () => {
+  // The requirement this encodes: removal stops future imports and deletes nothing, so the
+  // viewer must still be able to SEE the connection and END it themselves.
+  const connectedBranch = CARD.slice(
+    CARD.indexOf("status === 'connected' && connection && ("),
+    CARD.indexOf("status === 'not_connected'"))
+  assert.ok(connectedBranch.includes('<OutlookSyncStatus />'),
+    'the persisted sync status stays visible')
+  assert.ok(connectedBranch.includes('Disconnect Outlook'),
+    'and so does the way out')
+  // Neither of those is behind the invitation.
+  assert.ok(!/mayConnect[^\n]*OutlookSyncStatus/.test(connectedBranch))
+  assert.ok(CARD.includes("{!mayConnect && (") && CARD.includes('outlook-not-invited'),
+    'a removed viewer is told plainly that checks are not running and nothing was deleted')
+  const notice = CARD.slice(CARD.indexOf('outlook-not-invited'), CARD.indexOf('outlook-update-panel'))
+  assert.ok(/Nothing\s+has been deleted/.test(notice), notice.slice(0, 200))
+  assert.ok(!/removed|revoked|suspended|violat/i.test(notice),
+    'it must not guess at a reason it does not know')
+})
+
+test('consent is offered ONLY to an invited viewer', () => {
+  // Both consent paths - a first connection and an update of an existing one - are gated,
+  // because consent is how a connection begins or is renewed and a removed account may do
+  // neither. Offering it would be a dead end the server refuses.
+  assert.ok(CARD.includes('const offerUpdate = update.needed && mayConnect'),
+    'the update panel is gated by the invitation')
+  assert.ok(CARD.includes("{offerUpdate && ("), 'and rendered from that gate')
+  assert.ok(CARD.includes("{status === 'not_connected' && mayConnect && ("),
+    'the first-connection branch is gated too')
+  assert.ok(CARD.includes('{connection.needsReauth && mayConnect && ('),
+    'and the renewal notice does not point a removed viewer at a control they lack')
+})
+
 test('the module-level flag is false outside Vite (fail-safe default)', () => {
   assert.strictEqual(OUTLOOK_CONNECTION_ENABLED, false)
 })
 
-test('Settings renders the card ONLY behind that flag AND for the pilot viewer', () => {
-  // The flag is global: on its own it would offer the card to every signed-in user,
-  // all but one of whom outlook-oauth-start refuses with 403 not_in_pilot. So the
-  // guard now also requires the viewer to be the designated pilot. That second part
-  // is PRESENTATION ONLY - it hides a dead end, it does not authorize anything.
-  assert.ok(SETTINGS.includes('OUTLOOK_CONNECTION_ENABLED &&'),
+test('Settings mounts the card behind the flag and hands it the invitation', () => {
+  // The flag is global: on its own it would offer the card to every signed-in user, all
+  // but the invited ones of whom outlook-oauth-start refuses with 403 not_in_pilot.
+  //
+  // THE INVITATION MOVED, deliberately. It used to be part of the mount condition, which
+  // meant removing somebody from the cohort also removed the screen telling them they were
+  // still connected and the Disconnect control that is their way out. It is now a PROP, and
+  // the card decides: no connection and no invitation renders nothing at all.
+  assert.ok(SETTINGS.includes('OUTLOOK_CONNECTION_ENABLED && ('),
     'the card must be inside a flag guard')
-  assert.ok(SETTINGS.includes('outlookPilotViewer(OUTLOOK_PILOT_VIEWER_ID, user?.id)'),
-    'the guard must also require the designated pilot viewer')
-  const guard = SETTINGS.indexOf('OUTLOOK_CONNECTION_ENABLED &&')
-  const mount = SETTINGS.indexOf('<OutlookConnectionCard />')
+  assert.ok(SETTINGS.includes('mayConnect={outlookPilotViewer(OUTLOOK_PILOT_VIEWER_ID, user?.id)}'),
+    'and must be told whether this viewer is invited')
+  const guard = SETTINGS.indexOf('OUTLOOK_CONNECTION_ENABLED && (')
+  const mount = SETTINGS.indexOf('<OutlookConnectionCard')
   assert.ok(guard > 0 && mount > guard, 'the mount must sit inside the guard')
+  // Presentation only, still: the prop defaults to FALSE in the component, so a caller that
+  // forgets it offers consent to nobody.
+  assert.ok(CARD.includes('mayConnect = false,'), 'the prop must default to not-invited')
   // It must not share the Calendar flag: the two roll out independently.
   const between = SETTINGS.slice(guard, mount)
   assert.ok(!between.includes('CALENDAR_CONNECTION_ENABLED'))

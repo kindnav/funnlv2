@@ -71,7 +71,13 @@ function formatConnectedAt (iso) {
   return Number.isNaN(d.getTime()) ? '' : d.toLocaleDateString()
 }
 
-export default function OutlookConnectionCard() {
+export default function OutlookConnectionCard({
+  // Whether THIS viewer is invited to connect. Defaults to false, so a caller that forgets
+  // to pass it cannot accidentally offer consent to everybody.
+  mayConnect = false,
+  sectionLabel = '',
+  cardClassName = 'rounded-2xl border border-line-2 bg-card p-6',
+}) {
   const [searchParams] = useSearchParams()
   const [acknowledged, setAcknowledged] = useState(false)   // never defaults true
   const [connecting, setConnecting] = useState(false)
@@ -117,8 +123,20 @@ export default function OutlookConnectionCard() {
     readOutlookCallbackResult(searchParams) === 'error' && status === 'connected'
 
   // Why the connected branch may need the consent control: a superseded recorded version, or
-  // an authorisation Microsoft wants renewed. Same control for both.
+  // an authorisation Microsoft wants renewed. Same control for both - and only for a viewer
+  // who is still invited, because consent is how a connection BEGINS or is RENEWED, and
+  // neither is something a removed account may do.
   const update = outlookUpdateNeeded(connection)
+  const offerUpdate = update.needed && mayConnect
+
+  // WHAT A REMOVED-BUT-CONNECTED VIEWER SEES, and why. Their imports have stopped - the
+  // server gate refuses the reservation - but their connection, its tokens, its cursors and
+  // everything already matched are untouched, and they are entitled to see that and to end
+  // it themselves. So: the mailbox, the recorded scopes and version, the persisted sync
+  // status, and Disconnect. No Connect, no Update, no disclosure: offering consent to an
+  // account the server will refuse would be a dead end dressed up as a control.
+  const showCard = status === 'connected' || mayConnect
+  if (!showCard) return null
 
   const request = buildConsentRequest({
     acknowledged,
@@ -172,7 +190,8 @@ export default function OutlookConnectionCard() {
   }
 
   return (
-    <div className="rounded-2xl border border-line-2 bg-card p-6">
+    <div className={cardClassName}>
+      {sectionLabel && <span className={sectionLabel}>Connected accounts</span>}
       <h3 className="font-display text-lg text-hi">Outlook</h3>
 
       {/* Outside every status branch on purpose: visible while the status is
@@ -226,7 +245,7 @@ export default function OutlookConnectionCard() {
             </p>
           )}
 
-          {connection.needsReauth && (
+          {connection.needsReauth && mayConnect && (
             <p className="mt-3 rounded-xl border border-warning/40 bg-warning/10 p-3 text-sm text-warning">
               This connection needs your permission again before Funnl can read
               anything. Use <span className="font-semibold">Update Outlook permissions</span> below
@@ -235,11 +254,27 @@ export default function OutlookConnectionCard() {
             </p>
           )}
 
+          {/* A removed viewer is told the truth rather than pointed at a control they do not
+              have: imports have stopped, nothing was deleted, and disconnecting is theirs to
+              do whenever they want. Deliberately says nothing about WHY they were removed -
+              the card does not know, and guessing would be worse than silence. */}
+          {!mayConnect && (
+            <p
+              className="mt-3 rounded-xl border border-line-2 bg-elevated p-3 text-sm text-muted"
+              data-testid="outlook-not-invited"
+            >
+              Automatic Outlook checks are not running for this account at the moment. Nothing
+              has been deleted: your connection, the conversations Funnl has already matched and
+              every interaction you accepted are all still here. You can disconnect below
+              whenever you want to.
+            </p>
+          )}
+
           {/* ── UPDATE: the same disclosure, acknowledged again, on the SAME account ──
               Rendered only when the recorded version is superseded or Microsoft wants the
               authorisation renewed. Nothing here disconnects: the start flow is the one the
               not-connected branch uses, and the backend enforces the same account. */}
-          {update.needed && (
+          {offerUpdate && (
             <div className="mt-4" data-testid="outlook-update-panel">
               <p className="rounded-xl border border-accent/40 bg-accent/10 p-3 text-sm text-hi">
                 {update.consentSuperseded
@@ -341,7 +376,7 @@ export default function OutlookConnectionCard() {
       )}
 
       {/* ── NOT CONNECTED: the disclosure and the consent control ──────── */}
-      {status === 'not_connected' && (
+      {status === 'not_connected' && mayConnect && (
         <>
           <p className="mt-1 text-sm text-muted">
             Optional. Read the disclosure below before connecting.

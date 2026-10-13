@@ -287,7 +287,7 @@ await test('the Suggestions page polls the SIGNATURE, merges card by card from a
 await test('the Settings card mounts the sync status on the CONNECTED branch only; the component shows the activation line from the RPC', () => {
   const card = read('src/components/OutlookConnectionCard.jsx')
   const idx = card.indexOf('<OutlookSyncStatus />')
-  assert.ok(idx > card.indexOf("status === 'connected' && connection && (") && idx < card.indexOf("status === 'not_connected' && ("))
+  assert.ok(idx > card.indexOf("status === 'connected' && connection && (") && idx < card.indexOf("status === 'not_connected'"))
   const comp = read('src/components/OutlookSyncStatus.jsx')
   assert.ok(comp.includes("supabase.rpc('get_my_outlook_sync_status')"))
   assert.ok(comp.includes('data-testid="outlook-automation"'))

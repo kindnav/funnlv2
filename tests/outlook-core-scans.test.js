@@ -435,15 +435,14 @@ test('applied migrations are unmodified; the only addition is the forward scope 
   const files = readdirSync(join(ROOT, 'supabase/migrations')).sort()
   assert.ok(files.includes('20260921000000_add_outlook_content_draft_primitives.sql'))
   assert.ok(files.includes('20260922175616_revoke_service_role_from_outlook_user_rpcs.sql'))
-  // THE ORDERED TAIL of Outlook migrations. Every one must sort after every migration that
-  // precedes it and appear in this order, so `db push` applies them as reviewed: the scope
+  // THE FORWARD TAIL, IN ORDER. This list is no longer "the unapplied migrations": most of
+  // these have been applied to Production as their rollouts happened, and which ones is
+  // recorded in CLAUDE.md rather than here. What this assertion protects is the ORDER - each
+  // of these files must sort after every
+  // applied one, and in this order, so `db push` applies them as reviewed: the scope
   // widening, the connection-status read path, the candidate write path, the token
   // rotation, durable continuation, the pilot reservation, then the content note and
   // new-contact write paths.
-  //
-  // All but the last are APPLIED in Production - the list is an order assertion, not a
-  // statement about what is pending. The variable kept its old name for a while after that
-  // stopped being true, which is why it now says what it is.
   //
   // The last entry is the newest and must stay last: it DROPs and re-CREATEs
   // upsert_outlook_interaction_candidate to add the note parameter, so applying it
@@ -453,7 +452,7 @@ test('applied migrations are unmodified; the only addition is the forward scope 
   // 20261008000000 is newer still and must stay last for the same reason: it DROPs the
   // 10-argument form that 20261006000000 creates and re-CREATEs the function with the
   // follow-up and provenance parameters, so it can only apply after that file.
-  const ORDERED_TAIL = [
+  const FORWARD_TAIL = [
     '20260928000000_outlook_add_user_read_scope.sql',
     '20260929000000_outlook_connection_status_rpc.sql',
     '20260930000000_outlook_interaction_candidate_write.sql',
@@ -479,13 +478,17 @@ test('applied migrations are unmodified; the only addition is the forward scope 
     // like every producer change before it, it can only apply after them - which is why it
     // must stay last.
     '20261011000000_outlook_thread_segments.sql',
-    // The new-contact refresh fix: `upsert_new_contact_candidate` re-issued with the body
-    // copied from 20261011000000 and the `context_expires_at` reissue removed, so it must
-    // apply after the file it was copied from. NOT YET APPLIED.
+    // Cohort reservation: DROPs the three-argument reserve_due_outlook_connection that
+    // 20261009000000 creates and re-CREATEs it with one extra defaulted parameter, so like
+    // every reservation change before it, it can only apply after that file.
+    '20261013000000_outlook_cohort_reservation.sql',
+    // The new-contact refresh fix (APPLIED 2026-10-13): `upsert_new_contact_candidate`
+    // re-issued with the body copied from 20261011000000 and the `context_expires_at`
+    // reissue removed, so it must apply after the file it was copied from.
     '20261013060000_preserve_new_contact_context_deadline.sql',
   ]
-  assert.deepStrictEqual(files.slice(-ORDERED_TAIL.length), ORDERED_TAIL,
-    'the Outlook forward migrations must be the newest, in this order')
+  assert.deepStrictEqual(files.slice(-FORWARD_TAIL.length), FORWARD_TAIL,
+    'the forward migrations must be the newest, in this order')
   // The applied migrations must not be edited: 20260921000000 still carries its
   // original allowlist, which the forward migration supersedes at runtime.
   assert.ok(MIGRATION.includes("scopes <@ ARRAY['Mail.Read', 'offline_access', 'openid', 'email', 'profile']"),

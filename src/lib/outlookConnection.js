@@ -66,12 +66,46 @@ export const OUTLOOK_CONNECTION_ENABLED = outlookConnectionEnabled(
  * @param {unknown} viewerId    the signed-in user's id
  */
 export function outlookPilotViewer (rawPilotId, viewerId) {
-  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
-  const designated = typeof rawPilotId === 'string' ? rawPilotId.trim().toLowerCase() : ''
-  if (!uuid.test(designated)) return false
   const viewer = typeof viewerId === 'string' ? viewerId.trim().toLowerCase() : ''
-  return viewer.length > 0 && viewer === designated
+  if (viewer.length === 0) return false
+  return outlookCohortIds(rawPilotId).includes(viewer)
 }
+
+/**
+ * The invited ids, parsed from the build-time value.
+ *
+ * DELIBERATELY A SECOND IMPLEMENTATION of the rules in
+ * `supabase/functions/shared/outlookPilotGate.js`, not an import: this file ships in the
+ * browser bundle and that one runs in the function environment, so they cannot share a
+ * module. The rules are coordinated and both are tested against the same table of cases; if
+ * they ever disagree the server's answer is the one that matters, because a flag in a
+ * browser cannot stop a request.
+ *
+ * Fails closed identically: absent, empty, wildcard, over the cap, or ANY malformed segment
+ * - including an empty one from a trailing comma - admits nobody. Duplicates are
+ * deduplicated; the cap applies to the raw segment count.
+ */
+export function outlookCohortIds (rawPilotId) {
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+  if (typeof rawPilotId !== 'string') return EMPTY_COHORT
+  const trimmed = rawPilotId.trim()
+  if (trimmed.length === 0) return EMPTY_COHORT
+  const raw = trimmed.split(',')
+  if (raw.length > MAX_COHORT_VIEWERS) return EMPTY_COHORT
+  const out = []
+  for (const segment of raw) {
+    const id = segment.trim().toLowerCase()
+    if (!uuid.test(id)) return EMPTY_COHORT
+    if (!out.includes(id)) out.push(id)
+  }
+  return Object.freeze(out)
+}
+
+/** Must match MAX_COHORT_USERS in the server gate. */
+export const MAX_COHORT_VIEWERS = 10
+
+/** The one frozen value every fail-closed path returns. */
+const EMPTY_COHORT = Object.freeze([])
 
 /** The build-time designation. Undefined outside Vite, so false everywhere in Node. */
 export const OUTLOOK_PILOT_VIEWER_ID =

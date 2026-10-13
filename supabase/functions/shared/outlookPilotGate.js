@@ -1,5 +1,6 @@
-// The single-account Outlook pilot gate — server side, and the only thing that actually
-// restricts who can connect or be imported.
+// The Outlook cohort gate — server side, and the only thing that actually restricts who
+// can connect or be imported. It began as one designated account and now holds a short,
+// explicitly invited list; that is the only thing about it that changed.
 //
 // WHY THIS EXISTS. Before it, every server gate on the Outlook path was all-or-nothing:
 // `OUTLOOK_INTEGRATION_ENABLED` either opened the OAuth start endpoint to EVERY
@@ -14,19 +15,34 @@
 //   * Invoking the worker by hand restricts nothing either: the reservation chooses the
 //     connection, not the caller, so a manual call imports whichever account is due.
 //
-// THE RULE. One designated user id, supplied to the FUNCTION ENVIRONMENT as
-// OUTLOOK_PILOT_USER_ID. Not committed, not in the bundle, not a build flag.
+// THE RULE. A comma-separated list of user ids, supplied to the FUNCTION ENVIRONMENT as
+// OUTLOOK_PILOT_USER_ID. Not committed, not in the bundle, not a build flag. One id is
+// still a valid list of one, and behaves exactly as it did before the list existed.
 //
-// IT FAILS CLOSED, and that is the whole point: if the integration is enabled while no
-// pilot user is designated - or the value is not a well-formed uuid - NOBODY may connect or
-// be imported. Enabling Outlook therefore requires deliberately naming the one account,
-// rather than enabling it for everyone by forgetting a second variable.
+// IT FAILS CLOSED, IN EVERY DIRECTION, and that is the whole point. NOBODY may connect or
+// be imported when the value is absent, empty, whitespace, a wildcard (`*`, `all`, `true`),
+// longer than MAX_COHORT_USERS, or contains ANY segment that is not a well-formed uuid -
+// including an empty segment from a trailing or doubled comma. A partially valid list is
+// not partially honoured: `<good-uuid>,nonsense` admits NOBODY, because the alternative is
+// to guess which half of a mis-pasted configuration was intended.
+//
+// DUPLICATES are admitted and deduplicated: the same id twice is the same person twice, not
+// an error. The CAP is checked against the RAW segment count before deduplication, so
+// eleven entries are refused even if they name only three people - a list that long is a
+// mistake whatever it contains.
+//
+// CASE AND WHITESPACE: each segment is trimmed and lowercased, so a value pasted from a
+// dashboard that capitalises uuids still matches the ids the database stores.
 //
 // NOT A FEATURE-FLAG FRAMEWORK. One variable, one predicate, two call sites: the OAuth
-// start endpoint and the import run. Nothing here is generic, registered, or extensible.
+// start endpoint and the import run. Nothing here is generic, registered, or extensible,
+// and removing somebody is deleting their id from the list - no table, no admin screen.
 
-/** The function-environment variable that designates the pilot account. */
+/** The function-environment variable that names the invited accounts. */
 export const PILOT_USER_ENV = 'OUTLOOK_PILOT_USER_ID'
+
+/** The one value every fail-closed path returns, so a caller cannot mutate the refusal. */
+const EMPTY_COHORT = Object.freeze([])
 
 /** Why a caller or a connection is not in the pilot. Controlled; safe to log. */
 export const PILOT_REFUSALS = Object.freeze([
@@ -37,6 +53,13 @@ export const PILOT_REFUSALS = Object.freeze([
 ])
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
+/**
+ * The most accounts one configuration may name. Also enforced in SQL by
+ * `reserve_due_outlook_connection`, deliberately: a ceiling that only exists in the
+ * application is a ceiling a direct RPC call can ignore.
+ */
+export const MAX_COHORT_USERS = 10
 
 /**
  * Is `userId` the designated pilot account?
@@ -62,21 +85,49 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
  * @param {unknown} configured  the raw environment value
  * @returns {string|null}
  */
+export function designatedPilotUsers (configured) {
+  if (typeof configured !== 'string') return EMPTY_COHORT
+  const trimmed = configured.trim()
+  if (trimmed.length === 0) return EMPTY_COHORT
+  const raw = trimmed.split(',')
+  // The cap is on the RAW list, before deduplication: see the header.
+  if (raw.length > MAX_COHORT_USERS) return EMPTY_COHORT
+  const out = []
+  for (const segment of raw) {
+    const id = segment.trim().toLowerCase()
+    // An empty segment means a trailing or doubled comma. That is a malformed list, not a
+    // list with a gap in it, so it fails closed like any other malformed member.
+    if (!UUID_RE.test(id)) return EMPTY_COHORT
+    if (!out.includes(id)) out.push(id)
+  }
+  return Object.freeze(out)
+}
+
+/**
+ * The single designated account, for the one caller that still needs a scalar: the
+ * `p_pilot_user_id` compatibility argument of `reserve_due_outlook_connection`. Returns null
+ * whenever the cohort is not exactly one account, so it can never stand in for a list.
+ */
 export function designatedPilotUser (configured) {
-  const designated = typeof configured === 'string' ? configured.trim().toLowerCase() : ''
-  return UUID_RE.test(designated) ? designated : null
+  const users = designatedPilotUsers(configured)
+  return users.length === 1 ? users[0] : null
 }
 
 export function checkPilotUser (configured, userId) {
-  const designated = designatedPilotUser(configured)
-  if (designated === null) return { ok: false, reason: 'pilot_not_configured' }
+  // `configured` may be the raw environment value or an already-parsed cohort array, so the
+  // worker can check the owner of a reserved connection against the same list it sent to
+  // the reservation rather than re-parsing - and re-parsing cannot drift from it.
+  const designated = Array.isArray(configured)
+    ? configured.filter((id) => typeof id === 'string' && UUID_RE.test(id))
+    : designatedPilotUsers(configured)
+  if (designated.length === 0) return { ok: false, reason: 'pilot_not_configured' }
   // The CANDIDATE is only required to be a non-empty string that matches. Demanding a
   // uuid of it too would add nothing: it can only equal a uuid-shaped designation by
   // being uuid-shaped itself. The shape check that matters is the one above, on the
   // CONFIGURED value - it is what stops an empty string, a 'true', or a '*' from reading
   // as `everyone`.
   const candidate = typeof userId === 'string' ? userId.trim().toLowerCase() : ''
-  if (candidate.length === 0 || candidate !== designated) {
+  if (candidate.length === 0 || !designated.includes(candidate)) {
     return { ok: false, reason: 'not_in_pilot' }
   }
   return { ok: true }
