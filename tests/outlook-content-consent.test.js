@@ -55,7 +55,7 @@ test('the APPROVED content version is configured, and only it is allowed', () =>
   // from that exact text. What the guard protects has not changed: nothing but an
   // exact match opens the gate.
   assert.strictEqual(REQUIRED_CONTENT_CONSENT_VERSION,
-    'ol-disc-6f904c3f7313353acbbc39e1edf2e278',
+    'ol-disc-1b6906af498ccff0f1e3292027ca0539',
     'the configured version must be the one derived from the published text')
 
   // PUBLICATION WINDOW CLOSED 2026-10-13 (cohort, activation packet step 8). It was open from
@@ -68,14 +68,14 @@ test('the APPROVED content version is configured, and only it is allowed', () =>
   assert.strictEqual(REQUIRED_CONTENT_CONSENT_VERSION, OUTLOOK_DISCLOSURE_VERSION,
     'the configured version must match the notice the card actually renders')
   assert.strictEqual(OUTLOOK_DISCLOSURE_VERSION,
-    'ol-disc-6f904c3f7313353acbbc39e1edf2e278',
-    'the published cohort notice derives exactly this version')
+    'ol-disc-1b6906af498ccff0f1e3292027ca0539',
+    'the corrected notice (administrator-consent sentence) derives exactly this version')
   // THE PILOT'S CURRENT CONSENT IS NOW STALE. It names the thread-segments value, which the
   // requirement carried until this commit; from here a run is refused until that account
   // consents again under the published notice - a same-account OAuth update, never a
   // disconnect. Pinned so the consequence of the cutover is stated, not left to be discovered.
-  const pilotNow = contentProcessingAllowed('ol-disc-e1107c0221c89ded0b6a2134df848eea')
-  assert.strictEqual(pilotNow.allowed, false, 'the thread-segments consent no longer satisfies the gate')
+  const pilotNow = contentProcessingAllowed('ol-disc-6f904c3f7313353acbbc39e1edf2e278')
+  assert.strictEqual(pilotNow.allowed, false, 'the cohort consent no longer satisfies the gate')
   assert.strictEqual(pilotNow.reason, 'content_consent_stale')
   assert.ok(verifyDisclosureIntegrity(), 'and the notice must pass its own integrity check')
   // The CONTENT-RELEASE consent (October 6) is now stale too: the pilot must reconnect.
@@ -168,7 +168,7 @@ test('both gates are configured, and the live pilot is STALE against both', () =
   // is stale against both - 'stale' rather than 'not_configured' is the whole point:
   // the gate is open in principle and that connection does not satisfy it.
   assert.strictEqual(REQUIRED_THIRD_PARTY_CONSENT_VERSION,
-    'ol-disc-6f904c3f7313353acbbc39e1edf2e278')
+    'ol-disc-1b6906af498ccff0f1e3292027ca0539')
   // Cut over with the content twin: the published notice and this requirement agree again.
   assert.strictEqual(REQUIRED_THIRD_PARTY_CONSENT_VERSION, OUTLOOK_DISCLOSURE_VERSION)
   // Two constants, deliberately, even carrying the same value: they answer two

@@ -76,7 +76,7 @@ re-reads the array and fails if this section paraphrases any of them.
 
 > 3. You would grant six Microsoft scopes. Two of them read data, and both are read-only: Mail.Read (“Read user mail”) and User.Read (“Sign in and read user profile”). Three are the standard sign-in scopes openid, profile and email. The sixth, offline_access, grants no new access of its own — it is what lets Funnl keep using those two read permissions while you are not using the app, so a read can run without asking you to sign in again. Funnl also asks Microsoft to tell its servers when new mail arrives, so a check can start automatically within minutes while Funnl is closed.
 
-> 4. Microsoft grants those two more broadly than Funnl uses them. Mail.Read is granted at the mailbox level: it would technically permit reading message bodies and attachments anywhere in your mailbox. User.Read permits your profile and basic company information; Funnl asks it for three fields and uses them only to record which mailbox is connected. Neither requires administrator consent by default, but a work or school tenant can be configured to require an administrator to approve the app, and then you may not be able to consent for yourself.
+> 4. Microsoft grants those two more broadly than Funnl uses them. Mail.Read is granted at the mailbox level: it would technically permit reading message bodies and attachments anywhere in your mailbox. User.Read permits your profile and basic company information; Funnl asks it for three fields and uses them only to record which mailbox is connected. With a personal Microsoft account you approve them yourself. A work or school organisation can require an administrator to approve an app that reads mail — Microsoft's recommended setting for organisations does — and then you cannot connect it until an administrator approves Funnl.
 
 > 5. Funnl reads message envelopes — who sent each message, who it was addressed to, the subject, the times, which conversation it belongs to and whether it is a draft — from your Inbox and Sent Items. Where you and one other person have both written in the same exchange, Funnl also reads the text of those messages, so it can draft a short summary of what was discussed. It does not read one-sided exchanges, does not read attachments, and does not act on newsletters, mailing lists, automated notifications or automatic replies. Funnl can never send, reply, delete, move or change anything in your mailbox, and does not read your Microsoft contacts, calendars, files or your organisation’s directory.
 
@@ -125,7 +125,14 @@ each as a paragraph and shows nothing else as disclosure.
 `ol-disc-<first 32 hex of SHA-256 over the paragraphs joined by newline>`, so any edit
 produces a different version and the server's exact-string gate refuses the stale one.
 
-The derived version for this text is **`ol-disc-6f904c3f7313353acbbc39e1edf2e278`**
+**PREPARED, NOT PUBLISHED (administrator-consent correction, Draft PR):** the text above now
+derives **`ol-disc-1b6906af498ccff0f1e3292027ca0539`** (fingerprint
+`1b6906af498ccff0f1e3292027ca0539`, 24 paragraphs). Only the last sentence of paragraph 4 changed:
+"Neither requires administrator consent by default, ..." became the owner-reviewed sentence about
+personal accounts and Microsoft's recommended organisational setting. Every other paragraph is
+byte-identical. Publication and cutover follow `docs/outlook-admin-consent-wording-cutover.md`.
+
+The PUBLISHED version until then is **`ol-disc-6f904c3f7313353acbbc39e1edf2e278`**
 (fingerprint `6f904c3f7313353acbbc39e1edf2e278`, 24 paragraphs), **published October 13, 2026**
 (cohort wording approved from `docs/outlook-cohort-activation-packet.md` section 1a at PR #90
 head 4161368). Only paragraph 2 changed. It is quoted exactly as approved, including its plain

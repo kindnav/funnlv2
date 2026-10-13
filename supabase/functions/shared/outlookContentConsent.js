@@ -79,7 +79,8 @@ export const CONTENT_CONSENT_CODES = Object.freeze([
 // and no near-enough: the envelope-only pilot (ol-disc-81fe8944fd2be59ac3c059c229b4d28e),
 // the content-release consent (ol-disc-e3e2b1714b453c2904e3ed08cb232097), the
 // background-sync consent (ol-disc-6d1ddd67f51d5b3bfd8d3801c50271a7) and the thread-segments
-// consent (ol-disc-e1107c0221c89ded0b6a2134df848eea) are all stale against
+// consent (ol-disc-e1107c0221c89ded0b6a2134df848eea) and the cohort consent
+// (ol-disc-6f904c3f7313353acbbc39e1edf2e278) are all stale against
 // it. Clearing that is a SAME-ACCOUNT OAUTH UPDATE under the published notice, which
 // rewrites consent_policy_version on the SAME connection row: disconnecting is not required
 // and would cascade away the cursors and the dedup references.
@@ -88,8 +89,10 @@ export const CONTENT_CONSENT_CODES = Object.freeze([
 // ol-disc-6d1ddd67f51d5b3bfd8d3801c50271a7, and AGAIN 2026-10-13 (cohort activation packet
 // step 8) from ol-disc-e1107c0221c89ded0b6a2134df848eea - both times together with the other two
 // requirements and the server's OUTLOOK_DISCLOSURE_VERSION, never one alone, after the wording
-// was published that day and the browser derived this same value from it.
-export const REQUIRED_CONTENT_CONSENT_VERSION = 'ol-disc-6f904c3f7313353acbbc39e1edf2e278'
+// was published that day and the browser derived this same value from it. PREPARED (not yet
+// cut over) from ol-disc-6f904c3f7313353acbbc39e1edf2e278 for the administrator-consent
+// correction: these three move only in the packet's cutover step, with the server variable.
+export const REQUIRED_CONTENT_CONSENT_VERSION = 'ol-disc-1b6906af498ccff0f1e3292027ca0539'
 
 /**
  * The disclosure version an account must have consented to before any part of a
@@ -115,7 +118,7 @@ export const REQUIRED_CONTENT_CONSENT_VERSION = 'ol-disc-6f904c3f7313353acbbc39e
 // body gate even though both carry the same value. They stay two constants because they answer two questions, and a later decision to
 // stop sending anything to Anthropic while still reading bodies must remain expressible by
 // changing one of them.
-export const REQUIRED_THIRD_PARTY_CONSENT_VERSION = 'ol-disc-6f904c3f7313353acbbc39e1edf2e278'
+export const REQUIRED_THIRD_PARTY_CONSENT_VERSION = 'ol-disc-1b6906af498ccff0f1e3292027ca0539'
 
 /** Codes the background gate can return. Controlled, and safe to log. */
 export const BACKGROUND_CONSENT_CODES = Object.freeze([
@@ -157,7 +160,7 @@ export const BACKGROUND_CONSENT_CODES = Object.freeze([
  * in place by the worker. The run this gate refuses is released untouched with a retry
  * backoff, so nothing is lost - it waits for consent.
  */
-export const REQUIRED_BACKGROUND_CONSENT_VERSION = 'ol-disc-6f904c3f7313353acbbc39e1edf2e278'
+export const REQUIRED_BACKGROUND_CONSENT_VERSION = 'ol-disc-1b6906af498ccff0f1e3292027ca0539'
 
 /**
  * Pure: may this connection be operated unattended, given what it consented to?
