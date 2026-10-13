@@ -539,7 +539,7 @@ export async function runOutlookImport (p) {
   // context, which refreshes an expired token at Microsoft and persists the rotation.
   // Narrowing it here is what makes an ineligible account cost zero provider calls and
   // zero writes, and what stops an excluded connection taking an invited account's turn
-  // every time its backoff elapses. See migrations 20261003000000 and 20261013000000.
+  // every time its backoff elapses. See migrations 20261003000000 and 20261013120000.
   //
   // BOTH ARGUMENTS, deliberately - and MEASURED, because the first version of this comment
   // guessed wrong about what an old deployment does with the extra one.

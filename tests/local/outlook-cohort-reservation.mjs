@@ -1,7 +1,7 @@
 // THE COHORT RESERVATION, PROVEN AGAINST THE REAL FUNCTION ON A REAL DATABASE.
 //
 // Stands up this project's own Postgres image, applies EVERY migration in order - including
-// 20261013000000, which is the one under test - and runs
+// 20261013120000, which is the one under test - and runs
 // tests/sql/outlook-cohort-reservation-runtime.sql as `postgres`.
 //
 // WHY A DATABASE AND NOT A MOCK. The thing being changed is a SQL predicate inside a
@@ -88,9 +88,9 @@ try {
     { cwd: ROOT, encoding: 'utf8' }).split('\n').filter(Boolean)
   for (const m of migrations) psqlFile(`supabase/migrations/${m}`)
   console.log(`  applied ${migrations.length} migrations, none skipped`)
-  const underTest = migrations.includes('20261013000000_outlook_cohort_reservation.sql')
+  const underTest = migrations.includes('20261013120000_outlook_cohort_reservation.sql')
   if (!underTest) throw new Error('the cohort migration was not applied - nothing was proven')
-  console.log('  including 20261013000000_outlook_cohort_reservation.sql\n')
+  console.log('  including 20261013120000_outlook_cohort_reservation.sql\n')
 
   // RAISE NOTICE goes to STDERR, so both streams are captured and counted: reading only
   // stdout once made a passing run report zero assertions, which is a green run proving

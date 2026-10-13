@@ -56,7 +56,7 @@ const BASE = 'http://127.0.0.1:53997'
 const JWT_SECRET = randomBytes(32).toString('hex')
 const FIXTURE_KEY = 'sk-ant-fixture-not-a-real-key'
 
-const COHORT_MIGRATION = '20261013000000_outlook_cohort_reservation.sql'
+const COHORT_MIGRATION = '20261013120000_outlook_cohort_reservation.sql'
 
 // A and B are invited; C is not. Identical in every other way. Each account has TWO
 // conversations: one with a party Funnl already knows (which yields an interaction
@@ -598,6 +598,9 @@ const observedOf = (key) => ({
   cursors: rows(`SELECT folder, coalesce(delta_link_ciphertext,'none')
                    FROM public.outlook_sync_state WHERE connection_id='${ACC[key].conn}'
                   ORDER BY folder;`),
+  // `(... > now())::text` renders 'true'/'false', and 'none' when the lease is NULL. Spelled
+  // out because comparing it against psql's bare-boolean 't' is what made the lease check
+  // vacuous for as long as it existed.
   leases: rows(`SELECT folder, sync_status, coalesce((sync_lease_until > now())::text,'none')
                   FROM public.outlook_sync_state WHERE connection_id='${ACC[key].conn}'
                  ORDER BY folder;`),
@@ -611,11 +614,25 @@ const observedOf = (key) => ({
                      WHERE connection_id='${ACC[key].conn}';`),
 })
 
-/** Every lease this account holds is released and no folder is left running. */
+/**
+ * Every lease this account holds is released and no folder is left running.
+ *
+ * THE SECOND COMPARISON USED TO BE MEANINGLESS. It read `notStrictEqual(future, 't')`, but
+ * the query casts the boolean with `::text`, which renders 'true' and 'false' - psql only
+ * prints a BARE boolean as 't'/'f'. So the assertion was "'true' is not 't'", which holds for
+ * ever, whether or not a lease was held. Found while writing
+ * tests/local/outlook-refresh-expiry.mjs, where the same mistake failed loudly because that
+ * check was written the other way round.
+ *
+ * Now positive, and it requires rows to exist: a check over an empty list passes too.
+ */
 function assertLeasesReleased (key) {
-  for (const [folder, status, future] of observedOf(key).leases) {
+  const seen = observedOf(key).leases
+  assert.strictEqual(seen.length, 2, `${key} must have both folders in sync state`)
+  for (const [folder, status, future] of seen) {
     assert.notStrictEqual(status, 'running', `${key}/${folder} is still running`)
-    assert.notStrictEqual(future, 't', `${key}/${folder} still holds a live lease`)
+    assert.ok(future === 'none' || future === 'false',
+      `${key}/${folder} still holds a live lease (lease_in_future=${future})`)
   }
 }
 

@@ -1,5 +1,14 @@
 -- Outlook cohort reservation: eligibility becomes a SET, decided in SQL.
 --
+-- WHY THIS VERSION NUMBER. It was 20261013000000 until the new-contact refresh fix
+-- (20261013060000_preserve_new_contact_context_deadline.sql, branch
+-- fix/outlook-new-contact-refresh-expiry) needed to apply BEFORE it. Both are unapplied, so
+-- renumbering this one is safe, and renaming applied history never is: 060000 < 120000, so
+-- whichever branch merges first, `db push` applies the fix first. The two are independent -
+-- that one replaces a producer function, this one replaces the reservation - and nothing
+-- here depends on it. If BOTH are ever pending at once, apply and verify the fix on its own
+-- first; see docs/outlook-new-contact-refresh-expiry.md section 4.
+--
 -- WHAT THIS CHANGES, and nothing else. `reserve_due_outlook_connection` gains ONE defaulted
 -- parameter, `p_pilot_user_ids uuid[]`, and its eligibility clause learns to use it. The
 -- lease rules, the backoff rules, the three due alternatives, the ordering, the wake cutoff,

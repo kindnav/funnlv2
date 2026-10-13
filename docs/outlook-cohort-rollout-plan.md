@@ -166,7 +166,7 @@ migration.
 
 **S0 — the migration, because the deployed function cannot take a set.**
 `reserve_due_outlook_connection` is `(integer, integer, uuid)`. Migration
-`20261013000000_outlook_cohort_reservation.sql` drops that signature and re-creates it as
+`20261013120000_outlook_cohort_reservation.sql` drops that signature and re-creates it as
 `(integer, integer, uuid, uuid[])`: one extra defaulted parameter, the eligibility clause
 taught to use it, and everything else - the lease rules, the backoff rules, the three due
 alternatives, the ordering, the wake cutoff, the row insert, the serialization handling and the

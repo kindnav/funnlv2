@@ -481,11 +481,17 @@ test('applied migrations are unmodified; the only addition is the forward scope 
     // Cohort reservation: DROPs the three-argument reserve_due_outlook_connection that
     // 20261009000000 creates and re-CREATEs it with one extra defaulted parameter, so like
     // every reservation change before it, it can only apply after that file.
-    '20261013000000_outlook_cohort_reservation.sql',
-    // The new-contact refresh fix (APPLIED 2026-10-13): `upsert_new_contact_candidate`
-    // re-issued with the body copied from 20261011000000 and the `context_expires_at`
-    // reissue removed, so it must apply after the file it was copied from.
+    // The new-contact refresh fix, APPLIED to Production 2026-10-13:
+    // `upsert_new_contact_candidate` re-issued with the body copied from 20261011000000 and
+    // the `context_expires_at` reissue removed, so it must apply after the file it was
+    // copied from.
     '20261013060000_preserve_new_contact_context_deadline.sql',
+    // Cohort reservation, UNAPPLIED: DROPs the three-argument
+    // reserve_due_outlook_connection that 20261009000000 creates and re-CREATEs it with one
+    // extra defaulted parameter, so like every reservation change before it, it can only
+    // apply after that file. Renumbered from 20261013000000 so it sorts AFTER the refresh
+    // fix above - see docs/outlook-new-contact-refresh-expiry.md section 4.
+    '20261013120000_outlook_cohort_reservation.sql',
   ]
   assert.deepStrictEqual(files.slice(-FORWARD_TAIL.length), FORWARD_TAIL,
     'the forward migrations must be the newest, in this order')
