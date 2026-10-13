@@ -406,7 +406,7 @@ console.log('')
 console.log('5. the background-operation consent gate: CLOSED when unset, closed to stale consent, open to the exact version')
 await test('the pure gate: an unset requirement authorizes nothing; a set version must match the recorded one exactly', () => {
   // Cut over 2026-10-09: the requirement carries the published notice version, with the other two.
-  assert.strictEqual(REQUIRED_BACKGROUND_CONSENT_VERSION, 'ol-disc-e1107c0221c89ded0b6a2134df848eea')
+  assert.strictEqual(REQUIRED_BACKGROUND_CONSENT_VERSION, 'ol-disc-6f904c3f7313353acbbc39e1edf2e278')
   assert.strictEqual(REQUIRED_BACKGROUND_CONSENT_VERSION, REQUIRED_CONTENT_CONSENT_VERSION)
   assert.deepStrictEqual(backgroundOperationAllowed('anything', null), { ok: false, reason: 'background_consent_not_configured' }, 'unset is CLOSED, not open')
   const v = 'ol-disc-' + 'f'.repeat(32)

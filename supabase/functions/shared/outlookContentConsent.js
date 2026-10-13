@@ -77,17 +77,19 @@ export const CONTENT_CONSENT_CODES = Object.freeze([
 //
 // A connection must match this EXACTLY. It is a content digest, so there is no ordering
 // and no near-enough: the envelope-only pilot (ol-disc-81fe8944fd2be59ac3c059c229b4d28e),
-// the content-release consent (ol-disc-e3e2b1714b453c2904e3ed08cb232097) and the
-// background-sync consent (ol-disc-6d1ddd67f51d5b3bfd8d3801c50271a7) are all stale against
+// the content-release consent (ol-disc-e3e2b1714b453c2904e3ed08cb232097), the
+// background-sync consent (ol-disc-6d1ddd67f51d5b3bfd8d3801c50271a7) and the thread-segments
+// consent (ol-disc-e1107c0221c89ded0b6a2134df848eea) are all stale against
 // it. Clearing that is a SAME-ACCOUNT OAUTH UPDATE under the published notice, which
 // rewrites consent_policy_version on the SAME connection row: disconnecting is not required
 // and would cascade away the cursors and the dedup references.
 //
 // CUT OVER 2026-10-12 (thread-segments rollout, packet step 8) from
-// ol-disc-6d1ddd67f51d5b3bfd8d3801c50271a7, together with the other two requirements and the
-// server's OUTLOOK_DISCLOSURE_VERSION - never one alone - after the wording was published on
-// 2026-10-12 and the browser derived this same value from it.
-export const REQUIRED_CONTENT_CONSENT_VERSION = 'ol-disc-e1107c0221c89ded0b6a2134df848eea'
+// ol-disc-6d1ddd67f51d5b3bfd8d3801c50271a7, and AGAIN 2026-10-13 (cohort activation packet
+// step 8) from ol-disc-e1107c0221c89ded0b6a2134df848eea - both times together with the other two
+// requirements and the server's OUTLOOK_DISCLOSURE_VERSION, never one alone, after the wording
+// was published that day and the browser derived this same value from it.
+export const REQUIRED_CONTENT_CONSENT_VERSION = 'ol-disc-6f904c3f7313353acbbc39e1edf2e278'
 
 /**
  * The disclosure version an account must have consented to before any part of a
@@ -108,12 +110,12 @@ export const REQUIRED_CONTENT_CONSENT_VERSION = 'ol-disc-e1107c0221c89ded0b6a213
  * Approved and set, for the same reason as above: the notice the owner approved
  * discloses the third-party send explicitly, so this gate has a version to name.
  */
-// APPROVED AND SET; CUT OVER 2026-10-09 with the other two, and again 2026-10-12 for the
-// thread-segments wording, separately from the body gate even though both carry the same
-// value. They stay two constants because they answer two questions, and a later decision to
+// APPROVED AND SET; CUT OVER 2026-10-09 with the other two, again 2026-10-12 for the
+// thread-segments wording and again 2026-10-13 for the cohort wording, separately from the
+// body gate even though both carry the same value. They stay two constants because they answer two questions, and a later decision to
 // stop sending anything to Anthropic while still reading bodies must remain expressible by
 // changing one of them.
-export const REQUIRED_THIRD_PARTY_CONSENT_VERSION = 'ol-disc-e1107c0221c89ded0b6a2134df848eea'
+export const REQUIRED_THIRD_PARTY_CONSENT_VERSION = 'ol-disc-6f904c3f7313353acbbc39e1edf2e278'
 
 /** Codes the background gate can return. Controlled, and safe to log. */
 export const BACKGROUND_CONSENT_CODES = Object.freeze([
@@ -127,10 +129,11 @@ export const BACKGROUND_CONSENT_CODES = Object.freeze([
  * automatically (on a signal, or on the schedule) while the user is not using the app.
  *
  * SET ON 2026-10-09 (activation packet step 5) to the version derived from the PUBLISHED
- * background-sync notice (October 9, 2026), and CUT OVER AGAIN ON 2026-10-12 (thread-segments
+ * background-sync notice (October 9, 2026), CUT OVER AGAIN ON 2026-10-12 (thread-segments
  * rollout, packet step 8) to the version derived from the thread-segments notice published that
- * day - both times together with the other two requirements and the server's
- * OUTLOOK_DISCLOSURE_VERSION, never one alone. It was null until 2026-10-09, and while
+ * day, and AGAIN ON 2026-10-13 (cohort activation packet step 8) to the version derived from the
+ * cohort notice published that day - every time together with the other two requirements and
+ * the server's OUTLOOK_DISCLOSURE_VERSION, never one alone. It was null until 2026-10-09, and while
  * null the gate was CLOSED: an unconfigured requirement authorizes nothing, because no
  * account can have agreed to wording that does not exist yet (an earlier revision treated
  * null as "open"; that let a deployed worker subscribe and read unattended on the strength
@@ -138,7 +141,7 @@ export const BACKGROUND_CONSENT_CODES = Object.freeze([
  * fail-closed behaviour for any unconfigured or malformed value a test may pass.
  *
  * A connection whose recorded consent_policy_version equals this value may be operated
- * unattended; one whose version differs - the background-sync consent the pilot holds as of
+ * unattended; one whose version differs - the thread-segments consent the pilot holds as of
  * this cutover included - is released with `background_consent_missing`, before any read and
  * before any subscription request, until that account consents again under the published
  * notice. TWO DISTINCT CODES, AND THEY ARE NOT INTERCHANGEABLE: a connection carrying no
@@ -154,7 +157,7 @@ export const BACKGROUND_CONSENT_CODES = Object.freeze([
  * in place by the worker. The run this gate refuses is released untouched with a retry
  * backoff, so nothing is lost - it waits for consent.
  */
-export const REQUIRED_BACKGROUND_CONSENT_VERSION = 'ol-disc-e1107c0221c89ded0b6a2134df848eea'
+export const REQUIRED_BACKGROUND_CONSENT_VERSION = 'ol-disc-6f904c3f7313353acbbc39e1edf2e278'
 
 /**
  * Pure: may this connection be operated unattended, given what it consented to?

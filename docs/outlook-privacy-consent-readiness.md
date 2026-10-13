@@ -132,12 +132,22 @@ head 4161368). Only paragraph 2 changed. It is quoted exactly as approved, inclu
 apostrophe in "Funnl's"; normalising it to match the other paragraphs would publish words
 nobody approved and derive a different version.
 
-**THE PUBLICATION WINDOW IS OPEN (cohort activation packet step 7, October 13, 2026).** The
-notice and the browser's `DISCLOSURE_FINGERPRINT` moved together in the publishing commit, so
-the card renders the new text and derives the new version. The three worker requirements in
-`supabase/functions/shared/outlookContentConsent.js` and the server's `OUTLOOK_DISCLOSURE_VERSION`
-**deliberately still name the previous value**, `ol-disc-e1107c0221c89ded0b6a2134df848eea`
-(published October 12, 2026, thread-segments wording). Until the cutover (step 8):
+**THE PUBLICATION WINDOW IS CLOSED (cohort activation packet step 8, October 13, 2026).** All
+three worker requirements in `supabase/functions/shared/outlookContentConsent.js` name the
+published value `ol-disc-6f904c3f7313353acbbc39e1edf2e278` from the merge of this change; the
+server's `OUTLOOK_DISCLOSURE_VERSION` is set to the same value in the same step, and
+`outlook-import-worker` is redeployed from this merge so its closure carries it (packet step 9).
+Once both are done and verified, browser, server and worker agree again.
+
+**What that means now:** the pilot's stored consent still names the previous value,
+`ol-disc-e1107c0221c89ded0b6a2134df848eea` (thread-segments wording, published October 12,
+2026), so it **no longer satisfies** the requirements: a run would be released with
+`background_consent_missing` before any read. The stored consent is never upgraded in place.
+Clearing it is a same-account OAuth update under the published notice - see below.
+
+**History - the window as it stood between steps 7 and 8.** The notice and the browser's
+`DISCLOSURE_FINGERPRINT` moved together in the publishing commit; the three requirements and the
+server variable deliberately still named the previous value until step 8. During that window:
 
 - **The pilot's stored consent still SATISFIES the deployed worker.** It names
   `ol-disc-e1107c02...`, which is exactly what the worker requires, so the worker would read mail
@@ -152,9 +162,10 @@ the card renders the new text and derives the new version. The three worker requ
   cursors, its candidates and its provenance are untouched. **Re-consent belongs after the
   cutover, never in this window.**
 
-**Closing the window (step 8):** all three requirements and the server variable move to the
-published value together, the worker is redeployed so its closure carries them, and only then
-does the pilot re-consent - through a **same-account OAuth update** under the published notice.
+**Closing the window (steps 8-9, October 13, 2026):** all three requirements and the server
+variable move to the published value together and the worker is redeployed so its closure
+carries them. What remains is the pilot's re-consent - through a **same-account OAuth update**
+under the published notice.
 `finalize_microsoft_connection` upserts on `(user_id)`, returns the same connection id and
 rewrites `consent_policy_version`, deleting nothing. **Disconnecting is not the path:** the
 synchronisation state, the candidate references and the thread-recovery rows all cascade from

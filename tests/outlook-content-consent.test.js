@@ -55,26 +55,28 @@ test('the APPROVED content version is configured, and only it is allowed', () =>
   // from that exact text. What the guard protects has not changed: nothing but an
   // exact match opens the gate.
   assert.strictEqual(REQUIRED_CONTENT_CONSENT_VERSION,
-    'ol-disc-e1107c0221c89ded0b6a2134df848eea',
+    'ol-disc-6f904c3f7313353acbbc39e1edf2e278',
     'the configured version must be the one derived from the published text')
 
-  // PUBLICATION WINDOW OPENED 2026-10-13 (cohort, activation packet step 7). The notice now
-  // renders the cohort wording, so the DERIVED browser version has moved while this
-  // requirement deliberately has NOT: the deployed worker still names the thread-segments value
-  // pinned above, which is what the pilot's stored consent carries, so that consent still
-  // SATISFIES the gate and the worker would still read mail if it were allowed to run.
-  // Execution is held off by the absent OUTLOOK_IMPORT_WORKER_ENABLED flag and the inactive
-  // cron job - not by this constant. Step 8 closes the window: all three requirements and the
-  // server's OUTLOOK_DISCLOSURE_VERSION move to the derived value together, the worker is
-  // redeployed so its closure carries them, and only then does the pilot re-consent. The
-  // previous window (2026-10-12, thread segments) was closed the same way.
-  assert.notStrictEqual(REQUIRED_CONTENT_CONSENT_VERSION, OUTLOOK_DISCLOSURE_VERSION,
-    'during the publication window the requirement trails the published notice, by design')
+  // PUBLICATION WINDOW CLOSED 2026-10-13 (cohort, activation packet step 8). It was open from
+  // the publication commit (step 7) until this one: the notice was published first, then all
+  // three requirements and the server's OUTLOOK_DISCLOSURE_VERSION were moved to the derived
+  // value together and the worker was redeployed so its closure carries them. The equality
+  // below is the invariant that holds outside such a window. DERIVED, NOT TYPED - the constant
+  // must equal what the shipped paragraphs produce, or a recorded consent would name a document
+  // nobody saw. The thread-segments window (2026-10-12) was opened and closed the same way.
+  assert.strictEqual(REQUIRED_CONTENT_CONSENT_VERSION, OUTLOOK_DISCLOSURE_VERSION,
+    'the configured version must match the notice the card actually renders')
   assert.strictEqual(OUTLOOK_DISCLOSURE_VERSION,
     'ol-disc-6f904c3f7313353acbbc39e1edf2e278',
-    'the published cohort notice derives exactly this version; step 8 carries it everywhere')
-  // DERIVED, NOT TYPED, on both sides of the window: the notice's own version must still be
-  // what its shipped paragraphs produce, or a recorded consent would name a document nobody saw.
+    'the published cohort notice derives exactly this version')
+  // THE PILOT'S CURRENT CONSENT IS NOW STALE. It names the thread-segments value, which the
+  // requirement carried until this commit; from here a run is refused until that account
+  // consents again under the published notice - a same-account OAuth update, never a
+  // disconnect. Pinned so the consequence of the cutover is stated, not left to be discovered.
+  const pilotNow = contentProcessingAllowed('ol-disc-e1107c0221c89ded0b6a2134df848eea')
+  assert.strictEqual(pilotNow.allowed, false, 'the thread-segments consent no longer satisfies the gate')
+  assert.strictEqual(pilotNow.reason, 'content_consent_stale')
   assert.ok(verifyDisclosureIntegrity(), 'and the notice must pass its own integrity check')
   // The CONTENT-RELEASE consent (October 6) is now stale too: the pilot must reconnect.
   const prior = contentProcessingAllowed('ol-disc-e3e2b1714b453c2904e3ed08cb232097')
@@ -166,10 +168,9 @@ test('both gates are configured, and the live pilot is STALE against both', () =
   // is stale against both - 'stale' rather than 'not_configured' is the whole point:
   // the gate is open in principle and that connection does not satisfy it.
   assert.strictEqual(REQUIRED_THIRD_PARTY_CONSENT_VERSION,
-    'ol-disc-e1107c0221c89ded0b6a2134df848eea')
-  // Trails the published notice with its content twin during the publication window
-  // (2026-10-13 -> step 8), and for the same reason: see the comment on that assertion.
-  assert.notStrictEqual(REQUIRED_THIRD_PARTY_CONSENT_VERSION, OUTLOOK_DISCLOSURE_VERSION)
+    'ol-disc-6f904c3f7313353acbbc39e1edf2e278')
+  // Cut over with the content twin: the published notice and this requirement agree again.
+  assert.strictEqual(REQUIRED_THIRD_PARTY_CONSENT_VERSION, OUTLOOK_DISCLOSURE_VERSION)
   // Two constants, deliberately, even carrying the same value: they answer two
   // questions, and turning the model path off while keeping body reading must stay
   // expressible by changing one of them.
