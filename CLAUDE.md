@@ -1340,6 +1340,18 @@ and the user reviews before anything is saved. This slice makes the pipeline run
 makes its output discoverable. Full plan, latency target, measurement and next workstreams:
 `docs/outlook-background-sync-plan.md`. Disclosure wording for review: `docs/outlook-content-disclosure-draft.md` section F.
 
+**Launch scope decision (2026-10-13, owner).** Supported: **invited** Microsoft mailboxes whose
+organisation permits user consent, plus eligible personal Outlook accounts. **Unsupported:**
+school/work accounts whose organisation requires admin approval, pending future institutional
+approval. Never promise universal school-email compatibility. Deferred: publisher verification,
+IU approval requests, alternative capture mechanisms, the UI refresh. Why: Microsoft's
+recommended organisational consent policy (the default for new tenants) does not let users
+consent to `Mail.Read`, and publisher verification does not change that. Status is two separate
+facts: the **cohort rollout is complete** (both allowlists hold two members; the server value and
+the rebuilt website were verified 2026-10-13), but the **second-account acceptance test has NOT
+passed**. The first attempt used a school mailbox and stopped at Microsoft's "Need admin
+approval". Acceptance definition and onboarding steps: `docs/outlook-second-account-acceptance.md`.
+
 **Cohort rollout state (2026-10-13): PAUSED mid-rollout, single pilot.** Activation packet
 `docs/outlook-cohort-activation-packet.md`. Execution paused at 19:32:43Z (cron `outlook-worker-tick`
 inactive, `OUTLOOK_IMPORT_WORKER_ENABLED` absent). Migration `20261013120000` APPLIED - one
