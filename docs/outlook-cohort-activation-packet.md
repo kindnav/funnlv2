@@ -1,9 +1,20 @@
 # Outlook cohort — the wording to approve, and the ordered activation
 
-**Nothing in this file is published, applied, deployed or configured.** No consent version has
-been chosen. The implementation it describes is a Draft PR against `main` `c2e524f`; the pilot
-is live and unchanged on worker **v57** under notice version
-`ol-disc-e1107c0221c89ded0b6a2134df848eea`.
+**Progress (2026-10-13).** Steps 0-7 are done; **execution is PAUSED** (cron
+`outlook-worker-tick` inactive, `OUTLOOK_IMPORT_WORKER_ENABLED` absent) and stays paused until
+step 11. The section 1a/1b wording was approved at PR #90 head `4161368`; migration
+`20261013120000` is applied; PR #90 merged as `7a9f0cd`; `outlook-oauth-start` v44
+(`verify_jwt = true`) and `outlook-import-worker` v59 (`verify_jwt = false`) are deployed with
+closures byte-identical to merged main; and the wording is **PUBLISHED** (step 7), deriving
+notice version **`ol-disc-6f904c3f7313353acbbc39e1edf2e278`**.
+
+**The publication window is open until step 8.** The browser derives the new version; the three
+worker requirements and the server's `OUTLOOK_DISCLOSURE_VERSION` still name the previous one,
+`ol-disc-e1107c0221c89ded0b6a2134df848eea`. So the pilot's stored consent still satisfies the
+deployed worker - the inactive cron job and the absent flag are the only controls preventing
+execution - while the Settings card reads that consent as superseded and offers an update that
+`outlook-oauth-start` would refuse with `409 consent_version_mismatch` until step 8. Re-consent
+belongs after step 8, never in this window. Both single-pilot allowlists are unchanged.
 
 Design, capacity and the test plan: `docs/outlook-cohort-rollout-plan.md`.
 
@@ -86,7 +97,7 @@ deployed worker would be running against a notice whose text no longer matches i
 | 4 | **Apply migration `20261013120000` only** | `supabase migration list --linked` shows exactly one pending first - and if TWO are pending, the other is the new-contact refresh fix `20261013060000`, which is a SEPARATE rollout with its own packet (`docs/outlook-new-contact-refresh-expiry.md`): apply and verify that one on its own first, then come back here. Never push both in one go. Then verify: exactly **one** `reserve_due_outlook_connection` exists; it is `(integer, integer, uuid, uuid[])`, SECURITY DEFINER, empty `search_path`; `service_role` may execute and `anon`, `authenticated` and PUBLIC may not. **Migration before worker deploy, without exception** - the new worker sends `p_pilot_user_ids`. |
 | 5 | Merge the PR pinned to its verified head | Vercel Production READY for the exact merge SHA, confirmed through **Vercel's own API** - a GitHub deployment record is not evidence about Vercel, and its absence means unknown rather than failed. |
 | 6 | **Deploy BOTH `outlook-oauth-start` AND `outlook-import-worker`**, from clean merged main | See the note below: deploying the worker alone leaves OAuth on the old parser, which refuses a comma-separated cohort. For EACH function: download the deployed source into its own isolated directory and verify complete import-closure **file-set and byte equality** against merged main, CRLF/LF the only normalisation. Preserve each function's JWT setting - `outlook-oauth-start` is `verify_jwt = true`, `outlook-import-worker` is `verify_jwt = false`, both declared in `config.toml`. Execution still paused. |
-| 7 | Publish the approved §1a/§1b wording, **derive** the new version | The published page and notice match §1 word for word; the date is the publication date; `verifyDisclosureIntegrity()` passes. |
+| 7 | Publish the approved §1a/§1b wording, **derive** the new version | The published page and notice match §1 word for word; the date is the publication date; `verifyDisclosureIntegrity()` passes. **DONE 2026-10-13:** derived `ol-disc-6f904c3f7313353acbbc39e1edf2e278` (fingerprint `6f904c3f7313353acbbc39e1edf2e278`, 24 paragraphs, only paragraph 2 changed); "Last updated: October 13, 2026". Requirements and the server variable deliberately unchanged - see the header. |
 | 8 | Carry that one value into the browser constant, `OUTLOOK_DISCLOSURE_VERSION` and **all three** worker requirements, in one commit | All five read the same value. Verify the server variable by **digest**: `supabase secrets list --output json` returns each secret's SHA-256, so compare against `sha256(expected)` - name presence proves nothing. |
 | 9 | **Redeploy `outlook-import-worker`** so its closure carries the new consent requirements | Byte-equality check again. `outlook-oauth-start` also reads the disclosure version, but from the ENVIRONMENT (`OUTLOOK_DISCLOSURE_VERSION`) rather than from a compiled constant, so it does not need a second deploy for step 8 - it picks the new value up on its next invocation. Still paused. |
 | 10 | **The pilot re-consents** via the same-account OAuth update in Settings | Stored `consent_policy_version` equals the new value, **and** connection id, both cursors and the provenance refs match the step-3a baseline exactly - only the consent digest moves. Never a disconnect: the sync state, candidate refs and thread-recovery rows all cascade from the connection. |

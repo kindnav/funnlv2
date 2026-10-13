@@ -36,7 +36,7 @@ function PrivacyPage() {
             <span className="font-display font-bold text-[20px] text-hi">Funnl</span>
           </div>
           <h1 className="font-display text-[32px] font-bold text-hi tracking-[-0.5px] mb-3">Privacy Policy</h1>
-          <p className="text-[14px] text-low">Last updated: October 12, 2026</p>
+          <p className="text-[14px] text-low">Last updated: October 13, 2026</p>
           <div className="mt-4 px-4 py-3 bg-elevated border border-line-1 rounded-xl">
             <p className="text-[13.5px] text-muted leading-relaxed">
               This policy explains, in plain language, what Funnl collects, how it is used, who processes it, and how to remove it.
@@ -183,20 +183,19 @@ function PrivacyPage() {
             not legal advice, and is not evidence that outside
             counsel reviewed or approved this policy.
 
-            MANDATORY AT PUBLICATION: the date above is October 12, 2026 - the New York
-            date on which the thread-segments wording (message-level coverage, the later-exchange
-            behaviour, and the thread starting point) was published. October 10, 2026 was the
-            detailed-draft publication and October 9, 2026 the background-sync one; both are now
-            history. If the merge that publishes this section happens on any later day, the
+            MANDATORY AT PUBLICATION: the date above is October 13, 2026 - the New York
+            date on which the cohort wording (invited accounts, and what withdrawing an invitation
+            does and does not do) was published. These are history: the thread-segments
+            publication on October 12, 2026, the detailed-draft one on October 10, 2026 and
+            the background-sync one on October 9, 2026. If the merge that publishes this section happens on any later day, the
             "Last updated" date MUST be changed again in that same commit.
             tests/privacy-policy-outlook.test.js pins the conditional framing and the
             date. ------------- */}
-        <Section title="Outlook connection (not yet available)">
+        <Section title="Outlook connection (invited accounts only)">
           <p>
-            <strong className="text-hi font-semibold">Outlook is not generally available.</strong> When this integration is
-            enabled, only a single designated Funnl-controlled test account may start an Outlook connection; Funnl’s servers
-            refuse a connection request from any other account. That designated account is itself a Funnl account, so
-            Outlook-derived records will exist for it.
+            <strong className="text-hi font-semibold">Outlook is not generally available.</strong> It is being tested with a small number of
+            invited accounts, and an invitation can be withdrawn. Nothing below happens unless you are invited and explicitly
+            connect Outlook from Settings, and you can disconnect at any time.
           </p>
           <p className="mt-3">
             <strong className="text-hi font-semibold">What Funnl reads from your Outlook mailbox</strong> — message

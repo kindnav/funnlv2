@@ -119,7 +119,7 @@ test('the 30-day subject maximum is NOT published because no scheduler runs the 
   //
   // Fail closed: a missing, duplicated or reordered boundary throws instead of quietly
   // scanning a partial document.
-  const OUTLOOK_START = '<Section title="Outlook connection (not yet available)">'
+  const OUTLOOK_START = '<Section title="Outlook connection (invited accounts only)">'
   const OUTLOOK_END = '<Section title="Analytics: behavior, not content">'
   const startCount = POLICY.split(OUTLOOK_START).length - 1
   const endCount = POLICY.split(OUTLOOK_END).length - 1

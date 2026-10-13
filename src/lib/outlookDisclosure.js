@@ -105,8 +105,14 @@ export const DISCLOSURE_VERSION_PREFIX = 'ol-disc'
  */
 export const OUTLOOK_DISCLOSURE_PARAGRAPHS = Object.freeze([
   'Connecting Outlook is optional. Funnl works fully without it.',
-  'Access is restricted to one designated Funnl-controlled test account. Funnl’s servers '
-    + 'refuse a connection request from any other account.',
+  "Access is restricted to a small number of invited accounts. Funnl's servers refuse a "
+    + 'connection request from any account that has not been invited, and an invitation can be '
+    + 'withdrawn. Once that change has taken effect, Funnl stops starting new checks of your '
+    + 'mailbox, and it deletes nothing: your connection, everything Funnl has already matched '
+    + 'and every suggestion you accepted are all still there, and you can disconnect whenever '
+    + 'you want to. A check that has already started may finish, and Microsoft may keep telling '
+    + 'Funnl that new mail has arrived for a few days until that arrangement lapses — Funnl '
+    + 'records that a message arrived and then does nothing with it.',
   'You would grant six Microsoft scopes. Two of them read data, and both are read-only: '
     + 'Mail.Read (“Read user mail”) and User.Read (“Sign in and read user profile”). Three '
     + 'are the standard sign-in scopes openid, profile and email. The sixth, offline_access, '
@@ -277,6 +283,33 @@ export function disclosureFingerprint (paragraphs) {
 // text it shows. It is deliberately NOT kept as an accepted alternative here: the two
 // documents say opposite things about body reading, so that connection must disconnect
 // and reconnect rather than be treated as having agreed to this one.
+// THE COHORT RELEASE (published October 13, 2026, wording approved from
+// docs/outlook-cohort-activation-packet.md section 1a at PR #90 head 4161368): paragraph 2 no
+// longer says access is restricted to one designated test account. It says access is
+// restricted to a small number of invited accounts, that an invitation can be withdrawn, what
+// withdrawal does once it has taken effect (no NEW checks, nothing deleted), and what it does
+// not do (a check already started may finish; Microsoft's notifications keep arriving until the
+// subscription lapses, and Funnl records them and does nothing with them). Every other
+// paragraph is unchanged and there are still 24. The text is reproduced exactly as approved,
+// including its plain apostrophe in "Funnl's" - the other paragraphs use a typographic one,
+// and normalising it would publish words nobody approved and derive a different version.
+// The previous value, e1107c0221c89ded0b6a2134df848eea, identified the thread-segments text.
+//
+// PUBLISHING THIS DOES NOT CHANGE WHAT THE DEPLOYED WORKER REQUIRES, AND THAT IS A TEMPORARY,
+// KNOWN MISMATCH. The three requirements in supabase/functions/shared/outlookContentConsent.js
+// and the server's OUTLOOK_DISCLOSURE_VERSION still name the thread-segments value. Until the
+// cutover (packet step 8):
+//   * the pilot's stored consent still SATISFIES the deployed worker, so the worker would still
+//     read mail if it were allowed to run - the absent OUTLOOK_IMPORT_WORKER_ENABLED flag and
+//     the inactive outlook-worker-tick job are the ONLY controls holding it back;
+//   * the browser derives the new version, so it reads the pilot's consent as superseded and
+//     offers "Update Outlook permissions". An update attempted now is refused by
+//     outlook-oauth-start with 409 consent_version_mismatch before anything is stored, because
+//     the server variable still names the old value - and the card's "reload this page" advice
+//     cannot help until step 8. Re-consent belongs AFTER the cutover, never in this window.
+// The cutover raises all three requirements and the server variable to the value below
+// together, redeploys the worker so its closure carries them, and only then does the pilot
+// re-consent through a same-account update - in that order, never one alone.
 // THE THREAD-SEGMENTS RELEASE (published October 12, 2026, wording approved from
 // docs/outlook-thread-segments-rollout.md section 2): the suggestion-provenance paragraph now
 // says the fingerprints cover the MESSAGES a suggestion was drawn from, that a later exchange in
@@ -304,7 +337,7 @@ export function disclosureFingerprint (paragraphs) {
 // October 9, 2026 (activation packet, step 5), after publication - so no requirement was
 // ever raised ahead of its approval, and a connection that consents under this notice
 // satisfies all three.
-export const DISCLOSURE_FINGERPRINT = 'e1107c0221c89ded0b6a2134df848eea'
+export const DISCLOSURE_FINGERPRINT = '6f904c3f7313353acbbc39e1edf2e278'
 
 /**
  * True only when the paragraphs still match the fingerprint the version was

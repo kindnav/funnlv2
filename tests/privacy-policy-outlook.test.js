@@ -12,6 +12,7 @@ import assert from 'assert'
 import { readFileSync, existsSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { join, dirname } from 'path'
+import { OUTLOOK_DISCLOSURE_PARAGRAPHS } from '../src/lib/outlookDisclosure.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const root = join(__dirname, '..')
@@ -43,9 +44,14 @@ const OUTLOOK_OAUTH_SCOPES = JSON.parse(
     .map((s) => '"' + s.replace(/^'|'$/g, '') + '"').join(',') + ']')
 
 // The Outlook section only (so assertions cannot accidentally pass on Gmail wording).
-const START = POLICY.indexOf('<Section title="Outlook connection (not yet available)">')
+const START = POLICY.indexOf('<Section title="Outlook connection (invited accounts only)">')
 const END = POLICY.indexOf('<Section title="Analytics: behavior, not content">')
 const OUTLOOK = START !== -1 && END !== -1 ? POLICY.slice(START, END) : ''
+// The just-in-time notice AS RENDERED - the paragraphs array, not its source file, where each
+// paragraph is split across concatenated string literals and a phrase never appears whole.
+// The cohort release moved the statement of WHERE the restriction is enforced into the notice,
+// so the restriction test reads both documents.
+const OUTLOOK_NOTICE_TEXT = OUTLOOK_DISCLOSURE_PARAGRAPHS.join(' ')
 
 // --------------------------------------------------------------------------
 // RETENTION DURATIONS: an allowlist, not a denylist.
@@ -154,28 +160,40 @@ test('an Outlook section exists and is isolated from the Gmail section', () => {
 })
 
 test('the section describes the RESTRICTION, not non-existence', () => {
-  // It must read correctly BEFORE and DURING the restricted pilot, without being
-  // republished in between. So it says who can connect (one designated account) rather
-  // than asserting whether the pilot is running - an assertion that would go stale.
-  assert.ok(OUTLOOK.includes('Outlook connection (not yet available)'),
-    'the title still marks it unavailable to the reader')
+  // THE COHORT RELEASE (published October 13, 2026, approved from
+  // docs/outlook-cohort-activation-packet.md section 1b). The single-designated-account framing
+  // became false the moment a second account could be invited, so the heading and the opening
+  // now say who may connect - invited accounts - and that an invitation can be withdrawn.
+  assert.ok(OUTLOOK.includes('Outlook connection (invited accounts only)'),
+    'the title names the restriction')
+  assert.ok(!OUTLOOK.includes('Outlook connection (not yet available)'),
+    'the superseded title is gone: for invited accounts it IS available')
   assert.ok(/Outlook is not generally available/.test(OUTLOOK_PROSE),
     'it states availability rather than an absolute about the reader')
-  assert.ok(/only a single designated Funnl-controlled test account may start an Outlook connection/
-    .test(OUTLOOK_PROSE), 'it names who may start a connection')
-  assert.ok(/refuse a connection request from any other account/.test(OUTLOOK_PROSE),
-    'and where that is enforced')
+  assert.ok(/It is being tested with a small number of invited accounts, and an invitation can be withdrawn\./
+    .test(OUTLOOK_PROSE), 'it names who may connect, and that an invitation can be withdrawn')
+  assert.ok(/Nothing below happens unless you are invited and explicitly connect Outlook from Settings, and you can disconnect at any time\./
+    .test(OUTLOOK_PROSE), 'it makes processing conditional on being invited AND connecting')
+  // WHERE THE RESTRICTION IS ENFORCED moved to the just-in-time notice with the approved
+  // wording - "Funnl's servers refuse a connection request from any account that has not been
+  // invited" - which is what a person reads at the moment of connecting. The privacy opening
+  // was approved without that sentence, so it is asserted where it is published.
+  assert.ok(/Funnl's servers refuse a connection request from any account that has not been invited/
+    .test(OUTLOOK_NOTICE_TEXT), 'the server-side refusal is stated in the notice')
+  // The single-account sentences are gone, so nothing contradicts the cohort framing.
+  assert.ok(!/single designated Funnl-controlled test account/.test(OUTLOOK_PROSE),
+    'the superseded single-account restriction must not linger')
   // The start gate restricts NEW connections. It is not evidence that no retained row
   // exists elsewhere, so the page must not claim that.
   assert.ok(!/no Outlook-derived records exist for any other account/.test(OUTLOOK_PROSE),
     'the gate must not be presented as proof of absent historical rows')
   assert.ok(!/You cannot connect Outlook/.test(OUTLOOK_PROSE),
     'the superseded absolute must not return')
-  // And it does NOT claim the restriction means nobody has Outlook records.
-  assert.ok(/designated account is itself a Funnl account/.test(OUTLOOK_PROSE),
-    'it admits the designated account is a Funnl account')
-  assert.ok(/Outlook-derived records will exist for it/.test(OUTLOOK_PROSE),
-    'it does not claim no Outlook-derived records exist for any account')
+  // And it does NOT claim the restriction means nobody has Outlook records. The approved
+  // opening no longer carries the old "records will exist for it" admission, so this is now
+  // asserted by NEGATION: no sentence may say Outlook-derived records are absent.
+  assert.ok(!/no Outlook-derived records exist/i.test(OUTLOOK_PROSE),
+    'it must not claim that no Outlook-derived records exist for any account')
   // The conditional framing for the UNBUILT parts is retained.
   const flat = OUTLOOK.replace(/\s+/g, ' ')
   assert.ok(/if, and only if,<\/em> you choose to connect Outlook/i.test(flat),
@@ -246,9 +264,17 @@ test('no statement claims the pilot is running, verified or certified', () => {
   ]) {
     assert.ok(!bad.test(OUTLOOK), `must not claim: ${bad}`)
   }
-  // Instead: the restriction, and what the first pilot will do WHEN enabled.
-  assert.ok(/When this integration is enabled/.test(OUTLOOK_PROSE),
-    'the pilot is described conditionally on being enabled')
+  // Instead: the restriction, and processing described CONDITIONALLY. The old conditional
+  // ("When this integration is enabled") lived in the opening the cohort release replaced; the
+  // approved opening's conditional is being invited AND connecting. NOTE: the approved opening
+  // also states a present status - "It is being tested with a small number of invited
+  // accounts" - which this guard's earlier philosophy avoided because a run-state claim can go
+  // stale. It was approved as written; if Outlook becomes generally available or the cohort
+  // ends, that sentence must be republished, and this assertion will say so.
+  assert.ok(/Nothing below happens unless you are invited and explicitly connect Outlook from Settings/
+    .test(OUTLOOK_PROSE), 'processing is described conditionally on being invited and connecting')
+  assert.ok(/It is being tested with a small number of invited accounts/.test(OUTLOOK_PROSE),
+    'the approved testing status is present - republish it when it stops being true')
   // The heading moved from 'What the first pilot will do, when it is enabled' to a
   // description of what Funnl reads, because there is no longer a narrower first
   // pilot to describe separately. The CONDITIONAL framing is what this guard is
@@ -600,15 +626,17 @@ test('human-access wording is precise and includes the Anthropic safety exceptio
 // ── Date guard and non-regression ────────────────────────────────────────────
 console.log('\npublication date guard')
 
-test('the public date is the actual October 12, 2026 publication date', () => {
-  // Owner/product decision: publish the THREAD-SEGMENTS wording (message-level coverage, the
-  // later-exchange behaviour, the thread starting point and its bounds) dated 2026-10-12, the
-  // actual New York date of the publishing commit. October 10 (detailed draft), October 9
+test('the public date is the actual October 13, 2026 publication date', () => {
+  // Owner/product decision: publish the COHORT wording (invited accounts; what withdrawing an
+  // invitation does and does not do) dated 2026-10-13, the actual New York date of the
+  // publishing commit. October 12 (thread segments), October 10 (detailed draft), October 9
   // (background sync), October 6 (content release), October 5 and September 27 (envelope-only)
   // are historical. If a later merge moves the day, this pin must move with it in that same
   // commit - which is the point of pinning it rather than leaving it free.
-  assert.ok(POLICY.includes('Last updated: October 12, 2026'),
+  assert.ok(POLICY.includes('Last updated: October 13, 2026'),
     'the approved publication date must be present')
+  assert.ok(!/Last updated: October 12, 2026/.test(POLICY),
+    'the superseded thread-segments date must no longer be the public date')
   assert.ok(!/Last updated: October 10, 2026/.test(POLICY),
     'the superseded detailed-draft date must no longer be the public date')
   assert.ok(!/Last updated: October 9, 2026/.test(POLICY),
@@ -622,10 +650,13 @@ test('the public date is the actual October 12, 2026 publication date', () => {
   // Once in the public line, twice in the source decision comment (the approval and
   // the recheck instruction). Pinned so a stray extra date cannot creep in unnoticed.
   // Twice now: the public line and the approval in the source decision comment.
-  assert.strictEqual((POLICY.match(/October 12, 2026/g) || []).length, 2,
+  assert.strictEqual((POLICY.match(/October 13, 2026/g) || []).length, 2,
     'one public date line plus the source-comment approval')
-  assert.strictEqual((POLICY.match(/Last updated: October 12, 2026/g) || []).length, 1,
+  assert.strictEqual((POLICY.match(/Last updated: October 13, 2026/g) || []).length, 1,
     'exactly one public Last-updated line carries the date')
+  // October 12 survives ONCE, in the comment, as the superseded thread-segments publication.
+  assert.strictEqual((POLICY.match(/October 12, 2026/g) || []).length, 1,
+    'the superseded thread-segments date is recorded once, as history')
   // October 10 survives ONCE, in the comment, as the superseded detailed-draft publication.
   assert.strictEqual((POLICY.match(/October 10, 2026/g) || []).length, 1,
     'the superseded detailed-draft date is recorded once, as history')
