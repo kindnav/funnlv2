@@ -1351,11 +1351,16 @@ facts: the **cohort rollout is complete** (both allowlists hold two members; the
 the rebuilt website were verified 2026-10-13), but the **second-account acceptance test has NOT
 passed**. The first attempt used a school mailbox and stopped at Microsoft's "Need admin
 approval". Acceptance (staged S0–S6) and onboarding: `docs/outlook-second-account-acceptance.md`.
-It is **blocked on Draft PR #97** (one Funnl owner per Microsoft account; reproduced defect). That
-document also records two disclosure findings. Workstream B (richer metadata) needs a new
-disclosure, because notice paragraph 14 promises Funnl will not guess company, role or how-you-met.
-The "no administrator consent by default" wording is a separate accuracy fix, with a proposed
-correction and its consent-version consequences.
+It is **blocked until BOTH** Draft PR #97 is fully live (one Funnl owner per Microsoft account;
+a reproduced defect; `docs/outlook-one-owner-rollout.md`) **and** Draft PR #98's
+administrator-consent wording cutover is complete (new version
+`ol-disc-1b6906af498ccff0f1e3292027ca0539`; pilot re-consents once;
+`docs/outlook-admin-consent-wording-cutover.md`).
+
+A personal-account pass is not evidence about organisational accounts, and the reverse is also
+true. Admin-approval tenants stay unsupported. Workstream B (richer metadata) needs its own new
+disclosure, because notice paragraph 14 promises Funnl will not guess company, role or
+how-you-met.
 
 **Cohort rollout state (2026-10-13): PAUSED mid-rollout, single pilot.** Activation packet
 `docs/outlook-cohort-activation-packet.md`. Execution paused at 19:32:43Z (cron `outlook-worker-tick`

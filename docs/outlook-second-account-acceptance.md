@@ -1,6 +1,13 @@
 # Outlook second-account acceptance
 
-**Status (2026-10-13): NOT PASSED. Not started.** Blocked on the one-owner fix (Draft PR #97).
+**Status (2026-10-13): NOT PASSED. Not started. BLOCKED** until BOTH of these are complete in
+Production:
+1. the one-owner fix (Draft PR #97), rolled out in full: migration, website and callback;
+2. the administrator-consent wording cutover (Draft PR #98) through its step C7: published,
+   server variable and worker moved together, pilot re-consented, synchronisation resumed.
+
+The second account then consents once, under the corrected notice
+`ol-disc-1b6906af498ccff0f1e3292027ca0539`.
 
 The cohort rollout is complete:
 - both allowlists hold the pilot and one second Funnl account;
@@ -29,8 +36,17 @@ disposable infrastructure against the function Production runs:
 - the same mailbox would also be read into two Funnl accounts.
 
 #97 makes the database refuse that atomically, with `account_in_use`. **Acceptance starts only
-after #97's migration is applied** (and, for the accurate message, its website and callback
-changes are deployed). Until then, a wrong account choice at Microsoft could disturb the pilot.
+after #97 is fully live**: the migration, the website and the callback. Until then, a wrong account
+choice at Microsoft could disturb the pilot. Its rollout packet is `docs/outlook-one-owner-rollout.md`.
+
+## Prerequisite: the corrected disclosure (Draft PR #98)
+
+The notice and `/privacy` said the permissions need no administrator consent "by default". #98
+corrects one sentence in each, deriving the new version `ol-disc-1b6906af…`. Its cutover
+(`docs/outlook-admin-consent-wording-cutover.md`) has the pilot re-consent once.
+
+Running acceptance first would make the second account consent under text known to be
+inaccurate, and then consent again.
 
 ## Who and what
 
@@ -67,7 +83,7 @@ content is never read.
 **Gate A1:** exactly one connection for the second account:
 - `active`, not `needs_reauth`;
 - scopes exactly `Mail.Read User.Read offline_access openid email profile`;
-- consent version equal to the version then published;
+- consent version `ol-disc-1b6906af498ccff0f1e3292027ca0539` (the corrected notice);
 - `holders_of_this_microsoft_identity = 1`, `distinct_microsoft_account_from_pilot = true`;
 - the account type (personal or work) recorded as observed.
 
@@ -112,8 +128,20 @@ Suggestions, and accept it. **Gate A3:**
   token expiry and wake metadata may advance normally.
 
 Only when S1–S6 all pass is "a second account works end to end" recorded as demonstrated, **and
-only for the account type actually used**. A personal account passing demonstrates nothing about
-organisational accounts, and the reverse is also true.
+only for the account type actually used**.
+
+## What a pass is evidence of
+
+The query records `account_type` and `tenant_is_consumers_msa` for the connection. They decide
+what may be claimed:
+
+| Connected account | May be recorded as | May NOT be claimed |
+|---|---|---|
+| Personal (`account_type=personal`, tenant = the consumers tenant `9188040d-…`) | "a second **personal** Outlook account works end to end" | anything about work or school accounts, any organisation's consent policy, or IU |
+| Organisational (`account_type=work`, a non-consumers tenant whose policy let the user consent) | "a second account in an organisation that **permits user consent** works end to end" | that organisations in general work, that admin-approval tenants work, or that IU works |
+
+Organisations that require admin approval stay **unsupported** under the launch scope. No pass of
+either kind changes that.
 
 ## Disclosure findings (investigated, not assumed)
 
@@ -137,46 +165,19 @@ B contradicts both. It therefore needs:
 What Anthropic receives would not change: B reads the same message text and signature. Only the
 output fields would change.
 
-### Administrator-consent wording: an accuracy issue to fix on its own
+### Administrator-consent wording: corrected in Draft PR #98
 
-Notice paragraph 4 ends:
-
-> "Neither requires administrator consent by default, but a work or school tenant can be
-> configured to require an administrator to approve the app, and then you may not be able to
-> consent for yourself."
-
-`/privacy` says "None of these scopes requires administrator consent by default".
-
-This is true of Microsoft's per-permission metadata, but misleading in practice. Microsoft's
-recommended organisational consent policy, the default for new tenants, does **not** let users
-approve `Mail.Read`.
-
-**Smallest correction.** Replace that last sentence of paragraph 4 with:
-
-> "With a personal Microsoft account you approve them yourself. A work or school organisation can
-> require an administrator to approve an app that reads mail — Microsoft's recommended setting for
-> organisations does — and then you cannot connect it until an administrator approves Funnl."
-
-Make the same correction to the `/privacy` sentence.
-
-**Consent-version consequences.**
-- The `/privacy` sentence is not part of the notice fingerprint. Correcting it alone changes no
-  version and needs no re-consent.
-- The notice sentence **is** part of the fingerprint. Changing it derives a new
-  `ol-disc-…` version, which needs:
-  - the usual ordered publication: website first, then the server variable, the three worker
-    requirements and the worker redeploy, together;
-  - during the window between them, runs for every connection are refused with
-    `background_consent_missing`, and nothing is lost: cursors hold and resume;
-  - a same-account re-consent (an OAuth update; never a disconnect) by every connected account.
-- **Timing:** today only the pilot is connected. Publishing the correction **before** S1 means only
-  the pilot re-consents, and the second account connects under the corrected text. Publishing after
-  acceptance means both accounts re-consent. Folding it into B's later publication would leave a
-  known inaccuracy in place for an unknown period, so it is not recommended.
+The "no administrator consent by default" sentence is replaced in both the notice and
+`/privacy` by the owner-reviewed sentence, checked against current Microsoft documentation.
+The exact text, the derived version `ol-disc-1b6906af498ccff0f1e3292027ca0539` and the ordered
+cutover are in #98 and `docs/outlook-admin-consent-wording-cutover.md`.
 
 ## Admin-approval refusal message (Draft PR #95)
 
-#95 adds one conditional sentence to the failed-connection notice. It is conditional because the
-callback cannot reliably tell an admin-approval refusal from any other failure. That behaviour is
-kept. #97 separately adds an accurate notice for the one refusal the database *can* identify
-(`account_in_use`).
+#95 adds one conditional sentence to the generic failed-connection notice (`?outlook=error`). It
+is conditional because the callback cannot reliably tell an admin-approval refusal from any other
+failure. That behaviour is kept.
+
+#97 separately adds an accurate notice for the one refusal the database *can* identify
+(`?outlook=in_use`); the generic notice and its hint never show for it. #95 and #97 merge cleanly
+in either order (#95's tests live in their own file).
