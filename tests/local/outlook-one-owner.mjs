@@ -464,6 +464,36 @@ try {
     assert.strictEqual(rowDigest(A), aBefore)
     assert.strictEqual(JSON.stringify(subRow(connA)), subBefore)
   })
+  await test('a refusal writes NOTHING: no token row, no sync state, no subscription row, state row unchanged', async () => {
+    const before = one(`SELECT count(*) FROM public.microsoft_tokens`) + '|' +
+      one(`SELECT count(*) FROM public.outlook_sync_state`) + '|' + one(`SELECT count(*) FROM public.outlook_subscriptions`)
+    const r = await finalize(B, { ...X, tag: 'b-nothing' })
+    assert.strictEqual(r.result, 'account_in_use', r.raw)
+    const after = one(`SELECT count(*) FROM public.microsoft_tokens`) + '|' +
+      one(`SELECT count(*) FROM public.outlook_sync_state`) + '|' + one(`SELECT count(*) FROM public.outlook_subscriptions`)
+    assert.strictEqual(after, before)
+    assert.strictEqual(one(`SELECT count(*) FROM public.microsoft_tokens WHERE user_id='${B}';`), '0')
+    assert.strictEqual(one(`SELECT (consumed_at IS NULL AND expires_at > now())::text FROM public.microsoft_oauth_states WHERE state_hash='${r.state}';`), 'true')
+  })
+  await test('an UNRELATED unique violation is re-raised, never converted to account_in_use', async () => {
+    // Disposable-only: a temporary unique index the function knows nothing about.
+    psql(`CREATE UNIQUE INDEX _probe_unique_email ON public.microsoft_connections (lower(ms_email));`, { tuplesOnly: false })
+    try {
+      const r = await finalize(C, { tid: CONSUMERS, oid: oidOf(77), email: 'owner@outlook.test', tag: 'probe' }) // A's row already holds this address text
+      assert.notStrictEqual(r.result, 'account_in_use', r.raw)
+      assert.ok(r.status >= 400, `expected an error, got ${r.status} ${r.raw}`)
+      assert.ok(/23505/.test(r.raw) && /_probe_unique_email/.test(r.raw), r.raw)
+    } finally { psql('DROP INDEX public._probe_unique_email;', { tuplesOnly: false }) }
+  })
+  await test('a non-unique error (a CHECK) passes through untouched, never account_in_use', async () => {
+    psql(`ALTER TABLE public.microsoft_connections ADD CONSTRAINT _probe_check CHECK (ms_email NOT LIKE 'blocked%') NOT VALID;`, { tuplesOnly: false })
+    try {
+      const r = await finalize(F, { tid: CONSUMERS, oid: oidOf(78), email: 'blocked@outlook.test', tag: 'probe2' })
+      assert.notStrictEqual(r.result, 'account_in_use', r.raw)
+      assert.ok(r.status >= 400 && /23514/.test(r.raw), `${r.status} ${r.raw}`)
+      assert.strictEqual(connectionsFor(F), 0)
+    } finally { psql('ALTER TABLE public.microsoft_connections DROP CONSTRAINT _probe_check;', { tuplesOnly: false }) }
+  })
   await test('case variants of the same tenant and object id are the SAME identity', async () => {
     for (const v of [{ ...X, oid: OID_X.toUpperCase() }, { ...X, tid: CONSUMERS.toUpperCase() }]) {
       const r = await finalize(B, { ...v, tag: 'case' })

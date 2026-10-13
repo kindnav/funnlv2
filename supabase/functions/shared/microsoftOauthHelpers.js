@@ -92,16 +92,9 @@ export function isValidConfiguredOutlookCallbackUrl (raw) {
   return typeof raw === 'string' && raw === EXPECTED_OUTLOOK_CALLBACK_URL
 }
 
-/**
- * Builds the post-OAuth Settings redirect from an already-trusted origin.
- *
- * Three controlled values. `in_use` is sent ONLY after the browser binding has passed and
- * finalize_microsoft_connection itself answered `account_in_use`: the person in this browser
- * has just signed in to that Microsoft account, and the redirect says only that it is
- * connected to another Funnl account - never which one. Everything else stays `error`.
- */
+/** Builds the post-OAuth Settings redirect from an already-trusted origin. */
 export function buildOutlookSettingsRedirect (origin, result) {
-  const r = result === 'connected' || result === 'in_use' ? result : 'error'
+  const r = result === 'connected' ? 'connected' : 'error'
   return `${origin}/settings?outlook=${r}`
 }
 

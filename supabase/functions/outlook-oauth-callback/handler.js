@@ -16,6 +16,7 @@
 // endpoints through a SEPARATE harness entrypoint that is never deployed.
 
 import { PRODUCTION_ENDPOINTS } from './endpoints.js'
+import { refusalRedirect } from './refusals.js'
 // outlook-oauth-callback — receives Microsoft's response_mode=form_post
 // completion and refuses anything that did not start in THIS browser.
 //
@@ -359,9 +360,8 @@ export async function handleOutlookCallback (req, endpoints = PRODUCTION_ENDPOIN
       console.error('outlook-oauth-callback finalize_refused', result)
       // The one refusal the person can act on: this Microsoft account is already connected
       // to a different Funnl account. Nothing was written; the other connection is untouched.
-      if (result === 'account_in_use' && trustedOrigin) {
-        return redirect(buildOutlookSettingsRedirect(trustedOrigin, 'in_use'))
-      }
+      const refused = refusalRedirect(trustedOrigin, result)
+      if (refused) return redirect(refused)
       return redirect(failRedirect)
     }
 
