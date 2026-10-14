@@ -54,7 +54,9 @@ test('the pasted text is still wrapped as untrusted data, after every instructio
   assert.ok(c.indexOf(MASKED) > begin && c.indexOf(MASKED) < c.indexOf('=== END UNTRUSTED EMAIL CONTENT ==='))
 })
 
-test('the contact-details request is byte-identical to the published one', () => {
-  // sha256 of buildContactRequest(MASKED) at main 8d41302, before this change.
-  assert.equal(sha(buildContactRequest(MASKED)), '63f5bad0df107eb9b7f47db73669026a410d76f6d1f2d2ef22831eb49f969426')
+test('the contact-details request is pinned (the note voice never changes it)', () => {
+  // sha256 of buildContactRequest(MASKED). Was 63f5bad0... at main 8d41302; moved ONLY by the
+  // evidence-wording change (ask for the name line with the signature lines) in
+  // fix/paste-email-adjacent-signature. A future change must move this pin deliberately.
+  assert.equal(sha(buildContactRequest(MASKED)), '5b9fa33a1f31a254b53c6cb3feebca326b5d9628f6d10792655e79f745744110')
 })
