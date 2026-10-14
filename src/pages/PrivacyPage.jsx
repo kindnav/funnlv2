@@ -36,7 +36,7 @@ function PrivacyPage() {
             <span className="font-display font-bold text-[20px] text-hi">Funnl</span>
           </div>
           <h1 className="font-display text-[32px] font-bold text-hi tracking-[-0.5px] mb-3">Privacy Policy</h1>
-          <p className="text-[14px] text-low">Last updated: October 13, 2026</p>
+          <p className="text-[14px] text-low">Last updated: October 14, 2026</p>
           <div className="mt-4 px-4 py-3 bg-elevated border border-line-1 rounded-xl">
             <p className="text-[13.5px] text-muted leading-relaxed">
               This policy explains, in plain language, what Funnl collects, how it is used, who processes it, and how to remove it.
@@ -76,6 +76,7 @@ function PrivacyPage() {
             <div className="pl-4 border-l-2 border-[rgba(255,255,255,0.08)]">
               <p className="font-semibold text-hi mb-1">Anthropic (Claude) — powers AI features</p>
               <p>When you use Funnl AI or the AI Fill feature, your contact and interaction data is sent to Anthropic's Claude API to generate responses. This means the content of your network — names, notes, interactions — is processed by Anthropic. Pending suggestions and any retained email subject line are not sent to Anthropic. When you accept a suggestion, the type, date, and note you reviewed become an ordinary interaction in your network, and if you later use Funnl AI those fields may be sent to Anthropic like any other interaction. Raw Gmail messages, headers, subject lines, message or thread identifiers, and Google tokens are never sent to Anthropic. Anthropic does not use API data to train their models. <a href="https://www.anthropic.com/privacy" target="_blank" rel="noopener noreferrer" className="text-accent hover:text-tag no-underline">Anthropic privacy policy →</a></p>
+              <p className="mt-2" data-testid="privacy-paste-email"><strong className="text-hi font-semibold">Paste an email (Pro).</strong> If you paste an email into Funnl, the text you paste — which can include what the other person wrote, names, employers and phone numbers — is sent to Anthropic to draft a contact and an interaction note for you to review. Before sending it, Funnl replaces the email addresses it recognises with a placeholder and withholds the request if anything still looks like an email address or an access token; Funnl cannot guarantee that every identifying detail is removed. The email addresses Funnl finds stay within Funnl: they are used only to match the email to your contacts and, if you choose, to fill in a new contact's email. Funnl does not store the text you paste; only the contact and interaction you review and save are kept.</p>
             </div>
 
             <div className="pl-4 border-l-2 border-[rgba(255,255,255,0.08)]">
@@ -183,9 +184,10 @@ function PrivacyPage() {
             not legal advice, and is not evidence that outside
             counsel reviewed or approved this policy.
 
-            MANDATORY AT PUBLICATION: the date above is October 13, 2026 - the New York
-            date on which the cohort wording (invited accounts, and what withdrawing an invitation
-            does and does not do) was published. These are history: the thread-segments
+            MANDATORY AT PUBLICATION: the date above is October 14, 2026 - the New York
+            date on which the "Paste an email (Pro)" paragraph in the Anthropic section was
+            published. These are history: the cohort wording (invited accounts, and what
+            withdrawing an invitation does and does not do) on October 13, 2026, the thread-segments
             publication on October 12, 2026, the detailed-draft one on October 10, 2026 and
             the background-sync one on October 9, 2026. If the merge that publishes this section happens on any later day, the
             "Last updated" date MUST be changed again in that same commit.

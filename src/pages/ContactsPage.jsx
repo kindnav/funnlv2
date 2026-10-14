@@ -4,6 +4,9 @@ import { supabase } from '../lib/supabase'
 import ImportContactsModal from '../components/ImportContactsModal'
 import InteractionSourceBadge from '../components/InteractionSourceBadge'
 import TopBar from '../components/TopBar'
+import PasteEmailDrawer from '../components/PasteEmailDrawer'
+import { useProStatus } from '../lib/useProStatus'
+import { classifyProStatus } from '../lib/pro-ui-status'
 import { getAvatarColor, getInitials } from '../lib/avatarUtils'
 import {
   parseSortParam, buildDirectoryEntry, sortDirectoryEntries,
@@ -393,6 +396,10 @@ function ContactsPage() {
   const [loading, setLoading] = useState(true)
   const [fetchError, setFetchError] = useState('')
   const [importOpen, setImportOpen] = useState(false)
+  // Paste an email (Pro): same gate as AI Fill. The server re-checks entitlement.
+  const proClass = classifyProStatus(useProStatus())
+  const canPasteEmail = proClass === 'permanent' || proClass === 'trial'
+  const [pasteOpen, setPasteOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState(() => new URLSearchParams(location.search).get('search') || '')
   const [expandedId, setExpandedId] = useState(null)
 
@@ -570,6 +577,20 @@ function ContactsPage() {
         onSearchClick={() => window.dispatchEvent(new CustomEvent('funnl:open-command-palette'))}
         searchPlaceholder="Find, log, or ask anything…"
         actions={
+          <>
+          {canPasteEmail && (
+          <button
+            onClick={() => setPasteOpen(true)}
+            className="h-[34px] flex items-center gap-[6px] px-[11px] rounded-[9px] border border-line-2 text-[13px] font-medium transition-colors hover:border-line-3"
+            style={{ background: 'var(--color-elevated)', color: 'var(--color-mid)' }}
+            title="Paste an email (Pro)"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="3" y="5" width="18" height="14" rx="2.5"/><path d="m3 7 9 6 9-6"/>
+            </svg>
+            <span className="hidden md:inline">Paste email</span>
+          </button>
+          )}
           <button
             onClick={() => setImportOpen(true)}
             className="h-[34px] flex items-center gap-[6px] px-[11px] rounded-[9px] border border-line-2 text-[13px] font-medium transition-colors hover:border-line-3"
@@ -583,6 +604,7 @@ function ContactsPage() {
             </svg>
             <span className="hidden md:inline">Import</span>
           </button>
+          </>
         }
         cta={
           <button
@@ -943,6 +965,15 @@ function ContactsPage() {
         <ImportContactsModal
           onClose={() => setImportOpen(false)}
           onImported={() => fetchAll()}
+        />
+      )}
+
+      {/* Paste an email (Pro) */}
+      {pasteOpen && canPasteEmail && (
+        <PasteEmailDrawer
+          contacts={contacts}
+          onClose={() => setPasteOpen(false)}
+          onSaved={() => fetchAll()}
         />
       )}
 

@@ -1479,3 +1479,34 @@ that creates the subscription; `none_due` proves nothing) → listener verificat
 message and a sent draft each record a wake AND trigger an automatic kicked run while the tick is
 still inactive → activate the cron job → live acceptance test (fresh two-way exchange → proposal
 while Funnl is closed → accepted in Funnl).
+
+---
+
+## Paste an email (Pro) - Draft PR #101, NOT deployed or published
+
+A Pro user pastes an email thread; Funnl drafts contact details and an Email interaction note for
+review; nothing is saved until the reviewer presses Save. No schema change.
+
+- **Function `ai-paste-email`** (`verify_jwt = true`, new, not deployed). Logic in
+  `supabase/functions/shared/pasteEmail.js`; reuses the Outlook redactor, minimization gate, drafting
+  contract and bounded transport UNEDITED (every existing function's import closure is unchanged).
+  Addresses are found locally, masked before Anthropic, and returned only to the user's browser for
+  matching. Logs carry codes and counts only.
+- **Attribution.** The model returns one record PER PERSON. A company, role or LinkedIn URL is kept only
+  with quoted evidence for THAT person (lines in the email that contain the value, name the person and
+  name no other proposed person); text elsewhere in the email does not count; the same lines cited for
+  two records count for neither. Shared employers/roles are allowed; identical display names are both
+  offered, labelled apart and flagged. Tags and relationship note are not filled from paste. The drawer
+  never chooses the person: from a contact's page that contact is used; otherwise the reviewer picks an
+  existing contact or "A new contact" AND which proposed person it is. Email address is the reviewer's
+  own choice.
+- **Dates** are prefilled only from one unquoted, zoned header; anything else is blank and required.
+- **Saving** remembers a created contact, so retrying a failed interaction never creates another;
+  double submission is blocked. The raw paste is cleared on success, Cancel and Escape.
+- **Privacy wording** approved and added to `/privacy` (Anthropic paragraph); the "Last updated" date
+  must move to the real New York publication date in the publishing commit. Outlook consent version
+  unchanged.
+- **Proof:** `tests/paste-email.test.js`, `tests/paste-email-capture.test.js` and the on-demand browser
+  harness `tests/local/paste-email-browser.mjs` (real Postgres/GoTrue/PostgREST/edge-runtime, simulated
+  Anthropic). Real-model attribution is not yet proven.
+- **Rollout:** `docs/paste-email-rollout.md` - deploy the function first, then merge to publish.

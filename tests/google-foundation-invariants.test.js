@@ -104,6 +104,9 @@ test('start and disconnect are NOT set to verify_jwt=false', () => {
 console.log('\ndelete-account authentication')
 const deleteAccountSrc = read('supabase/functions/delete-account/index.ts')
 const FUNCTION_JWT_SETTINGS = {
+  // Paste an email (Pro). User-initiated: the platform verifies the caller's JWT, and the
+  // handler re-checks the user and Pro entitlement before anything else.
+  'ai-paste-email': 'true',
   'google-oauth-callback': 'false',
   'google-calendar-sync': 'true',
   'delete-account': 'true',
