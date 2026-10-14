@@ -1492,8 +1492,11 @@ review; nothing is saved until the reviewer presses Save. No schema change.
   contract and bounded transport UNEDITED (every existing function's import closure is unchanged).
   Addresses are found locally, masked before Anthropic, and returned only to the user's browser for
   matching. Logs carry codes and counts only.
-- **Attribution.** The model returns one record PER PERSON. Server guards drop a name/company/role not
-  found in the email, drop duplicate names, and remove a company/role given to two people. The drawer
+- **Attribution.** The model returns one record PER PERSON. A company, role or LinkedIn URL is kept only
+  with quoted evidence for THAT person (lines in the email that contain the value, name the person and
+  name no other proposed person); text elsewhere in the email does not count; the same lines cited for
+  two records count for neither. Shared employers/roles are allowed; identical display names are both
+  offered, labelled apart and flagged. Tags and relationship note are not filled from paste. The drawer
   never chooses the person: from a contact's page that contact is used; otherwise the reviewer picks an
   existing contact or "A new contact" AND which proposed person it is. Email address is the reviewer's
   own choice.

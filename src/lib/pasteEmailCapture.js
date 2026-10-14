@@ -133,14 +133,31 @@ export function resolveInteractionDate (date, timeZone) {
 }
 
 /** The people the server proposed, as choices. Order is the server's; nothing is preselected. */
+/**
+ * The people the server proposed, as choices. Order is the server's; nothing is preselected.
+ * People who share a display name are BOTH offered, labelled apart by the detail the server
+ * kept for each (or their position), and marked ambiguous so the review can say so.
+ */
 export function personOptions (contact) {
   const people = Array.isArray(contact?.people) ? contact.people : []
-  return people
-    .map((p, index) => ({ index, name: typeof p?.fields?.name === 'string' ? p.fields.name : '' }))
+  const opts = people
+    .map((p, index) => ({
+      index,
+      name: typeof p?.fields?.name === 'string' ? p.fields.name : '',
+      detail: [p?.fields?.company, p?.fields?.role].filter((v) => typeof v === 'string' && v.length > 0).join(', '),
+      ambiguous: p?.ambiguous_name === true,
+    }))
     .filter((o) => o.name.length > 0)
+  return opts.map((o) => {
+    if (!o.ambiguous) return { index: o.index, name: o.name, label: o.name, ambiguous: false }
+    const same = opts.filter((x) => x.name.toLowerCase() === o.name.toLowerCase())
+    const position = `${same.indexOf(o) + 1} of ${same.length}`
+    return { index: o.index, name: o.name, label: `${o.name} (${o.detail || 'no details'}; ${position})`, ambiguous: true }
+  })
 }
 
-const AI_KEYS = ['name', 'company', 'role', 'how_met', 'linkedin_url', 'relationship_note']
+// The fields the review step SHOWS. Nothing the reviewer cannot see is filled in.
+const AI_KEYS = ['name', 'company', 'role', 'how_met', 'linkedin_url']
 
 /**
  * The new-contact form after the reviewer picks a proposed person: that person's fields and
@@ -152,7 +169,6 @@ export function applyPerson (draft, person) {
   const f = person?.fields ?? {}
   const next = { ...draft }
   for (const k of AI_KEYS) next[k] = typeof f[k] === 'string' ? f[k] : ''
-  next.tags = Array.isArray(f.tags) ? [...f.tags] : []
   return next
 }
 

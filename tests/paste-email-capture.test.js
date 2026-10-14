@@ -73,22 +73,38 @@ test('capture from a contact page uses that contact, and warns if their address 
 // ── Choosing which proposed person a new contact is ───────────────────────────
 
 const PROPOSED = { people: [
-  { fields: { name: 'Priya Shah', company: 'Goldman Sachs', role: 'Analyst', tags: ['finance'] }, dropped: [] },
-  { fields: { name: 'Sam Lee', company: 'Finance Club', role: 'Treasurer' }, dropped: [] },
+  { fields: { name: 'Priya Shah', company: 'Goldman Sachs', role: 'Analyst' }, dropped: [], ambiguous_name: false },
+  { fields: { name: 'Sam Lee', company: 'Finance Club', role: 'Treasurer' }, dropped: [], ambiguous_name: false },
 ] }
 
 test('people are offered by name, nothing preselected', () => {
-  assert.deepEqual(personOptions(PROPOSED), [{ index: 0, name: 'Priya Shah' }, { index: 1, name: 'Sam Lee' }])
+  assert.deepEqual(personOptions(PROPOSED), [
+    { index: 0, name: 'Priya Shah', label: 'Priya Shah', ambiguous: false },
+    { index: 1, name: 'Sam Lee', label: 'Sam Lee', ambiguous: false },
+  ])
   assert.deepEqual(personOptions(null), [])
   assert.deepEqual(personOptions({ people: [{ fields: {} }] }), [])
+})
+
+test('identical display names are both offered, labelled apart, and marked ambiguous', () => {
+  const opts = personOptions({ people: [
+    { fields: { name: 'Alex Kim', company: 'Goldman Sachs', role: 'Associate' }, ambiguous_name: true },
+    { fields: { name: 'Alex Kim' }, ambiguous_name: true },
+    { fields: { name: 'Jamie Fox', company: 'Goldman Sachs' }, ambiguous_name: false },
+  ] })
+  assert.deepEqual(opts.map((o) => o.label), ['Alex Kim (Goldman Sachs, Associate; 1 of 2)', 'Alex Kim (no details; 2 of 2)', 'Jamie Fox'])
+  assert.deepEqual(opts.map((o) => o.ambiguous), [true, true, false])
 })
 
 test('picking a person fills ONLY that person\u2019s details; switching replaces them all', () => {
   const start = { name: '', email: 'sam@club.example', company: '', role: '', how_met: '', linkedin_url: '', tags: [], relationship_note: '' }
   const priya = applyPerson(start, PROPOSED.people[0])
-  assert.deepEqual([priya.name, priya.company, priya.role, priya.tags], ['Priya Shah', 'Goldman Sachs', 'Analyst', ['finance']])
+  assert.deepEqual([priya.name, priya.company, priya.role], ['Priya Shah', 'Goldman Sachs', 'Analyst'])
   const sam = applyPerson(priya, PROPOSED.people[1])
-  assert.deepEqual([sam.name, sam.company, sam.role, sam.tags], ['Sam Lee', 'Finance Club', 'Treasurer', []])
+  assert.deepEqual([sam.name, sam.company, sam.role], ['Sam Lee', 'Finance Club', 'Treasurer'])
+  // fields the review step never shows are never filled in from the model
+  const hidden = applyPerson(start, { fields: { name: 'X Y', tags: ['t'], relationship_note: 'n' } })
+  assert.deepEqual([hidden.tags, hidden.relationship_note], [[], ''])
   assert.equal(sam.email, 'sam@club.example')
   const cleared = applyPerson(sam, null)
   assert.deepEqual([cleared.name, cleared.company, cleared.role], ['', '', ''])

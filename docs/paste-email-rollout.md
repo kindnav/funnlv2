@@ -29,7 +29,7 @@ default, `manual`). No Outlook file changes, and the Outlook consent version sta
   | `shared/boundedJson.js` | `8575249c5c905456…` (unchanged from `main`) |
   | `shared/outlookContentSanitizer.js` | `fefd6a7acfb62233…` (unchanged from `main`) |
   | `shared/outlookDraftContract.js` | `5dc7756258ab38b6…` (unchanged from `main`) |
-  | `shared/pasteEmail.js` | `dabaa735d799060a…` |
+  | `shared/pasteEmail.js` | `d83c6f421b3ff5fc…` |
   | `shared/pro-entitlement.js` | `3f9015b99d476a82…` (unchanged from `main`) |
 
   Recompute these after any further change to the PR. **Every one of the 15 existing functions has an
@@ -115,12 +115,18 @@ simulated model (see Evidence below).
   clearing the paste, the failure paths, minimization refusal, input bounds, and Pro and auth
   enforcement. It also proves that the function's logs carry no paste text or model output.
 
-  It does **not** prove the real model's attribution quality. The deterministic guards limit what a
-  wrong attribution can do:
-  - a name, company or role that does not appear in the email is dropped;
-  - a duplicate name is dropped;
-  - a company or role given to two people is removed from both;
-  - nothing fills a new contact until the reviewer picks the person.
+  It does **not** prove the real model's attribution quality. The deterministic attribution rule
+  limits what a wrong attribution can do:
+  - a company, role or LinkedIn URL is kept only with **quoted evidence for that person**: lines
+    that are in the email, contain the value, name this person and name no other proposed person,
+    such as their signature or a sentence about them;
+  - text appearing elsewhere in the email does not count;
+  - the same lines cited for two records count for neither;
+  - two people may share an employer or a role;
+  - two people with the same display name are both offered, labelled apart and flagged for the
+    reviewer;
+  - nothing fills a new contact until the reviewer picks the person, and only fields the review
+    shows are filled.
 
 ## Known limits
 
@@ -128,4 +134,8 @@ simulated model (see Evidence below).
   neither masked nor refused. The published wording covers this ("the email addresses it
   recognises").
 - Names, employers and phone numbers in the paste reach Anthropic, as disclosed.
-- A role the model paraphrases rather than copies is left blank, because it is not found in the email.
+- A role the model paraphrases rather than copies is left blank, because it is not found in the
+  quoted evidence.
+- A single sentence naming two people ("Priya and Sam both work at Goldman Sachs") is not used for
+  either of them; the reviewer fills it in. Separate signatures or sentences are used.
+- A detail stated far from the person's name (more than 4 lines away) is left blank.

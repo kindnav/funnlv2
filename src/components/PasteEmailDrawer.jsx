@@ -156,6 +156,7 @@ function PasteEmailDrawer ({ contacts = [], preselectedContact = null, onClose, 
   const done = saveResult?.status === 'saved' || saveResult?.status === 'already_saved'
   const otherContacts = contacts.filter((c) => !candidates.some((x) => x.matches.some((m) => m.id === c.id)))
   const aiPeople = personOptions(aiContact)
+  const pickedAi = aiPeople.find((o) => String(o.index) === aiPersonChoice) ?? null
   const canGoBack = !saving && !saveResult?.contactSaved && !saveResult?.interactionSaved
 
   return (
@@ -258,10 +259,15 @@ function PasteEmailDrawer ({ contacts = [], preselectedContact = null, onClose, 
                       <select id="paste-email-ai-person" className={inputClass} value={aiPersonChoice} disabled={locked}
                         onChange={(e) => chooseAiPerson(e.target.value)}>
                         <option value="">Choose a person…</option>
-                        {aiPeople.map((o) => <option key={o.index} value={String(o.index)}>{o.name}</option>)}
+                        {aiPeople.map((o) => <option key={o.index} value={String(o.index)}>{o.label}</option>)}
                         <option value={NOT_LISTED}>Someone not listed</option>
                       </select>
                       <p className="text-[12px] text-lower mt-1">Only details the email states about that person are filled in. Check each one, and fill in anything left blank yourself.</p>
+                      {pickedAi?.ambiguous && (
+                        <p className="text-[12px] mt-1" style={{ color: 'var(--color-warning)' }} data-testid="paste-email-ambiguous-name">
+                          More than one person in this email is named {pickedAi.name}. Check these details belong to the person you mean.
+                        </p>
+                      )}
                     </div>
                   )}
                   <div><label htmlFor="paste-email-name" className={labelClass}>Name *</label>

@@ -37,9 +37,11 @@ export const MAX_PASTE_CHARS = 12_000
 export const MAX_ADDRESSES = 20
 /** At most this many people are proposed from one paste; the reviewer picks one or none. */
 export const MAX_PEOPLE = 4
-export const CONTACT_MAX_TOKENS = 1536
+export const CONTACT_MAX_TOKENS = 3072
 export const NOTE_MAX_TOKENS = 2048
-export const RELATIONSHIP_NOTE_MAX = 500
+/** Evidence quoted for one field: at most this many lines and characters. */
+export const EVIDENCE_MAX_LINES = 4
+export const EVIDENCE_MAX_CHARS = 400
 
 /** AI Fill's instructions, verbatim from ai-parse-contact (pinned by test). */
 export const AI_FILL_INSTRUCTIONS = "Parse the following text about a person into contact fields.\nReturn ONLY a raw JSON object — no explanation, no markdown, no code fences.\nOnly extract fields that are explicitly and clearly stated in the text.\nDo not infer, guess, complete partial information, or make assumptions about anything not directly stated.\nIf a detail is ambiguous or only implied, omit that field entirely.\n\nFields to extract (include only those explicitly present in the text):\n- name (string) — full name of the person\n- company (string) — company or organization they work at\n- role (string) — their job title or role\n- email (string) — only if a complete email address is explicitly stated\n- linkedin_url (string) — only if a linkedin.com URL is explicitly stated\n- how_met (string) — where or how you met them, e.g. \"Career fair\", \"Coffee chat\"\n- tags (array of strings) — informal labels e.g. [\"alumni\", \"target firm\"]\n- relationship_note (string) — why this person matters or how they can help, e.g. \"Can intro me to the PM team at Stripe\" (do NOT include this for generic contact info)\n- follow_up_suggestion (string) — only if a specific timeframe is explicitly mentioned, e.g. \"2 weeks\", \"next Monday\""
@@ -254,20 +256,27 @@ function untrusted (masked) {
 
 function nullableString (description) { return { type: ['string', 'null'], description } }
 
-/** One person: AI Fill's fields minus email and follow-up (6 unions). */
+/**
+ * One person. Each of company, role and LinkedIn URL travels with the EXACT lines of the email
+ * that state it about this person (their signature, or a sentence naming them), which the server
+ * checks before the value can reach the reviewer. Email, follow-up, tags and the relationship note
+ * are not requested: the first two belong elsewhere, and the review step never shows the last two.
+ */
 function personSchema () {
+  const evidence = (what) => nullableString(`The exact lines of the email, copied verbatim (at most ${EVIDENCE_MAX_LINES}), that NAME this person and state their ${what}: their signature, or a sentence naming them. Null when the email has no such text.`)
   return {
     type: 'object',
     additionalProperties: false,
-    required: ['name', 'company', 'role', 'how_met', 'linkedin_url', 'relationship_note', 'tags'],
+    required: ['name', 'company', 'company_evidence', 'role', 'role_evidence', 'how_met', 'linkedin_url', 'linkedin_evidence'],
     properties: {
       name: nullableString('This person\'s full name, copied exactly as written in the email.'),
-      company: nullableString('THIS person\'s company or organization, copied exactly as written, only if the email states it about them.'),
-      role: nullableString('THIS person\'s job title or role, copied exactly as written, only if the email states it about them.'),
+      company: nullableString('THIS person\'s company or organization, copied exactly as written. Null unless company_evidence supports it.'),
+      company_evidence: evidence('company'),
+      role: nullableString('THIS person\'s job title or role, copied exactly as written. Null unless role_evidence supports it.'),
+      role_evidence: evidence('role'),
       how_met: nullableString('Where or how the user met THIS person, only if explicitly stated.'),
-      linkedin_url: nullableString('THIS person\'s linkedin.com/in/ URL only if it appears verbatim.'),
-      relationship_note: nullableString('Why THIS person matters to the user, only if explicitly stated.'),
-      tags: { type: 'array', items: { type: 'string' }, description: 'Up to 5 informal labels explicitly supported by the text about this person; empty when none.' },
+      linkedin_url: nullableString('THIS person\'s linkedin.com/in/ URL only if it appears verbatim. Null unless linkedin_evidence supports it.'),
+      linkedin_evidence: evidence('LinkedIn URL'),
     },
   }
 }
@@ -300,8 +309,10 @@ export function buildContactRequest (masked) {
     'This text is an email exchange, not a note about one person. Under "people", list each',
     `person other than the user who wrote, received or is named in it, at most ${MAX_PEOPLE}.`,
     'Give each person ONLY the details the text states about THAT person, with name, company and',
-    'role copied exactly as written. If it is unclear which person a detail belongs to, or the',
-    'detail could describe the user, return null for it. Never return an email address.',
+    'role copied exactly as written. A company, role or LinkedIn URL needs evidence: copy the exact',
+    'lines that name this person and state it, such as their signature or a sentence about them.',
+    'Text elsewhere in the email is not evidence. If it is unclear which person a detail belongs to,',
+    'or it could describe the user, return null for it and its evidence. Never return an email address.',
     '',
     PASTE_PREAMBLE,
     '',
@@ -361,22 +372,51 @@ function cleanText (v, max, { allowLinkedIn = false } = {}) {
 
 function isPlainRecord (v) { return v !== null && typeof v === 'object' && !Array.isArray(v) }
 function hasProtoKey (v) { return PROTO_KEYS.some((k) => Object.prototype.hasOwnProperty.call(v, k)) }
-/** Case- and whitespace-insensitive form used to compare a value with the pasted text. */
+/** Case- and whitespace-insensitive form of a value. */
 function norm (v) { return String(v).toLowerCase().replace(/\s+/g, ' ').trim() }
+/** The pasted text, or a quote from it, in comparison form: quote markers removed from each
+ *  line, lines joined, whitespace collapsed, lower case. */
+function normSource (v) {
+  return norm(String(v).split('\n').map((l) => l.replace(/^[\s>]+/, '')).join(' '))
+}
+function nameTokens (name) { return norm(name).split(/[^\p{L}\p{N}'-]+/u).filter((t) => t.length >= 2) }
+/** `word` occurs in `hay` as a whole word. */
+function hasWord (hay, word) {
+  for (let i = hay.indexOf(word); i !== -1; i = hay.indexOf(word, i + 1)) {
+    const before = i === 0 ? '' : hay[i - 1]
+    const after = hay[i + word.length] ?? ''
+    if (!/[\p{L}\p{N}]/u.test(before) && !/[\p{L}\p{N}]/u.test(after)) return true
+  }
+  return false
+}
+
+const EVIDENCED = [['company', 'company_evidence'], ['role', 'role_evidence'], ['linkedin_url', 'linkedin_evidence']]
 
 /**
- * Validate ONE person. Unknown keys (an `email` included) are ignored, not passed on; each
- * field that fails a rule is DROPPED with a code, never truncated. A person with no usable
- * name is dropped entirely: the reviewer chooses people by name.
- *   not_in_text  a name, company or role that does not appear in the text the model was
- *                given. Copied values must be findable; anything else is a guess.
- * @returns {{fields:object, dropped:object} | null}
+ * Does `evidence` show that `value` belongs to the person whose name tokens are `own`?
+ * Returns null when it does, otherwise why not. Text appearing ANYWHERE in the email is not
+ * enough: the quoted lines must be in the email, contain the value, name this person, and
+ * name no other proposed person.
  */
-function validatePerson (raw, text) {
+function evidenceProblem (key, value, evidence, { text, own, others }) {
+  if (typeof evidence !== 'string' || evidence.trim() === '') return 'no_evidence'
+  if (evidence.length > EVIDENCE_MAX_CHARS || evidence.trim().split('\n').length > EVIDENCE_MAX_LINES) return 'evidence_too_long'
+  const ev = normSource(evidence)
+  if (!text.includes(ev)) return 'evidence_not_in_text'
+  const needle = key === 'linkedin_url' ? norm(value).replace(/^https:\/\/(www\.)?/, '') : norm(value)
+  if (!ev.includes(needle)) return 'value_not_in_evidence'
+  if (!own.some((t) => hasWord(ev, t))) return 'evidence_does_not_name_person'
+  if (others.some((t) => hasWord(ev, t))) return 'evidence_names_another_person'
+  return null
+}
+
+/** One person's own fields, cleaned. A person with no usable name, or a name not in the
+ *  email, is not a person Funnl can offer. */
+function cleanPerson (raw, text) {
   if (!isPlainRecord(raw) || hasProtoKey(raw)) return null
   const spec = {
     name: [BOUNDS.name], company: [BOUNDS.company], role: [BOUNDS.role], how_met: [BOUNDS.howMet],
-    linkedin_url: [BOUNDS.linkedin, { allowLinkedIn: true }], relationship_note: [RELATIONSHIP_NOTE_MAX],
+    linkedin_url: [BOUNDS.linkedin, { allowLinkedIn: true }],
   }
   const fields = {}
   const dropped = {}
@@ -385,60 +425,58 @@ function validatePerson (raw, text) {
     if (r.drop) dropped[key] = r.drop
     else if (r.value !== null) fields[key] = r.value
   }
-  if (raw.tags !== undefined && raw.tags !== null) {
-    if (!Array.isArray(raw.tags)) {
-      dropped.tags = 'bad_type'
-    } else {
-      const tags = []
-      for (const t of raw.tags.slice(0, BOUNDS.maxTags)) {
-        const r = cleanText(t, BOUNDS.tag)
-        if (r.value) tags.push(r.value)
-      }
-      if (tags.length > 0) fields.tags = tags
-    }
-  }
-  if (!fields.name || !text.includes(norm(fields.name))) return null
-  for (const key of ['company', 'role']) {
-    if (fields[key] && !text.includes(norm(fields[key]))) { delete fields[key]; dropped[key] = 'not_in_text' }
-  }
-  return { fields, dropped }
-}
-
-function countBy (items, keyOf) {
-  const m = new Map()
-  for (const it of items) { const k = keyOf(it); m.set(k, (m.get(k) ?? 0) + 1) }
-  return m
+  if (!fields.name || !text.includes(normSource(fields.name))) return null
+  return { fields, dropped, raw }
 }
 
 /**
- * Validate the contact-field output: a list of people, each validated on its own, then two
- * guards ACROSS people, because attribution is what a thread makes uncertain:
- *   * a name given to more than one record is ambiguous - every such record is dropped;
- *   * a company or role given to more than one person may be one person's detail spread
- *     onto another - it is removed from each of them ('shared') and left for the reviewer.
+ * Validate the contact-field output: a list of people.
+ *   * A company, role or LinkedIn URL is kept only with explicit evidence for THAT person
+ *     (evidenceProblem). Otherwise it is left blank for the reviewer, with a code.
+ *   * The same quoted lines cited for the same field of two records cannot tell them apart:
+ *     that field is left blank on both ('evidence_shared').
+ *   * Two people may share an employer or a role: each keeps it when each has evidence.
+ *   * Two records with the same display name are BOTH kept and marked ambiguousName; the
+ *     reviewer decides who is who. Nothing is dropped for sharing a name.
  * @param {unknown} raw          the model's parsed output
  * @param {string}  sourceText   the MASKED text the model was given
- * @returns {{ok:true, people:Array<{fields:object, dropped:object}>, droppedPeople:number} | {ok:false, code:string}}
+ * @returns {{ok:true, people:Array<{fields:object, dropped:object, ambiguousName:boolean}>, droppedPeople:number} | {ok:false, code:string}}
  */
 export function validateContactFields (raw, sourceText = '') {
   if (!isPlainRecord(raw)) return { ok: false, code: 'not_object' }
   if (hasProtoKey(raw)) return { ok: false, code: 'prototype_pollution' }
   if (!Array.isArray(raw.people)) return { ok: false, code: 'bad_type' }
-  const text = norm(sourceText)
-  const valid = []
+  const text = normSource(sourceText)
+  const people = []
   for (const person of raw.people.slice(0, MAX_PEOPLE)) {
-    const v = validatePerson(person, text)
-    if (v) valid.push(v)
+    const v = cleanPerson(person, text)
+    if (v) people.push(v)
   }
-  const names = countBy(valid, (x) => norm(x.fields.name))
-  const people = valid.filter((x) => names.get(norm(x.fields.name)) === 1)
-  for (const key of ['company', 'role']) {
-    const values = countBy(people.filter((x) => x.fields[key]), (x) => norm(x.fields[key]))
-    for (const x of people) {
-      if (x.fields[key] && values.get(norm(x.fields[key])) > 1) { delete x.fields[key]; x.dropped[key] = 'shared' }
+  const tokens = people.map((x) => nameTokens(x.fields.name))
+  const cited = new Map()   // field + quoted lines -> how many records cite them
+  for (const [i, x] of people.entries()) {
+    const own = tokens[i]
+    const others = [...new Set(tokens.flatMap((t, j) => (j === i ? [] : t)))].filter((t) => !own.includes(t))
+    for (const [key, evKey] of EVIDENCED) {
+      if (!x.fields[key]) continue
+      const problem = evidenceProblem(key, x.fields[key], x.raw[evKey], { text, own, others })
+      if (problem) { delete x.fields[key]; x.dropped[key] = problem; continue }
+      x.evidence = { ...x.evidence, [key]: `${key}:${normSource(x.raw[evKey])}` }
+      cited.set(x.evidence[key], (cited.get(x.evidence[key]) ?? 0) + 1)
     }
   }
-  return { ok: true, people, droppedPeople: raw.people.length - people.length }
+  for (const x of people) {
+    for (const [key] of EVIDENCED) {
+      if (x.evidence?.[key] && cited.get(x.evidence[key]) > 1) { delete x.fields[key]; x.dropped[key] = 'evidence_shared' }
+    }
+  }
+  const names = new Map()
+  for (const x of people) names.set(norm(x.fields.name), (names.get(norm(x.fields.name)) ?? 0) + 1)
+  return {
+    ok: true,
+    people: people.map((x) => ({ fields: x.fields, dropped: x.dropped, ambiguousName: names.get(norm(x.fields.name)) > 1 })),
+    droppedPeople: raw.people.length - people.length,
+  }
 }
 
 /** Validate the note output with the Outlook validator; keep only summary and next step. */
@@ -512,7 +550,7 @@ export async function handlePasteEmail (input, deps) {
   if (c?.ok === true) {
     const v = validateContactFields(c.parsed, masked)
     if (v.ok) {
-      contact = { people: v.people.map((x) => ({ fields: x.fields, dropped: Object.keys(x.dropped) })) }
+      contact = { people: v.people.map((x) => ({ fields: x.fields, dropped: Object.keys(x.dropped), ambiguous_name: x.ambiguousName })) }
       if (contact.people.length === 0) contactCode = 'contact_no_people'
     } else {
       contactCode = `contact_${v.code}`

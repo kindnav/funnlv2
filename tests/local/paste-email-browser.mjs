@@ -366,7 +366,22 @@ const LENA = [
 ].join(NL)
 
 const NOTE_OK = (summary) => ({ value: { result: 'interaction_draft', summary, summary_evidence: 'explicit_body', follow_up: 'Send a thank-you note', interaction_date: null } })
-const PEOPLE = (people) => ({ value: { people: people.map((p) => ({ company: null, role: null, how_met: null, linkedin_url: null, relationship_note: null, tags: [], ...p })) } })
+const PEOPLE = (people) => ({ value: { people: people.map((p) => ({ company: null, company_evidence: null, role: null, role_evidence: null, how_met: null, linkedin_url: null, linkedin_evidence: null, ...p })) } })
+// Evidence lines, as they appear in the MASKED text the model is given.
+const MARCUS_EV = ['On Mon, Oct 12, 2026 at 9:00 AM Marcus Bell <[email removed]> wrote:', '> Happy to chat. I lead recruiting at Northwind Capital as Head of Talent.'].join(NL)
+const DANA_EV = '> Dana Whitfield is a Senior Associate at Kestrel Partners and will join.'
+const SAME = [
+  'From: Me <me@school.example>',
+  'To: Alex Kim <alex.kim@goldman.example>, Alex Kim <akim@kestrel.example>, Jamie Fox <jamie@goldman.example>',
+  'Date: 2026-10-12',
+  'Subject: Panel',
+  '',
+  `Thanks all for the panel. ${MARK}`,
+  '',
+  'Alex Kim | Associate | Goldman Sachs',
+  'Alex Kim | Partner | Kestrel Partners',
+  'Jamie Fox | Analyst | Goldman Sachs',
+].join(NL)
 
 let chrome = null, gw = null, fake = null, page = null
 async function teardown () {
@@ -526,7 +541,7 @@ async function main () {
   const explainVisible = await page.eval('return !!document.querySelector("[data-testid=paste-email-explanation]") && !!document.querySelector("[role=dialog] a[href=\'/privacy\']")')
   check('the explanation and privacy link are shown before anything is submitted', explainVisible)
   const before2 = counts(); const log2 = gwLog.length; const fake2 = fakeCalls.length
-  setFake(PEOPLE([{ name: 'Priya Shah', company: 'Goldman Sachs', role: 'Analyst' }]), NOTE_OK(`Priya thanked the user for the coffee chat. ${SUMMARY_MARK}`))
+  setFake(PEOPLE([{ name: 'Priya Shah', company: 'Goldman Sachs', company_evidence: 'Priya Shah | Analyst | Goldman Sachs', role: 'Analyst', role_evidence: 'Priya Shah | Analyst | Goldman Sachs' }]), NOTE_OK(`Priya thanked the user for the coffee chat. ${SUMMARY_MARK}`))
   await draftFrom(SINGLE)
   await toReview()
   const fnCall = gwLog.slice(log2).find((e) => e.path === '/functions/v1/ai-paste-email')
@@ -582,10 +597,10 @@ async function main () {
   console.log('4. new contact from a two-person thread: attribution, quoted date, partial save and retry')
   await openDrawerOn(`${GW}/contacts`)
   setFake(PEOPLE([
-    { name: 'Marcus Bell', company: 'Northwind Capital', role: 'Head of Talent', how_met: 'Intro call' },
-    { name: 'Dana Whitfield', company: 'Kestrel Partners', role: 'Senior Associate' },
+    { name: 'Marcus Bell', company: 'Northwind Capital', company_evidence: MARCUS_EV, role: 'Head of Talent', role_evidence: MARCUS_EV, how_met: 'Intro call' },
+    // SWAPPED: Marcus's company offered for Dana, citing Marcus's lines; her own role is evidenced.
+    { name: 'Dana Whitfield', company: 'Northwind Capital', company_evidence: MARCUS_EV, role: 'Senior Associate', role_evidence: DANA_EV },
     { name: 'Ghost Invented', company: 'Nowhere Inc' },
-    { name: 'Dana Whitfield', company: 'Blackstone', role: 'Partner' },
   ]), NOTE_OK(`Marcus and Dana agreed to a follow-up call. ${SUMMARY_MARK}`))
   const before4 = counts(); const log4 = gwLog.length
   await draftFrom(THREAD)
@@ -596,8 +611,11 @@ async function main () {
   const blank4 = await page.eval('return ["#paste-email-name","#paste-email-company","#paste-email-role"].map(s=>document.querySelector(s).value)')
   check('choosing "A new contact" fills NOTHING in by itself', blank4.every((v) => v === ''), JSON.stringify(blank4))
   const opts4 = await page.eval('return [...document.querySelectorAll("#paste-email-ai-person option")].map(o=>o.textContent)')
-  check('the picker offers only people the guards kept (no invented person, no ambiguous duplicate name)',
-    JSON.stringify(opts4) === JSON.stringify(['Choose a person…', 'Marcus Bell', 'Someone not listed']), JSON.stringify(opts4))
+  check('the picker offers the two real people and not the invented one',
+    JSON.stringify(opts4) === JSON.stringify(['Choose a person…', 'Marcus Bell', 'Dana Whitfield', 'Someone not listed']), JSON.stringify(opts4))
+  await page.setValue('#paste-email-ai-person', '1')
+  const dana = await page.eval('return ["#paste-email-name","#paste-email-company","#paste-email-role"].map(s=>document.querySelector(s).value)')
+  check('SWAPPED company: Dana gets her own evidenced role, and Marcus\u2019s company is left blank', JSON.stringify(dana) === JSON.stringify(['Dana Whitfield', '', 'Senior Associate']), JSON.stringify(dana))
   await page.setValue('#paste-email-ai-person', '0')
   const marcus = await page.eval('return ["#paste-email-name","#paste-email-company","#paste-email-role","#paste-email-how-met"].map(s=>document.querySelector(s).value)')
   check('picking Marcus fills ONLY Marcus\u2019s name, company and role', JSON.stringify(marcus) === JSON.stringify(['Marcus Bell', 'Northwind Capital', 'Head of Talent', 'Intro call']), JSON.stringify(marcus))
@@ -635,10 +653,42 @@ async function main () {
     JSON.stringify(tableWritesSince(log4)))
   await page.click('Close', { byText: true, within: '[role=dialog]' })
 
+  // ══ 4b. shared employer and identical display names ════════════════════════
+  console.log('4b. a shared employer is kept; two people with the same name are both offered')
+  await openDrawerOn(`${GW}/contacts`)
+  setFake(PEOPLE([
+    { name: 'Alex Kim', company: 'Goldman Sachs', company_evidence: 'Alex Kim | Associate | Goldman Sachs', role: 'Associate', role_evidence: 'Alex Kim | Associate | Goldman Sachs' },
+    { name: 'Alex Kim', company: 'Kestrel Partners', company_evidence: 'Alex Kim | Partner | Kestrel Partners', role: 'Partner', role_evidence: 'Alex Kim | Partner | Kestrel Partners' },
+    { name: 'Jamie Fox', company: 'Goldman Sachs', company_evidence: 'Jamie Fox | Analyst | Goldman Sachs', role: 'Analyst', role_evidence: 'Jamie Fox | Analyst | Goldman Sachs' },
+  ]), NOTE_OK('Thanked the panel.'))
+  const before4b = counts()
+  await draftFrom(SAME)
+  await toReview()
+  await page.click('A new contact', { byText: true, within: '[role=dialog]' })
+  const opts4b = await page.eval('return [...document.querySelectorAll("#paste-email-ai-person option")].map(o=>o.textContent)')
+  check('both people named Alex Kim are offered, labelled apart',
+    JSON.stringify(opts4b) === JSON.stringify(['Choose a person…', 'Alex Kim (Goldman Sachs, Associate; 1 of 2)', 'Alex Kim (Kestrel Partners, Partner; 2 of 2)', 'Jamie Fox', 'Someone not listed']), JSON.stringify(opts4b))
+  await page.setValue('#paste-email-ai-person', '1')
+  const alex2 = await page.eval('return { f: ["#paste-email-name","#paste-email-company","#paste-email-role"].map(s=>document.querySelector(s).value), warn: document.querySelector("[data-testid=paste-email-ambiguous-name]")?.innerText ?? "" }')
+  check('picking the second Alex Kim fills that person\u2019s own details and warns the name is shared',
+    JSON.stringify(alex2.f) === JSON.stringify(['Alex Kim', 'Kestrel Partners', 'Partner']) && alex2.warn.includes('More than one person in this email is named Alex Kim'), JSON.stringify(alex2))
+  await page.setValue('#paste-email-ai-person', '2')
+  const jamie = await page.eval('return { f: ["#paste-email-name","#paste-email-company","#paste-email-role"].map(s=>document.querySelector(s).value), warn: !!document.querySelector("[data-testid=paste-email-ambiguous-name]") }')
+  check('SHARED employer: Jamie keeps Goldman Sachs (Alex Kim also has it), with no warning',
+    JSON.stringify(jamie.f) === JSON.stringify(['Jamie Fox', 'Goldman Sachs', 'Analyst']) && jamie.warn === false, JSON.stringify(jamie))
+  await page.setValue('#paste-email-address', 'jamie@goldman.example')
+  await page.click('Save', { byText: true, within: '[role=dialog]' })
+  await page.waitFor('document.body.innerText.includes("Saved: the new contact and the interaction.")', 10000, 'saved')
+  const saved4b = one(`SELECT name||'|'||coalesce(company,'')||'|'||coalesce(role,'')||'|'||coalesce(email,'')||'|'||coalesce(array_to_string(tags,','),'')||'|'||coalesce(relationship_note,'') FROM public.contacts WHERE user_id='${A}' AND name='Jamie Fox'`)
+  check('saved: Jamie Fox with the shared employer, her role and chosen address, and no unseen fields',
+    saved4b === 'Jamie Fox|Goldman Sachs|Analyst|jamie@goldman.example||' && counts().contacts === before4b.contacts + 1, saved4b)
+  await page.click('Close', { byText: true, within: '[role=dialog]' })
+
   // ══ 5. double submission ══════════════════════════════════════════════════
   console.log('5. double submission creates no extra records')
   await openDrawerOn(`${GW}/contacts`)
-  setFake(PEOPLE([{ name: 'Lena Ortiz', company: 'Harbor Labs', role: 'Product Manager' }]), NOTE_OK('Lena introduced herself.'))
+  const LENA_EV = `Lena Ortiz, Product Manager at Harbor Labs, here - good to meet you. ${MARK}`
+  setFake(PEOPLE([{ name: 'Lena Ortiz', company: 'Harbor Labs', company_evidence: LENA_EV, role: 'Product Manager', role_evidence: LENA_EV }]), NOTE_OK('Lena introduced herself.'))
   const before5 = counts(); const log5 = gwLog.length
   await draftFrom(LENA)
   await toReview()
