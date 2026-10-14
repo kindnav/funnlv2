@@ -335,10 +335,33 @@ export function buildContactRequest (masked) {
  * The schema requires an allowed date; it is given one placeholder value and the model's
  * date answer is DISCARDED - the date comes only from detectInteractionDate.
  */
+/**
+ * The note is the owner's OWN record in their personal CRM, so it is written to them, not about
+ * "the user". This voice block belongs to paste-email alone: the shared Outlook contract is
+ * imported unchanged and still governs everything the note may say.
+ */
+export const NOTE_VOICE = [
+  'Task: draft the note I keep in my own personal CRM about this email exchange.',
+  'I own this CRM. My own messages may be in the exchange; everyone else in it is a contact.',
+  'VOICE: write it as my own note. Refer to me as "I", "me" or "my", or leave me out where the',
+  'sentence reads naturally without me (for example "Follow-up after the career fair."). Never write',
+  '"the user".',
+  'The voice changes nothing else. Keep every offer, request and commitment attached to the person',
+  'who made it ("She offered to review my resume", never "I offered" when she did), and record only',
+  'what the exchange states.',
+].join('\n')
+
+const NOTE_PREAMBLE = [
+  'I pasted the email exchange below into Funnl. It may include my own messages,',
+  'several participants, signatures and quoted or forwarded history. Email addresses have',
+  `been replaced with ${EMAIL_REDACTED}.`,
+].join('\n')
+
 export function buildNoteRequest (masked, placeholderDate) {
   const content = [
-    'Task: draft an interaction note for the user\'s own record of this email exchange.',
-    PASTE_PREAMBLE,
+    NOTE_VOICE,
+    '',
+    NOTE_PREAMBLE,
     '',
     untrusted(masked),
   ].join('\n')
