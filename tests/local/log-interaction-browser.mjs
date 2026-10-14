@@ -232,8 +232,8 @@ async function main () {
   const U = created.id
   check('user created by the real GoTrue', /^[0-9a-f-]{36}$/.test(U))
   psql(`UPDATE public.profiles SET activation_five_contacts_at = now(), activation_first_interaction_at = now(), activation_first_followup_at = now(), activation_completed_at = now() - interval '2 days' WHERE id = '${U}';`)
-  const ada = randomUUID(), ben = randomUUID()
-  psql(`INSERT INTO public.contacts (id, user_id, name, company) VALUES ('${ada}','${U}','Ada Byron','Analytical Engines'), ('${ben}','${U}','Ben Okafor','Northwind');
+  const ada = randomUUID(), ben = randomUUID(), cara = randomUUID()
+  psql(`INSERT INTO public.contacts (id, user_id, name, company) VALUES ('${ada}','${U}','Ada Byron','Analytical Engines'), ('${ben}','${U}','Ben Okafor','Northwind'), ('${cara}','${U}','Cara Mendes','Brightline');
         INSERT INTO public.interactions (contact_id, user_id, type, interaction_date, notes) VALUES ('${ada}','${U}','Coffee chat', current_date - 7, 'First chat.');`)
   const rows = (cid) => psql(`SELECT type || '|' || coalesce(notes,'') || '|' || coalesce(follow_up_date::text,'') || '|' || coalesce(outreach_status,'') FROM public.interactions WHERE contact_id='${cid}' ORDER BY created_at`).trim().split('\n').filter(Boolean)
 
@@ -328,6 +328,68 @@ async function main () {
   const r2 = rows(ben)
   check('phone save wrote exactly one row with type, note and outreach status', r2.length === 1 && r2[0] === 'Call|Phone note.||responded', JSON.stringify(r2))
   check('the user\u2019s interactions total 3 (no duplicate writes)', one(`SELECT count(*) FROM public.interactions WHERE user_id='${U}'`) === '3')
+
+  // \u2550\u2550 Breakpoint change with an unsaved draft \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
+  console.log('4. Unsaved draft across desktop -> phone -> desktop')
+  // The draft as the VISIBLE form shows it (values only; nothing here is user data).
+  const DRAFT = `
+    const vis = e => !!e && e.getBoundingClientRect().width > 0;
+    const f = [...document.querySelectorAll('form')].find(f => vis(f) && f.querySelector('textarea'));
+    if (!f) return null;
+    const q = s => f.querySelector(s);
+    return {
+      type: q('select').value,
+      date: q('input[type=date][required]').value,
+      notes: q('textarea').value,
+      followUp: q('input[type=date]:not([required])').value,
+      outreach: !!q('input[type=checkbox]')?.checked,
+      status: q('select[aria-label="Outreach status"]')?.value ?? null,
+      inSheet: !!f.closest('[role=dialog][aria-labelledby=log-sheet-title]'),
+    }`
+  const want = { type: 'Email', date: '2026-09-30', notes: 'Draft survives resize.', followUp: '2031-04-04', outreach: true, status: 'meeting_booked' }
+  const same = (d) => !!d && Object.keys(want).every(k => d[k] === want[k])
+  const bodyLock = () => page.eval('return document.body.style.overflow')
+
+  await page.viewport(1366, 900)
+  await openContact(cara)
+  await page.click('+ Log', { byText: true })
+  await page.waitFor('document.querySelector("form textarea")', 5000, 'the desktop form')
+  await page.setValue('form select', 'Email')
+  await page.click('This was outreach I sent', { byText: true })
+  await page.setValue('select[aria-label="Outreach status"]', 'meeting_booked')
+  await page.setValue('input[type=date][required]', '2026-09-30')
+  await page.type('form textarea', 'Draft survives resize.')
+  await page.setValue('input[type=date]:not([required])', '2031-04-04')
+  let d = await page.eval(DRAFT)
+  check('draft entered on desktop (note, date, follow-up, outreach on, status)', same(d) && !d.inSheet, JSON.stringify(d))
+
+  await page.viewport(390, 844, true)
+  await page.waitFor('document.querySelector("[role=dialog][aria-labelledby=log-sheet-title] textarea")', 5000, 'the sheet after shrinking')
+  await sleep(300)
+  s = await state(); d = await page.eval(DRAFT)
+  check('at phone width: only the sheet is rendered', s.mounted === 1 && s.visible === 1 && s.sheet, JSON.stringify(s))
+  check('at phone width: the unsaved draft is intact in the sheet', same(d) && d.inSheet, JSON.stringify(d))
+  check('at phone width: the sheet locks page scroll', (await bodyLock()) === 'hidden')
+  await page.shot('04-draft-after-shrink')
+
+  await page.viewport(1366, 900)
+  await page.waitFor('!document.querySelector("[role=dialog][aria-labelledby=log-sheet-title]") && document.querySelector("form textarea")', 5000, 'the inline form after widening')
+  await sleep(300)
+  s = await state(); d = await page.eval(DRAFT)
+  check('back at desktop width: only the inline form is rendered', s.mounted === 1 && s.visible === 1 && !s.sheet, JSON.stringify(s))
+  check('back at desktop width: the unsaved draft is intact', same(d) && !d.inSheet, JSON.stringify(d))
+  check('back at desktop width: the scroll lock is cleared', (await bodyLock()) === '', JSON.stringify(await bodyLock()))
+  await page.shot('05-draft-after-widen')
+
+  const before = one(`SELECT count(*) FROM public.interactions WHERE user_id='${U}'`)
+  await page.click('Save interaction', { byText: true })
+  await page.waitFor('document.body.innerText.includes("Draft survives resize.") && !document.querySelector("form textarea")', 10000, 'saved')
+  const r3 = rows(cara)
+  check('saving after the resizes creates exactly one interaction with the draft\u2019s values',
+    r3.length === 1 && r3[0] === 'Email|Draft survives resize.|2031-04-04|meeting_booked' &&
+    one(`SELECT interaction_date::text FROM public.interactions WHERE contact_id='${cara}'`) === '2026-09-30' &&
+    one(`SELECT count(*) FROM public.interactions WHERE user_id='${U}'`) === String(Number(before) + 1), JSON.stringify(r3))
+  check('scroll lock still clear after saving', (await bodyLock()) === '')
 }
 
 let harnessError = null

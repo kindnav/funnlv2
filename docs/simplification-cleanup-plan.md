@@ -19,9 +19,9 @@ its own explicit approval.
 | Remove lint-proven unused imports and variables: `ImportContactsModal` (`dbDupMap` / `doneStats` written but never read, the `importableCount` memo, `useMemo`), `CommandPalette`, `SignInPage`, `ContactsPage`, `ContactDetailPage` | Dead | None |
 
 **Proof:**
-- `tests/local/log-interaction-browser.mjs` runs in a real browser with real Postgres, GoTrue and PostgREST: 15 checks.
-  - On unchanged main, 6 fail. This reproduces the defect.
-  - On this branch, all 15 pass.
+- `tests/local/log-interaction-browser.mjs` runs in a real browser with real Postgres, GoTrue and PostgREST: 24 checks, all passing on this branch.
+  - The first 15 run on unchanged main fail 6 times, reproducing the defect.
+  - The last 9 cover an unsaved draft (note, date, follow-up, outreach on and status) carried across desktop, phone and desktop again: one form rendered at each width, the phone scroll lock set then cleared, and one interaction saved with the draft's values.
 - `tests/log-interaction-form.test.js` pins the contracts. It passes on this branch and fails against main's source.
 - `npm test` passes in full.
 
@@ -41,35 +41,153 @@ Each removal below is therefore paired with a Production undeploy, approved sepa
 
 ## 3. Production packet A: stop Outlook processing (prepared, NOT executed)
 
-**Stops:** the every-minute tick, worker runs, Graph subscription renewal, and reading mail.
+**Goal:** no further Outlook processing.
 
-**Keeps:**
-- the connection, tokens, subscription row, cursors and pending suggestions (0 today);
-- accepted contacts and interactions;
-- the Settings card (status + Disconnect) and Suggestions UI;
-- `/privacy`;
-- the consent version.
+- **Stops:** the per-minute tick, worker runs (scheduled or notification-kicked) and Graph
+  subscription renewal.
+- **Kept:**
+  - the connection, tokens, subscription row, committed cursors and pending suggestions;
+  - accepted contacts and interactions;
+  - the Settings card (status and Disconnect) and the Suggestions UI;
+  - `/privacy` and the consent version.
+- **Never:** force, steal or clear a lease or round, or run the worker by hand.
 
-| Step | Command (owner session) | Verify (read-only, counts/names only) |
-|---|---|---|
-| 0. Baseline | none | `SELECT jobname, schedule, active FROM cron.job;` · `SELECT count(*) FROM cron.job_run_details WHERE jobid = (SELECT jobid FROM cron.job WHERE jobname = 'outlook-worker-tick') AND start_time > now() - interval '10 minutes';` · `SELECT max(last_attempt_at), max(last_success_at) FROM public.outlook_sync_state;` · contact and interaction counts |
-| 1. Deactivate the tick | `SELECT cron.alter_job((SELECT jobid FROM cron.job WHERE jobname = 'outlook-worker-tick'), active := false);` | `active = false` |
-| 2. Remove the worker flag | `.\scripts\outlook-worker-flag.ps1 disable` (it verifies ABSENT itself) | `.\scripts\outlook-worker-flag.ps1 status` → ABSENT (names only) |
-| 3. Observe ≥ 60 min | none | 0 new `cron.job_run_details` rows for the job; `outlook_sync_state.last_attempt_at` not advancing. A Microsoft notification may still arrive and record a wake-up, but no read runs without the flag (the worker answers 503 `not_enabled`). |
-| 4. Observe ≤ 3 days | none | `outlook_subscriptions.expires_at` passes without renewal; contact and interaction counts unchanged |
+**How it is enforced.** The worker refuses (503 `not_enabled`) before reading any row unless
+`OUTLOOK_IMPORT_WORKER_ENABLED` is present, so the flag is the stop. Disabling the cron job first
+stops new scheduled ticks. A Microsoft notification can still kick the worker until the flag is
+removed. After that, a notification may still arrive and record a wake-up, but it starts nothing.
 
-**Rollback** (before any deletion):
-1. `.\scripts\outlook-worker-flag.ps1 enable`
-2. `SELECT cron.alter_job(<jobid>, active := true);`
-3. The next run recreates the subscription.
+**Reporting.** Every query below returns counts, booleans, timestamps or md5 digests only. No
+identifiers, addresses or content are printed. The per-row digest lists are written to a local
+file for comparison, never to chat.
 
-**Not touched:** credentials, connection records, tables, functions, Vault secrets, the consent version.
+### Steps
+
+**S0. Preconditions (read-only).**
+
+```sql
+SELECT count(*) AS matching, bool_and(active) AS all_active, min(schedule) AS schedule
+FROM cron.job WHERE jobname = 'outlook-worker-tick';
+```
+
+**Gate:** `matching = 1` exactly. 0 or more than 1 means STOP and report; do not guess which job.
+`scripts/outlook-worker-flag.ps1 status` must report PRESENT, or the deviation is recorded.
+
+**S1. Disable the tick.**
+
+```sql
+SELECT cron.alter_job(j.jobid, active := false)
+FROM cron.job j WHERE j.jobname = 'outlook-worker-tick'
+  AND (SELECT count(*) FROM cron.job WHERE jobname = 'outlook-worker-tick') = 1;
+```
+
+Then re-run the S0 query. **Gate:** `matching = 1`, `all_active = false`.
+
+**S2. Disable the worker flag.** Run `.\scripts\outlook-worker-flag.ps1 disable`, which itself
+requires ABSENT. Then **independently** run `.\scripts\outlook-worker-flag.ps1 status` in a
+separate invocation.
+
+**Gate:** ABSENT (names only). UNVERIFIED or UNKNOWN is not ABSENT: STOP. The rollback is
+available.
+
+**S3. Quiescence: let existing work release naturally.** Poll every few minutes, no fixed wait:
+
+```sql
+SELECT count(*) FILTER (WHERE sync_status = 'running')                           AS running_folders,
+       count(*) FILTER (WHERE sync_lease_until > now())                          AS live_leases,
+       count(*) FILTER (WHERE sync_run_id IS NOT NULL)                           AS held_run_tokens,
+       count(*) FILTER (WHERE round_id IS NOT NULL)                              AS open_rounds,
+       count(*) FILTER (WHERE round_id IS NOT NULL AND round_expires_at <= now()) AS expired_open_rounds
+FROM public.outlook_sync_state;
+```
+
+**Gate:** `running_folders = 0`, `live_leases = 0`, `held_run_tokens = 0` and `open_rounds = 0`.
+
+- **Already met:** a run that was in flight at S1/S2 releases its lease on its own when it
+  finishes. If it holds, continue to S4.
+- **Not met:** if a folder stays `running`, a run token stays held after its lease has expired, or
+  a round stays open, nothing can finish it while the flag is absent. **Do not force it.**
+  - Take the rollback (re-enable the flag and the tick).
+  - Let the scheduled worker complete or expire the round itself (an expired round is discarded
+    and restarts from the committed cursor).
+  - Re-run the packet from S0 at a quiet moment.
+  - Record which counter blocked it.
+
+**S4. Stable baseline (only after S3 passes).** Captured twice, a few minutes apart. Both captures
+must be equal:
+
+- **Processing digest per folder:**
+  `md5(string_agg(concat_ws('|', folder, sync_status, last_attempt_at, last_success_at,
+  run_started_at, last_run_complete, retry_count, md5(coalesce(delta_link_ciphertext,'')),
+  round_id IS NULL), ',' ORDER BY folder))` over `outlook_sync_state`.
+- **Subscription digest:** `md5(concat_ws('|', status, expires_at, renewed_at, last_error_code,
+  md5(coalesce(subscription_id,''))))` over `outlook_subscriptions`. Also record `expires_at` as
+  a timestamp.
+- **Notifications and wakes, recorded SEPARATELY and preserved (never cleared):**
+  - `notifications_received`, `last_notification_at`, `last_lifecycle_event`, `last_lifecycle_at`
+    from `outlook_subscriptions`;
+  - `wake_requested_at`, `wake_count`, `last_wake_at` from `microsoft_connections`.
+- **Protected existing records**, as per-row digests keyed by `md5(id::text)` and written to a
+  local file:
+  - `interactions` where `source IN ('outlook','google_calendar')`, row digest over `contact_id`,
+    `type`, `interaction_date`, `md5(notes)`, `follow_up_date`, `outreach_status`,
+    `follow_up_completed_at`;
+  - `contacts` referenced by `new_contact_candidates.accepted_contact_id`;
+  - `interaction_candidates` and `new_contact_candidates` in status `accepted`, with `status`,
+    `accepted_contact_id` / `accepted_interaction_id` / `interaction_id` presence.
+- **Context only, not a gate:** global contact and interaction counts and the pending-suggestion
+  count.
+
+**S5. Verify no subsequent processing.** Run at least once, at any later time; no mandatory wait.
+
+- **The tick did not run:** `SELECT count(*) FROM cron.job_run_details WHERE jobid = (SELECT jobid
+  FROM cron.job WHERE jobname = 'outlook-worker-tick') AND start_time > <S1 time>;` is `0`.
+- **The processing digest equals the baseline.** No new attempt, run, cursor movement or round.
+- **The subscription digest equals the baseline.** No renewal (`renewed_at` and `expires_at`
+  unmoved).
+- **Notification and wake counters may have increased.** That proves Microsoft still notifies,
+  not that Funnl processed anything. Record the new values; do not clear them.
+- **Protected records:** every baseline row still exists with the same digest, or each difference
+  is explained:
+  - a row missing because the user deleted it, or its contact, in the app (contacts cascade);
+  - a changed digest from a user action in the app (follow-up completed, snoozed or edited, note
+    or outreach status edited);
+  - no difference may be attributed to the worker. With the processing digest unchanged there is
+    no worker write to explain.
+
+  New contacts and interactions created by normal use are expected and are not compared.
+- **Pending suggestions:** none can be created (the producers run only in the worker). An existing
+  pending one may be accepted or dismissed by the user. That is user activity and is recorded.
+
+**S6. Later observation (NOT a prerequisite for stage B).** Without renewal, Microsoft lets the
+subscription lapse at `expires_at` (at most 3 days). Record its final status when it does.
+Stage B (hiding Suggestions) may proceed as soon as S5 passes.
+
+### Rollback
+
+Available until stage C deletes credentials.
+
+1. Run `.\scripts\outlook-worker-flag.ps1 enable`, which verifies PRESENT.
+2. Re-activate the tick:
+
+   ```sql
+   SELECT cron.alter_job(j.jobid, active := true)
+   FROM cron.job j WHERE j.jobname = 'outlook-worker-tick';
+   ```
+
+3. Re-run the S0 query.
+
+The next run renews or recreates the subscription. Committed cursors were never moved, so nothing
+is skipped.
+
+**Not touched by this packet:** credentials, connection records, tables, functions, Vault secrets,
+the consent version, pending suggestions.
 
 ## 4. Deferred stages (each a separate approval, in this order)
 
 | Stage | Content | Precondition |
 |---|---|---|
-| B. Hide | Remove the Suggestions rail item, Review tab, `/suggestions` route, dashboard entry and pending badges. Settings keeps the Outlook card (status and Disconnect) while a connection exists. | Packet A verified (stage 3 at least) |
+| B. Hide | Remove the Suggestions rail item, Review tab, `/suggestions` route, dashboard entry and pending badges. Settings keeps the Outlook card (status and Disconnect) while a connection exists. | Packet A S5 passed (subscription expiry, S6, is not required) |
 | C. Credentials (irreversible) | The pilot account disconnects Outlook in Settings; Google is disconnected through `google-oauth-disconnect` (revokes at Google); the owner removes Funnl at account.microsoft.com. | Owner approval; before and after proof that contacts and interactions are unchanged |
 | D. Undeploy + remove source | Undeploy the Outlook, Google and Gmail functions; delete their source, Outlook/Google/Gmail-only shared modules (computed by import closure; `outlookContentSanitizer`, `outlookDraftContract` and `boundedJson` stay for paste-email), tests and docs; remove `[functions.*]` config, Vault secrets and cron in a **forward** migration. Remove the Settings cards and the Calendar connection UI. | Stage C done |
 | E. Policy | Replace the Outlook, Gmail and Calendar sections of `/privacy` with a short "discontinued" paragraph and a new date. | Owner-approved wording |
