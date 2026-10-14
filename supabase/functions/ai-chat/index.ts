@@ -243,7 +243,7 @@ Deno.serve(async (req) => {
     const [contactsResult, interactionsResult] = await Promise.all([
       supabaseAdmin
         .from('contacts')
-        .select('id, name, company, role, how_met, email, tags, relationship_type, relationship_note')
+        .select('id, name, company, role, school, how_met, email, tags, relationship_type, relationship_note')
         .eq('user_id', user.id)
         .order('created_at', { ascending: false }),
       supabaseAdmin

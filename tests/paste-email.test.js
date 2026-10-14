@@ -395,7 +395,7 @@ test('attribution: the schema asks for evidence per field and nothing the review
   const s = contactFieldsSchema()
   const item = s.properties.people.items
   assert.deepEqual(s.required, ['people'])
-  assert.deepEqual(item.required, ['name', 'company', 'company_evidence', 'role', 'role_evidence', 'how_met', 'linkedin_url', 'linkedin_evidence'])
+  assert.deepEqual(item.required, ['name', 'company', 'company_evidence', 'role', 'role_evidence', 'school', 'school_evidence', 'how_met', 'linkedin_url', 'linkedin_evidence'])
   for (const k of ['email', 'tags', 'relationship_note', 'follow_up_suggestion']) assert.equal(item.properties[k], undefined, k)
   assert.equal(item.additionalProperties, false)
   const content = buildContactRequest('x').messages[0].content

@@ -106,6 +106,7 @@ Fields to extract (include only those explicitly present in the text):
 - name (string) — full name of the person
 - company (string) — company or organization they work at
 - role (string) — their job title or role
+- school (string) — the school, college or university they attend or attended
 - email (string) — only if a complete email address is explicitly stated
 - linkedin_url (string) — only if a linkedin.com URL is explicitly stated
 - how_met (string) — where or how you met them, e.g. "Career fair", "Coffee chat"

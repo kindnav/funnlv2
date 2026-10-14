@@ -65,6 +65,7 @@ const FUNNL_FIELDS = [
   { value: 'email',             label: 'Email' },
   { value: 'linkedin_url',      label: 'LinkedIn URL' },
   { value: 'how_met',           label: 'How met' },
+  { value: 'school',            label: 'School' },
   { value: 'tags',              label: 'Tags' },
   { value: 'relationship_type', label: 'Relationship type' },
   { value: 'relationship_note', label: 'Why they matter' },
@@ -100,6 +101,9 @@ const HEADER_MAP = {
   'where met': 'how_met', 'where we met': 'how_met', 'meeting context': 'how_met',
   'met through': 'how_met', 'met at': 'how_met', 'met via': 'how_met',
   'introduction': 'how_met',
+  'school': 'school', 'school name': 'school', 'university': 'school',
+  'university name': 'school', 'college': 'school', 'college name': 'school',
+  'alma mater': 'school',
   'tags': 'tags', 'tag': 'tags', 'labels': 'tags', 'categories': 'tags', 'groups': 'tags',
   'relationship type': 'relationship_type', 'contact type': 'relationship_type',
   'connection type': 'relationship_type', 'relationship': 'relationship_type',
@@ -114,7 +118,7 @@ const HEADER_MAP = {
 function freshAssignment() {
   return {
     name: [], company: [], role: [], email: [], linkedin_url: [],
-    how_met: [], tags: [], relationship_type: [], relationship_note: [],
+    how_met: [], school: [], tags: [], relationship_type: [], relationship_note: [],
   }
 }
 

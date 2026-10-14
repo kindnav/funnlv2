@@ -16,7 +16,7 @@ import {
 
 const inputClass = 'w-full bg-input border border-line-3 rounded-xl px-[13px] py-[10px] text-[13.5px] text-hi placeholder-lower outline-none focus:border-[rgba(255,68,35,0.4)] transition-colors'
 const labelClass = 'block text-[12px] font-semibold text-mid mb-1.5'
-const EMPTY_CONTACT = { name: '', email: '', company: '', role: '', how_met: '', linkedin_url: '', tags: [], relationship_note: '' }
+const EMPTY_CONTACT = { name: '', email: '', company: '', role: '', school: '', how_met: '', linkedin_url: '', tags: [], relationship_note: '' }
 const NOT_LISTED = 'not_listed'
 
 function PasteEmailDrawer ({ contacts = [], preselectedContact = null, onClose, onSaved }) {
@@ -281,6 +281,8 @@ function PasteEmailDrawer ({ contacts = [], preselectedContact = null, onClose, 
                     <input id="paste-email-company" className={inputClass} value={contactDraft.company} disabled={locked} onChange={(e) => setContactDraft({ ...contactDraft, company: e.target.value })} /></div>
                   <div><label htmlFor="paste-email-role" className={labelClass}>Role</label>
                     <input id="paste-email-role" className={inputClass} value={contactDraft.role} disabled={locked} onChange={(e) => setContactDraft({ ...contactDraft, role: e.target.value })} /></div>
+                  <div><label htmlFor="paste-email-school" className={labelClass}>School</label>
+                    <input id="paste-email-school" className={inputClass} value={contactDraft.school} disabled={locked} onChange={(e) => setContactDraft({ ...contactDraft, school: e.target.value })} /></div>
                   <div><label htmlFor="paste-email-how-met" className={labelClass}>How you met</label>
                     <input id="paste-email-how-met" className={inputClass} value={contactDraft.how_met} disabled={locked} onChange={(e) => setContactDraft({ ...contactDraft, how_met: e.target.value })} /></div>
                   <div><label htmlFor="paste-email-linkedin" className={labelClass}>LinkedIn</label>

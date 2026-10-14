@@ -57,6 +57,7 @@ test('the pasted text is still wrapped as untrusted data, after every instructio
 test('the contact-details request is pinned (the note voice never changes it)', () => {
   // sha256 of buildContactRequest(MASKED). Was 63f5bad0... at main 8d41302; moved ONLY by the
   // evidence-wording change (ask for the name line with the signature lines) in
-  // fix/paste-email-adjacent-signature. A future change must move this pin deliberately.
-  assert.equal(sha(buildContactRequest(MASKED)), '5b9fa33a1f31a254b53c6cb3feebca326b5d9628f6d10792655e79f745744110')
+  // fix/paste-email-adjacent-signature (5b9fa33a...), then by adding School with its evidence
+  // field in feat/contact-school. A future change must move this pin deliberately.
+  assert.equal(sha(buildContactRequest(MASKED)), 'e1647ff0cdea9b498abccf87f9f91e9bb551503c213963fda9ecb7d0f39e9434')
 })

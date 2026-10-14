@@ -157,7 +157,7 @@ export function personOptions (contact) {
 }
 
 // The fields the review step SHOWS. Nothing the reviewer cannot see is filled in.
-const AI_KEYS = ['name', 'company', 'role', 'how_met', 'linkedin_url']
+const AI_KEYS = ['name', 'company', 'role', 'school', 'how_met', 'linkedin_url']
 
 /**
  * The new-contact form after the reviewer picks a proposed person: that person's fields and
@@ -201,6 +201,7 @@ export function buildContactPayload (draft) {
     name: String(draft?.name ?? '').trim(),
     company: draft?.company?.trim() || null,
     role: draft?.role?.trim() || null,
+    school: draft?.school?.trim() || null,
     how_met: draft?.how_met?.trim() || null,
     email: draft?.email?.trim() || null,
     linkedin_url: normalizeUrl(draft?.linkedin_url),

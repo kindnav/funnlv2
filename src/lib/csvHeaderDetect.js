@@ -103,6 +103,13 @@ export const HEADER_MAP = {
   'met at':          'how_met',
   'met via':         'how_met',
   'introduction':    'how_met',
+  'school':          'school',
+  'school name':     'school',
+  'university':      'school',
+  'university name': 'school',
+  'college':         'school',
+  'college name':    'school',
+  'alma mater':      'school',
 
   // Tags
   'tags':       'tags',
@@ -219,7 +226,7 @@ export function isLinkedInExport(row) {
 export function buildInitialAssignment(headers) {
   const FIELD_KEYS = [
     'name', 'company', 'role', 'email', 'linkedin_url',
-    'how_met', 'tags', 'relationship_type', 'relationship_note',
+    'how_met', 'school', 'tags', 'relationship_type', 'relationship_note',
   ]
   const result = Object.fromEntries(FIELD_KEYS.map(k => [k, []]))
   const used = new Set()

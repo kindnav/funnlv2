@@ -210,6 +210,7 @@ supabase/
 | `company` | text | Optional |
 | `role` | text | Optional |
 | `how_met` | text | Optional |
+| `school` | text | Optional — school, college or university (e.g. "Indiana University"). Migration `20261015000000_add_contact_school.sql`, **NOT YET APPLIED** (branch `feat/contact-school`). Editable on the contact form, shown on the contact page, searchable, a sortable table column, CSV-mappable (School/University/College/Alma Mater; the AI column-mapper does not suggest it), extracted by AI Fill and by Paste email (same evidence rules as company/role), and included in Funnl AI chat context. |
 | `email` | text | Optional |
 | `linkedin_url` | text | Optional |
 | `tags` | text[] | Optional — relationship labels e.g. ["recruiter", "target firm"]. Drives the sidebar YOUR TAGS section and ContactsPage ?tag= filter. |
@@ -256,6 +257,7 @@ supabase/
 | `activation_completed_at` | timestamptz | Nullable — set when all three activation steps are complete. Same idempotent write. |
 
 **Applied migrations:**
+- `supabase/migrations/20261015000000_add_contact_school.sql` — **NOT YET APPLIED.** Adds nullable `contacts.school text` (no default, no backfill, no CHECK, RLS/grants unchanged). Must be applied BEFORE the website that writes `school` is published and BEFORE `ai-chat` (which selects it) is deployed. Rollback: leave the column in place.
 - `supabase/migrations/20260713075431_add_activation_milestones.sql` — adds the four activation timestamp columns above to `profiles`, with backfill SQL for existing users. Applied to production 2026-07-13.
 - `supabase/migrations/20260713185900_harden_handle_new_user.sql` — revokes EXECUTE on `public.handle_new_user()` from `PUBLIC`, `anon`, and `authenticated`. Applied to production 2026-07-13 via `supabase db push`. Post-migration verification: PUBLIC absent from explicit ACL; `anon` and `authenticated` effective execute = false; trigger `on_auth_user_created` still enabled; function owner, SECURITY DEFINER, and search_path unchanged. Requires a real signup/profile creation test to confirm trigger path is unaffected.
 - `supabase/migrations/20260721000000_add_outreach_status.sql` — adds nullable `outreach_status text` column to `public.interactions` with named CHECK constraint `interactions_outreach_status_check` (five allowed values). Applied to production 2026-07-24 via `supabase db push --linked`. Column verified: text, nullable YES, no default. Constraint verified: correct five-value check, NULL permitted. Existing 5 interaction rows unaffected (all `outreach_status = NULL`). RLS and all four ownership policies verified unchanged.
