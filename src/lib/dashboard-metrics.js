@@ -167,9 +167,8 @@ export function computeSignals(contacts, interactions, todayStr) {
 /**
  * Returns the NETWORK SIGNAL card text.
  *
- * This is entirely deterministic — not AI-generated. The true AI weekly insight
- * (which requires a cached or intentionally scheduled generation flow) is behind
- * AI_WEEKLY_INSIGHT_ENABLED = false in DashboardPage.jsx and is not shown.
+ * This is entirely deterministic — not AI-generated. An AI weekly insight would
+ * require a cached or intentionally scheduled generation flow; none exists.
  */
 export function computeNetworkSignal(signals, interactionsThisWeek, awaitingCount, contactCount) {
   const quietCount = signals.filter(s => s.type === 'going_quiet').length

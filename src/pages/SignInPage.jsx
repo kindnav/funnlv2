@@ -94,7 +94,6 @@ const labelCls = 'block text-[13px] font-semibold text-[#4A3C2E] mb-2'
 
 // Ember primary button (flat, no gradient, no glow)
 const btnPrimary = 'w-full bg-ember hover:bg-ember-hover text-white text-[15px] font-bold py-[14px] rounded-xl transition-colors motion-reduce:transition-none disabled:opacity-50 disabled:cursor-not-allowed'
-const btnSecondary = 'w-full bg-[#EDE9E2] hover:bg-[#E3DDD5] text-[#1C1510] text-[15px] font-bold py-[14px] rounded-xl transition-colors motion-reduce:transition-none disabled:opacity-50 disabled:cursor-not-allowed'
 
 // ---------------------------------------------------------------------------
 // SignInPage

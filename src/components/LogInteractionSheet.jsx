@@ -7,7 +7,11 @@
  * All form state and the submit handler live in ContactDetailPage so there is
  * one source of truth for mutation logic, analytics, and Log Result behaviour.
  * This component is a pure UI shell — it receives state + setters as props and
- * calls onSubmit (handleLogInteraction) directly.
+ * calls onSubmit (handleLogInteraction) directly. The fields themselves are
+ * InteractionFormFields, shared with the desktop inline form.
+ *
+ * ContactDetailPage mounts this sheet ONLY below md (useMediaQuery), so its
+ * focus trap, Escape handler and scroll lock never act on the desktop page.
  *
  * Accessibility
  *   - role="dialog" aria-modal="true"
@@ -20,6 +24,7 @@
  *     element that triggered the sheet). Sheet focuses it on close.
  */
 import { useEffect, useRef } from 'react'
+import InteractionFormFields from './InteractionFormFields'
 
 const SHEET_TITLE_ID = 'log-sheet-title'
 const FOCUSABLE_SEL  = [
@@ -28,10 +33,6 @@ const FOCUSABLE_SEL  = [
   '[tabindex]:not([tabindex="-1"])',
 ].join(',')
 
-const TYPE_OPTIONS = ['Coffee chat', 'Email', 'Event', 'Call', 'Message', 'Other']
-const iCls = 'w-full bg-input border border-line-3 rounded-xl px-[13px] py-[11px] text-[13.5px] text-hi placeholder-lower outline-none focus:border-[rgba(255,68,35,0.4)] transition-colors'
-const lCls = 'mb-[7px] block text-[12.5px] font-semibold text-mid'
-const sCls = `${iCls} cursor-pointer`
 
 function useFocusTrap(containerRef, active) {
   useEffect(() => {
@@ -167,125 +168,24 @@ export default function LogInteractionSheet({
         {/* Form — single onSubmit pointing at handleLogInteraction in parent */}
         <form onSubmit={onSubmit} className="p-4 space-y-3">
 
-          {/* Type */}
-          <div>
-            <label className={lCls} htmlFor="ls-type">Type</label>
-            <select
-              id="ls-type"
-              ref={typeSelRef}
-              value={type}
-              onChange={e => onTypeChange(e.target.value)}
-              className={sCls}
-            >
-              {TYPE_OPTIONS.map(o => <option key={o}>{o}</option>)}
-            </select>
-          </div>
-
-          {/* Date */}
-          <div>
-            <label className={lCls} htmlFor="ls-date">
-              Date <span style={{ color: 'var(--color-ember)' }}>*</span>
-            </label>
-            <input
-              id="ls-date"
-              type="date"
-              value={interactionDate}
-              onChange={e => setInteractionDate(e.target.value)}
-              required
-              className={iCls}
-            />
-          </div>
-
-          {/* Notes */}
-          <div>
-            <label className={lCls} htmlFor="ls-notes">Notes</label>
-            <textarea
-              id="ls-notes"
-              value={notes}
-              onChange={e => setNotes(e.target.value)}
-              rows={3}
-              placeholder="What did you talk about? Any key takeaways?"
-              className={`${iCls} resize-y min-h-[80px]`}
-            />
-          </div>
-
-          {/* Follow-up date */}
-          <div>
-            <label className={lCls} htmlFor="ls-followup">Follow-up date</label>
-            <input
-              id="ls-followup"
-              ref={followUpDateRef}
-              type="date"
-              value={followUpDate}
-              onChange={e => setFollowUpDate(e.target.value)}
-              className={iCls}
-            />
-          </div>
-
-          {/* Outreach — Email / Message */}
-          {(type === 'Email' || type === 'Message') && (
-            <div className="space-y-2.5">
-              <label className="flex items-center gap-2.5 cursor-pointer select-none">
-                <input
-                  type="checkbox"
-                  checked={trackOutreach}
-                  onChange={e => {
-                    setTrackOutreach(e.target.checked)
-                    if (e.target.checked && !outreachStatus) setOutreachStatus('awaiting_response')
-                    if (!e.target.checked) setOutreachStatus('')
-                  }}
-                  className="w-4 h-4 accent-[#FF4423] cursor-pointer"
-                />
-                <span className="text-[13px] font-semibold text-hi">This was outreach I sent</span>
-              </label>
-              <p className="text-[12px] text-lower">
-                Track the response manually. Automatic inbox syncing is not enabled.
-              </p>
-              {trackOutreach && (
-                <select
-                  value={outreachStatus}
-                  onChange={e => setOutreachStatus(e.target.value)}
-                  className={sCls}
-                >
-                  <option value="awaiting_response">Awaiting response</option>
-                  <option value="responded">Responded</option>
-                  <option value="meeting_booked">Meeting booked</option>
-                  <option value="no_response">No response</option>
-                  <option value="declined">Declined</option>
-                </select>
-              )}
-            </div>
-          )}
-
-          {/* Outreach — Call / Other */}
-          {(type === 'Call' || type === 'Other') && (
-            <div>
-              <label className={lCls} htmlFor="ls-outreach-status">
-                Outreach status
-                <span className="text-lower font-normal ml-1">
-                  — Track the outcome manually. Automatic syncing is not enabled.
-                </span>
-              </label>
-              <select
-                id="ls-outreach-status"
-                value={outreachStatus}
-                onChange={e => setOutreachStatus(e.target.value)}
-                className={sCls}
-              >
-                <option value="">— not set —</option>
-                <option value="awaiting_response">Awaiting response</option>
-                <option value="responded">Responded</option>
-                <option value="meeting_booked">Meeting booked</option>
-                <option value="no_response">No response</option>
-                <option value="declined">Declined</option>
-              </select>
-            </div>
-          )}
-
-          {/* Error */}
-          {formError && (
-            <p className="text-sm font-medium" style={{ color: 'var(--color-danger)' }}>{formError}</p>
-          )}
+          <InteractionFormFields
+            idPrefix="ls"
+            type={type}
+            onTypeChange={onTypeChange}
+            interactionDate={interactionDate}
+            setInteractionDate={setInteractionDate}
+            notes={notes}
+            setNotes={setNotes}
+            followUpDate={followUpDate}
+            setFollowUpDate={setFollowUpDate}
+            trackOutreach={trackOutreach}
+            setTrackOutreach={setTrackOutreach}
+            outreachStatus={outreachStatus}
+            setOutreachStatus={setOutreachStatus}
+            formError={formError}
+            typeSelectRef={typeSelRef}
+            followUpDateRef={followUpDateRef}
+          />
 
           {/* Actions */}
           <div className="flex gap-2 pt-1">

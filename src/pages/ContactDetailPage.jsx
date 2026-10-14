@@ -4,7 +4,6 @@ import { supabase } from '../lib/supabase'
 import { getAvatarColor, getInitials } from '../lib/avatarUtils'
 import InteractionSourceBadge from '../components/InteractionSourceBadge'
 import { track } from '../lib/analytics'
-import { CONTACT_AI_ENABLED, snoozeOptionToDate } from '../lib/contactDirectoryUtils'
 import { effectiveOutreachStatus } from '../lib/contactFormUtils'
 import { typeChangeFields, followUpDateChanged, shouldFireOutreachChangeOnEdit } from '../lib/interactionFormUtils'
 import { clearCompletionFields } from '../lib/followUpUtils'
@@ -12,6 +11,8 @@ import { completeFollowUp, snoozeFollowUp as snoozeFollowUpAction } from '../lib
 import TopBar from '../components/TopBar'
 import AddContactDrawer from '../components/AddContactDrawer'
 import LogInteractionSheet from '../components/LogInteractionSheet'
+import InteractionFormFields from '../components/InteractionFormFields'
+import { useMediaQuery, MD_UP } from '../lib/useMediaQuery'
 import PasteEmailDrawer from '../components/PasteEmailDrawer'
 import { useProStatus } from '../lib/useProStatus'
 import { hasProAccess } from '../lib/pro-ui-status'
@@ -228,6 +229,11 @@ function ContactDetailPage() {
   const loggedWarningTimerRef = useRef(null)
   // Ref to the Log interaction button — receives focus when the mobile sheet closes.
   const logCTARef            = useRef(null)
+  // Exactly one Log interaction container is mounted: the inline form from md up, the
+  // bottom sheet below it. Both used to mount at once (one hidden by CSS), so the hidden
+  // sheet's focus trap and Escape handler acted on desktop and held the shared
+  // follow-up-date ref, sending "Create a follow-up" focus to an invisible input.
+  const isDesktop = useMediaQuery(MD_UP)
   // Tracks whether focus was on a mobile trigger before the sheet opened.
   const sheetPrevFocusRef    = useRef(null)
 
@@ -718,8 +724,6 @@ function ContactDetailPage() {
                 )}
               </div>
 
-              {/* Contact AI slot — deferred while CONTACT_AI_ENABLED is false */}
-              {/* CONTACT_AI_ENABLED = false → section removed entirely */}
 
               {/* Delete */}
               <div>
@@ -777,70 +781,34 @@ function ContactDetailPage() {
               </button>
             </div>
 
-            {/* Log interaction form — desktop only; mobile uses LogInteractionSheet */}
-            {showForm && (
-              <form ref={interactionFormRef} onSubmit={handleLogInteraction} className="hidden md:block mb-5 space-y-3 bg-elevated border border-line-2 rounded-xl p-4">
-                <div>
-                  <label className={lCls}>Type</label>
-                  <select value={type} onChange={e => handleTypeChange(e.target.value)} className={sCls}>
-                    {TYPE_OPTIONS.map(o => <option key={o}>{o}</option>)}
-                  </select>
-                </div>
-                <div>
-                  <label className={lCls}>Date <span className="text-accent">*</span></label>
-                  <input type="date" value={interactionDate} onChange={e => setInteractionDate(e.target.value)} required className={iCls}/>
-                </div>
-                <div>
-                  <label className={lCls}>Notes</label>
-                  <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={3}
-                    placeholder="What did you talk about? Any key takeaways?"
-                    className={`${iCls} resize-y min-h-[80px]`}/>
-                </div>
-                <div>
-                  <label className={lCls}>Follow-up date</label>
-                  <input ref={followUpDateInputRef} type="date" value={followUpDate} onChange={e => setFollowUpDate(e.target.value)} className={iCls}/>
-                </div>
-                {(type === 'Email' || type === 'Message') && (
-                  <div className="space-y-2.5">
-                    <label className="flex items-center gap-2.5 cursor-pointer select-none">
-                      <input type="checkbox" checked={trackOutreach}
-                        onChange={e => {
-                          setTrackOutreach(e.target.checked)
-                          if (e.target.checked && !outreachStatus) setOutreachStatus('awaiting_response')
-                          if (!e.target.checked) setOutreachStatus('')
-                        }}
-                        className="w-4 h-4 accent-[#FF4423] cursor-pointer"/>
-                      <span className="text-[13px] font-semibold text-hi">This was outreach I sent</span>
-                    </label>
-                    <p className="text-[12px] text-lower">Track the response manually. Automatic inbox syncing is not enabled.</p>
-                    {trackOutreach && (
-                      <select value={outreachStatus} onChange={e => setOutreachStatus(e.target.value)} className={sCls}>
-                        <option value="awaiting_response">Awaiting response</option>
-                        <option value="responded">Responded</option>
-                        <option value="meeting_booked">Meeting booked</option>
-                        <option value="no_response">No response</option>
-                        <option value="declined">Declined</option>
-                      </select>
-                    )}
-                  </div>
-                )}
-                {(type === 'Call' || type === 'Other') && (
-                  <div>
-                    <label className={lCls}>
-                      Outreach status
-                      <span className="text-lower font-normal ml-1">— Track the outcome manually. Automatic syncing is not enabled.</span>
-                    </label>
-                    <select value={outreachStatus} onChange={e => setOutreachStatus(e.target.value)} className={sCls}>
-                      <option value="">— not set —</option>
-                      <option value="awaiting_response">Awaiting response</option>
-                      <option value="responded">Responded</option>
-                      <option value="meeting_booked">Meeting booked</option>
-                      <option value="no_response">No response</option>
-                      <option value="declined">Declined</option>
-                    </select>
-                  </div>
-                )}
-                {formError && <p className="text-sm text-danger">{formError}</p>}
+            {/* Log interaction form — desktop (md and up); phones get LogInteractionSheet.
+                Escape closes it and returns focus to the Log control, as before. */}
+            {showForm && isDesktop && (
+              <form
+                ref={interactionFormRef}
+                onSubmit={handleLogInteraction}
+                onKeyDown={e => {
+                  if (e.key === 'Escape') { e.stopPropagation(); setShowForm(false); setTimeout(() => logCTARef.current?.focus(), 0) }
+                }}
+                className="mb-5 space-y-3 bg-elevated border border-line-2 rounded-xl p-4"
+              >
+                <InteractionFormFields
+                  idPrefix="lf"
+                  type={type}
+                  onTypeChange={handleTypeChange}
+                  interactionDate={interactionDate}
+                  setInteractionDate={setInteractionDate}
+                  notes={notes}
+                  setNotes={setNotes}
+                  followUpDate={followUpDate}
+                  setFollowUpDate={setFollowUpDate}
+                  trackOutreach={trackOutreach}
+                  setTrackOutreach={setTrackOutreach}
+                  outreachStatus={outreachStatus}
+                  setOutreachStatus={setOutreachStatus}
+                  formError={formError}
+                  followUpDateRef={followUpDateInputRef}
+                />
                 <button type="submit" disabled={submitting}
                   className="w-full text-[13.5px] font-bold py-[11px] rounded-[11px] hover:opacity-90 transition-opacity disabled:opacity-40"
                   style={{ background: 'var(--color-ember)', color: 'var(--color-paper)' }}>
@@ -1003,9 +971,9 @@ function ContactDetailPage() {
           </div>
         </div>
 
-      {/* Mobile bottom sheet — shown on small screens instead of the desktop inline form */}
+      {/* Phone bottom sheet — mounted only below md, instead of the desktop inline form */}
       <LogInteractionSheet
-        open={showForm}
+        open={showForm && !isDesktop}
         onClose={() => setShowForm(false)}
         contactName={contact?.name}
         focusRestoreRef={logCTARef}

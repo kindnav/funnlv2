@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useMemo, useCallback, Fragment } from 'react'
+import { useState, useRef, useEffect, useCallback, Fragment } from 'react'
 import { useNavigate } from 'react-router-dom'
 import Papa from 'papaparse'
 import { supabase } from '../lib/supabase'
@@ -281,7 +281,6 @@ export default function ImportContactsModal({ onClose, onImported }) {
   const [tagSummary, setTagSummary]   = useState([])
   const [fixingRowId, setFixingRowId] = useState(null)
   const [fixNameValue, setFixNameValue] = useState('')
-  const [dbDupMap, setDbDupMap]       = useState(new Map()) // rowId → {id, name} for DB-existing dups
 
   // Per-row AI suggestion review state: Map<rowId, RowSuggestionState>
   const [suggestionReview, setSuggestionReview] = useState(() => new Map())
@@ -293,7 +292,6 @@ export default function ImportContactsModal({ onClose, onImported }) {
   const [retryPayloadItems, setRetryPayloadItems] = useState(null)
 
   // Done step stats
-  const [doneStats, setDoneStats]       = useState(null)
   const [doneStatsLine, setDoneStatsLine] = useState('')
   const [importedContacts, setImportedContacts] = useState([])
   const [chooserQuery, setChooserQuery] = useState('')
@@ -404,14 +402,6 @@ export default function ImportContactsModal({ onClose, onImported }) {
       .map(f => f.value),
   ].slice(0, 5)
   const previewContacts = rows.slice(0, 5).map(row => transformRow(row, assignment))
-
-  const importableCount = useMemo(() => {
-    if (!rows.length || !assignment.name.length) return 0
-    return rows.filter(row => {
-      const nameParts = assignment.name.map(col => (row[col] || '').trim()).filter(Boolean)
-      return nameParts.join(' ').trim().length > 0
-    }).length
-  }, [rows, assignment])
 
   function computeMappingSignature() {
     return JSON.stringify(
@@ -569,7 +559,6 @@ export default function ImportContactsModal({ onClose, onImported }) {
     setTagSummary([])
     setFixingRowId(null)
     setFixNameValue('')
-    setDbDupMap(new Map())
     if (fileInputRef.current) fileInputRef.current.value = ''
   }
 
@@ -720,7 +709,6 @@ export default function ImportContactsModal({ onClose, onImported }) {
       rRows.filter(r => r._defaultSelected).map(r => r._rowId)
     )
 
-    setDbDupMap(dbDups)
     setReviewRows(rRows)
     setSelectedIds(defaultSelected)
     setTagSummary(tSummary)
@@ -803,7 +791,6 @@ export default function ImportContactsModal({ onClose, onImported }) {
     const stats     = computeDoneStats(reviewRows, importedCount)
     const statsLine = buildDoneStatsLine(tagSummary, stats)
 
-    setDoneStats(stats)
     setDoneStatsLine(statsLine)
     setImportedContacts(execResult.successfulContacts.map(r => ({ id: r.id, name: r.name || '' })))
     setResult({ imported: importedCount, importedIds })
@@ -843,7 +830,6 @@ export default function ImportContactsModal({ onClose, onImported }) {
     const stats     = computeDoneStats(reviewRows, importedCount)
     const statsLine = buildDoneStatsLine(tagSummary, stats)
 
-    setDoneStats(stats)
     setDoneStatsLine(statsLine)
     setImportedContacts(mergedResult.successfulContacts.map(r => ({ id: r.id, name: r.name || '' })))
     setResult({ imported: importedCount, importedIds })

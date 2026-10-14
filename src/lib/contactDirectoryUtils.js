@@ -20,9 +20,6 @@ export const CATEGORY_ORDER = [
   'recently_active',   // actively managed — lowest urgency
 ]
 
-// Feature flag: contact-level AI insight. Deferred — do not show while false.
-export const CONTACT_AI_ENABLED = false
-
 // ── URL state ─────────────────────────────────────────────────────────────────
 
 /** Parse ?sort= URL param; unknown values silently fall back to DEFAULT_SORT. */
@@ -65,16 +62,6 @@ export function snoozeOptionToDate(option, customDate, today) {
   const ms = Date.UTC(y, m - 1, d) + days * 86400000
   const r = new Date(ms)
   return `${r.getUTCFullYear()}-${String(r.getUTCMonth() + 1).padStart(2, '0')}-${String(r.getUTCDate()).padStart(2, '0')}`
-}
-
-// ── Pro gate helper (pure — no Supabase) ─────────────────────────────────────
-
-/**
- * Whether to show contact-level AI. Requires both Pro access AND feature enabled.
- * While CONTACT_AI_ENABLED is false, this always returns false.
- */
-export function shouldShowContactAI(canUsePro, featureEnabled) {
-  return featureEnabled === true && canUsePro === true
 }
 
 // ── Status derivation ─────────────────────────────────────────────────────────
