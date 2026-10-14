@@ -1,5 +1,6 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { loadProEntitlement, decideEntitlement } from '../shared/pro-entitlement.js'
+import { parseModelContact } from './parse.js'
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -118,7 +119,8 @@ Text: ${JSON.stringify(text)}`,
     })
 
     if (!anthropicRes.ok) {
-      console.error('Anthropic API error:', await anthropicRes.text())
+      // Status only. The provider's body is not read into a log: it is not ours to keep.
+      console.error('ai-parse-contact provider_error', anthropicRes.status)
       return new Response(
         JSON.stringify({ error: 'AI service error — please try again' }),
         { status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
@@ -126,24 +128,20 @@ Text: ${JSON.stringify(text)}`,
     }
 
     const anthropicData = await anthropicRes.json()
-    let rawContent = (anthropicData.content?.[0]?.text ?? '').trim()
-
-    // Strip markdown code fences if the model wraps output despite instructions
-    if (rawContent.startsWith('```')) {
-      rawContent = rawContent.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '').trim()
-    }
+    const rawContent = anthropicData.content?.[0]?.text ?? ''
 
     // ── 5. Parse the JSON Claude returned ─────────────────────────────────────
-    let contact
-    try {
-      contact = JSON.parse(rawContent)
-    } catch {
-      console.error('Failed to parse Claude output as JSON:', rawContent)
+    // The reply is derived from the user's pasted text, so it is NEVER logged: only the
+    // controlled code from parseModelContact is.
+    const parsed = parseModelContact(rawContent)
+    if (!parsed.ok) {
+      console.error('ai-parse-contact', parsed.code)
       return new Response(
         JSON.stringify({ error: 'Could not parse AI response — please try again' }),
         { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
       )
     }
+    const contact = parsed.contact
 
     return new Response(
       JSON.stringify({ contact }),
@@ -151,7 +149,8 @@ Text: ${JSON.stringify(text)}`,
     )
 
   } catch (err) {
-    console.error('Unexpected error:', err)
+    // The error's name only: a message can carry fragments of a request or a reply.
+    console.error('ai-parse-contact unexpected', err?.name ?? 'error')
     return new Response(
       JSON.stringify({ error: 'Something went wrong — please try again' }),
       { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
