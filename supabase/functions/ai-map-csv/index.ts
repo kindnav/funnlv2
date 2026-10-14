@@ -167,7 +167,8 @@ ${sampleJson}`
     })
 
     if (!anthropicRes.ok) {
-      console.error('Anthropic API error:', await anthropicRes.text())
+      // Status only. The provider's body is not read into a log: it is not ours to keep.
+      console.error('ai-map-csv provider_error', anthropicRes.status)
       return new Response(
         JSON.stringify({ error: 'AI service error — please try again' }),
         { status: 502, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
@@ -187,7 +188,10 @@ ${sampleJson}`
     try {
       parsed = JSON.parse(rawContent)
     } catch {
-      console.error('Failed to parse Claude output as JSON:', rawContent)
+      // The reply is derived from the user's CSV headers and sample rows, so it is NEVER
+      // logged: only a controlled code is.
+      const code = rawContent.length === 0 ? 'empty_model_output' : 'unparseable_model_output'
+      console.error('ai-map-csv', code)
       return new Response(
         JSON.stringify({ error: 'Could not parse AI response — please try again' }),
         { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
@@ -227,7 +231,8 @@ ${sampleJson}`
     )
 
   } catch (err) {
-    console.error('Unexpected error:', err)
+    // The error's name only: a message can carry fragments of a request or a reply.
+    console.error('ai-map-csv unexpected', err?.name ?? 'error')
     return new Response(
       JSON.stringify({ error: 'Something went wrong — please try again' }),
       { status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' } }
