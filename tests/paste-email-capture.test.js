@@ -14,6 +14,7 @@ import { readFileSync } from 'fs'
 import {
   requestPasteDraft, matchAddressesToContacts, initialAttribution, resolveInteractionDate,
   buildContactPayload, reviewErrors, createPasteSaver, messageForSave, messageForPasteCode,
+  personOptions, applyPerson, draftNotices,
 } from '../src/lib/pasteEmailCapture.js'
 
 const read = (p) => readFileSync(new URL(p, import.meta.url), 'utf8').split(String.fromCharCode(13)).join('')
@@ -67,6 +68,42 @@ test('capture from a contact page uses that contact, and warns if their address 
   assert.equal(absent.warning, 'preselected_not_in_paste')
   assert.deepEqual(absent.person, { kind: 'existing', contactId: 'c2' })
   assert.equal(initialAttribution({ preselectedContactId: 'c2', addresses: [], contacts: CONTACTS }).warning, null)
+})
+
+// ── Choosing which proposed person a new contact is ───────────────────────────
+
+const PROPOSED = { people: [
+  { fields: { name: 'Priya Shah', company: 'Goldman Sachs', role: 'Analyst', tags: ['finance'] }, dropped: [] },
+  { fields: { name: 'Sam Lee', company: 'Finance Club', role: 'Treasurer' }, dropped: [] },
+] }
+
+test('people are offered by name, nothing preselected', () => {
+  assert.deepEqual(personOptions(PROPOSED), [{ index: 0, name: 'Priya Shah' }, { index: 1, name: 'Sam Lee' }])
+  assert.deepEqual(personOptions(null), [])
+  assert.deepEqual(personOptions({ people: [{ fields: {} }] }), [])
+})
+
+test('picking a person fills ONLY that person\u2019s details; switching replaces them all', () => {
+  const start = { name: '', email: 'sam@club.example', company: '', role: '', how_met: '', linkedin_url: '', tags: [], relationship_note: '' }
+  const priya = applyPerson(start, PROPOSED.people[0])
+  assert.deepEqual([priya.name, priya.company, priya.role, priya.tags], ['Priya Shah', 'Goldman Sachs', 'Analyst', ['finance']])
+  const sam = applyPerson(priya, PROPOSED.people[1])
+  assert.deepEqual([sam.name, sam.company, sam.role, sam.tags], ['Sam Lee', 'Finance Club', 'Treasurer', []])
+  assert.equal(sam.email, 'sam@club.example')
+  const cleared = applyPerson(sam, null)
+  assert.deepEqual([cleared.name, cleared.company, cleared.role], ['', '', ''])
+})
+
+test('a field the server left blank stays blank after picking that person', () => {
+  const d = applyPerson({ company: 'typed earlier' }, { fields: { name: 'Priya Shah' } })
+  assert.equal(d.company, '')
+})
+
+test('a partial draft is never silent', () => {
+  assert.deepEqual(draftNotices({ note_code: 'ok', contact_code: 'ok' }), [])
+  assert.equal(draftNotices({ note_code: 'note_provider_error', contact_code: 'ok' }).length, 1)
+  assert.match(draftNotices({ note_code: 'note_defer', contact_code: 'ok' })[0], /did not find a conversation/)
+  assert.match(draftNotices({ note_code: 'ok', contact_code: 'contact_no_people' })[0], /could not identify/)
 })
 
 // ── Dates ──────────────────────────────────────────────────────────────────────
@@ -250,12 +287,32 @@ test('drawer: the raw paste is cleared on cancel, Escape and successful save, an
   for (const bad of ['localStorage', 'sessionStorage', 'console.', 'track(\'paste']) assert.equal(src.includes(bad), false, bad)
 })
 
-test('drawer: Save is disabled while saving; AI contact fields only fill a NEW contact', () => {
+test('drawer: Save is disabled while saving; AI fields fill a NEW contact only from the picked person', () => {
   const src = read('../src/components/PasteEmailDrawer.jsx')
   assert.ok(src.includes('disabled={saving || errors.length > 0}'))
-  const choose = src.slice(src.indexOf('function choose'), src.indexOf('async function save'))
-  assert.ok(choose.includes("if (next?.kind === 'new')"))
+  const choose = src.slice(src.indexOf('function choose'), src.indexOf('function chooseAiPerson'))
+  assert.equal(choose.includes('applyPerson'), false)
   assert.ok(choose.includes('createdContactId) return'))
+  const pick = src.slice(src.indexOf('function chooseAiPerson'), src.indexOf('async function save'))
+  assert.ok(pick.includes('applyPerson(cur, picked)'))
+  assert.ok(src.includes("person?.kind === 'new' && !preselectedContact"))
+})
+
+test('drawer: the paste and the note are never silently truncated', () => {
+  const src = read('../src/components/PasteEmailDrawer.jsx')
+  assert.equal(src.includes('.slice(0, MAX_PASTE_CHARS)'), false)
+  assert.equal(/maxLength=/.test(src), false)
+  assert.ok(src.includes('disabled={drafting || !text.trim() || overLimit}'))
+})
+
+test('drawer: a failed draft keeps the paste for retry; Back returns to it before any save', () => {
+  const src = read('../src/components/PasteEmailDrawer.jsx')
+  const draft = src.slice(src.indexOf('async function draft'), src.indexOf('const d = r.data'))
+  assert.ok(draft.includes("if (!r.ok) { setError(messageForPasteCode(r.code)); return }"))
+  assert.equal(draft.includes("setText('')"), false)
+  const back = src.slice(src.indexOf('function backToPaste'), src.indexOf('function choose'))
+  assert.ok(back.includes('saveResult?.contactSaved || saveResult?.interactionSaved) return'))
+  assert.equal(back.includes("setText('')"), false)
 })
 
 test('entry points are Pro-only; the contact page preselects its contact', () => {

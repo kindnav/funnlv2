@@ -8,14 +8,17 @@
 //   * ATTRIBUTION IS NEVER ASSUMED. Capture started from a contact's page uses that contact.
 //     Otherwise the reviewer must choose the person. Funnl's login address is NOT treated as
 //     the user's mailbox identity, and a found address only produces a SUGGESTION to choose.
-//   * The AI's contact fields are offered only when the reviewer chooses "new contact", and are
-//     never written onto an existing contact.
+//   * The AI proposes one record PER PERSON in the thread. Its fields reach the form only when
+//     the reviewer chooses "new contact" AND picks which person that is; they are never
+//     written onto an existing contact, and an address is never matched to a record.
 //   * A date is prefilled only when the server classed it 'clear'; anything else stays blank
 //     and required.
 //   * Saving is idempotent: a contact created by an earlier attempt is remembered and reused,
 //     so a retry never creates a second one, and a submission in flight blocks another.
 
 export const MAX_NOTE_CHARS = 10_000
+/** Mirrors MAX_PASTE_CHARS in supabase/functions/shared/pasteEmail.js. */
+export const MAX_PASTE_CHARS = 12_000
 export const PASTE_FUNCTION = 'ai-paste-email'
 
 /**
@@ -45,12 +48,16 @@ export async function requestPasteDraft (client, text) {
 export function messageForPasteCode (code) {
   switch (code) {
     case 'pro_required': return 'Paste an email is a Pro feature.'
-    case 'too_long': return 'That is too long to process. Paste just the part of the email you want to record.'
+    case 'too_long':
+    case 'request_too_large':
+      return 'That is too long to process. Paste just the part of the email you want to record.'
+    case 'bad_type': return 'Funnl could not read that text. Paste it again and retry.'
     case 'empty': return 'Paste an email first.'
     case 'minimization_refused':
       return 'Funnl could not send this safely: something in it still looks like an email address or an access token after Funnl removed the addresses it recognised. Remove it from the text and try again.'
     case 'entitlement_unavailable': return 'Funnl could not check your Pro access just now. Please try again.'
-    case 'drafting_failed': return 'Funnl could not draft anything from this email. You can still log it by hand.'
+    case 'drafting_failed': return 'Funnl could not draft anything from this email. Try again, or log it by hand.'
+    case 'not_authenticated': return 'Your session has ended. Sign in again, then retry.'
     case 'network': return 'Could not reach Funnl. Check your connection and try again.'
     default: return 'Something went wrong. Please try again.'
   }
@@ -123,6 +130,44 @@ export function resolveInteractionDate (date, timeZone) {
     numeric_format: 'The email\'s date could be read more than one way. Choose the date.',
   }[reason] ?? 'Choose the date of this conversation.'
   return { value: '', note }
+}
+
+/** The people the server proposed, as choices. Order is the server's; nothing is preselected. */
+export function personOptions (contact) {
+  const people = Array.isArray(contact?.people) ? contact.people : []
+  return people
+    .map((p, index) => ({ index, name: typeof p?.fields?.name === 'string' ? p.fields.name : '' }))
+    .filter((o) => o.name.length > 0)
+}
+
+const AI_KEYS = ['name', 'company', 'role', 'how_met', 'linkedin_url', 'relationship_note']
+
+/**
+ * The new-contact form after the reviewer picks a proposed person: that person's fields and
+ * NOTHING from anyone else. A field the server left out stays blank for the reviewer. Passing
+ * no person clears every AI field ("someone not listed"). The chosen email is kept: it is the
+ * reviewer's own choice from the addresses found, never matched to a person by Funnl.
+ */
+export function applyPerson (draft, person) {
+  const f = person?.fields ?? {}
+  const next = { ...draft }
+  for (const k of AI_KEYS) next[k] = typeof f[k] === 'string' ? f[k] : ''
+  next.tags = Array.isArray(f.tags) ? [...f.tags] : []
+  return next
+}
+
+/** Plain-language notes about a PARTIAL draft, so a missing half is never silent. */
+export function draftNotices (data) {
+  const out = []
+  if (data?.note_code && data.note_code !== 'ok') {
+    out.push(data.note_code === 'note_ignore' || data.note_code === 'note_defer'
+      ? 'Funnl did not find a conversation to summarise, so the note is empty. Write it yourself, or go back and try again.'
+      : 'Funnl could not draft the note from this email. Write it yourself, or go back and try again.')
+  }
+  if (data?.contact_code && data.contact_code !== 'ok') {
+    out.push('Funnl could not identify anyone\u2019s details in this email. You can still choose a contact or fill in a new one yourself.')
+  }
+  return out
 }
 
 function normalizeUrl (url) {

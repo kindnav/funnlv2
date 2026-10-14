@@ -13,7 +13,8 @@ import { readFileSync } from 'fs'
 import {
   normalizePaste, extractAddresses, maskAddresses, parseHeaderDate, detectInteractionDate,
   buildContactRequest, buildNoteRequest, validateContactFields, validateNote, handlePasteEmail,
-  AI_FILL_INSTRUCTIONS, CONTACT_SYSTEM_RULES, MAX_PASTE_CHARS, MAX_ADDRESSES, PASTE_CODES,
+  AI_FILL_INSTRUCTIONS, CONTACT_SYSTEM_RULES, MAX_PASTE_CHARS, MAX_ADDRESSES, PASTE_CODES, MAX_PEOPLE,
+  contactFieldsSchema,
 } from '../supabase/functions/shared/pasteEmail.js'
 import { SYSTEM_CONTRACT, DRAFT_MODEL } from '../supabase/functions/shared/outlookDraftContract.js'
 
@@ -35,7 +36,7 @@ const THREAD = [
   '',
   'Best,',
   'Me',
-  'Treasurer, Finance Club | treasurer@club.example',
+  'Sam Lee | Treasurer, Finance Club | treasurer@club.example',
   '',
   'On Mon, Oct 12, 2026 at 9:00 AM Priya Shah <priya.shah@goldman.example> wrote:',
   '> Happy to talk tomorrow.',
@@ -47,10 +48,12 @@ const SINGLE = [
   'Date: Tue, 13 Oct 2026 14:05:00 -0400',
   '',
   `Great to meet you. ${MARK}`,
+  'Priya Shah | Analyst | Goldman Sachs',
 ].join(NL)
 
 const GOOD_NOTE = { result: 'interaction_draft', summary: 'Priya thanked the user for the coffee chat.', summary_evidence: 'explicit_body', follow_up: 'Send a thank-you note', interaction_date: PLACEHOLDER }
-const GOOD_CONTACT = { name: 'Priya Shah', company: 'Goldman Sachs', role: 'Analyst', how_met: 'Coffee chat', linkedin_url: null, relationship_note: null, tags: ['finance'] }
+const PRIYA = { name: 'Priya Shah', company: 'Goldman Sachs', role: 'Analyst', how_met: 'Coffee chat', linkedin_url: null, relationship_note: null, tags: ['finance'] }
+const GOOD_CONTACT = { people: [PRIYA] }
 
 function deps (over = {}) {
   const calls = []
@@ -101,19 +104,20 @@ test('handler: an ambiguous thread returns ALL addresses and picks no person', a
   assert.equal(r.status, 200)
   assert.equal(r.json.addresses.length, 4)
   for (const k of ['person', 'contact_id', 'email', 'selected']) assert.equal(k in r.json, false, k)
-  assert.equal('email' in r.json.contact.fields, false)
+  for (const p of r.json.contact.people) assert.equal('email' in p.fields, false)
 })
 
 test('handler: a model-supplied email or an address inside a field never reaches the response', async () => {
   const d = deps({
     callModel: async (body) => body.system === SYSTEM_CONTRACT
       ? { ok: true, parsed: GOOD_NOTE }
-      : { ok: true, parsed: { ...GOOD_CONTACT, email: 'priya@goldman.example', role: 'Analyst, priya@goldman.example' } },
+      : { ok: true, parsed: { email: 'priya@goldman.example', people: [{ ...PRIYA, email: 'priya@goldman.example', role: 'Analyst, priya@goldman.example' }] } },
   })
   const r = await handlePasteEmail({ text: SINGLE }, d)
-  assert.equal(r.json.contact.fields.email, undefined)
-  assert.equal(r.json.contact.fields.role, undefined)
-  assert.deepEqual(r.json.contact.dropped, ['role'])
+  assert.equal('email' in r.json.contact, false)
+  assert.equal(r.json.contact.people[0].fields.email, undefined)
+  assert.equal(r.json.contact.people[0].fields.role, undefined)
+  assert.deepEqual(r.json.contact.people[0].dropped, ['role'])
 })
 
 // ── Masking and the minimization gate ──────────────────────────────────────────
@@ -240,7 +244,7 @@ test('dates: the response date comes from the paste, never from the model', asyn
 // ── Validating both model outputs ──────────────────────────────────────────────
 
 test('contact fields: each failing field is dropped (never truncated); unknown keys ignored', () => {
-  const v = validateContactFields({
+  const v = validateContactFields({ people: [{
     name: 'Priya Shah',
     company: 'x'.repeat(500),
     role: 'See https://example.com',
@@ -249,18 +253,102 @@ test('contact fields: each failing field is dropped (never truncated); unknown k
     linkedin_url: 'https://evil.example/in/priya',
     tags: ['a', 'b', 'c', 'd', 'e', 'f', 'g'],
     email: 'priya@goldman.example',
-  })
+  }] }, 'Priya Shah wrote')
   assert.equal(v.ok, true)
-  assert.deepEqual(v.fields, { name: 'Priya Shah', tags: ['a', 'b', 'c', 'd', 'e'] })
-  assert.deepEqual(v.dropped, { company: 'too_long', role: 'url', how_met: 'control_characters', relationship_note: 'sensitive_inference', linkedin_url: 'url' })
-  assert.equal(validateContactFields({ linkedin_url: 'https://www.linkedin.com/in/priya-shah' }).fields.linkedin_url, 'https://www.linkedin.com/in/priya-shah')
-  assert.equal(validateContactFields({ name: '[email removed]' }).dropped.name, 'address')
+  assert.deepEqual(v.people[0].fields, { name: 'Priya Shah', tags: ['a', 'b', 'c', 'd', 'e'] })
+  assert.deepEqual(v.people[0].dropped, { company: 'too_long', role: 'url', how_met: 'control_characters', relationship_note: 'sensitive_inference', linkedin_url: 'url' })
+  const li = validateContactFields({ people: [{ name: 'Priya Shah', linkedin_url: 'https://www.linkedin.com/in/priya-shah' }] }, 'priya shah')
+  assert.equal(li.people[0].fields.linkedin_url, 'https://www.linkedin.com/in/priya-shah')
+  assert.equal(validateContactFields({ people: [{ name: '[email removed]' }] }, '[email removed]').people.length, 0)
 })
 
-test('contact fields: non-objects and prototype keys are refused outright', () => {
+test('contact fields: non-objects, non-lists and prototype keys are refused outright', () => {
   assert.equal(validateContactFields(null).code, 'not_object')
   assert.equal(validateContactFields([]).code, 'not_object')
-  assert.equal(validateContactFields(JSON.parse('{"__proto__":{"x":1},"name":"A"}')).code, 'prototype_pollution')
+  assert.equal(validateContactFields({ name: 'A' }).code, 'bad_type')
+  assert.equal(validateContactFields(JSON.parse('{"__proto__":{"x":1},"people":[]}')).code, 'prototype_pollution')
+  const pp = validateContactFields({ people: [JSON.parse('{"__proto__":{"x":1},"name":"A"}')] }, 'A')
+  assert.equal(pp.people.length, 0)
+})
+
+// ── Attribution across people ──────────────────────────────────────────────────
+
+const TWO_PEOPLE_TEXT = [
+  'From: Priya Shah <[email removed]>',
+  'Cc: Sam Lee <[email removed]>',
+  'Priya Shah | Analyst | Goldman Sachs',
+  'Sam Lee | Treasurer | Finance Club',
+].join(NL)
+
+test('attribution: two people keep their OWN name, company and role', () => {
+  const v = validateContactFields({ people: [
+    PRIYA,
+    { name: 'Sam Lee', company: 'Finance Club', role: 'Treasurer', how_met: null, linkedin_url: null, relationship_note: null, tags: [] },
+  ] }, TWO_PEOPLE_TEXT)
+  assert.deepEqual(v.people.map((p) => [p.fields.name, p.fields.company, p.fields.role]),
+    [['Priya Shah', 'Goldman Sachs', 'Analyst'], ['Sam Lee', 'Finance Club', 'Treasurer']])
+})
+
+test('attribution: a company or role given to two people is removed from both', () => {
+  const v = validateContactFields({ people: [
+    { name: 'Priya Shah', company: 'Goldman Sachs', role: 'Analyst' },
+    { name: 'Sam Lee', company: 'goldman  sachs', role: 'Treasurer' },
+  ] }, TWO_PEOPLE_TEXT)
+  assert.equal(v.people[0].fields.company, undefined)
+  assert.equal(v.people[1].fields.company, undefined)
+  assert.equal(v.people[0].dropped.company, 'shared')
+  assert.equal(v.people[0].fields.role, 'Analyst')
+  assert.equal(v.people[1].fields.role, 'Treasurer')
+})
+
+test('attribution: a name, company or role not in the email is left blank, not guessed', () => {
+  const v = validateContactFields({ people: [
+    { name: 'Priya Shah', company: 'Morgan Stanley', role: 'Vice President' },
+    { name: 'Alex Invented', company: 'Finance Club' },
+  ] }, TWO_PEOPLE_TEXT)
+  assert.equal(v.people.length, 1)
+  assert.equal(v.droppedPeople, 1)
+  assert.deepEqual(v.people[0].fields, { name: 'Priya Shah' })
+  assert.deepEqual(v.people[0].dropped, { company: 'not_in_text', role: 'not_in_text' })
+})
+
+test('attribution: a name given to two records is ambiguous and both are dropped', () => {
+  const v = validateContactFields({ people: [
+    { name: 'Priya Shah', company: 'Goldman Sachs' },
+    { name: 'priya shah', role: 'Treasurer' },
+    { name: 'Sam Lee' },
+  ] }, TWO_PEOPLE_TEXT)
+  assert.deepEqual(v.people.map((p) => p.fields.name), ['Sam Lee'])
+})
+
+test('attribution: at most MAX_PEOPLE are proposed', () => {
+  const names = ['Ann One', 'Ben Two', 'Cat Three', 'Dan Four', 'Eve Five', 'Fay Six']
+  const v = validateContactFields({ people: names.map((name) => ({ name })) }, names.join(' '))
+  assert.equal(v.people.length, MAX_PEOPLE)
+})
+
+test('attribution: the schema asks for a LIST of people, each with only their own details', () => {
+  const s = contactFieldsSchema()
+  assert.deepEqual(s.required, ['people'])
+  assert.equal(s.properties.people.type, 'array')
+  assert.equal(s.properties.people.items.properties.email, undefined)
+  assert.equal(s.additionalProperties, false)
+  assert.equal(s.properties.people.items.additionalProperties, false)
+  const content = buildContactRequest('x').messages[0].content
+  assert.ok(content.includes('ONLY the details the text states about THAT person'))
+})
+
+test('handler: the two-person thread returns both records, unselected', async () => {
+  const d = deps({
+    callModel: async (b) => b.system === SYSTEM_CONTRACT ? { ok: true, parsed: GOOD_NOTE } : { ok: true, parsed: { people: [
+      { name: 'Priya Shah', company: null, role: null, how_met: 'Coffee chat', linkedin_url: null, relationship_note: null, tags: [] },
+      { name: 'Sam Lee', company: 'Finance Club', role: 'Treasurer', how_met: null, linkedin_url: null, relationship_note: null, tags: [] },
+    ] } },
+  })
+  const r = await handlePasteEmail({ text: THREAD }, d)
+  assert.deepEqual(r.json.contact.people.map((p) => p.fields.name), ['Priya Shah', 'Sam Lee'])
+  assert.equal(r.json.contact.people[1].fields.company, 'Finance Club')
+  assert.equal(r.json.contact.people[0].fields.company, undefined)
 })
 
 test('note: the Outlook validator decides; ignore/defer/invalid are not drafts', () => {
@@ -284,11 +372,18 @@ test('handler: one failed half still returns the other; both failed is 502', asy
   assert.equal(r2.status, 502)
   assert.equal(r2.json.code, 'drafting_failed')
   assert.ok(none.logs.some((l) => l.includes('"drafting_failed"')))
+
+  // No person identified and no note: also nothing usable.
+  const empty = deps({ callModel: async (b) => b.system === SYSTEM_CONTRACT ? { ok: true, parsed: { result: 'defer' } } : { ok: true, parsed: { people: [] } } })
+  const r3 = await handlePasteEmail({ text: SINGLE }, empty)
+  assert.equal(r3.status, 502)
+  assert.equal(r3.json.contact_code, 'contact_no_people')
+  assert.equal(r3.json.note_code, 'note_defer')
 })
 
 test('nothing returned or logged carries the paste or raw model output', async () => {
   const leaky = 'LEAKYMODELTEXT'
-  const d = deps({ callModel: async (b) => b.system === SYSTEM_CONTRACT ? { ok: true, parsed: { result: leaky } } : { ok: true, parsed: { name: null, junk: leaky } } })
+  const d = deps({ callModel: async (b) => b.system === SYSTEM_CONTRACT ? { ok: true, parsed: { result: leaky } } : { ok: true, parsed: { junk: leaky, people: [{ name: leaky }] } } })
   const r = await handlePasteEmail({ text: THREAD }, d)
   const out = JSON.stringify(r.json) + d.logs.join('')
   assert.equal(out.includes(MARK), false)

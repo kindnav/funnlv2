@@ -35,7 +35,9 @@ import {
 export const MAX_PASTE_CHARS = 12_000
 /** At most this many distinct addresses are returned for matching. */
 export const MAX_ADDRESSES = 20
-export const CONTACT_MAX_TOKENS = 1024
+/** At most this many people are proposed from one paste; the reviewer picks one or none. */
+export const MAX_PEOPLE = 4
+export const CONTACT_MAX_TOKENS = 1536
 export const NOTE_MAX_TOKENS = 2048
 export const RELATIONSHIP_NOTE_MAX = 500
 
@@ -52,8 +54,22 @@ if (SUMMARY_SECTION <= 0) throw new Error('drafting_contract_changed')
 export const CONTACT_SYSTEM_RULES = SYSTEM_CONTRACT.slice(0, SUMMARY_SECTION).trimEnd()
 
 const PROTO_KEYS = ['__proto__', 'constructor', 'prototype']
-const CONTROL_RE = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g
-const ANY_CONTROL_RE = /[\u0000-\u001F\u007F]/
+// Control characters are found with a loop over code points rather than a regular
+// expression, so the source carries no raw control-character ranges.
+function isControl (c) { return c < 32 || c === 127 }
+function stripControls (s) {
+  let out = ''
+  for (const ch of s) {
+    const c = ch.codePointAt(0)
+    if (isControl(c) && c !== 9 && c !== 10) continue   // keep tab and newline
+    out += ch
+  }
+  return out
+}
+function hasControl (s) {
+  for (const ch of s) if (isControl(ch.codePointAt(0))) return true
+  return false
+}
 const URL_RE = /(https?:|www\.)/i
 const LINKEDIN_RE = /^https:\/\/(www\.)?linkedin\.com\/in\/[A-Za-z0-9_%.-]+\/?$/
 
@@ -66,7 +82,7 @@ const LINKEDIN_RE = /^https:\/\/(www\.)?linkedin\.com\/in\/[A-Za-z0-9_%.-]+\/?$/
  */
 export function normalizePaste (raw) {
   if (typeof raw !== 'string') return { ok: false, code: 'bad_type' }
-  const text = raw.replace(/\r\n?/g, '\n').replace(CONTROL_RE, '').trim()
+  const text = stripControls(raw.replace(/\r\n?/g, '\n')).trim()
   if (text.length === 0) return { ok: false, code: 'empty' }
   if (text.length > MAX_PASTE_CHARS) return { ok: false, code: 'too_long' }
   return { ok: true, text }
@@ -238,20 +254,40 @@ function untrusted (masked) {
 
 function nullableString (description) { return { type: ['string', 'null'], description } }
 
-/** The contact-field schema: AI Fill's fields minus email and follow-up (6 unions). */
-export function contactFieldsSchema () {
+/** One person: AI Fill's fields minus email and follow-up (6 unions). */
+function personSchema () {
   return {
     type: 'object',
     additionalProperties: false,
     required: ['name', 'company', 'role', 'how_met', 'linkedin_url', 'relationship_note', 'tags'],
     properties: {
-      name: nullableString('Full name of the one person the user corresponded with, only if explicitly stated.'),
-      company: nullableString('Their company or organization, only if explicitly stated about that person.'),
-      role: nullableString('Their job title or role, only if explicitly stated about that person.'),
-      how_met: nullableString('Where or how the user met them, only if explicitly stated.'),
-      linkedin_url: nullableString('A linkedin.com/in/ URL only if it appears verbatim.'),
-      relationship_note: nullableString('Why this person matters, only if explicitly stated.'),
-      tags: { type: 'array', items: { type: 'string' }, description: 'Up to 5 informal labels explicitly supported by the text; empty when none.' },
+      name: nullableString('This person\'s full name, copied exactly as written in the email.'),
+      company: nullableString('THIS person\'s company or organization, copied exactly as written, only if the email states it about them.'),
+      role: nullableString('THIS person\'s job title or role, copied exactly as written, only if the email states it about them.'),
+      how_met: nullableString('Where or how the user met THIS person, only if explicitly stated.'),
+      linkedin_url: nullableString('THIS person\'s linkedin.com/in/ URL only if it appears verbatim.'),
+      relationship_note: nullableString('Why THIS person matters to the user, only if explicitly stated.'),
+      tags: { type: 'array', items: { type: 'string' }, description: 'Up to 5 informal labels explicitly supported by the text about this person; empty when none.' },
+    },
+  }
+}
+
+/**
+ * The contact-field schema: a LIST of people, each with only the details stated about them.
+ * A thread holds several people; a single flat record would let one person's company or role
+ * land on another. The reviewer chooses which record (if any) is the new contact.
+ */
+export function contactFieldsSchema () {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['people'],
+    properties: {
+      people: {
+        type: 'array',
+        items: personSchema(),
+        description: `Each person other than the user who wrote, received or is named in the exchange, at most ${MAX_PEOPLE}. Empty when none can be identified.`,
+      },
     },
   }
 }
@@ -261,9 +297,11 @@ export function buildContactRequest (masked) {
   const content = [
     AI_FILL_INSTRUCTIONS,
     '',
-    'This text is an email exchange, not a note about one person. Describe only the one person',
-    'the user corresponded with. If it is unclear which participant a detail belongs to, or the',
-    'detail could describe the user, return null for that field. Never return an email address.',
+    'This text is an email exchange, not a note about one person. Under "people", list each',
+    `person other than the user who wrote, received or is named in it, at most ${MAX_PEOPLE}.`,
+    'Give each person ONLY the details the text states about THAT person, with name, company and',
+    'role copied exactly as written. If it is unclear which person a detail belongs to, or the',
+    'detail could describe the user, return null for it. Never return an email address.',
     '',
     PASTE_PREAMBLE,
     '',
@@ -313,7 +351,7 @@ function cleanText (v, max, { allowLinkedIn = false } = {}) {
   const s = v.trim().replace(/\s+/g, ' ')
   if (s.length === 0) return { value: null }
   if (s.length > max) return { drop: 'too_long' }
-  if (ANY_CONTROL_RE.test(s)) return { drop: 'control_characters' }
+  if (hasControl(s)) return { drop: 'control_characters' }
   if (s.includes('@') || s.includes(EMAIL_REDACTED)) return { drop: 'address' }
   if (allowLinkedIn) return LINKEDIN_RE.test(s) ? { value: s } : { drop: 'url' }
   if (URL_RE.test(s)) return { drop: 'url' }
@@ -321,14 +359,21 @@ function cleanText (v, max, { allowLinkedIn = false } = {}) {
   return { value: s }
 }
 
+function isPlainRecord (v) { return v !== null && typeof v === 'object' && !Array.isArray(v) }
+function hasProtoKey (v) { return PROTO_KEYS.some((k) => Object.prototype.hasOwnProperty.call(v, k)) }
+/** Case- and whitespace-insensitive form used to compare a value with the pasted text. */
+function norm (v) { return String(v).toLowerCase().replace(/\s+/g, ' ').trim() }
+
 /**
- * Validate the contact-field output. Unknown keys (an `email` included) are ignored, not
- * passed on; each field that fails a rule is DROPPED with a code, never truncated.
- * @returns {{ok:true, fields:object, dropped:object} | {ok:false, code:string}}
+ * Validate ONE person. Unknown keys (an `email` included) are ignored, not passed on; each
+ * field that fails a rule is DROPPED with a code, never truncated. A person with no usable
+ * name is dropped entirely: the reviewer chooses people by name.
+ *   not_in_text  a name, company or role that does not appear in the text the model was
+ *                given. Copied values must be findable; anything else is a guess.
+ * @returns {{fields:object, dropped:object} | null}
  */
-export function validateContactFields (raw) {
-  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return { ok: false, code: 'not_object' }
-  for (const k of PROTO_KEYS) if (Object.prototype.hasOwnProperty.call(raw, k)) return { ok: false, code: 'prototype_pollution' }
+function validatePerson (raw, text) {
+  if (!isPlainRecord(raw) || hasProtoKey(raw)) return null
   const spec = {
     name: [BOUNDS.name], company: [BOUNDS.company], role: [BOUNDS.role], how_met: [BOUNDS.howMet],
     linkedin_url: [BOUNDS.linkedin, { allowLinkedIn: true }], relationship_note: [RELATIONSHIP_NOTE_MAX],
@@ -352,7 +397,48 @@ export function validateContactFields (raw) {
       if (tags.length > 0) fields.tags = tags
     }
   }
-  return { ok: true, fields, dropped }
+  if (!fields.name || !text.includes(norm(fields.name))) return null
+  for (const key of ['company', 'role']) {
+    if (fields[key] && !text.includes(norm(fields[key]))) { delete fields[key]; dropped[key] = 'not_in_text' }
+  }
+  return { fields, dropped }
+}
+
+function countBy (items, keyOf) {
+  const m = new Map()
+  for (const it of items) { const k = keyOf(it); m.set(k, (m.get(k) ?? 0) + 1) }
+  return m
+}
+
+/**
+ * Validate the contact-field output: a list of people, each validated on its own, then two
+ * guards ACROSS people, because attribution is what a thread makes uncertain:
+ *   * a name given to more than one record is ambiguous - every such record is dropped;
+ *   * a company or role given to more than one person may be one person's detail spread
+ *     onto another - it is removed from each of them ('shared') and left for the reviewer.
+ * @param {unknown} raw          the model's parsed output
+ * @param {string}  sourceText   the MASKED text the model was given
+ * @returns {{ok:true, people:Array<{fields:object, dropped:object}>, droppedPeople:number} | {ok:false, code:string}}
+ */
+export function validateContactFields (raw, sourceText = '') {
+  if (!isPlainRecord(raw)) return { ok: false, code: 'not_object' }
+  if (hasProtoKey(raw)) return { ok: false, code: 'prototype_pollution' }
+  if (!Array.isArray(raw.people)) return { ok: false, code: 'bad_type' }
+  const text = norm(sourceText)
+  const valid = []
+  for (const person of raw.people.slice(0, MAX_PEOPLE)) {
+    const v = validatePerson(person, text)
+    if (v) valid.push(v)
+  }
+  const names = countBy(valid, (x) => norm(x.fields.name))
+  const people = valid.filter((x) => names.get(norm(x.fields.name)) === 1)
+  for (const key of ['company', 'role']) {
+    const values = countBy(people.filter((x) => x.fields[key]), (x) => norm(x.fields[key]))
+    for (const x of people) {
+      if (x.fields[key] && values.get(norm(x.fields[key])) > 1) { delete x.fields[key]; x.dropped[key] = 'shared' }
+    }
+  }
+  return { ok: true, people, droppedPeople: raw.people.length - people.length }
 }
 
 /** Validate the note output with the Outlook validator; keep only summary and next step. */
@@ -424,9 +510,13 @@ export async function handlePasteEmail (input, deps) {
   let contact = null
   let contactCode = 'ok'
   if (c?.ok === true) {
-    const v = validateContactFields(c.parsed)
-    if (v.ok) contact = { fields: v.fields, dropped: Object.keys(v.dropped) }
-    else contactCode = `contact_${v.code}`
+    const v = validateContactFields(c.parsed, masked)
+    if (v.ok) {
+      contact = { people: v.people.map((x) => ({ fields: x.fields, dropped: Object.keys(x.dropped) })) }
+      if (contact.people.length === 0) contactCode = 'contact_no_people'
+    } else {
+      contactCode = `contact_${v.code}`
+    }
   } else {
     contactCode = `contact_${c?.code ?? 'failed'}`
   }
@@ -441,7 +531,9 @@ export async function handlePasteEmail (input, deps) {
     noteCode = `note_${nt?.code ?? 'failed'}`
   }
 
-  const failed = contact === null && note === null
+  // Nothing usable drafted: no person to offer and no note. A partial result is returned and
+  // the review step says which half is missing.
+  const failed = note === null && (contact === null || contact.people.length === 0)
   log('paste_email', { code: failed ? 'drafting_failed' : 'ok', contact: contactCode, note: noteCode, addresses: addresses.length, date: date.status })
   if (failed) {
     return { status: 502, json: { code: 'drafting_failed', contact_code: contactCode, note_code: noteCode } }

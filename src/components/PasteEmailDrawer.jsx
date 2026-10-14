@@ -4,19 +4,20 @@ import { supabase } from '../lib/supabase'
 import { track } from '../lib/analytics'
 import {
   requestPasteDraft, messageForPasteCode, initialAttribution, resolveInteractionDate,
-  createPasteSaver, messageForSave, reviewErrors, MAX_NOTE_CHARS,
+  createPasteSaver, messageForSave, reviewErrors, personOptions, applyPerson, draftNotices,
+  MAX_NOTE_CHARS, MAX_PASTE_CHARS,
 } from '../lib/pasteEmailCapture'
 
 // Paste an email (Pro): paste -> review -> save, in one drawer.
 //
-// The pasted text lives only in this component's state. It is sent once to ai-paste-email,
-// never stored or logged, and cleared after a successful save or when the drawer is cancelled.
+// The pasted text lives only in this component's state. It is sent to ai-paste-email, never
+// stored or logged, and cleared after a successful save or when the drawer is cancelled.
 // Nothing reaches the database until the reviewer presses Save.
-
-const MAX_PASTE_CHARS = 12_000
 
 const inputClass = 'w-full bg-input border border-line-3 rounded-xl px-[13px] py-[10px] text-[13.5px] text-hi placeholder-lower outline-none focus:border-[rgba(255,68,35,0.4)] transition-colors'
 const labelClass = 'block text-[12px] font-semibold text-mid mb-1.5'
+const EMPTY_CONTACT = { name: '', email: '', company: '', role: '', how_met: '', linkedin_url: '', tags: [], relationship_note: '' }
+const NOT_LISTED = 'not_listed'
 
 function PasteEmailDrawer ({ contacts = [], preselectedContact = null, onClose, onSaved }) {
   const [step, setStep] = useState('paste')
@@ -29,8 +30,10 @@ function PasteEmailDrawer ({ contacts = [], preselectedContact = null, onClose, 
   const [person, setPerson] = useState(null)
   const [otherContactId, setOtherContactId] = useState('')
   const [addresses, setAddresses] = useState([])
-  const [aiFields, setAiFields] = useState({})
-  const [contactDraft, setContactDraft] = useState({ name: '', email: '', company: '', role: '', how_met: '', linkedin_url: '' })
+  const [aiContact, setAiContact] = useState(null)
+  const [aiPersonChoice, setAiPersonChoice] = useState('')
+  const [notices, setNotices] = useState([])
+  const [contactDraft, setContactDraft] = useState(EMPTY_CONTACT)
   const [interaction, setInteraction] = useState({ date: '', notes: '', followUpDate: '' })
   const [dateNote, setDateNote] = useState('')
   const [followUpSuggestion, setFollowUpSuggestion] = useState('')
@@ -51,12 +54,17 @@ function PasteEmailDrawer ({ contacts = [], preselectedContact = null, onClose, 
     return () => document.removeEventListener('keydown', onKey)
   }, [onClose, saving])
 
+  const overLimit = text.length > MAX_PASTE_CHARS
+
   async function draft () {
+    if (drafting) return
     setError('')
     if (!text.trim()) { setError(messageForPasteCode('empty')); return }
+    if (overLimit) { setError(messageForPasteCode('too_long')); return }
     setDrafting(true)
     const r = await requestPasteDraft(supabase, text)
     setDrafting(false)
+    // A failure keeps the paste in place, so the retry path is pressing Draft again.
     if (!r.ok) { setError(messageForPasteCode(r.code)); return }
 
     const d = r.data
@@ -68,8 +76,12 @@ function PasteEmailDrawer ({ contacts = [], preselectedContact = null, onClose, 
     setCandidates(att.candidates)
     setWarning(att.warning)
     setPerson(att.person)
+    setOtherContactId('')
     setAddresses(Array.isArray(d.addresses) ? d.addresses.map((a) => a.address) : [])
-    setAiFields(d.contact?.fields ?? {})
+    setAiContact(d.contact ?? null)
+    setAiPersonChoice('')
+    setContactDraft(EMPTY_CONTACT)
+    setNotices(draftNotices(d))
 
     let tz = 'UTC'
     try { tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC' } catch { /* keep UTC */ }
@@ -77,6 +89,7 @@ function PasteEmailDrawer ({ contacts = [], preselectedContact = null, onClose, 
     setInteraction({ date: dt.value, notes: d.note?.summary ?? '', followUpDate: '' })
     setDateNote(dt.note)
     setFollowUpSuggestion(d.note?.follow_up ?? '')
+    setSaveResult(null)
 
     saverRef.current = createPasteSaver({
       insertContact: async (payload) => {
@@ -100,23 +113,26 @@ function PasteEmailDrawer ({ contacts = [], preselectedContact = null, onClose, 
     setStep('review')
   }
 
-  // Choosing "new contact" offers the AI's fields - and ONLY then. They are never applied to an
-  // existing contact, and nothing is filled in merely because an address was found.
+  // Back to the paste, which is still there, to try again. Only before anything is saved.
+  function backToPaste () {
+    if (saving || saveResult?.contactSaved || saveResult?.interactionSaved) return
+    saverRef.current = null
+    setSaveResult(null)
+    setStep('paste')
+  }
+
+  // Who the email is with. Choosing "new contact" does NOT fill anything in: the reviewer must
+  // also pick which proposed person that is. Locked once a contact has been created.
   function choose (next) {
-    if (saverRef.current?.snapshot().createdContactId) return   // locked once a contact exists
+    if (saverRef.current?.snapshot().createdContactId) return
     setPerson(next)
-    if (next?.kind === 'new') {
-      setContactDraft((cur) => ({
-        name: cur.name || aiFields.name || '',
-        email: cur.email || '',
-        company: cur.company || aiFields.company || '',
-        role: cur.role || aiFields.role || '',
-        how_met: cur.how_met || aiFields.how_met || '',
-        linkedin_url: cur.linkedin_url || aiFields.linkedin_url || '',
-        tags: aiFields.tags ?? [],
-        relationship_note: aiFields.relationship_note ?? '',
-      }))
-    }
+  }
+
+  function chooseAiPerson (value) {
+    if (saverRef.current?.snapshot().createdContactId) return
+    setAiPersonChoice(value)
+    const picked = value === '' || value === NOT_LISTED ? null : aiContact?.people?.[Number(value)] ?? null
+    setContactDraft((cur) => applyPerson(cur, picked))
   }
 
   async function save () {
@@ -139,6 +155,8 @@ function PasteEmailDrawer ({ contacts = [], preselectedContact = null, onClose, 
   }), [person, contactDraft, interaction, locked, saveResult])
   const done = saveResult?.status === 'saved' || saveResult?.status === 'already_saved'
   const otherContacts = contacts.filter((c) => !candidates.some((x) => x.matches.some((m) => m.id === c.id)))
+  const aiPeople = personOptions(aiContact)
+  const canGoBack = !saving && !saveResult?.contactSaved && !saveResult?.interactionSaved
 
   return (
     <>
@@ -172,16 +190,24 @@ function PasteEmailDrawer ({ contacts = [], preselectedContact = null, onClose, 
               )}
               <div>
                 <label htmlFor="paste-email-text" className={labelClass}>Email</label>
-                <textarea id="paste-email-text" value={text} onChange={(e) => setText(e.target.value.slice(0, MAX_PASTE_CHARS))}
-                  rows={12} maxLength={MAX_PASTE_CHARS} placeholder="Paste the email or thread here…" className={inputClass + ' resize-y'} />
-                <p className="text-[11px] text-lower mt-1">{text.length.toLocaleString('en-US')} / {MAX_PASTE_CHARS.toLocaleString('en-US')}</p>
+                <textarea id="paste-email-text" value={text} onChange={(e) => setText(e.target.value)}
+                  rows={12} placeholder="Paste the email or thread here…" className={inputClass + ' resize-y'} />
+                <p className="text-[11px] mt-1" style={{ color: overLimit ? 'var(--color-danger)' : 'var(--color-lower)' }} data-testid="paste-email-count">
+                  {text.length.toLocaleString('en-US')} / {MAX_PASTE_CHARS.toLocaleString('en-US')}
+                  {overLimit && ' - too long. Remove the parts you do not need to record.'}
+                </p>
               </div>
-              {error && <p className="text-[12.5px]" style={{ color: 'var(--color-danger)' }} role="alert">{error}</p>}
+              {error && <p className="text-[12.5px]" style={{ color: 'var(--color-danger)' }} role="alert" data-testid="paste-email-error">{error}</p>}
             </>
           )}
 
           {step === 'review' && (
             <>
+              {notices.length > 0 && (
+                <div role="status" data-testid="paste-email-notices" className="p-3 rounded-xl border border-line-2 text-[12.5px] space-y-1" style={{ background: 'var(--color-elevated)', color: 'var(--color-warning)' }}>
+                  {notices.map((n) => <p key={n}>{n}</p>)}
+                </div>
+              )}
               <section className="space-y-2">
                 <h3 className="text-[13px] font-bold text-hi">Who is this email with?</h3>
                 {preselectedContact ? (
@@ -207,7 +233,7 @@ function PasteEmailDrawer ({ contacts = [], preselectedContact = null, onClose, 
                       <input type="radio" name="paste-person" disabled={locked} aria-label="Another existing contact"
                         checked={person?.kind === 'existing' && !!otherContactId && person.contactId === otherContactId}
                         onChange={() => { if (otherContactId) choose({ kind: 'existing', contactId: otherContactId }) }} />
-                      <select value={otherContactId} disabled={locked} className={inputClass}
+                      <select value={otherContactId} disabled={locked} className={inputClass} aria-label="Existing contact"
                         onChange={(e) => { setOtherContactId(e.target.value); if (e.target.value) choose({ kind: 'existing', contactId: e.target.value }) }}>
                         <option value="">Another existing contact…</option>
                         {otherContacts.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
@@ -226,22 +252,33 @@ function PasteEmailDrawer ({ contacts = [], preselectedContact = null, onClose, 
               {person?.kind === 'new' && !preselectedContact && (
                 <section className="space-y-3" data-testid="paste-email-new-contact">
                   <h3 className="text-[13px] font-bold text-hi">New contact</h3>
-                  <p className="text-[12px] text-lower">Suggested from the email. Check each one describes this person, and clear anything you are not sure of.</p>
-                  <div><label className={labelClass}>Name *</label>
-                    <input className={inputClass} value={contactDraft.name} disabled={locked} onChange={(e) => setContactDraft({ ...contactDraft, name: e.target.value })} /></div>
-                  <div><label className={labelClass}>Email</label>
-                    <select className={inputClass} value={contactDraft.email} disabled={locked} onChange={(e) => setContactDraft({ ...contactDraft, email: e.target.value })}>
+                  {aiPeople.length > 0 && (
+                    <div>
+                      <label htmlFor="paste-email-ai-person" className={labelClass}>Which person in the email is this?</label>
+                      <select id="paste-email-ai-person" className={inputClass} value={aiPersonChoice} disabled={locked}
+                        onChange={(e) => chooseAiPerson(e.target.value)}>
+                        <option value="">Choose a person…</option>
+                        {aiPeople.map((o) => <option key={o.index} value={String(o.index)}>{o.name}</option>)}
+                        <option value={NOT_LISTED}>Someone not listed</option>
+                      </select>
+                      <p className="text-[12px] text-lower mt-1">Only details the email states about that person are filled in. Check each one, and fill in anything left blank yourself.</p>
+                    </div>
+                  )}
+                  <div><label htmlFor="paste-email-name" className={labelClass}>Name *</label>
+                    <input id="paste-email-name" className={inputClass} value={contactDraft.name} disabled={locked} onChange={(e) => setContactDraft({ ...contactDraft, name: e.target.value })} /></div>
+                  <div><label htmlFor="paste-email-address" className={labelClass}>Email</label>
+                    <select id="paste-email-address" className={inputClass} value={contactDraft.email} disabled={locked} onChange={(e) => setContactDraft({ ...contactDraft, email: e.target.value })}>
                       <option value="">None</option>
                       {addresses.map((a) => <option key={a} value={a}>{a}</option>)}
                     </select></div>
-                  <div><label className={labelClass}>Company</label>
-                    <input className={inputClass} value={contactDraft.company} disabled={locked} onChange={(e) => setContactDraft({ ...contactDraft, company: e.target.value })} /></div>
-                  <div><label className={labelClass}>Role</label>
-                    <input className={inputClass} value={contactDraft.role} disabled={locked} onChange={(e) => setContactDraft({ ...contactDraft, role: e.target.value })} /></div>
-                  <div><label className={labelClass}>How you met</label>
-                    <input className={inputClass} value={contactDraft.how_met} disabled={locked} onChange={(e) => setContactDraft({ ...contactDraft, how_met: e.target.value })} /></div>
-                  <div><label className={labelClass}>LinkedIn</label>
-                    <input className={inputClass} value={contactDraft.linkedin_url} disabled={locked} onChange={(e) => setContactDraft({ ...contactDraft, linkedin_url: e.target.value })} /></div>
+                  <div><label htmlFor="paste-email-company" className={labelClass}>Company</label>
+                    <input id="paste-email-company" className={inputClass} value={contactDraft.company} disabled={locked} onChange={(e) => setContactDraft({ ...contactDraft, company: e.target.value })} /></div>
+                  <div><label htmlFor="paste-email-role" className={labelClass}>Role</label>
+                    <input id="paste-email-role" className={inputClass} value={contactDraft.role} disabled={locked} onChange={(e) => setContactDraft({ ...contactDraft, role: e.target.value })} /></div>
+                  <div><label htmlFor="paste-email-how-met" className={labelClass}>How you met</label>
+                    <input id="paste-email-how-met" className={inputClass} value={contactDraft.how_met} disabled={locked} onChange={(e) => setContactDraft({ ...contactDraft, how_met: e.target.value })} /></div>
+                  <div><label htmlFor="paste-email-linkedin" className={labelClass}>LinkedIn</label>
+                    <input id="paste-email-linkedin" className={inputClass} value={contactDraft.linkedin_url} disabled={locked} onChange={(e) => setContactDraft({ ...contactDraft, linkedin_url: e.target.value })} /></div>
                 </section>
               )}
 
@@ -250,11 +287,13 @@ function PasteEmailDrawer ({ contacts = [], preselectedContact = null, onClose, 
                 <div><label htmlFor="paste-email-date" className={labelClass}>Date *</label>
                   <input id="paste-email-date" type="date" className={inputClass} value={interaction.date} disabled={done}
                     onChange={(e) => setInteraction({ ...interaction, date: e.target.value })} />
-                  {dateNote && <p className="text-[11.5px] text-lower mt-1">{dateNote}</p>}</div>
+                  {dateNote && <p className="text-[11.5px] text-lower mt-1" data-testid="paste-email-date-note">{dateNote}</p>}</div>
                 <div><label htmlFor="paste-email-notes" className={labelClass}>Note</label>
-                  <textarea id="paste-email-notes" rows={8} maxLength={MAX_NOTE_CHARS} className={inputClass + ' resize-y'} value={interaction.notes} disabled={done}
+                  <textarea id="paste-email-notes" rows={8} className={inputClass + ' resize-y'} value={interaction.notes} disabled={done}
                     onChange={(e) => setInteraction({ ...interaction, notes: e.target.value })} />
-                  <p className="text-[11px] text-lower mt-1">Drafted from the email. Edit anything that is wrong.</p></div>
+                  <p className="text-[11px] mt-1" style={{ color: interaction.notes.length > MAX_NOTE_CHARS ? 'var(--color-danger)' : 'var(--color-lower)' }}>
+                    {interaction.notes.length.toLocaleString('en-US')} / {MAX_NOTE_CHARS.toLocaleString('en-US')} · Drafted from the email. Edit anything that is wrong.
+                  </p></div>
                 {followUpSuggestion && <p className="text-[12px] text-mid">Suggested next step: {followUpSuggestion}</p>}
                 <div><label htmlFor="paste-email-followup" className={labelClass}>Follow-up date (optional)</label>
                   <input id="paste-email-followup" type="date" className={inputClass} value={interaction.followUpDate} disabled={done}
@@ -269,19 +308,24 @@ function PasteEmailDrawer ({ contacts = [], preselectedContact = null, onClose, 
                 </div>
               )}
               {!done && errors.length > 0 && (
-                <ul className="text-[12px] text-lower list-disc pl-5">{errors.map((e) => <li key={e}>{e}</li>)}</ul>
+                <ul className="text-[12px] text-lower list-disc pl-5" data-testid="paste-email-review-errors">{errors.map((e) => <li key={e}>{e}</li>)}</ul>
               )}
             </>
           )}
         </div>
 
         <div className="flex items-center justify-end gap-2 px-[26px] py-[18px] border-t border-line-1 flex-none">
+          {step === 'review' && !done && canGoBack && (
+            <button type="button" onClick={backToPaste} className="mr-auto h-[38px] px-3 rounded-[10px] text-[13px] font-medium text-mid hover:text-hi transition-colors">
+              Back to email
+            </button>
+          )}
           <button type="button" onClick={cancel} disabled={saving}
             className="h-[38px] px-4 rounded-[10px] border border-line-2 text-[13px] font-medium text-mid hover:border-line-3 transition-colors">
             {done ? 'Close' : 'Cancel'}
           </button>
           {step === 'paste' && (
-            <button type="button" onClick={draft} disabled={drafting || !text.trim()}
+            <button type="button" onClick={draft} disabled={drafting || !text.trim() || overLimit}
               className="h-[38px] px-4 rounded-[10px] text-[13px] font-semibold disabled:opacity-40 disabled:cursor-not-allowed"
               style={{ background: 'var(--color-ember)', color: 'var(--color-paper)' }}>
               {drafting ? 'Drafting…' : 'Draft from email'}
