@@ -450,6 +450,13 @@ function SettingsPage() {
               </svg>
               <span className="text-[12px] font-semibold text-hi">Funnl Pro · permanent access</span>
             </div>
+          ) : proClass === 'subscribed' ? (
+            <div className="flex items-center gap-[8px]">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path d="M3 4H21L15 12.5V20H9V12.5Z" fill="#FF4423"/>
+              </svg>
+              <span className="text-[12px] font-semibold text-hi">Funnl Pro · subscription</span>
+            </div>
           ) : proClass === 'trial' ? (
             <div>
               <div className="flex items-center gap-[8px]">

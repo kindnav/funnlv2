@@ -3,7 +3,7 @@ import ReactMarkdown from 'react-markdown'
 import { Link, useNavigate, useLocation } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { useProStatus, useProRefresh } from '../lib/useProStatus'
-import { classifyProStatus } from '../lib/pro-ui-status'
+import { classifyProStatus, hasProAccess } from '../lib/pro-ui-status'
 import { track } from '../lib/analytics'
 import { extractInvokeError } from '../lib/ai-chat-error'
 import { buildProviderMessages, isRetryEligible } from '../lib/ai-chat-conversation'
@@ -261,7 +261,7 @@ function FunnlAIPage() {
   const proStatus     = useProStatus()
   const proRefresh    = useProRefresh()
   const displayStatus = classifyProStatus(proStatus)
-  const isProUser     = displayStatus === 'permanent' || displayStatus === 'trial'
+  const isProUser     = hasProAccess(proStatus)
   const isCheckingPro = proStatus === null
 
   const [userId,      setUserId]      = useState(null)
@@ -628,7 +628,7 @@ function FunnlAIPage() {
 
   // ── Pro badge for TopBar actions slot ──────────────────────────────────────
 
-  const proBadge = displayStatus === 'permanent' ? (
+  const proBadge = displayStatus === 'permanent' || displayStatus === 'subscribed' ? (
     <span className="font-mono text-[9.5px] font-bold tracking-[0.5px] px-1.5 py-0.5 rounded-[5px]"
       style={{ color: 'var(--color-ember)', background: 'rgba(255,68,35,0.1)', border: '1px solid rgba(255,68,35,0.22)' }}>
       PRO

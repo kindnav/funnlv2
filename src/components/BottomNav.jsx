@@ -28,7 +28,7 @@ import { SUGGESTION_REVIEW_ENABLED } from '../lib/suggestionReview'
 import { usePendingSuggestionCount } from '../lib/usePendingSuggestionCount'
 import { badgeLabel } from '../lib/pendingSuggestions'
 import { useProStatus } from '../lib/useProStatus'
-import { classifyProStatus } from '../lib/pro-ui-status'
+import { hasProAccess } from '../lib/pro-ui-status'
 import { useContactPicker } from '../lib/useContactPicker'
 import { buildPickerNavigationState } from '../lib/contactPickerUtils'
 import ContactPickerResults from './ContactPickerResults'
@@ -154,9 +154,9 @@ export default function BottomNav() {
 
   // Pro access — from shared context (one RPC per app mount, not one per component)
   const proStatus = useProStatus()
-  const displayStatus = classifyProStatus(proStatus)
-  // 'permanent' or 'trial' → show AI actions; all other states → hide (fail closed)
-  const canUsePro = displayStatus === 'permanent' || displayStatus === 'trial'
+  // Server-authoritative can_use_pro (permanent, trial or a granting subscription) → show AI
+  // actions; all other states → hide (fail closed)
+  const canUsePro = hasProAccess(proStatus)
 
   // Sheet state
   const [sheetOpen, setSheetOpen] = useState(false)

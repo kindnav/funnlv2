@@ -65,58 +65,65 @@ test('edit mode would never call with count=0 — verify id is still guarded', (
 })
 
 // ── shouldShowAIFill ──────────────────────────────────────────────────────────
+// New signature: shouldShowAIFill(proStatus, isEditMode) → delegates to
+// hasProAccess(proStatus) (the canonical access gate — no state allowlist).
 
 console.log('\nshouldShowAIFill\n')
 
-// Add mode (isEditMode = false)
+// Server-authoritative status fixtures (shape from get_my_pro_access_status()).
+const PRO_PERMANENT  = { can_use_pro: true,  permanent_pro: true }
+const PRO_TRIAL      = { can_use_pro: true,  permanent_pro: false, trial_active: true }
+const PRO_SUBSCRIBED = { can_use_pro: true,  permanent_pro: false, subscription_active: true }
+const EXPIRED        = { can_use_pro: false, permanent_pro: false, trial_expired: true }
+const NON_PRO        = { can_use_pro: false, permanent_pro: false }
+
+// Add mode (isEditMode = false) — visible only when the user actually has access.
 test('permanent + add mode → show AI Fill', () => {
-  assert.strictEqual(shouldShowAIFill('permanent', false), true)
+  assert.strictEqual(shouldShowAIFill(PRO_PERMANENT, false), true)
 })
 
 test('trial + add mode → show AI Fill', () => {
-  assert.strictEqual(shouldShowAIFill('trial', false), true)
+  assert.strictEqual(shouldShowAIFill(PRO_TRIAL, false), true)
+})
+
+test('subscribed + add mode → show AI Fill', () => {
+  assert.strictEqual(shouldShowAIFill(PRO_SUBSCRIBED, false), true)
 })
 
 test('expired + add mode → hide AI Fill', () => {
-  assert.strictEqual(shouldShowAIFill('expired', false), false)
+  assert.strictEqual(shouldShowAIFill(EXPIRED, false), false)
 })
 
 test('non_pro + add mode → hide AI Fill', () => {
-  assert.strictEqual(shouldShowAIFill('non_pro', false), false)
+  assert.strictEqual(shouldShowAIFill(NON_PRO, false), false)
 })
 
-test('unavailable (loading/error) + add mode → hide AI Fill', () => {
-  assert.strictEqual(shouldShowAIFill('unavailable', false), false)
+test('unavailable (error) + add mode → hide AI Fill', () => {
+  assert.strictEqual(shouldShowAIFill('error', false), false)
 })
 
-test('unknown proClass + add mode → hide AI Fill (fail-closed)', () => {
-  assert.strictEqual(shouldShowAIFill('mystery', false), false)
+test('malformed status + add mode → hide AI Fill (fail-closed)', () => {
+  assert.strictEqual(shouldShowAIFill({ can_use_pro: 'yes' }, false), false)
 })
 
 // Edit mode (isEditMode = true) — always hidden regardless of Pro status
 test('permanent + edit mode → hide AI Fill', () => {
-  assert.strictEqual(shouldShowAIFill('permanent', true), false)
+  assert.strictEqual(shouldShowAIFill(PRO_PERMANENT, true), false)
 })
 
 test('trial + edit mode → hide AI Fill', () => {
-  assert.strictEqual(shouldShowAIFill('trial', true), false)
+  assert.strictEqual(shouldShowAIFill(PRO_TRIAL, true), false)
 })
 
-test('expired + edit mode → hide AI Fill', () => {
-  assert.strictEqual(shouldShowAIFill('expired', true), false)
+test('subscribed + edit mode → hide AI Fill', () => {
+  assert.strictEqual(shouldShowAIFill(PRO_SUBSCRIBED, true), false)
 })
 
 test('non_pro + edit mode → hide AI Fill', () => {
-  assert.strictEqual(shouldShowAIFill('non_pro', true), false)
+  assert.strictEqual(shouldShowAIFill(NON_PRO, true), false)
 })
 
-test('unavailable + edit mode → hide AI Fill', () => {
-  assert.strictEqual(shouldShowAIFill('unavailable', true), false)
-})
-
-test('null proClass + add mode → hide AI Fill', () => {
-  // null can arrive when proStatus is loading; classifyProStatus maps it to
-  // 'unavailable', but guard the raw null too.
+test('null proStatus + add mode → hide AI Fill (loading, fail-closed)', () => {
   assert.strictEqual(shouldShowAIFill(null, false), false)
 })
 

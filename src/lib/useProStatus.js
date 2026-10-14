@@ -19,7 +19,7 @@
  *   Wrap the authenticated shell in <ProStatusProvider>.
  *   Consume with:  const proStatus = useProStatus()
  *   Classify with: const displayStatus = classifyProStatus(proStatus)
- *   Gate AI with:  const canUsePro = displayStatus === 'permanent' || displayStatus === 'trial'
+ *   Gate AI with:  const canUsePro = hasProAccess(proStatus)   (server-authoritative can_use_pro)
  */
 import { createContext, createElement, useCallback, useContext, useEffect, useState } from 'react'
 import { getProAccessStatus } from './pro-access-status'

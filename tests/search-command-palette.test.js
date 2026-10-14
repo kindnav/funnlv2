@@ -411,8 +411,8 @@ console.log('\nProStatus usage (shared RPC, no independent call)')
 test('useProStatus() used (not getProAccessStatus directly)', () => {
   assert.ok(src.includes('useProStatus()'), 'must call useProStatus() from shared context')
 })
-test('classifyProStatus applied to proStatus', () => {
-  assert.ok(src.includes('classifyProStatus(proStatus)'), 'must call classifyProStatus(proStatus)')
+test('Pro access gated on the server-authoritative hasProAccess(proStatus)', () => {
+  assert.ok(src.includes('const canUsePro = hasProAccess(proStatus)'), 'must gate on hasProAccess(proStatus) (permanent, trial or a granting subscription)')
 })
 test('canUsePro derived from displayStatus', () => {
   assert.ok(src.includes('canUsePro'), 'must derive canUsePro for Pro-gated features')

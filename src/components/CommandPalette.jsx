@@ -43,7 +43,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useProStatus } from '../lib/useProStatus'
-import { classifyProStatus } from '../lib/pro-ui-status'
+import { hasProAccess } from '../lib/pro-ui-status'
 import { supabase } from '../lib/supabase'
 import { resolveActivationAction } from '../lib/activationActionCoordinator'
 import { buildPickerNavigationState } from '../lib/contactPickerUtils'
@@ -182,8 +182,7 @@ export default function CommandPalette() {
   // ── Pro status ────────────────────────────────────────────────────────────
   // Shared ProStatusProvider — one RPC per app mount, broadcast to all consumers.
   const proStatus = useProStatus()
-  const displayStatus = classifyProStatus(proStatus)
-  const canUsePro = displayStatus === 'permanent' || displayStatus === 'trial'
+  const canUsePro = hasProAccess(proStatus)
 
   // ── UID fetch + auth subscription ─────────────────────────────────────────
   useEffect(() => {

@@ -334,7 +334,7 @@ test('drawer: a failed draft keeps the paste for retry; Back returns to it befor
 test('entry points are Pro-only; the contact page preselects its contact', () => {
   for (const f of ['../src/pages/ContactsPage.jsx', '../src/pages/ContactDetailPage.jsx']) {
     const src = read(f)
-    assert.ok(src.includes("const canPasteEmail = proClass === 'permanent' || proClass === 'trial'"), f)
+    assert.ok(src.includes('const canPasteEmail = hasProAccess(useProStatus())'), f)
     assert.ok(src.includes('{canPasteEmail && ('), f)
     assert.ok(src.includes('{pasteOpen && canPasteEmail &&'), f)
   }
