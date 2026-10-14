@@ -25,6 +25,13 @@ its own explicit approval.
 - `tests/log-interaction-form.test.js` pins the contracts. It passes on this branch and fails against main's source.
 - `npm test` passes in full.
 
+**Deployment.** Merging P1 into `main` **may deploy the frontend to Production**:
+- `vercel.json` enables Git deployments for `main`;
+- the current Production deployment was built by Vercel from a main merge (`3115d18`);
+- no deployment hold was found (read-only, 2026-10-14).
+
+No Edge Function, migration or secret is deployed by a merge.
+
 ## 2. Inventory: repository vs Production (read-only, 2026-10-14)
 
 | Area | Deployed in Production | In repository | Running? |
@@ -113,20 +120,43 @@ FROM public.outlook_sync_state;
   - Re-run the packet from S0 at a quiet moment.
   - Record which counter blocked it.
 
-**S4. Stable baseline (only after S3 passes).** Captured twice, a few minutes apart. Both captures
-must be equal:
+**S4. Stable baseline (only after S3 passes).** Captured twice, a few minutes apart.
+
+**What must be equal, and what may change.** Equality between the two captures, and later in S5,
+applies only to **processing and renewal evidence**: the processing digest and the subscription
+identity/renewal digest below. Notification and wake observations are recorded alongside,
+preserved, never cleared, and **may change**, because Microsoft can keep notifying after the
+stop. Protected records are compared separately (below).
+
+Who writes the subscription row (from `20261009000000`, the only migration that writes
+`outlook_subscriptions`):
+- **Only the worker** (`record_outlook_subscription_state`, fenced on its run) sets or renews
+  `subscription_id`, `client_state_hash`, `expires_at`, `renewed_at` and `last_error_code`, and
+  can also set `status`.
+- **The notification endpoint** (`record_outlook_change_notification`) never touches those
+  identity/renewal columns. On a lifecycle event it sets `status` to `removed`
+  (`subscriptionRemoved`) or `reauthorize` (`reauthorizationRequired`), stamps
+  `last_lifecycle_event` / `last_lifecycle_at`, and increments `notifications_received` /
+  `last_notification_at`. A `missed` event stamps the lifecycle fields without changing `status`.
+  Every accepted notification also records a wake-up on `microsoft_connections`.
+
+Baseline values:
 
 - **Processing digest per folder:**
   `md5(string_agg(concat_ws('|', folder, sync_status, last_attempt_at, last_success_at,
   run_started_at, last_run_complete, retry_count, md5(coalesce(delta_link_ciphertext,'')),
-  round_id IS NULL), ',' ORDER BY folder))` over `outlook_sync_state`.
-- **Subscription digest:** `md5(concat_ws('|', status, expires_at, renewed_at, last_error_code,
-  md5(coalesce(subscription_id,''))))` over `outlook_subscriptions`. Also record `expires_at` as
-  a timestamp.
-- **Notifications and wakes, recorded SEPARATELY and preserved (never cleared):**
-  - `notifications_received`, `last_notification_at`, `last_lifecycle_event`, `last_lifecycle_at`
-    from `outlook_subscriptions`;
-  - `wake_requested_at`, `wake_count`, `last_wake_at` from `microsoft_connections`.
+  round_id IS NULL), ',' ORDER BY folder))` over `outlook_sync_state`. **Must be equal.**
+- **Subscription identity/renewal digest (worker-owned):**
+  `md5(concat_ws('|', md5(coalesce(subscription_id,'')), coalesce(client_state_hash,''),
+  expires_at, renewed_at, last_error_code))` over `outlook_subscriptions` (`client_state_hash` is
+  already a SHA-256 digest). **Must be equal.**
+  Also record `expires_at` as a timestamp. `status` is deliberately NOT in this digest.
+- **Subscription status**, recorded as a value (`active`, `reauthorize`, `removed` or `failed`),
+  together with `last_lifecycle_event` and `last_lifecycle_at`.
+- **Notification and wake observations**, recorded SEPARATELY, preserved and never cleared; they
+  may change:
+  - `notifications_received`, `last_notification_at` from `outlook_subscriptions`;
+  - `wake_requested_at`, `wake_source`, `wake_count`, `last_wake_at` from `microsoft_connections`.
 - **Protected existing records**, as per-row digests keyed by `md5(id::text)` and written to a
   local file:
   - `interactions` where `source IN ('outlook','google_calendar')`, row digest over `contact_id`,
@@ -143,10 +173,24 @@ must be equal:
 - **The tick did not run:** `SELECT count(*) FROM cron.job_run_details WHERE jobid = (SELECT jobid
   FROM cron.job WHERE jobname = 'outlook-worker-tick') AND start_time > <S1 time>;` is `0`.
 - **The processing digest equals the baseline.** No new attempt, run, cursor movement or round.
-- **The subscription digest equals the baseline.** No renewal (`renewed_at` and `expires_at`
-  unmoved).
-- **Notification and wake counters may have increased.** That proves Microsoft still notifies,
-  not that Funnl processed anything. Record the new values; do not clear them.
+- **The subscription identity/renewal digest equals the baseline.** No renewal or re-creation
+  (`subscription_id`, `expires_at`, `renewed_at`, `last_error_code` unmoved). Any difference here
+  is worker activity and **blocks**.
+- **Subscription status:** unchanged, or changed only by an explained lifecycle transition:
+  - **Explained** means all of the following:
+    - the new status is `removed` with `last_lifecycle_event = 'subscriptionRemoved'`, or
+      `reauthorize` with `last_lifecycle_event = 'reauthorizationRequired'`;
+    - `last_lifecycle_at` is later than the baseline capture;
+    - `notifications_received` increased;
+    - the identity/renewal digest is still equal.
+  - **Blocks:** any other transition, for example to `active` or `failed`, a status change with no
+    matching lifecycle record, or a lifecycle record later overwritten by `missed` so the cause can
+    no longer be shown. Investigate before continuing; do not "fix" the row.
+  - An explained `removed` or `reauthorize` is a Microsoft-side lifecycle outcome, not
+    processing. It needs no action, and the subscription is left for S6.
+- **Notification and wake observations may have changed.** Increases show that Microsoft still
+  notifies, not that Funnl processed anything: the processing digest is the evidence for that.
+  Record the new values; do not clear them.
 - **Protected records:** every baseline row still exists with the same digest, or each difference
   is explained:
   - a row missing because the user deleted it, or its contact, in the app (contacts cascade);
