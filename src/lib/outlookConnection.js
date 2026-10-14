@@ -266,6 +266,12 @@ export function messageForOutcome (kind) {
       // every path that stops before finalize_microsoft_connection stores a
       // row, and on a non-'stored' result.
       return 'Could not connect your Outlook account. Nothing was connected - please try again.'
+    case 'callback_admin_approval':
+      // Shown with callback_failed, never alone. The callback cannot tell an organisation's
+      // "Need admin approval" refusal from any other failure - every failing path returns the
+      // same redirect, deliberately - so this is conditional ("If ...") rather than a diagnosis.
+      // It must not imply Funnl can obtain that approval or that retrying will succeed.
+      return "If your school or work account said it needs admin approval, trying again won't help: your organisation has to approve Funnl first. You can keep using Funnl without connecting Outlook."
     case 'stale_version':
       return 'The Outlook disclosure has been updated. Reload this page to read the current version before connecting.'
     case 'not_enabled':

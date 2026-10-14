@@ -216,6 +216,7 @@ export default function OutlookConnectionCard({
           aria-live="polite"
         >
           {messageForOutcome('callback_failed')}
+          <span className="mt-1 block">{messageForOutcome('callback_admin_approval')}</span>
         </p>
       )}
 
