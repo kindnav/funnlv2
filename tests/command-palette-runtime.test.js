@@ -629,9 +629,12 @@ console.log('\n14. Pro gating')
 test('useProStatus() used (shared context, no independent RPC)', () => {
   assert.ok(cp.includes('useProStatus()'), 'must use shared useProStatus() — no independent RPC')
 })
-test('canUsePro derived from displayStatus (permanent or trial)', () => {
-  assert.ok(cp.includes("displayStatus === 'permanent'") || cp.includes("=== 'permanent'"), 'permanent Pro must be checked')
-  assert.ok(cp.includes("displayStatus === 'trial'") || cp.includes("=== 'trial'"), 'trial Pro must be checked')
+test('canUsePro derived from hasProAccess (canonical gate, not a state allowlist)', () => {
+  assert.ok(/canUsePro\s*=\s*hasProAccess\(/.test(cp), 'canUsePro must be hasProAccess(proStatus)')
+  assert.ok(
+    !/canUsePro\s*=\s*[^\n]*===\s*['"](permanent|trial|subscribed)['"]/.test(cp),
+    'canUsePro must not enumerate entitlement states'
+  )
 })
 test('AI row only renders when canUsePro', () => {
   // JSX renders the section label as >Ask< (not a string literal 'Ask')

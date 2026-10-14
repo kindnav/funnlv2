@@ -190,7 +190,11 @@ test('Pro: anything but canUse === true is refused', async () => {
 test('the Edge Function checks auth and entitlement server-side and requires a JWT', () => {
   const src = readFileSync(new URL('../supabase/functions/ai-paste-email/index.ts', import.meta.url), 'utf8')
   assert.ok(src.includes('auth.getUser()'))
-  assert.ok(src.includes('loadProEntitlement') && src.includes('evaluateProEntitlement'))
+  assert.ok(src.includes('loadProEntitlement') && src.includes('decideEntitlement'))
+  // The shared three-way decision, mapped without a false 403: unknown -> retryable error.
+  assert.ok(src.includes("if (decision.status === 'unknown') return { canUse: false, error: true }"))
+  assert.ok(src.includes("return { canUse: decision.status === 'allow' }"))
+  assert.equal(src.includes('evaluateProEntitlement'), false)
   assert.equal(src.includes('console.log'), false)
   const cfg = readFileSync(new URL('../supabase/config.toml', import.meta.url), 'utf8').split(String.fromCharCode(13)).join('')
   assert.ok(cfg.includes('[functions.ai-paste-email]' + NL + 'verify_jwt = true'))

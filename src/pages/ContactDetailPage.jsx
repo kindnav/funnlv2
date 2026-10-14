@@ -14,7 +14,7 @@ import AddContactDrawer from '../components/AddContactDrawer'
 import LogInteractionSheet from '../components/LogInteractionSheet'
 import PasteEmailDrawer from '../components/PasteEmailDrawer'
 import { useProStatus } from '../lib/useProStatus'
-import { classifyProStatus } from '../lib/pro-ui-status'
+import { hasProAccess } from '../lib/pro-ui-status'
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -190,8 +190,7 @@ function ContactDetailPage() {
 
   const [editDrawerOpen, setEditDrawerOpen] = useState(false)
   // Paste an email (Pro), attributed to THIS contact because capture starts on their page.
-  const proClass = classifyProStatus(useProStatus())
-  const canPasteEmail = proClass === 'permanent' || proClass === 'trial'
+  const canPasteEmail = hasProAccess(useProStatus())
   const [pasteOpen, setPasteOpen] = useState(false)
 
   const [confirmingDelete, setConfirmingDelete] = useState(false)

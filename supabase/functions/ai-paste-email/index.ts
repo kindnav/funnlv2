@@ -9,7 +9,7 @@
 // carry the controlled codes handlePasteEmail emits and nothing else.
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
-import { loadProEntitlement, evaluateProEntitlement } from '../shared/pro-entitlement.js'
+import { loadProEntitlement, decideEntitlement } from '../shared/pro-entitlement.js'
 import { callDraftModel } from '../shared/outlookDraftContract.js'
 import { handlePasteEmail, MAX_PASTE_CHARS } from '../shared/pasteEmail.js'
 
@@ -61,10 +61,13 @@ Deno.serve(async (req) => {
     const result = await handlePasteEmail(
       { text: (body as { text?: unknown })?.text },
       {
+        // The same decision every AI function uses: permanent Pro, an active trial, or a
+        // subscription the billing policy grants (active, past_due). 'unknown' - a failed
+        // lookup with no proven access - is a retryable error, never a false 403.
         loadEntitlement: async () => {
-          const { profile, trial, profileError, trialError } = await loadProEntitlement(supabaseAdmin, user.id)
-          if (profileError || trialError) return { canUse: false, error: true }
-          return { canUse: evaluateProEntitlement(profile, trial, new Date()).canUse }
+          const decision = decideEntitlement(await loadProEntitlement(supabaseAdmin, user.id), new Date())
+          if (decision.status === 'unknown') return { canUse: false, error: true }
+          return { canUse: decision.status === 'allow' }
         },
         callModel: (requestBody: unknown) => callDraftModel({ body: requestBody, apiKey, fetchImpl: fetch }),
         log,

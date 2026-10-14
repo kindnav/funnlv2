@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { track } from '../lib/analytics'
 import { useProStatus } from '../lib/useProStatus'
-import { classifyProStatus } from '../lib/pro-ui-status'
+import { classifyProStatus, hasProAccess } from '../lib/pro-ui-status'
 import { findDuplicate } from '../lib/contactFormUtils'
 import { viewExistingRoute } from '../lib/interactionFormUtils'
 
@@ -49,7 +49,7 @@ function AddContactDrawer({ contact, contacts = [], onClose, onSuccess, initialN
   // Pro status for AI Fill gate (add mode only)
   const proStatus = useProStatus()
   const proClass  = classifyProStatus(proStatus)
-  const showAIFill = !isEditMode && (proClass === 'permanent' || proClass === 'trial')
+  const showAIFill = !isEditMode && hasProAccess(proStatus)
 
   // AI Fill state
   const [aiText,              setAiText]              = useState('')

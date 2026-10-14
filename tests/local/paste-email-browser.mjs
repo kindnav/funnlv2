@@ -815,6 +815,53 @@ async function main () {
   await sleep(1500)
   check('the non-Pro user sees no "Paste email" button', !(await page.eval('return !!document.querySelector(\'button[title="Paste an email (Pro)"]\')')))
 
+  // ══ 10b. subscription-based Pro (PR #24's policy: active and past_due grant) ══
+  console.log('10b. subscriptions: granted statuses are admitted; others and foreign rows are refused before the model')
+  const mk = async (label) => { const u = { email: `${label}@example.test`, password: randomBytes(12).toString('hex') }; return { ...u, id: (await admin(u)).id } }
+  const SUB = await mk('sub-active'), PD = await mk('sub-past-due'), CAN = await mk('sub-canceled'), TRI = await mk('sub-trialing'), FOREIGN = await mk('no-own-sub')
+  const subUsers = [SUB, PD, CAN, TRI, FOREIGN]
+  // Every one is Pro ONLY through a subscription, if at all: no permanent flag, trial expired.
+  psql(`UPDATE public.pro_trials SET started_at = now() - interval '10 days', ends_at = now() - interval '3 days' WHERE user_id IN (${subUsers.map((u) => `'${u.id}'`).join(',')});
+        UPDATE public.profiles SET ai_enabled = false WHERE id IN (${subUsers.map((u) => `'${u.id}'`).join(',')});
+        INSERT INTO public.subscriptions (user_id, stripe_customer_id, status, current_period_end, cancel_at_period_end) VALUES
+          ('${SUB.id}', 'cus_fixture_1', 'active', now() + interval '20 days', false),
+          ('${PD.id}',  'cus_fixture_2', 'past_due', now() + interval '20 days', false),
+          ('${CAN.id}', 'cus_fixture_3', 'canceled', now() - interval '1 day', true),
+          ('${TRI.id}', 'cus_fixture_4', 'trialing', now() + interval '20 days', false);`)
+  check('fixtures: four subscription rows, and FOREIGN has none of its own while another user is active',
+    one(`SELECT count(*) FROM public.subscriptions WHERE user_id IN (${subUsers.map((u) => `'${u.id}'`).join(',')})`) === '4'
+      && one(`SELECT count(*) FROM public.subscriptions WHERE user_id = '${FOREIGN.id}'`) === '0')
+  const rpcFor = async (u) => {
+    const t = await tokenFor(u)
+    const r = await fetch(`${GW}/rest/v1/rpc/get_my_pro_access_status`, { method: 'POST', headers: { apikey: ANON_KEY, Authorization: `Bearer ${t}`, 'Content-Type': 'application/json' }, body: '{}' })
+    return { token: t, status: await r.json() }
+  }
+  setFake(PEOPLE([{ name: 'Priya Shah' }]), NOTE_OK('A note.'))
+  for (const [u, label, admitted] of [[SUB, 'active', true], [PD, 'past_due', true], [CAN, 'canceled', false], [TRI, 'trialing', false], [FOREIGN, 'no own row (another user is active)', false]]) {
+    const { token, status } = await rpcFor(u)
+    const before = fakeCalls.length
+    const r = await call(token, { text: SINGLE })
+    const body = await r.json()
+    const modelCalls = fakeCalls.length - before
+    check(`subscription ${label}: the database says can_use_pro=${status.can_use_pro}, and the function ${admitted ? 'ADMITS (200, model called)' : 'REFUSES (403 pro_required, no model call)'}`,
+      status.can_use_pro === admitted && (admitted ? (r.status === 200 && body.code === 'ok' && modelCalls === 2) : (r.status === 403 && body.code === 'pro_required' && modelCalls === 0)),
+      JSON.stringify({ can_use_pro: status.can_use_pro, http: r.status, code: body.code, modelCalls }))
+  }
+  await page.eval('localStorage.clear(); sessionStorage.clear(); return true')
+  await signIn(SUB)
+  await page.goto(`${GW}/contacts`)
+  await page.waitFor("document.querySelector('button[title=\"Paste an email (Pro)\"]')", 20000, 'Paste email for the subscriber')
+  check('the subscription-only user SEES "Paste email" (browser and server agree)', true)
+  await page.goto(`${GW}/settings`)
+  await page.waitFor('document.body.innerText.includes("Funnl Pro")', 20000, 'the Pro line in Settings')
+  check('Settings labels the subscriber correctly', await page.eval('return document.body.innerText.includes("Funnl Pro · subscription")'))
+  await page.eval('localStorage.clear(); sessionStorage.clear(); return true')
+  await signIn(CAN)
+  await page.goto(`${GW}/contacts`)
+  await page.waitFor('document.body.innerText.includes("Contacts")', 15000, 'Contacts as the canceled user')
+  await sleep(1500)
+  check('the canceled subscriber sees no "Paste email" button', !(await page.eval("return !!document.querySelector('button[title=\"Paste an email (Pro)\"]')")))
+
   // ══ 11. what the model received, and what the logs hold ═══════════════════
   console.log('11. the model saw no addresses; no log holds the paste or the model output')
   const addresses = ['priya.shah@goldman.example', 'me@school.example', 'marcus.bell@northwind.example', 'dana@kestrel.example', 'sam@club.example', 'lena@harbor.example']

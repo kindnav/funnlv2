@@ -6,7 +6,7 @@ import InteractionSourceBadge from '../components/InteractionSourceBadge'
 import TopBar from '../components/TopBar'
 import PasteEmailDrawer from '../components/PasteEmailDrawer'
 import { useProStatus } from '../lib/useProStatus'
-import { classifyProStatus } from '../lib/pro-ui-status'
+import { hasProAccess } from '../lib/pro-ui-status'
 import { getAvatarColor, getInitials } from '../lib/avatarUtils'
 import {
   parseSortParam, buildDirectoryEntry, sortDirectoryEntries,
@@ -397,8 +397,7 @@ function ContactsPage() {
   const [fetchError, setFetchError] = useState('')
   const [importOpen, setImportOpen] = useState(false)
   // Paste an email (Pro): same gate as AI Fill. The server re-checks entitlement.
-  const proClass = classifyProStatus(useProStatus())
-  const canPasteEmail = proClass === 'permanent' || proClass === 'trial'
+  const canPasteEmail = hasProAccess(useProStatus())
   const [pasteOpen, setPasteOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState(() => new URLSearchParams(location.search).get('search') || '')
   const [expandedId, setExpandedId] = useState(null)
