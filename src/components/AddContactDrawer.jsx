@@ -36,6 +36,7 @@ function AddContactDrawer({ contact, contacts = [], onClose, onSuccess, initialN
   const [company,          setCompany]          = useState(contact?.company             ?? '')
   const [role,             setRole]             = useState(contact?.role                ?? '')
   const [howMet,           setHowMet]           = useState(contact?.how_met             ?? '')
+  const [school,           setSchool]           = useState(contact?.school              ?? '')
   const [relationshipType, setRelationshipType] = useState(contact?.relationship_type   ?? '')
   const [relationshipNote, setRelationshipNote] = useState(contact?.relationship_note   ?? '')
   const [email,            setEmail]            = useState(contact?.email               ?? '')
@@ -150,6 +151,7 @@ function AddContactDrawer({ contact, contacts = [], onClose, onSuccess, initialN
     if (parsed.company)           { setCompany(parsed.company);                    filled.add('company') }
     if (parsed.role)              { setRole(parsed.role);                          filled.add('role') }
     if (parsed.how_met)           { setHowMet(parsed.how_met);                     filled.add('howMet') }
+    if (parsed.school)            { setSchool(parsed.school);                      filled.add('school') }
     if (parsed.email)             { setEmail(parsed.email);                        filled.add('email') }
     if (parsed.linkedin_url)      { setLinkedinUrl(parsed.linkedin_url);           filled.add('linkedinUrl') }
     if (parsed.tags?.length)      { setTagsInput(parsed.tags.join(', '));          filled.add('tags') }
@@ -175,6 +177,7 @@ function AddContactDrawer({ contact, contacts = [], onClose, onSuccess, initialN
       company:           company || null,
       role:              role || null,
       how_met:           howMet || null,
+      school:            school.trim() || null,
       email:             email || null,
       linkedin_url:      normalizeUrl(linkedinUrl),
       tags:              tags.length > 0 ? tags : null,
@@ -397,6 +400,17 @@ function AddContactDrawer({ contact, contacts = [], onClose, onSuccess, initialN
             onChange={e => { setHowMet(e.target.value); clearAiFill('howMet') }}
             className={inputCls('howMet')}
             placeholder="Spring Career Fair"
+          />
+        </div>
+
+        {/* ── School ── */}
+        <div>
+          <label className={lCls}>School</label>
+          <input
+            value={school}
+            onChange={e => { setSchool(e.target.value); clearAiFill('school') }}
+            className={inputCls('school')}
+            placeholder="Indiana University"
           />
         </div>
 

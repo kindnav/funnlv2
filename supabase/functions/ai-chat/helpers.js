@@ -115,6 +115,7 @@ function buildContextBody(contacts, byContact, today, maxIx) {
     const meta = []
     if (c.company)           meta.push(`Company: ${truncFreeText(c.company, MAX_FIELD_CHARS)}`)
     if (c.role)              meta.push(`Role: ${truncFreeText(c.role, MAX_FIELD_CHARS)}`)
+    if (c.school)            meta.push(`School: ${truncFreeText(c.school, MAX_FIELD_CHARS)}`)
     if (c.how_met)           meta.push(`How met: ${truncFreeText(c.how_met, MAX_FIELD_CHARS)}`)
     if (c.relationship_type) meta.push(`Relationship type: ${truncEnum(c.relationship_type, MAX_FIELD_CHARS)}`)
 
@@ -179,6 +180,7 @@ function buildCompactBody(contacts, byContact, today) {
     const metaParts = []
     if (c.company) metaParts.push(truncFreeText(c.company, MAX_FIELD_CHARS))
     if (c.role)    metaParts.push(truncFreeText(c.role, MAX_FIELD_CHARS))
+    if (c.school)  metaParts.push(truncFreeText(c.school, MAX_FIELD_CHARS))
     const metaStr  = metaParts.length ? ` — ${metaParts.join(', ')}` : ''
     const relStr   = c.relationship_type
       ? ` (${truncEnum(c.relationship_type, MAX_FIELD_CHARS)})`

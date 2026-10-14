@@ -490,7 +490,7 @@ function ContactDetailPage() {
     .filter(i => i.outreach_status)
     .sort((a, b) => b.interaction_date.localeCompare(a.interaction_date))[0] || null
 
-  const hasAnyDetails = contact.email || contact.linkedin_url || contact.how_met ||
+  const hasAnyDetails = contact.email || contact.linkedin_url || contact.how_met || contact.school ||
     contact.relationship_type || contact.relationship_note || latestOutreach
 
   // ── Render ────────────────────────────────────────────────────────────────
@@ -677,6 +677,12 @@ function ContactDetailPage() {
                       <div>
                         <p className="text-[11.5px] text-low mb-0.5">How you met</p>
                         <p className="text-[13px] font-medium text-hi">{contact.how_met}</p>
+                      </div>
+                    )}
+                    {contact.school && (
+                      <div>
+                        <p className="text-[11.5px] text-low mb-0.5">School</p>
+                        <p className="text-[13px] font-medium text-hi">{contact.school}</p>
                       </div>
                     )}
                     {contact.relationship_type && (

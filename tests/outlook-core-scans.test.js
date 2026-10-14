@@ -497,6 +497,9 @@ test('applied migrations are unmodified; the only addition is the forward scope 
     // plus a fenced cross-user refusal, so it must apply after the file it was copied from.
     // It refuses to run while a duplicate exists and deletes nothing.
     '20261014000000_outlook_one_owner_per_microsoft_account.sql',
+    // NOT an Outlook migration: an optional School column on contacts. It touches no Outlook
+    // object; it is listed only because this pin covers the newest files.
+    '20261015000000_add_contact_school.sql',
   ]
   assert.deepStrictEqual(files.slice(-FORWARD_TAIL.length), FORWARD_TAIL,
     'the forward migrations must be the newest, in this order')

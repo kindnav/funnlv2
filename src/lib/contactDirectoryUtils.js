@@ -246,6 +246,7 @@ export function searchDirectory(entries, query) {
     if (entry.name?.toLowerCase().includes(q))              return true
     if (entry.company?.toLowerCase().includes(q))           return true
     if (entry.role?.toLowerCase().includes(q))              return true
+    if (entry.school?.toLowerCase().includes(q))            return true
     if (entry.relationship_note?.toLowerCase().includes(q)) return true
     if (entry.tags?.some(t => t.toLowerCase().includes(q))) return true
     if (entry._interactions?.some(i => i.notes?.toLowerCase().includes(q))) return true

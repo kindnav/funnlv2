@@ -37,6 +37,8 @@ export const MAX_PASTE_CHARS = 12_000
 export const MAX_ADDRESSES = 20
 /** At most this many people are proposed from one paste; the reviewer picks one or none. */
 export const MAX_PEOPLE = 4
+/** Same bound as company and role. */
+export const SCHOOL_MAX = 120
 export const CONTACT_MAX_TOKENS = 3072
 export const NOTE_MAX_TOKENS = 2048
 /** Evidence quoted for one field: at most this many lines and characters. */
@@ -44,7 +46,7 @@ export const EVIDENCE_MAX_LINES = 4
 export const EVIDENCE_MAX_CHARS = 400
 
 /** AI Fill's instructions, verbatim from ai-parse-contact (pinned by test). */
-export const AI_FILL_INSTRUCTIONS = "Parse the following text about a person into contact fields.\nReturn ONLY a raw JSON object — no explanation, no markdown, no code fences.\nOnly extract fields that are explicitly and clearly stated in the text.\nDo not infer, guess, complete partial information, or make assumptions about anything not directly stated.\nIf a detail is ambiguous or only implied, omit that field entirely.\n\nFields to extract (include only those explicitly present in the text):\n- name (string) — full name of the person\n- company (string) — company or organization they work at\n- role (string) — their job title or role\n- email (string) — only if a complete email address is explicitly stated\n- linkedin_url (string) — only if a linkedin.com URL is explicitly stated\n- how_met (string) — where or how you met them, e.g. \"Career fair\", \"Coffee chat\"\n- tags (array of strings) — informal labels e.g. [\"alumni\", \"target firm\"]\n- relationship_note (string) — why this person matters or how they can help, e.g. \"Can intro me to the PM team at Stripe\" (do NOT include this for generic contact info)\n- follow_up_suggestion (string) — only if a specific timeframe is explicitly mentioned, e.g. \"2 weeks\", \"next Monday\""
+export const AI_FILL_INSTRUCTIONS = "Parse the following text about a person into contact fields.\nReturn ONLY a raw JSON object — no explanation, no markdown, no code fences.\nOnly extract fields that are explicitly and clearly stated in the text.\nDo not infer, guess, complete partial information, or make assumptions about anything not directly stated.\nIf a detail is ambiguous or only implied, omit that field entirely.\n\nFields to extract (include only those explicitly present in the text):\n- name (string) — full name of the person\n- company (string) — company or organization they work at\n- role (string) — their job title or role\n- school (string) — the school, college or university they attend or attended\n- email (string) — only if a complete email address is explicitly stated\n- linkedin_url (string) — only if a linkedin.com URL is explicitly stated\n- how_met (string) — where or how you met them, e.g. \"Career fair\", \"Coffee chat\"\n- tags (array of strings) — informal labels e.g. [\"alumni\", \"target firm\"]\n- relationship_note (string) — why this person matters or how they can help, e.g. \"Can intro me to the PM team at Stripe\" (do NOT include this for generic contact info)\n- follow_up_suggestion (string) — only if a specific timeframe is explicitly mentioned, e.g. \"2 weeks\", \"next Monday\""
 
 /**
  * The drafting contract's ABSOLUTE RULES only (untrusted content, explicit facts only, no
@@ -267,13 +269,15 @@ function personSchema () {
   return {
     type: 'object',
     additionalProperties: false,
-    required: ['name', 'company', 'company_evidence', 'role', 'role_evidence', 'how_met', 'linkedin_url', 'linkedin_evidence'],
+    required: ['name', 'company', 'company_evidence', 'role', 'role_evidence', 'school', 'school_evidence', 'how_met', 'linkedin_url', 'linkedin_evidence'],
     properties: {
       name: nullableString('This person\'s full name, copied exactly as written in the email.'),
       company: nullableString('THIS person\'s company or organization, copied exactly as written. Null unless company_evidence supports it.'),
       company_evidence: evidence('company'),
       role: nullableString('THIS person\'s job title or role, copied exactly as written. Null unless role_evidence supports it.'),
       role_evidence: evidence('role'),
+      school: nullableString('THIS person\'s school, college or university, copied exactly as written. Null unless school_evidence supports it.'),
+      school_evidence: evidence('school'),
       how_met: nullableString('Where or how the user met THIS person, only if explicitly stated.'),
       linkedin_url: nullableString('THIS person\'s linkedin.com/in/ URL only if it appears verbatim. Null unless linkedin_evidence supports it.'),
       linkedin_evidence: evidence('LinkedIn URL'),
@@ -308,8 +312,9 @@ export function buildContactRequest (masked) {
     '',
     'This text is an email exchange, not a note about one person. Under "people", list each',
     `person other than the user who wrote, received or is named in it, at most ${MAX_PEOPLE}.`,
-    'Give each person ONLY the details the text states about THAT person, with name, company and',
-    'role copied exactly as written. A company, role or LinkedIn URL needs evidence: copy the exact',
+    'Give each person ONLY the details the text states about THAT person, with name, company, role',
+    'and school copied exactly as written. A company, role, school or LinkedIn URL needs evidence:',
+    'copy the exact',
     'lines that state it INCLUDING the line with this person\'s name - for a signature, the name line',
     'together with the title and company lines beneath it; for a sentence, the whole sentence.',
     'Text elsewhere in the email is not evidence. If it is unclear which person a detail belongs to,',
@@ -414,7 +419,7 @@ function hasWord (hay, word) {
   return false
 }
 
-const EVIDENCED = [['company', 'company_evidence'], ['role', 'role_evidence'], ['linkedin_url', 'linkedin_evidence']]
+const EVIDENCED = [['company', 'company_evidence'], ['role', 'role_evidence'], ['school', 'school_evidence'], ['linkedin_url', 'linkedin_evidence']]
 
 /**
  * Does `evidence` show that `value` belongs to the person whose name tokens are `own`?
@@ -485,7 +490,7 @@ function adjacentNameProblem (evidence, { lines, ownName, others }) {
 function cleanPerson (raw, text) {
   if (!isPlainRecord(raw) || hasProtoKey(raw)) return null
   const spec = {
-    name: [BOUNDS.name], company: [BOUNDS.company], role: [BOUNDS.role], how_met: [BOUNDS.howMet],
+    name: [BOUNDS.name], company: [BOUNDS.company], role: [BOUNDS.role], school: [SCHOOL_MAX], how_met: [BOUNDS.howMet],
     linkedin_url: [BOUNDS.linkedin, { allowLinkedIn: true }],
   }
   const fields = {}

@@ -157,7 +157,7 @@ test('review requires a person, a new contact name and a date', () => {
 
 test('contact payload has AddContactDrawer’s shape and never sets a relationship type', () => {
   const p = buildContactPayload({ ...NEW_DRAFT, tags: ['finance', ' '], relationship_note: '' })
-  assert.deepEqual(p, { name: 'Priya Shah', company: 'Goldman', role: null, how_met: null, email: 'priya.shah@goldman.example', linkedin_url: 'https://linkedin.com/in/priya', tags: ['finance'], relationship_type: null, relationship_note: null })
+  assert.deepEqual(p, { name: 'Priya Shah', company: 'Goldman', role: null, school: null, how_met: null, email: 'priya.shah@goldman.example', linkedin_url: 'https://linkedin.com/in/priya', tags: ['finance'], relationship_type: null, relationship_note: null })
 })
 
 // ── Saving and retries ─────────────────────────────────────────────────────────

@@ -706,6 +706,30 @@ async function main () {
   await page.click('Cancel', { byText: true, within: '[role=dialog]' })
   check('nothing was saved', tableWritesSince(log4c).length === 0 && JSON.stringify(counts()) === JSON.stringify(before4c))
 
+  // ══ 4d. School: extracted with evidence, reviewed, saved to the new column ════
+  console.log('4d. School: a school in the signature fills the field and is saved to contacts.school')
+  await openDrawerOn(`${GW}/contacts`)
+  setFake(PEOPLE([{ name: 'Ravi Patel', school: 'Indiana University', school_evidence: 'Indiana University', role: 'MBA Candidate', role_evidence: 'Ravi Patel' + NL + 'MBA Candidate, Kelley School of Business' }]),
+    NOTE_OK('Ravi offered to share his recruiting notes.'))
+  const before4d = counts()
+  await draftFrom(['From: Ravi Patel <ravi@iu.example>', 'Date: 2026-10-12', '', `Happy to share my recruiting notes. ${MARK}`, '', 'Best,', 'Ravi Patel', 'MBA Candidate, Kelley School of Business', 'Indiana University'].join(NL))
+  await toReview()
+  await page.click('A new contact', { byText: true, within: '[role=dialog]' })
+  await page.setValue('#paste-email-ai-person', '0')
+  const ravi = await page.eval('return ["#paste-email-name","#paste-email-role","#paste-email-school"].map(s=>document.querySelector(s).value)')
+  check('School is filled from the line beneath his signature', JSON.stringify(ravi) === JSON.stringify(['Ravi Patel', 'MBA Candidate', 'Indiana University']), JSON.stringify(ravi))
+  await page.click('Save', { byText: true, within: '[role=dialog]' })
+  await page.waitFor('document.body.innerText.includes("Saved: the new contact and the interaction.")', 10000, 'saved')
+  const savedSchool = one(`SELECT coalesce(school, '<null>') FROM public.contacts WHERE user_id='${A}' AND name='Ravi Patel'`)
+  check('saved: contacts.school = "Indiana University" (the migration\'s column, through real PostgREST)', savedSchool === 'Indiana University' && counts().contacts === before4d.contacts + 1, savedSchool)
+  await page.click('Close', { byText: true, within: '[role=dialog]' })
+  await page.goto(`${GW}/contacts`)
+  await page.waitFor('document.body.innerText.includes("Ravi Patel")', 15000, 'Ravi on the Contacts page')
+  await page.paste('input[placeholder^="Search name"]', 'Indiana')
+  await sleep(600)
+  const found = await page.eval('return { ravi: document.body.innerText.includes("Ravi Patel"), jordan: document.body.innerText.includes("Jordan Park") }')
+  check('searching "Indiana" finds him by school and filters out a contact without one', found.ravi === true && found.jordan === false, JSON.stringify(found))
+
   // ══ 5. double submission ══════════════════════════════════════════════════
   console.log('5. double submission creates no extra records')
   await openDrawerOn(`${GW}/contacts`)

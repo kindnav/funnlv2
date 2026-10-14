@@ -19,7 +19,7 @@
  * The local Contacts search input is intentionally separate:
  *   - It IS a real <input type="text"> that users can type into
  *   - It filters the visible contact list in real time (local scope)
- *   - Its placeholder uses local copy ("Search name, company, role, notes…")
+ *   - Its placeholder uses local copy ("Search name, company, role, school, notes…")
  *   - It coexists with the global launcher — two different things, not duplicates
  *
  * Run with: node tests/topbar-search-semantics.test.js
@@ -272,7 +272,7 @@ test('local search input uses a different (local-scope) placeholder', () => {
   // contact list — not the global launcher behavior. Having the same copy on
   // both would re-create the confusion this fix was designed to eliminate.
   assert.ok(
-    contactsSrc.includes('Search name, company, role, notes…'),
+    contactsSrc.includes('Search name, company, role, school, notes…'),
     'local search input must use local-scope placeholder distinct from the global launcher'
   )
   assert.ok(

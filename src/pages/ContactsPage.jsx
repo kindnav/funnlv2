@@ -367,6 +367,7 @@ const TABLE_COLS = [
   { key: 'name',              label: 'Name',         sortable: true },
   { key: 'company',           label: 'Company',      sortable: true },
   { key: 'role',              label: 'Role',         sortable: true },
+  { key: 'school',            label: 'School',       sortable: true },
   { key: 'relationship_type', label: 'Relationship', sortable: true },
   { key: 'tags',              label: 'Tags',         sortable: false },
 ]
@@ -632,7 +633,7 @@ function ContactsPage() {
               type="text"
               value={searchQuery}
               onChange={e => setSearchQuery(e.target.value)}
-              placeholder="Search name, company, role, notes…"
+              placeholder="Search name, company, role, school, notes…"
               className="flex-1 bg-transparent text-[13.5px] text-hi placeholder-low outline-none"
             />
             {searchQuery && (
@@ -879,6 +880,10 @@ function ContactsPage() {
                     {/* Role */}
                     <td className="px-4 py-3 text-[13.5px] text-muted">
                       {entry.role || <span className="text-lower">—</span>}
+                    </td>
+                    {/* School */}
+                    <td className="px-4 py-3 text-[13.5px] text-muted">
+                      {entry.school || <span className="text-lower">—</span>}
                     </td>
                     {/* Relationship type */}
                     <td className="px-4 py-3">
