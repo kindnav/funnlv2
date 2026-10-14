@@ -262,7 +262,7 @@ supabase/
 - `supabase/migrations/20260729000000_add_followup_completion.sql` — adds nullable `follow_up_completed_at timestamptz`, `follow_up_previous_date date`, and `follow_up_completion_method text` columns to `public.interactions`, with named CHECK constraint `interactions_follow_up_completion_method_check` (allowed values: `mark_done`, `log_result`). Applied to production 2026-07-29. Powers the "Recently Completed" section, Undo, and completion-method tracking on `/followups`.
 - `supabase/migrations/20261010120000_long_reviewed_interaction_notes.sql` — **Applied to production 2026-10-10.** Re-issues `accept_interaction_candidate` and `accept_new_contact_candidate` with the REVIEWED note bound raised 200 → 10,000 characters (tab/LF/CR admitted in the note; every other control character and every other field unchanged); signatures and grants restated; no column widened. Merged as PR #80 (`87f5d7d2fe10a2ee8611e3dde030ec840d4c55a9`).
 - `supabase/migrations/20261011000000_outlook_thread_segments.sql` — **Applied to production 2026-10-12** (ledger: nothing pending afterwards). Thread segments: five coverage columns + four CHECKs and an index on `outlook_candidate_refs`; new worker-only table `public.outlook_thread_recovery` (RLS on, **no** policies, grantees `postgres, service_role` only, cascading from the connection, constraints `otr_cfp_shape`/`otr_unpaired_shape`/`otr_unpaired_together`/`otr_baseline_together`/`otr_not_empty`/`otr_conn_user_fk`); four worker RPCs (`get_outlook_thread_coverage`, `record_outlook_thread_recovery`, `baseline_outlook_thread_window`, `baseline_outlook_thread_coverage`) each one overload, SECURITY DEFINER, `search_path=""`, `service_role`-only, lease-fenced; both producers re-issued at 19 and 20 arguments. **The two acceptance RPCs are untouched** (definition, signature, ACL digests verified identical across the apply). **Production behaviour is unchanged for now:** `outlook-import-worker` IS deployed at **v53** from merged main `6215fd6` (2026-10-12, closure byte-verified, `verify_jwt=false`), but `OUTLOOK_IMPORT_WORKER_ENABLED` is ABSENT and `outlook-worker-tick` is INACTIVE — execution is deliberately paused for the whole consent cutover (Draft PR #85, packet `docs/outlook-thread-segments-rollout.md`). Rollback is revert-the-worker, never reverse this migration.
-- `supabase/migrations/20261013060000_preserve_new_contact_context_deadline.sql` — **NOT YET APPLIED.** Branch `fix/outlook-new-contact-refresh-expiry`, Draft PR. Re-issues `upsert_new_contact_candidate` with the body copied verbatim from `20261011000000` and ONE change: the refresh branch no longer reassigns `context_expires_at`. The old `context_expires_at = now() + interval '30 days'` could never succeed on a refresh, because `created_at` keeps the original insert instant and the table's own ceiling is `context_expires_at <= created_at + interval '30 days'` — the create and the refresh are different transactions and `now()` is transaction-start time, so every refresh raised `23514 / ncc_context_ceiling`. The worker surfaced that as `rpc_error` / `write_failed` with **no cursor advanced**, so a folder re-read the same page until the reviewer accepted or dismissed that proposal. Reproduced over real PostgREST before the fix and proven after it in `tests/local/outlook-refresh-expiry.mjs`; the one-line scope is pinned by `tests/outlook-refresh-expiry-scan.test.js`, which substitutes the old assignment back and requires the applied text byte for byte. No column, constraint, index, trigger or policy touched; no DML; the 30-day review window now runs from creation, which is what `/privacy` already publishes, so no wording and no consent version moves. Rollout, ordering and verification: `docs/outlook-new-contact-refresh-expiry.md`. **Order matters:** this file is `20261013060000` and the unapplied cohort migration on `feat/outlook-cohort-gate` is `20261013120000`, so a `db push` applies this one first — do not merge the cohort branch before this is applied, or one push would carry both.
+- `supabase/migrations/20261013060000_preserve_new_contact_context_deadline.sql` — **APPLIED to Production 2026-10-13** (PR #91 merged `28fe93a`; ledger confirmed 2026-10-14, nothing pending). Re-issues `upsert_new_contact_candidate` with the body copied verbatim from `20261011000000` and ONE change: the refresh branch no longer reassigns `context_expires_at`. The old `context_expires_at = now() + interval '30 days'` could never succeed on a refresh, because `created_at` keeps the original insert instant and the table's own ceiling is `context_expires_at <= created_at + interval '30 days'` — the create and the refresh are different transactions and `now()` is transaction-start time, so every refresh raised `23514 / ncc_context_ceiling`. The worker surfaced that as `rpc_error` / `write_failed` with **no cursor advanced**, so a folder re-read the same page until the reviewer accepted or dismissed that proposal. Reproduced over real PostgREST before the fix and proven after it in `tests/local/outlook-refresh-expiry.mjs`; the one-line scope is pinned by `tests/outlook-refresh-expiry-scan.test.js`, which substitutes the old assignment back and requires the applied text byte for byte. No column, constraint, index, trigger or policy touched; no DML; the 30-day review window now runs from creation, which is what `/privacy` already publishes, so no wording and no consent version moves. Rollout, ordering and verification: `docs/outlook-new-contact-refresh-expiry.md`. **Order matters:** this file is `20261013060000` and the unapplied cohort migration on `feat/outlook-cohort-gate` is `20261013120000`, so a `db push` applies this one first — do not merge the cohort branch before this is applied, or one push would carry both.
 - `supabase/migrations/20261014000000_outlook_one_owner_per_microsoft_account.sql` — **APPLIED to Production 2026-10-13** (PR #97, pinned head `54c2ed6`, merged `2d7acb3`). Catalog verified: one finalize overload, prosrc md5 `90ecb2d60c3a22e23d758263ed5604a7` (9,680 chars), ACL postgres+service_role only, valid unique index, 5 indexes, 0 duplicate identities. `outlook-oauth-callback` v49 deployed from `2d7acb3` (closure byte-verified, 13 files, `verify_jwt=false`); no other function changed. Pilot protected data unchanged. Fixes a reproduced defect: two Funnl users could connect the SAME Microsoft account, because `finalize_microsoft_connection` compared the incoming identity only with the caller's own connection and `microsoft_connections` was unique on `user_id` alone. With two connections on one Microsoft user, the second's Graph subscription create 409s and `createFresh` deletes the first's subscription (notifications then reach only the second; the first's renewal deletes the second's in turn), and the mailbox is read into two Funnl accounts. Adds unique index `microsoft_connections_ms_identity_unique` on `(COALESCE(lower(ms_tenant_id),''), lower(ms_account_id))` (tenant + object id, never mailbox text) and re-issues finalize with the 20260928000000 body verbatim plus fenced blocks: a cross-user check and a race handler both returning `account_in_use` (any other unique violation re-raises). Same-user, same-account updates unchanged. Refuses to apply while a duplicate exists and deletes nothing (Production read-only 2026-10-13: one connection, no duplicates). The callback maps `account_in_use` to `?outlook=in_use` after binding, through the callback-local `outlook-oauth-callback/refusals.js` (the shared `microsoftOauthHelpers.js` is unchanged, so only `outlook-oauth-callback`'s closure moves); the card shows an accurate notice naming no one. Proof: `tests/local/outlook-one-owner.mjs` (24 checks: Production prosrc parity, before/after, refusal writes nothing, unrelated unique and CHECK errors re-raised, races, burst), `tests/outlook-one-owner-scan.test.js`. **Rollout:** `docs/outlook-one-owner-rollout.md` — migration → website → `outlook-oauth-callback` only.
 - `supabase/migrations/20261010050349_recover_rejected_outlook_delta_cursors.sql` — **Applied to production 2026-10-10.** `reset_outlook_round` gains one marked block: reason `committed_delta_rejected` clears both committed delta cursors (explicit 410/400 token rejection only); ordinary resets retain them. Merged as PR #79 (`c750aa5`); worker v49 deployed.
 - `supabase/migrations/20261009000000_outlook_change_notifications.sql` — Outlook background sync: wake-up columns on `microsoft_connections`, `outlook_subscriptions` (RLS on, no user policy), `wake_cutoff_at`, the notification RPCs (single and batch), `record_outlook_subscription_state`, `get_my_outlook_sync_status()` (authenticated), the reservation treating a pending wake as due, the consume trigger, and pg_cron `outlook-worker-tick` created INACTIVE. **Applied to production 2026-10-09** (ledger: nothing pending) and catalog-verified: four worker RPCs one overload each, SECURITY DEFINER, service_role-only.
@@ -1340,42 +1340,47 @@ and the user reviews before anything is saved. This slice makes the pipeline run
 makes its output discoverable. Full plan, latency target, measurement and next workstreams:
 `docs/outlook-background-sync-plan.md`. Disclosure wording for review: `docs/outlook-content-disclosure-draft.md` section F.
 
-**Launch scope decision (2026-10-13, owner).** Supported: **invited** Microsoft mailboxes whose
-organisation permits user consent, plus eligible personal Outlook accounts. **Unsupported:**
-school/work accounts whose organisation requires admin approval, pending future institutional
-approval. Never promise universal school-email compatibility. Deferred: publisher verification,
-IU approval requests, alternative capture mechanisms, the UI refresh. Why: Microsoft's
-recommended organisational consent policy (the default for new tenants) does not let users
-consent to `Mail.Read`, and publisher verification does not change that. Status is two separate
-facts: the **cohort rollout is complete** (both allowlists hold two members; the server value and
-the rebuilt website were verified 2026-10-13), but the **second-account acceptance test has NOT
-passed**. The first attempt used a school mailbox and stopped at Microsoft's "Need admin
-approval". Acceptance (staged S0–S6) and onboarding: `docs/outlook-second-account-acceptance.md`.
-It is **blocked until BOTH** Draft PR #97 is fully live (one Funnl owner per Microsoft account;
-a reproduced defect; `docs/outlook-one-owner-rollout.md`) **and** Draft PR #98's
-administrator-consent wording cutover is complete (new version
-`ol-disc-1b6906af498ccff0f1e3292027ca0539`; pilot re-consents once;
-`docs/outlook-admin-consent-wording-cutover.md`).
+**Outlook state (2026-10-14): LIVE for the single pilot; second-account acceptance DEFERRED.**
+- **Launch scope (owner, 2026-10-13).**
+  - Supported: **invited** Microsoft mailboxes whose organisation permits user consent, plus
+    eligible personal Outlook accounts.
+  - **Unsupported:** school and work accounts whose organisation requires admin approval (IU
+    included), pending future institutional approval. Never promise universal school-email
+    compatibility.
+  - Why: Microsoft's recommended organisational consent policy, the default for new tenants, does
+    not let users consent to `Mail.Read`, and publisher verification does not change that.
+- **Live.** The pilot (`funnl.naveen` outlook.com, a personal account) syncs unattended:
+  - cron `outlook-worker-tick` active, `OUTLOOK_IMPORT_WORKER_ENABLED` present;
+  - one notice version everywhere, `ol-disc-1b6906af498ccff0f1e3292027ca0539`: browser, server
+    `OUTLOOK_DISCLOSURE_VERSION`, all three worker requirements (`outlook-import-worker` v66
+    `afed9659f4852c0a`) and the pilot's stored consent.
+- **#97 one Funnl owner per Microsoft account: LIVE 2026-10-13.** Migration `20261014000000`
+  applied; merged `2d7acb3`; `outlook-oauth-callback` v49.
+- **#98 administrator-consent correction: CUTOVER COMPLETE 2026-10-14.**
+  - Paused 23:36:50Z.
+  - Published `263c28d` at 23:46:42Z.
+  - Server variable set 23:50:39Z; worker redeployed 23:54:23Z.
+  - Pilot same-account re-consent about 23:57:25Z.
+  - Resumed 00:02Z; first automatic run committed.
+- **Cohort.** Both allowlists hold the pilot plus one second Funnl account (server digest
+  `05e42217…7d847516`).
+- **Second-account acceptance: NOT PASSED, DEFERRED by the owner.**
+  - There is no distinct test mailbox: `funnl.naveen` is the pilot's, and IU needs admin approval.
+  - A temporary distinct personal connection on 2026-10-14 (connected 00:10:42Z, synced empty,
+    removed by an unverified actor) is recorded as a historical observation, **not** acceptance.
+  - Staged S0–S6 with tester recognition: `docs/outlook-second-account-acceptance.md`.
+  - A personal-account pass is not evidence about organisational accounts.
+- **Open items and backlog:** `docs/outlook-closeout-backlog.md`. Workstream B (richer metadata)
+  needs a new disclosure, because notice paragraph 14 promises Funnl will not guess company, role
+  or how-you-met.
+- **Next product order (owner):** Outlook closeout, then paste-email capture using the existing
+  extraction and review process, then the UI refresh, then marketing. The browser extension is
+  deferred.
 
-A personal-account pass is not evidence about organisational accounts, and the reverse is also
-true. Admin-approval tenants stay unsupported. Workstream B (richer metadata) needs its own new
-disclosure, because notice paragraph 14 promises Funnl will not guess company, role or
-how-you-met.
-
-**Cohort rollout state (2026-10-13): PAUSED mid-rollout, single pilot.** Activation packet
-`docs/outlook-cohort-activation-packet.md`. Execution paused at 19:32:43Z (cron `outlook-worker-tick`
-inactive, `OUTLOOK_IMPORT_WORKER_ENABLED` absent). Migration `20261013120000` APPLIED - one
-`reserve_due_outlook_connection(integer, integer, uuid, uuid[])` overload, eligibility decided in SQL.
-PR #90 merged as `7a9f0cd`; `outlook-oauth-start` v44 (verify_jwt=true) and `outlook-import-worker` v59
-(verify_jwt=false) deployed, closures byte-identical to merged main. Cohort wording PUBLISHED
-2026-10-13 ("Last updated: October 13, 2026"; notice paragraph 2 and the /privacy heading
-"Outlook connection (invited accounts only)" plus its opening), deriving browser notice version
-`ol-disc-6f904c3f7313353acbbc39e1edf2e278`. **Publication window CLOSED (steps 8-9, 2026-10-13):**
-the three worker requirements carry that value from the cutover merge, with the server
-`OUTLOOK_DISCLOSURE_VERSION` set to it and `outlook-import-worker` redeployed from that merge in the same step. The pilot's stored consent still
-names `ol-disc-e1107c0221c89ded0b6a2134df848eea`, so it no longer satisfies them; a run would be
-refused with `background_consent_missing`. Next is the same-account re-consent (step 10), then resume.
-Both allowlists still hold only the pilot.
+*History.* The cohort rollout of 2026-10-13 (packet `docs/outlook-cohort-activation-packet.md`):
+- migration `20261013120000` applied;
+- PR #90 merged `7a9f0cd`;
+- cohort wording published as `ol-disc-6f904c3f7313353acbbc39e1edf2e278`, superseded by #98.
 
 **Rollout state (2026-10-10): LIVE, unattended, single pilot account.** Migrations `20261009000000`,
 `20261010050349` and `20261010120000` APPLIED; `outlook-notifications` v1 and `outlook-import-worker` v49

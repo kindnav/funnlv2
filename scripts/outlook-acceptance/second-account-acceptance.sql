@@ -25,6 +25,12 @@ union all select 'A1','account_type', coalesce((select account_type from sc),'n/
 union all select 'A1','tenant_is_consumers_msa',
   coalesce((select (ms_tenant_id = '9188040d-6c67-4c5b-b112-36a304b66dad')::text from sc),'n/a')
 union all select 'A1','scopes', coalesce((select array_to_string(scopes,' ') from sc),'n/a')
+-- Microsoft does not echo offline_access in its granted-scope list; the stored refresh token is
+-- the evidence of offline access (the long-running pilot stores the same five scopes).
+union all select 'A1','refresh_token_stored', coalesce((select (t.refresh_token_ciphertext is not null and t.refresh_token_nonce is not null)::text
+  from public.microsoft_tokens t where t.connection_id in (select id from sc)),'n/a')
+-- For the tester-recognition step: the DOMAIN only, never the full address.
+union all select 'A1','mailbox_domain', coalesce((select split_part(lower(ms_email),'@',2) from sc),'n/a')
 union all select 'A1','consent_version', coalesce((select consent_policy_version from sc),'n/a')
 union all select 'A1','status/needs_reauth', coalesce((select status||'/'||needs_reauth::text from sc),'n/a')
 union all select 'A1','connected_at', coalesce((select connected_at::text from sc),'n/a')
