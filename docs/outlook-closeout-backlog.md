@@ -67,8 +67,9 @@ Microsoft account; the corrected administrator-consent notice.
    - A1 stays deferred until a mailbox exists.
 
    Outlook is a live, limited, optional integration for eligible mailboxes, not a main Funnl feature. No further invitations.
-2. **Paste-email capture**, reusing the existing extraction and review process.
-3. The UI refresh.
+2. **Paste-email capture** - DONE, live 2026-10-14 (CLAUDE.md "Paste an email (Pro)").
+   The contact School field followed, live 2026-10-14.
+3. The UI refresh - only when the owner explicitly initiates it.
 4. Marketing.
 
 The browser extension is deferred.

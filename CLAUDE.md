@@ -210,7 +210,7 @@ supabase/
 | `company` | text | Optional |
 | `role` | text | Optional |
 | `how_met` | text | Optional |
-| `school` | text | Optional — school, college or university (e.g. "Indiana University"). Migration `20261015000000_add_contact_school.sql`, **NOT YET APPLIED** (branch `feat/contact-school`). Editable on the contact form, shown on the contact page, searchable, a sortable table column, CSV-mappable (School/University/College/Alma Mater; the AI column-mapper does not suggest it), extracted by AI Fill and by Paste email (same evidence rules as company/role), and included in Funnl AI chat context. |
+| `school` | text | Optional — school, college or university (e.g. "Indiana University"). Migration `20261015000000_add_contact_school.sql` **APPLIED to production 2026-10-14**; shipped in PR #106 (merged `9783309`). Editable on the contact form, shown on the contact page, searchable, a sortable table column, CSV-mappable (School/University/College/Alma Mater; the AI column-mapper does not suggest it), extracted by AI Fill and by Paste email (same evidence rules as company/role), and included in Funnl AI chat context. |
 | `email` | text | Optional |
 | `linkedin_url` | text | Optional |
 | `tags` | text[] | Optional — relationship labels e.g. ["recruiter", "target firm"]. Drives the sidebar YOUR TAGS section and ContactsPage ?tag= filter. |
@@ -257,7 +257,7 @@ supabase/
 | `activation_completed_at` | timestamptz | Nullable — set when all three activation steps are complete. Same idempotent write. |
 
 **Applied migrations:**
-- `supabase/migrations/20261015000000_add_contact_school.sql` — **NOT YET APPLIED.** Adds nullable `contacts.school text` (no default, no backfill, no CHECK, RLS/grants unchanged). Must be applied BEFORE the website that writes `school` is published and BEFORE `ai-chat` (which selects it) is deployed. Rollback: leave the column in place.
+- `supabase/migrations/20261015000000_add_contact_school.sql` — **APPLIED to production 2026-10-14** (ledger 38/38 matched, nothing pending). Adds nullable `contacts.school text` (no default, no backfill, no CHECK, RLS/grants unchanged). Verified: 492 contacts before and after, fingerprint of the 12 pre-existing columns unchanged; constraints and policies unchanged. It was applied BEFORE `ai-chat` (which selects it) and the website (which writes it). Rollback: leave the column in place; dropping it would delete user data.
 - `supabase/migrations/20260713075431_add_activation_milestones.sql` — adds the four activation timestamp columns above to `profiles`, with backfill SQL for existing users. Applied to production 2026-07-13.
 - `supabase/migrations/20260713185900_harden_handle_new_user.sql` — revokes EXECUTE on `public.handle_new_user()` from `PUBLIC`, `anon`, and `authenticated`. Applied to production 2026-07-13 via `supabase db push`. Post-migration verification: PUBLIC absent from explicit ACL; `anon` and `authenticated` effective execute = false; trigger `on_auth_user_created` still enabled; function owner, SECURITY DEFINER, and search_path unchanged. Requires a real signup/profile creation test to confirm trigger path is unaffected.
 - `supabase/migrations/20260721000000_add_outreach_status.sql` — adds nullable `outreach_status text` column to `public.interactions` with named CHECK constraint `interactions_outreach_status_check` (five allowed values). Applied to production 2026-07-24 via `supabase db push --linked`. Column verified: text, nullable YES, no default. Constraint verified: correct five-value check, NULL permitted. Existing 5 interaction rows unaffected (all `outreach_status = NULL`). RLS and all four ownership policies verified unchanged.
@@ -288,7 +288,7 @@ After migration `20260727000000_add_pro_trials.sql` is applied, `handle_new_user
 
 Settings page `upsert()` still works — now it always UPDATES an existing row (never needs to INSERT). Existing accounts were backfilled with `email` and profile rows via a one-time SQL migration.
 
-RLS: UPDATE policy prevents users from changing `ai_enabled` on their own row. The `school` column was dropped earlier. Sidebar falls back to email username / "Funnl user" if `display_name` is null.
+RLS: UPDATE policy prevents users from changing `ai_enabled` on their own row. The `profiles.school` column (the user's own school) was dropped earlier; it is unrelated to `contacts.school`. Sidebar falls back to email username / "Funnl user" if `display_name` is null.
 
 ### `pro_trials` (pending migration `20260727000000_add_pro_trials.sql`)
 | Column | Type | Notes |
@@ -1375,9 +1375,10 @@ makes its output discoverable. Full plan, latency target, measurement and next w
 - **Open items and backlog:** `docs/outlook-closeout-backlog.md`. Workstream B (richer metadata)
   needs a new disclosure, because notice paragraph 14 promises Funnl will not guess company, role
   or how-you-met.
-- **Next product order (owner):** Outlook closeout, then paste-email capture using the existing
-  extraction and review process, then the UI refresh, then marketing. The browser extension is
-  deferred.
+- **Next product order (owner):** Outlook closeout - DONE. Paste-email capture - DONE, live
+  2026-10-14 (see "Paste an email (Pro)" below). Contact School field - DONE, live 2026-10-14. Next:
+  the UI refresh, **only when the owner explicitly initiates it**, then marketing. The browser
+  extension is deferred.
 
 *History.* The cohort rollout of 2026-10-13 (packet `docs/outlook-cohort-activation-packet.md`):
 - migration `20261013120000` applied;
@@ -1484,31 +1485,65 @@ while Funnl is closed → accepted in Funnl).
 
 ---
 
-## Paste an email (Pro) - Draft PR #101, NOT deployed or published
+## Paste an email (Pro) - LIVE since 2026-10-14
 
 A Pro user pastes an email thread; Funnl drafts contact details and an Email interaction note for
-review; nothing is saved until the reviewer presses Save. No schema change.
+review; nothing is saved until the reviewer presses Save.
 
-- **Function `ai-paste-email`** (`verify_jwt = true`, new, not deployed). Logic in
-  `supabase/functions/shared/pasteEmail.js`; reuses the Outlook redactor, minimization gate, drafting
-  contract and bounded transport UNEDITED (every existing function's import closure is unchanged).
-  Addresses are found locally, masked before Anthropic, and returned only to the user's browser for
-  matching. Logs carry codes and counts only.
-- **Attribution.** The model returns one record PER PERSON. A company, role or LinkedIn URL is kept only
-  with quoted evidence for THAT person (lines in the email that contain the value, name the person and
-  name no other proposed person); text elsewhere in the email does not count; the same lines cited for
-  two records count for neither. Shared employers/roles are allowed; identical display names are both
-  offered, labelled apart and flagged. Tags and relationship note are not filled from paste. The drawer
-  never chooses the person: from a contact's page that contact is used; otherwise the reviewer picks an
-  existing contact or "A new contact" AND which proposed person it is. Email address is the reviewer's
-  own choice.
+**Live state (2026-10-14):** `ai-paste-email` **v5** (`verify_jwt = true`), closure byte-equal to main
+`9783309`; website from main `9783309`. Shipped by: #101 (feature, merged `8d41302`; `/privacy`
+paragraph published, "Last updated: October 14, 2026"), #102 (owner-voice note, `0233ea8`), #103
+(subscription-aware Pro, `56c4919`), #105 (title-only signature attribution, `61f5154`), #106 (School,
+`9783309`). Rollout packet: `docs/paste-email-rollout.md`. Outlook consent version unchanged
+(`ol-disc-1b6906af498ccff0f1e3292027ca0539`).
+
+- **Function `ai-paste-email`.** Logic in `supabase/functions/shared/pasteEmail.js`; reuses the Outlook
+  redactor, minimization gate, drafting contract and bounded transport UNEDITED. Addresses are found
+  locally, masked before Anthropic, and returned only to the user's browser for matching. A token or a
+  surviving address withholds the request before any model call. Logs carry codes and counts only;
+  the paste and model output are never stored or logged.
+- **Attribution.** The model returns one record PER PERSON. A company, role, school or LinkedIn URL is
+  kept only with quoted evidence for THAT person: lines in the email that contain the value, name the
+  person and name no other proposed person. If the quote omits the name (e.g. only "Senior Consultant,
+  Brightline Advisory"), it is resolved from bounded adjacent source lines: whole lines only, same
+  block (a blank line ends it), at most 4 lines, the first line naming a proposed person must BEGIN
+  with this person's full name, another proposed name first blocks it, and every occurrence must
+  agree. Text elsewhere in the email is not evidence; the same lines cited for two records count for
+  neither. Shared employers/roles are allowed; identical display names are both offered, labelled
+  apart and flagged. The drawer never chooses the person.
+- **Note voice.** The drafted note is the owner's own CRM note ("I"/"me"/"my", never "the user"),
+  keeping who offered what.
 - **Dates** are prefilled only from one unquoted, zoned header; anything else is blank and required.
-- **Saving** remembers a created contact, so retrying a failed interaction never creates another;
-  double submission is blocked. The raw paste is cleared on success, Cancel and Escape.
-- **Privacy wording** approved and added to `/privacy` (Anthropic paragraph); the "Last updated" date
-  must move to the real New York publication date in the publishing commit. Outlook consent version
-  unchanged.
-- **Proof:** `tests/paste-email.test.js`, `tests/paste-email-capture.test.js` and the on-demand browser
+- **Saving** remembers a created contact (a retry never creates another); double submission is
+  blocked; the raw paste is cleared on success, Cancel and Escape.
+- **Live evidence (owner, synthetic emails, one real-AI example each, not general accuracy proof):**
+  Marcus/Dana draft passed; one save created exactly one contact + one interaction (the "Dana
+  Whitfield" test contact remains in the owner's account); Elena note voice passed; Elena
+  company/role filled after #105. The ORIGINAL blank-Elena request's cause is **unknown** (its model
+  output was never recorded); the reproducible title-only cause was fixed.
+- **Proof:** `tests/paste-email*.test.js`, `tests/contact-school.test.js` and the on-demand browser
   harness `tests/local/paste-email-browser.mjs` (real Postgres/GoTrue/PostgREST/edge-runtime, simulated
-  Anthropic). Real-model attribution is not yet proven.
-- **Rollout:** `docs/paste-email-rollout.md` - deploy the function first, then merge to publish.
+  Anthropic; 88/88 at #106).
+
+## Contact School field - LIVE since 2026-10-14
+
+Optional `contacts.school` (e.g. "Indiana University"), PR #106 merged `9783309`; migration
+`20261015000000` applied first (see Applied migrations). Editable on the contact form, shown on the
+contact page, searchable (placeholder "Search name, company, role, school, notes…"), a sortable School
+column in the table view, CSV-mappable (School / School name / University / University name / College /
+College name / Alma mater; "Education" deliberately NOT mapped; the AI column-mapper `ai-map-csv` does
+not suggest it), extracted by AI Fill and by Paste email (same evidence rules as company/role), and
+included in Funnl AI chat context. Deployed: `ai-chat` v76, `ai-parse-contact` v66, `ai-paste-email`
+v5, each byte-equal to `ece7193`, `verify_jwt = true`. No privacy wording change ("What Funnl stores"
+lists no fields). Signed-in end-to-end check on the live site: the owner's manual test.
+
+## AI Pro entitlement - subscriptions count (PR #103, live 2026-10-14)
+
+All five AI functions (`ai-chat`, `ai-map-csv`, `ai-categorize-contacts`, `ai-parse-contact`,
+`ai-paste-email`) and every frontend Pro gate use one decision: permanent Pro, an active trial, or a
+Stripe subscription in status `active` or `past_due` (PR #24's policy, unchanged; status-only, no
+`current_period_end` check). Server: `shared/pro-entitlement.js` `decideEntitlement` (a failed lookup
+with no proven access is a retryable error, never a false 403) + `shared/subscriptionStatusPolicy.js`.
+Browser: `hasProAccess(proStatus)` (the RPC's `can_use_pro`). AI Fill and CSV-mapping logs no longer
+contain raw model output or provider bodies (#100 `f181ae4`, #104 `2826d11`). The rest of the billing
+work remains in Draft PR #24.
