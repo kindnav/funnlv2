@@ -14,11 +14,13 @@ Every item below is one of:
 
 ## A. Launch-blocking before inviting anyone beyond the pilot
 
+Status 2026-10-14: A2 and A3 are closed. **A1 remains open** and deferred, so inviting anyone beyond the pilot stays blocked.
+
 | # | Item | Kind | Evidence / what closes it |
 |---|---|---|---|
 | A1 | **Second-account acceptance has not passed.** | Open, deferred by owner | No distinct, tester-controlled mailbox exists today. Closes only with S0–S6 in `docs/outlook-second-account-acceptance.md`, including tester recognition at A1. Until then, nothing is demonstrated about more than one account: connecting, syncing, suggestions, acceptance or isolation. |
-| A2 | **Unexplained drop in pilot rows on 2026-10-13.** Between 18:15:21Z and 19:35:35Z: interaction candidates 29 → 27, candidate refs 5 → 4, interactions 15 → 13. | Open | Reported to the owner at the time and never explained. Ruled out: a scope effect, the pause, PR #91 (no DML). A contact deletion during test setup would cascade to exactly these counts, but that is an **unverified hypothesis**. Closes when the owner confirms whether they deleted a contact in that window; otherwise investigate before inviting anyone, since an unexplained deletion path would be a data-loss defect. |
-| A3 | **The failed-connection notice tells admin-approval users to "try again".** | Verified defect, fix ready | Draft PR #95 (copy only, conditional sentence). Needs approval and merge, then a website deploy. Only the website changes; no function or migration. |
+| A2 | ~~Unexplained drop in pilot rows on 2026-10-13~~ **Explained by owner confirmation (2026-10-14).** Between 18:15:21Z and 19:35:35Z: interaction candidates 29 → 27, candidate refs 5 → 4, interactions 15 → 13. | Closed: owner confirmation | The owner confirmed deleting a test contact in that window. That is **consistent with** the observed cascades: deleting a contact removes its interactions and interaction candidates by `ON DELETE CASCADE`, and their provenance refs with them. This is **owner confirmation, not independent audit evidence**: Funnl keeps no deletion log, and no record shows which contact was deleted or by whom. No defect was found, and no code path other than a contact deletion was identified for these counts. |
+| A3 | ~~The failed-connection notice tells admin-approval users to "try again".~~ **Fixed.** | Closed | PR #95 merged as `5135258` on 2026-10-14 (copy only). The live site (`index-NkrFlT1k.js`) serves the conditional sentence, keeps #97's account-in-use notice, and still uses `ol-disc-1b6906af…`. |
 
 ## B. Disclosed limits: decide, do not hide
 
@@ -59,9 +61,15 @@ Microsoft account; the corrected administrator-consent notice.
 
 ## Next product work (owner order)
 
-1. Finish Outlook closeout: A2 and A3 now; A1 when a mailbox exists.
-2. **Paste-email capture**, reusing the existing extraction and review process.
-3. The UI refresh.
+1. Outlook closeout is finished:
+   - A3 is fixed (#95 merged `5135258`);
+   - A2 is explained by owner confirmation;
+   - A1 stays deferred until a mailbox exists.
+
+   Outlook is a live, limited, optional integration for eligible mailboxes, not a main Funnl feature. No further invitations.
+2. **Paste-email capture** - DONE, live 2026-10-14 (CLAUDE.md "Paste an email (Pro)").
+   The contact School field followed, live 2026-10-14.
+3. The UI refresh - only when the owner explicitly initiates it.
 4. Marketing.
 
 The browser extension is deferred.
