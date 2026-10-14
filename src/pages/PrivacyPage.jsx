@@ -36,7 +36,7 @@ function PrivacyPage() {
             <span className="font-display font-bold text-[20px] text-hi">Funnl</span>
           </div>
           <h1 className="font-display text-[32px] font-bold text-hi tracking-[-0.5px] mb-3">Privacy Policy</h1>
-          <p className="text-[14px] text-low">Last updated: October 13, 2026</p>
+          <p className="text-[14px] text-low">Last updated: October 14, 2026</p>
           <div className="mt-4 px-4 py-3 bg-elevated border border-line-1 rounded-xl">
             <p className="text-[13.5px] text-muted leading-relaxed">
               This policy explains, in plain language, what Funnl collects, how it is used, who processes it, and how to remove it.
@@ -184,9 +184,10 @@ function PrivacyPage() {
             not legal advice, and is not evidence that outside
             counsel reviewed or approved this policy.
 
-            MANDATORY AT PUBLICATION: the date above is October 13, 2026 - the New York
-            date on which the cohort wording (invited accounts, and what withdrawing an invitation
-            does and does not do) was published. These are history: the thread-segments
+            MANDATORY AT PUBLICATION: the date above is October 14, 2026 - the New York
+            date on which the "Paste an email (Pro)" paragraph in the Anthropic section was
+            published. These are history: the cohort wording (invited accounts, and what
+            withdrawing an invitation does and does not do) on October 13, 2026, the thread-segments
             publication on October 12, 2026, the detailed-draft one on October 10, 2026 and
             the background-sync one on October 9, 2026. If the merge that publishes this section happens on any later day, the
             "Last updated" date MUST be changed again in that same commit.

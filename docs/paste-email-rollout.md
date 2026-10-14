@@ -60,10 +60,23 @@ Nothing user-visible changes yet: no page calls the function.
 **Rollback:** delete the function (`npx supabase functions delete ai-paste-email --project-ref …`), or
 leave it in place. It is unreachable from the app before step 3, and is JWT- and Pro-gated.
 
+**Record: step 1 done 2026-10-14 (owner-authorized).**
+- Deployed from `6c517de5fbd92d82582da960361990b942227774`, with a clean checkout and the local,
+  remote and PR heads equal. The function did not exist before, so nothing was replaced.
+- Upload sent exactly the 6 closure files. Live: `ai-paste-email` v1, ACTIVE, `verify_jwt = true`,
+  bundle `4d5c8c363bd36b5c…`, updated 2026-10-14T15:38:37Z.
+- The download, into an isolated directory, holds the same 6-file closure, each file byte-equal to
+  the pinned commit (CRLF→LF only).
+- An unauthenticated `POST` with an empty body got 401 `UNAUTHORIZED_NO_AUTH_HEADER` from the
+  platform, before the function ran, so no model call was possible.
+- All 17 existing functions are unchanged: version, `verify_jwt`, bundle hash, `updated_at`, status
+  and entry point.
+- Outlook, cron, secrets and configuration were not touched.
+
 ### 2. Set the publication date (with step 3's approval)
 
-`/privacy` currently reads "Last updated: October 13, 2026". In the same commit that publishes, change it
-to the **actual New York date of the merge**, and update the date pinned by the privacy tests
+`/privacy` now reads "Last updated: October 14, 2026", prepared for a merge on that New York day. If the merge
+happens on a later day, change it again to the **actual New York date of the merge**, and update the date pinned by the privacy tests
 (`tests/privacy-policy-outlook.test.js` and any other test that asserts it). Run `npm test`.
 
 ### 3. Publish the frontend (owner approval)
