@@ -263,7 +263,7 @@ function nullableString (description) { return { type: ['string', 'null'], descr
  * are not requested: the first two belong elsewhere, and the review step never shows the last two.
  */
 function personSchema () {
-  const evidence = (what) => nullableString(`The exact lines of the email, copied verbatim (at most ${EVIDENCE_MAX_LINES}), that NAME this person and state their ${what}: their signature, or a sentence naming them. Null when the email has no such text.`)
+  const evidence = (what) => nullableString(`The exact lines of the email, copied verbatim (at most ${EVIDENCE_MAX_LINES}), that state this person's ${what}, INCLUDING the line with this person's name: for a signature, the name line and the title or company lines beneath it; for a sentence, the whole sentence naming them. Null when the email has no such text.`)
   return {
     type: 'object',
     additionalProperties: false,
@@ -310,7 +310,8 @@ export function buildContactRequest (masked) {
     `person other than the user who wrote, received or is named in it, at most ${MAX_PEOPLE}.`,
     'Give each person ONLY the details the text states about THAT person, with name, company and',
     'role copied exactly as written. A company, role or LinkedIn URL needs evidence: copy the exact',
-    'lines that name this person and state it, such as their signature or a sentence about them.',
+    'lines that state it INCLUDING the line with this person\'s name - for a signature, the name line',
+    'together with the title and company lines beneath it; for a sentence, the whole sentence.',
     'Text elsewhere in the email is not evidence. If it is unclear which person a detail belongs to,',
     'or it could describe the user, return null for it and its evidence. Never return an email address.',
     '',
@@ -421,16 +422,62 @@ const EVIDENCED = [['company', 'company_evidence'], ['role', 'role_evidence'], [
  * enough: the quoted lines must be in the email, contain the value, name this person, and
  * name no other proposed person.
  */
-function evidenceProblem (key, value, evidence, { text, own, others }) {
+function evidenceProblem (key, value, evidence, ctx) {
+  const { text, own, others } = ctx
   if (typeof evidence !== 'string' || evidence.trim() === '') return 'no_evidence'
   if (evidence.length > EVIDENCE_MAX_CHARS || evidence.trim().split('\n').length > EVIDENCE_MAX_LINES) return 'evidence_too_long'
   const ev = normSource(evidence)
   if (!text.includes(ev)) return 'evidence_not_in_text'
   const needle = key === 'linkedin_url' ? norm(value).replace(/^https:\/\/(www\.)?/, '') : norm(value)
   if (!ev.includes(needle)) return 'value_not_in_evidence'
-  if (!own.some((t) => hasWord(ev, t))) return 'evidence_does_not_name_person'
-  if (others.some((t) => hasWord(ev, t))) return 'evidence_names_another_person'
-  return null
+  const namesOwn = own.some((t) => hasWord(ev, t))
+  const namesOther = others.some((t) => hasWord(ev, t))
+  if (namesOwn) return namesOther ? 'evidence_names_another_person' : null
+  if (namesOther) return 'evidence_does_not_name_person'
+  // The quote names nobody, e.g. only "Senior Consultant, Brightline Advisory" from a signature.
+  return adjacentNameProblem(evidence, ctx)
+}
+
+/** One line of the pasted text, or of a quote, in comparison form (quote markers removed). */
+function normLine (line) { return norm(String(line).replace(/^[\s>]+/, '')) }
+
+/** `line` BEGINS with the full name, as a signature name line does ("Elena Ruiz", "Elena Ruiz, PhD"). */
+function startsWithName (line, name) {
+  const s = line.replace(/^[^\p{L}\p{N}]+/u, '')
+  return name.length > 0 && s.startsWith(name) && !/[\p{L}\p{N}]/u.test(s[name.length] ?? '')
+}
+
+/**
+ * Attribute a quote that omits the name from BOUNDED ADJACENT SOURCE LINES - the signature case,
+ * where the title line sits directly beneath the name line. Never "any title near any name":
+ *   * the quote must equal whole source lines exactly (a fragment cannot borrow a name);
+ *   * look upward through the same contiguous block (a blank line ends it), the quote and the
+ *     lines above it together at most EVIDENCE_MAX_LINES;
+ *   * the first line above that names a proposed person decides: it must BEGIN with this
+ *     person's full name, and if another proposed person is named first the detail is theirs;
+ *   * when the quoted lines occur more than once, every occurrence must resolve to this person.
+ * Returns null when attributed, otherwise why not.
+ */
+function adjacentNameProblem (evidence, { lines, ownName, others }) {
+  const q = evidence.split('\n').map(normLine)
+  while (q.length > 0 && q[0] === '') q.shift()
+  while (q.length > 0 && q[q.length - 1] === '') q.pop()
+  if (q.length === 0) return 'evidence_does_not_name_person'
+  const outcomes = []
+  for (let i = 0; i + q.length <= lines.length; i++) {
+    if (!q.every((l, j) => lines[i + j] === l)) continue
+    let outcome = 'none'
+    for (let k = 1; q.length + k <= EVIDENCE_MAX_LINES && i - k >= 0; k++) {
+      const line = lines[i - k]
+      if (line === '') break
+      if (others.some((t) => hasWord(line, t))) { outcome = 'other'; break }
+      if (startsWithName(line, ownName)) { outcome = 'own'; break }
+    }
+    outcomes.push(outcome)
+  }
+  if (outcomes.length > 0 && outcomes.every((o) => o === 'own')) return null
+  if (outcomes.includes('other')) return 'adjacent_name_is_another_person'
+  return 'evidence_does_not_name_person'
 }
 
 /** One person's own fields, cleaned. A person with no usable name, or a name not in the
@@ -470,6 +517,7 @@ export function validateContactFields (raw, sourceText = '') {
   if (hasProtoKey(raw)) return { ok: false, code: 'prototype_pollution' }
   if (!Array.isArray(raw.people)) return { ok: false, code: 'bad_type' }
   const text = normSource(sourceText)
+  const lines = String(sourceText).split('\n').map(normLine)
   const people = []
   for (const person of raw.people.slice(0, MAX_PEOPLE)) {
     const v = cleanPerson(person, text)
@@ -482,7 +530,7 @@ export function validateContactFields (raw, sourceText = '') {
     const others = [...new Set(tokens.flatMap((t, j) => (j === i ? [] : t)))].filter((t) => !own.includes(t))
     for (const [key, evKey] of EVIDENCED) {
       if (!x.fields[key]) continue
-      const problem = evidenceProblem(key, x.fields[key], x.raw[evKey], { text, own, others })
+      const problem = evidenceProblem(key, x.fields[key], x.raw[evKey], { text, own, others, lines, ownName: norm(x.fields.name) })
       if (problem) { delete x.fields[key]; x.dropped[key] = problem; continue }
       x.evidence = { ...x.evidence, [key]: `${key}:${normSource(x.raw[evKey])}` }
       cited.set(x.evidence[key], (cited.get(x.evidence[key]) ?? 0) + 1)

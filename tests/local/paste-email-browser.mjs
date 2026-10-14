@@ -684,6 +684,28 @@ async function main () {
     saved4b === 'Jamie Fox|Goldman Sachs|Analyst|jamie@goldman.example||' && counts().contacts === before4b.contacts + 1, saved4b)
   await page.click('Close', { byText: true, within: '[role=dialog]' })
 
+  // ══ 4c. the Elena signature: the model quotes ONLY the title line ════════════
+  // One possible cause of the 2026-10-14 live blank fields (that request's cause is unverified).
+  console.log('4c. a title-only quote directly beneath the name line is attributed; nothing is saved')
+  await openDrawerOn(`${GW}/contacts`)
+  const ELENA_TITLE = 'Senior Consultant, Brightline Advisory'
+  setFake(PEOPLE([{ name: 'Elena Ruiz', company: 'Brightline Advisory', company_evidence: ELENA_TITLE, role: 'Senior Consultant', role_evidence: ELENA_TITLE }]),
+    NOTE_OK('Elena offered to send the case-study prep guide by Friday.'))
+  const before4c = counts(); const log4c = gwLog.length
+  await draftFrom([
+    'From: Elena Ruiz <elena.ruiz@example.com>', 'To: You <you@example.org>', 'Date: Wed, 14 Oct 2026 10:15:00 -0400',
+    'Subject: Great meeting you', '', 'Hi,', '',
+    "It was great meeting you at the alumni panel yesterday. As promised, I'll send you the case-study prep guide by Friday, and I'm happy to do a mock interview with you before the end of the month. Could you send me your resume first?",
+    '', 'Best,', 'Elena Ruiz', ELENA_TITLE, MARK,
+  ].join(NL))
+  await toReview()
+  await page.click('A new contact', { byText: true, within: '[role=dialog]' })
+  await page.setValue('#paste-email-ai-person', '0')
+  const elena = await page.eval('return ["#paste-email-name","#paste-email-company","#paste-email-role"].map(s=>document.querySelector(s).value)')
+  check('Elena: the title line under her name fills company and role', JSON.stringify(elena) === JSON.stringify(['Elena Ruiz', 'Brightline Advisory', 'Senior Consultant']), JSON.stringify(elena))
+  await page.click('Cancel', { byText: true, within: '[role=dialog]' })
+  check('nothing was saved', tableWritesSince(log4c).length === 0 && JSON.stringify(counts()) === JSON.stringify(before4c))
+
   // ══ 5. double submission ══════════════════════════════════════════════════
   console.log('5. double submission creates no extra records')
   await openDrawerOn(`${GW}/contacts`)
