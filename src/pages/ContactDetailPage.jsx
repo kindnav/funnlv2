@@ -12,6 +12,9 @@ import { completeFollowUp, snoozeFollowUp as snoozeFollowUpAction } from '../lib
 import TopBar from '../components/TopBar'
 import AddContactDrawer from '../components/AddContactDrawer'
 import LogInteractionSheet from '../components/LogInteractionSheet'
+import PasteEmailDrawer from '../components/PasteEmailDrawer'
+import { useProStatus } from '../lib/useProStatus'
+import { classifyProStatus } from '../lib/pro-ui-status'
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -186,6 +189,10 @@ function ContactDetailPage() {
   const [error, setError] = useState('')
 
   const [editDrawerOpen, setEditDrawerOpen] = useState(false)
+  // Paste an email (Pro), attributed to THIS contact because capture starts on their page.
+  const proClass = classifyProStatus(useProStatus())
+  const canPasteEmail = proClass === 'permanent' || proClass === 'trial'
+  const [pasteOpen, setPasteOpen] = useState(false)
 
   const [confirmingDelete, setConfirmingDelete] = useState(false)
 
@@ -507,6 +514,19 @@ function ContactDetailPage() {
         title={contact.name}
         actions={
           <>
+            {canPasteEmail && (
+            <button
+            onClick={() => setPasteOpen(true)}
+            className="h-8 flex items-center gap-[6px] px-[11px] rounded-[8px] border border-line-2 text-[13px] font-medium transition-colors hover:border-line-3"
+            style={{ background: 'var(--color-elevated)', color: 'var(--color-mid)' }}
+            title="Paste an email (Pro)"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="3" y="5" width="18" height="14" rx="2.5"/><path d="m3 7 9 6 9-6"/>
+            </svg>
+            <span className="hidden md:inline">Paste email</span>
+          </button>
+            )}
             <button
               onClick={() => setEditDrawerOpen(true)}
               className="hidden md:inline-flex items-center text-[12.5px] font-semibold px-3 h-8 rounded-[8px] border border-line-2 hover:border-line-3 transition-colors"
@@ -1016,6 +1036,14 @@ function ContactDetailPage() {
             onSuccess={() => { setEditDrawerOpen(false); fetchContact() }}
           />
         </>
+      )}
+      {pasteOpen && canPasteEmail && contact && (
+        <PasteEmailDrawer
+          contacts={[contact]}
+          preselectedContact={contact}
+          onClose={() => setPasteOpen(false)}
+          onSaved={() => fetchInteractions()}
+        />
       )}
     </div>
   )

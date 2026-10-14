@@ -486,3 +486,9 @@ verify_jwt = false
 # it never reads a message: a notification is a wake-up signal for the delta pipeline.
 [functions.outlook-notifications]
 verify_jwt = false
+
+# Paste-email capture (Pro). Called by the signed-in browser only, so the gateway requires a
+# valid user JWT, like AI Fill (which relies on the same default). The function re-checks the
+# user and the Pro entitlement itself.
+[functions.ai-paste-email]
+verify_jwt = true
