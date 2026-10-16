@@ -43,12 +43,10 @@ import {
   writeLocalFlag,
 } from '../lib/activationHelpers'
 
-// AI_WEEKLY_INSIGHT_ENABLED = false
-// True AI-generated weekly insights require a cached, scheduled generation flow
-// (e.g., Edge Function on cron, result stored in DB). They must never be triggered
-// by page load — that would fire an uncached LLM call per user per Dashboard mount.
-// The NETWORK SIGNAL card is entirely rule-based and safe to show all users now.
-const AI_WEEKLY_INSIGHT_ENABLED = false
+// The NETWORK SIGNAL card is entirely rule-based and safe to show all users. An
+// AI-generated weekly insight would need a cached, scheduled generation flow (e.g. an
+// Edge Function on cron, result stored in the DB); it must never be triggered by page
+// load, which would fire an uncached LLM call per user per Dashboard mount.
 
 // ── Sub-components (module-level — not inside DashboardPage) ─────────────────
 
@@ -983,9 +981,7 @@ function DashboardPage() {
 
             {/* NETWORK SIGNAL — rule-based, shown to ALL users.
                 Uses always-dark ink gradient so light text is readable in both themes.
-                AI_WEEKLY_INSIGHT_ENABLED = false guards against an uncached LLM call
-                on every Dashboard mount. When the true AI insight is ready, it will
-                replace the text below behind this flag. */}
+                No AI call is made here (see the note at the top of this file). */}
             <div
               className="rounded-[14px] p-[18px] md:p-[20px]"
               style={{ background: 'var(--banner-gradient)', border: '1px solid rgba(247,242,231,0.09)' }}

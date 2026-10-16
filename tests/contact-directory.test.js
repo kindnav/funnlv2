@@ -3,16 +3,16 @@
  *
  * Pure-function tests for contactDirectoryUtils: parseSortParam, daysSince,
  * deriveContactStatus, buildDirectoryEntry, sortDirectoryEntries, filterByTag,
- * searchDirectory, buildTagCounts, isLowHistory, shouldShowContactAI.
+ * searchDirectory, buildTagCounts, isLowHistory.
  *
  * Run: node tests/contact-directory.test.js
  */
 import assert from 'assert'
 import {
-  SORT_OPTIONS, DEFAULT_SORT, CATEGORY_ORDER, CONTACT_AI_ENABLED, ATTENTION_RECENT_DAYS,
+  SORT_OPTIONS, DEFAULT_SORT, CATEGORY_ORDER, ATTENTION_RECENT_DAYS,
   parseSortParam, daysSince, deriveContactStatus, buildDirectoryEntry,
   sortDirectoryEntries, filterByTag, searchDirectory, buildTagCounts,
-  isLowHistory, shouldShowContactAI, snoozeOptionToDate,
+  isLowHistory, snoozeOptionToDate,
 } from '../src/lib/contactDirectoryUtils.js'
 
 let passed = 0
@@ -719,36 +719,6 @@ test('3 interactions → false', () => {
 
 test('null → true (treated as zero interactions)', () => {
   assert.strictEqual(isLowHistory(null), true)
-})
-
-// ── shouldShowContactAI ───────────────────────────────────────────────────────
-
-console.log('\nshouldShowContactAI\n')
-
-test('hidden when feature flag is false, even for Pro users', () => {
-  assert.strictEqual(shouldShowContactAI(true, false), false)
-})
-
-test('hidden when not Pro, even if feature enabled', () => {
-  assert.strictEqual(shouldShowContactAI(false, true), false)
-})
-
-test('shown when both Pro and feature enabled', () => {
-  assert.strictEqual(shouldShowContactAI(true, true), true)
-})
-
-test('hidden when both false', () => {
-  assert.strictEqual(shouldShowContactAI(false, false), false)
-})
-
-test('CONTACT_AI_ENABLED export is false (feature deferred)', () => {
-  assert.strictEqual(CONTACT_AI_ENABLED, false)
-})
-
-test('contact AI always hidden in real app (CONTACT_AI_ENABLED is false)', () => {
-  // Regardless of Pro status, the flag gates the feature
-  assert.strictEqual(shouldShowContactAI(true,  CONTACT_AI_ENABLED), false)
-  assert.strictEqual(shouldShowContactAI(false, CONTACT_AI_ENABLED), false)
 })
 
 // ── CATEGORY_ORDER ────────────────────────────────────────────────────────────
