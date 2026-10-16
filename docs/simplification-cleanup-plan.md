@@ -52,7 +52,8 @@ Each removal below is therefore paired with a Production undeploy, approved sepa
 
 - **Stops:** the per-minute tick, worker runs (scheduled or notification-kicked) and Graph
   subscription renewal.
-- **Kept:**
+- **Kept by this packet** (it deletes nothing; users can still Disconnect or delete their account,
+  see S5):
   - the connection, tokens, subscription row, committed cursors and pending suggestions;
   - accepted contacts and interactions;
   - the Settings card (status and Disconnect) and the Suggestions UI;
@@ -173,9 +174,12 @@ Baseline values:
 - **The tick did not run:** `SELECT count(*) FROM cron.job_run_details WHERE jobid = (SELECT jobid
   FROM cron.job WHERE jobname = 'outlook-worker-tick') AND start_time > <S1 time>;` is `0`.
 - **The processing digest equals the baseline.** No new attempt, run, cursor movement or round.
+  Any difference **blocks**.
 - **The subscription identity/renewal digest equals the baseline.** No renewal or re-creation
-  (`subscription_id`, `expires_at`, `renewed_at`, `last_error_code` unmoved). Any difference here
-  is worker activity and **blocks**.
+  (`subscription_id`, `expires_at`, `renewed_at`, `last_error_code` unmoved). Any difference
+  **blocks**.
+- **A difference is not proof of its cause.** Worker activity is one possible cause. Disconnect and
+  account deletion are others (below). A blocking difference is investigated, never assumed.
 - **Subscription status:** unchanged, or changed only by an explained lifecycle transition:
   - **Explained** means all of the following:
     - the new status is `removed` with `last_lifecycle_event = 'subscriptionRemoved'`, or
@@ -191,15 +195,38 @@ Baseline values:
 - **Notification and wake observations may have changed.** Increases show that Microsoft still
   notifies, not that Funnl processed anything: the processing digest is the evidence for that.
   Record the new values; do not clear them.
-- **Protected records:** every baseline row still exists with the same digest, or each difference
-  is explained:
-  - a row missing because the user deleted it, or its contact, in the app (contacts cascade);
-  - a changed digest from a user action in the app (follow-up completed, snoozed or edited, note
-    or outreach status edited);
-  - no difference may be attributed to the worker. With the processing digest unchanged there is
-    no worker write to explain.
+- **Protected records:** every baseline row still exists with the same digest. **Any difference
+  blocks** completing Packet A until it is investigated.
+  - Possible causes include a user deleting a row or its contact in the app (contacts cascade), a
+    user action such as completing, snoozing or editing a follow-up, note or outreach status, and
+    account deletion.
+  - Record a cause only where existing evidence supports it; otherwise mark it **unresolved**.
+    Packet A is not complete while any cause is unresolved.
+  - An unchanged processing digest is evidence against a worker run. It does not by itself explain
+    a protected-record difference.
 
   New contacts and interactions created by normal use are expected and are not compared.
+- **Rows removed by Disconnect or account deletion.** Both stay available to users during
+  Packet A. Neither is an exception to the checks above.
+  - **Disconnect** runs `disconnect_my_outlook`, which calls `run_microsoft_local_cleanup`
+    (`20260921000000`).
+    - Invalidated: pending Outlook `interaction_candidates`, and pending or deferred
+      `new_contact_candidates` (their draft fields are cleared).
+    - Deleted: `microsoft_oauth_states` and the user's `microsoft_connections` row.
+    - Removed with the connection (`ON DELETE CASCADE`): `microsoft_tokens`,
+      `outlook_sync_state` (both folders), `outlook_subscriptions`, `outlook_candidate_refs`,
+      `outlook_conversation_progress`, `outlook_round_messages` and `outlook_thread_recovery`.
+    - Not touched: contacts, interactions and accepted suggestions. Its updates filter on
+      pending/deferred status, and none of those tables references the connection.
+  - **Account deletion** (`delete-account`) deletes all of the user's contacts (their
+    interactions cascade), then the auth user, which removes the user's remaining rows. **Accepted
+    contacts and interactions are not preserved**, and Packet A makes no preservation promise for
+    them.
+  - Either one removes the connection and its subscription and folder rows, so both digests above
+    differ. **That still blocks.** Missing rows alone do not show who removed them, or that no
+    worker ran beforehand.
+  - Record Disconnect or account deletion as the cause only where existing evidence supports it;
+    otherwise the cause is **unresolved**. No logging or schema is added for this.
 - **Pending suggestions:** none can be created (the producers run only in the worker). An existing
   pending one may be accepted or dismissed by the user. That is user activity and is recorded.
 
@@ -223,6 +250,10 @@ Available until stage C deletes credentials.
 
 The next run renews or recreates the subscription. Committed cursors were never moved, so nothing
 is skipped.
+
+Rollback only re-enables processing. It does **not** restore a connection, tokens, suggestions or
+records removed by Disconnect or account deletion. Reconnecting or restoring any of them needs
+separate authorization.
 
 **Not touched by this packet:** credentials, connection records, tables, functions, Vault secrets,
 the consent version, pending suggestions.
