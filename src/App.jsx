@@ -18,8 +18,6 @@ import MobileAppBar from './components/MobileAppBar'
 import CommandPalette from './components/CommandPalette'
 import GlobalAddContactController from './components/GlobalAddContactController'
 import SettingsPage from './pages/SettingsPage'
-import SuggestionsPage from './pages/SuggestionsPage'
-import { SUGGESTION_REVIEW_ENABLED } from './lib/suggestionReview'
 import { ProStatusProvider } from './lib/useProStatus'
 
 function App() {
@@ -88,15 +86,12 @@ function App() {
             <Route path="/contacts" element={<ContactsPage />} />
             <Route path="/contacts/:id" element={<ContactDetailPage />} />
             <Route path="/followups" element={<FollowUpsPage />} />
-            {/* Source-neutral Suggestions queue — only mounted when the ingestion flag is
-                enabled. /calendar-suggestions is preserved as a redirect so existing
-                bookmarks keep working (client-side navigation keeps the session). */}
-            {SUGGESTION_REVIEW_ENABLED && (
-              <Route path="/suggestions" element={<SuggestionsPage />} />
-            )}
-            {SUGGESTION_REVIEW_ENABLED && (
-              <Route path="/calendar-suggestions" element={<Navigate to="/suggestions" replace />} />
-            )}
+            {/* Suggestions is retired (Stage B, docs/simplification-cleanup-plan.md): Outlook
+                processing is stopped, so nothing new can arrive. The page is not mounted and
+                makes no queries; old bookmarks land on Home. Accepted suggestions are ordinary
+                contacts and interactions and are unaffected. */}
+            <Route path="/suggestions" element={<Navigate to="/" replace />} />
+            <Route path="/calendar-suggestions" element={<Navigate to="/" replace />} />
             <Route path="/ai" element={<FunnlAIPage />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="/privacy" element={<PrivacyPage />} />

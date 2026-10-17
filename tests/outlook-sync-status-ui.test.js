@@ -353,11 +353,13 @@ await test('the selects carry updated_at so refreshed proposals are detectable a
 
 console.log('')
 console.log('3. the wiring: gated navigation, a non-destructive poll, cards that report when they are busy')
-await test('Sidebar and BottomNav mount the Suggestions entry under SUGGESTION_REVIEW_ENABLED, with the shared badge', () => {
-  for (const src of [read('src/components/Sidebar.jsx'), read('src/components/BottomNav.jsx')]) {
-    assert.ok(src.includes('usePendingSuggestionCount(SUGGESTION_REVIEW_ENABLED)'))
-    assert.ok(src.includes('{SUGGESTION_REVIEW_ENABLED && ('))
-    assert.ok(src.includes('to="/suggestions"'))
+// Stage B: Suggestions is retired. No navigation entry, no badge and no pending-count
+// query from the rail, the tab bar or the Dashboard. (The hook stays until Stage D.)
+await test('Sidebar, BottomNav and Dashboard no longer mount a Suggestions entry, badge or pending-count query', () => {
+  for (const src of [read('src/components/Sidebar.jsx'), read('src/components/BottomNav.jsx'), read('src/pages/DashboardPage.jsx')]) {
+    for (const gone of ['usePendingSuggestionCount', 'SUGGESTION_REVIEW_ENABLED', 'to="/suggestions"', 'SuggestionsEntry', 'suggestions-badge']) {
+      assert.ok(!src.includes(gone), gone)
+    }
   }
   const hook = read('src/lib/usePendingSuggestionCount.js')
   assert.ok(hook.includes('setInterval(tick, SUGGESTIONS_REFRESH_INTERVAL_MS)'), 'the badge polls while another page is open')
