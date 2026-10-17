@@ -32,10 +32,13 @@ test('renamed components exist; old names are gone', () => {
 })
 
 console.log('\ncanonical route + redirect compatibility')
-test('/suggestions is canonical; /calendar-suggestions redirects to it; both flag-gated', () => {
-  assert.ok(/import SuggestionsPage from '\.\/pages\/SuggestionsPage'/.test(APP))
-  assert.ok(/SUGGESTION_REVIEW_ENABLED &&[\s\S]*?path="\/suggestions" element=\{<SuggestionsPage \/>\}/.test(APP))
-  assert.ok(/SUGGESTION_REVIEW_ENABLED &&[\s\S]*?path="\/calendar-suggestions" element=\{<Navigate to="\/suggestions" replace \/>\}/.test(APP))
+// Stage B (docs/simplification-cleanup-plan.md): Suggestions is retired. The page is never
+// mounted - not imported by App at all - and both old URLs redirect to Home unconditionally.
+test('Suggestions is retired: the page is not mounted; /suggestions and /calendar-suggestions redirect to Home', () => {
+  assert.ok(!/SuggestionsPage/.test(APP), 'App must not import or mount the Suggestions page')
+  assert.ok(!/SUGGESTION_REVIEW_ENABLED/.test(APP), 'the redirects must not depend on a build flag')
+  assert.ok(APP.includes('<Route path="/suggestions" element={<Navigate to="/" replace />} />'))
+  assert.ok(APP.includes('<Route path="/calendar-suggestions" element={<Navigate to="/" replace />} />'))
   assert.ok(!/CalendarSuggestionsPage/.test(APP), 'old page name must be gone from App')
 })
 
