@@ -10,14 +10,13 @@ import { fileURLToPath } from 'url'
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const MIG_FILE = readdirSync(join(ROOT, 'supabase/migrations')).find(f => /add_calendar_candidate_review_rpcs\.sql$/.test(f))
 const MIG = readFileSync(join(ROOT, 'supabase/migrations', MIG_FILE), 'utf8')
-const PAGE = readFileSync(join(ROOT, 'src/pages/SuggestionsPage.jsx'), 'utf8')
-const ENTRY = readFileSync(join(ROOT, 'src/components/SuggestionsEntry.jsx'), 'utf8')
 const LIB = readFileSync(join(ROOT, 'src/lib/calendarReview.js'), 'utf8')
 
 function stripSql(s) { return s.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/--[^\n]*/g, ' ') }
 function stripJs(s) { return s.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/[^\n]*/g, '$1') }
 const MIG_CODE = stripSql(MIG)
-const FRONT_CODE = stripJs(PAGE) + '\n' + stripJs(ENTRY) + '\n' + stripJs(LIB)
+// The Suggestions page and entry are retired (Stage D); the retained review helper is what remains.
+const FRONT_CODE = stripJs(LIB)
 
 let passed = 0, failed = 0
 function test(name, fn) {
@@ -107,19 +106,10 @@ test('never touches contacts/refs/tokens/connections destructively', () => {
 })
 
 console.log('\nReview UI (source)')
-test('review page + entry are flag-gated (SUGGESTION_REVIEW_ENABLED)', () => {
-  assert.ok(/SUGGESTION_REVIEW_ENABLED/.test(PAGE) && /if \(!SUGGESTION_REVIEW_ENABLED\) return/.test(PAGE))
-  assert.ok(/SUGGESTION_REVIEW_ENABLED/.test(ENTRY) && /if \(!SUGGESTION_REVIEW_ENABLED\) return/.test(ENTRY))
-})
 test('review UI never renders provider/sensitive fields', () => {
   for (const bad of ['source_fingerprint', 'google_sub', 'connection_id', 'event_id', 'ical', 'interaction_id', 'ciphertext', 'nonce', 'refresh_token', 'access_token']) {
     assert.ok(!FRONT_CODE.includes(bad), `UI must not reference ${bad}`)
   }
-})
-test('accept/dismiss are single-flight (busy guard) + dismiss confirmation', () => {
-  assert.ok(/if \(busy\) return/.test(PAGE), 'single-flight guard')
-  assert.ok(/confirmDismiss/.test(PAGE), 'dismiss confirmation state')
-  assert.ok(/loadInitial|Try again/.test(PAGE), 'error retry present')
 })
 test('no production "Run sync" button; no direct sync invocation in UI', () => {
   assert.ok(!/Run.{0,4}Sync|Run Calendar Sync/i.test(FRONT_CODE))
@@ -133,24 +123,6 @@ test('no scheduler/cron/webhook/Gmail/AI/incremental/auto-accept', () => {
   assert.ok(!/gmail|mail\.google/i.test(all))
   assert.ok(!/anthropic|claude|openai|\bLLM\b/i.test(all))
   assert.ok(!/synctoken|incremental sync/i.test(all))
-  // no automatic acceptance: accept only runs from an explicit handler, never on mount
-  assert.ok(!/useEffect\([\s\S]{0,120}accept_interaction_candidate/.test(PAGE))
-})
-test('analytics events are SOURCE-CORRECT and carry no identifiers', () => {
-  // RENAMED DELIBERATELY. The queue has always been source-neutral, but it fired
-  // calendar_review_viewed / calendar_candidate_accepted / calendar_candidate_dismissed
-  // for every row - so an Outlook suggestion emitted a Calendar event, which is a false
-  // record. The names are now source-neutral and the source travels as a property.
-  // Safe because the whole surface is gated and the gate has never been enabled, so no
-  // event has ever been emitted and no insight can rest on the old names.
-  assert.ok(/track\(SUGGESTION_EVENTS\.viewed, suggestionEventProps\(s\)\)/.test(PAGE))
-  assert.ok(/track\(SUGGESTION_EVENTS\.accepted,/.test(PAGE))
-  assert.ok(/edited: !!edited/.test(PAGE), 'accepted still carries at most an edited boolean')
-  assert.ok(/track\(SUGGESTION_EVENTS\.dismissed, suggestionEventProps\(candidate\.source\)\)/.test(PAGE))
-  // The old calendar-named events must be gone, not merely supplemented.
-  assert.ok(!/calendar_review_viewed|calendar_candidate_accepted|calendar_candidate_dismissed/.test(PAGE))
-  // And still no identifier or content in any event.
-  assert.ok(!/track\([^)]*candidate\.id|track\([^)]*\.name|track\([^)]*email/.test(PAGE))
 })
 
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed\n`)

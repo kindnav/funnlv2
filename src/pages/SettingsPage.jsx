@@ -24,10 +24,6 @@ import {
 import ProComingSoon from '../components/ProComingSoon'
 import GoogleConnectionCard from '../components/GoogleConnectionCard'
 import { CALENDAR_CONNECTION_ENABLED } from '../lib/googleConnection'
-import OutlookConnectionCard from '../components/OutlookConnectionCard'
-import {
-  OUTLOOK_CONNECTION_ENABLED, OUTLOOK_PILOT_VIEWER_ID, outlookPilotViewer,
-} from '../lib/outlookConnection'
 
 // ── Shared style tokens ─────────────────────────────────────────────────────
 const SECTION_LABEL =
@@ -499,27 +495,8 @@ function SettingsPage() {
           </div>
         )}
 
-        {/*
-          Outlook: its own flag, off everywhere, and invitation-scoped INSIDE the card.
-          The flag alone is global, so switching it on would offer the controls to every
-          user and refuse all but the invited ones server-side. Hiding is presentation
-          only - outlook-oauth-start is what actually refuses.
-
-          WHY THE INVITATION IS A PROP AND NOT THE MOUNT CONDITION. Removing somebody from
-          the cohort stops their future imports; it must not take away the screen that
-          tells them they are still connected, or the Disconnect control that is their way
-          out. So the card mounts whenever the flag is on and decides for itself: with no
-          connection and no invitation it renders nothing, which is what every other user
-          sees. The wrapper is rendered by the card, so a card that renders nothing leaves
-          no empty "Connected accounts" panel behind.
-        */}
-        {OUTLOOK_CONNECTION_ENABLED && (
-          <OutlookConnectionCard
-            mayConnect={outlookPilotViewer(OUTLOOK_PILOT_VIEWER_ID, user?.id)}
-            sectionLabel={SECTION_LABEL}
-            cardClassName={`${CARD} mb-[14px]`}
-          />
-        )}
+        {/* Outlook is retired (Stage D): processing stopped, every connection and token was
+            removed and new connections cannot be made, so its Settings card is gone. */}
 
         {/* ── Appearance ─────────────────────────────────────────────────── */}
         <div className={`${CARD} mb-[14px]`}>
