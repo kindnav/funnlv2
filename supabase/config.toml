@@ -393,6 +393,18 @@ deno_version = 2
 [functions.delete-account]
 verify_jwt = true
 
+# Billing (deployed; source reconciled from Draft PR #24 head 697dae1, identical to the deployed bundles).
+# stripe-webhook receives unauthenticated POSTs from Stripe — no Supabase JWT.
+# JWT verification is disabled here; security comes from Stripe HMAC-SHA256
+# signature verification (STRIPE_WEBHOOK_SECRET) inside the handler itself.
+# create-checkout-session has no section and keeps the default verify_jwt = true.
+[functions.stripe-webhook]
+verify_jwt = false
+
+# create-billing-portal-session — authenticated callers only (default verify_jwt = true)
+[functions.create-billing-portal-session]
+verify_jwt = true
+
 # [edge_runtime.secrets]
 # secret_key = "env(SECRET_VALUE)"
 
