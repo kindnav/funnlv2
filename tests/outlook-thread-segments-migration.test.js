@@ -11,8 +11,6 @@ import assert from 'node:assert'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
-import { WRITE_OK } from '../supabase/functions/shared/outlookImportRun.js'
-import { MAX_SEGMENT_COVERAGE } from '../supabase/functions/shared/outlookThreadSegments.js'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const read = (p) => readFileSync(join(ROOT, p), 'utf8').replace(/\r\n/g, '\n')
@@ -88,18 +86,6 @@ test('four columns, four CHECKs and one partial index, all guarded for re-applic
   }
   assert.ok(/CREATE INDEX IF NOT EXISTS ocr_conversation_idx/.test(FORWARD))
   assert.ok(/WHERE conversation_fingerprint IS NOT NULL/.test(FORWARD), 'the index is partial')
-})
-
-test('the coverage bound in SQL matches the bound the decision module enforces', () => {
-  assert.strictEqual(MAX_SEGMENT_COVERAGE, 50)
-  assert.ok(FORWARD.includes('BETWEEN 1 AND 50'), 'the CHECK carries the same ceiling')
-  assert.strictEqual((FORWARD.match(/array_length\(p_covered_fingerprints, 1\) > 50/g) || []).length, 4,
-    'both producers, the candidate baseline and the THREAD baseline all refuse an oversized '
-    + 'coverage set')
-  // And the thread baseline refuses rather than TRIMMING, because dropping a fingerprint from
-  // an absorbed window would make an already-absorbed message look new again.
-  assert.ok(/'baseline_full'/.test(FORWARD),
-    'an over-bound union is refused with its own code, not silently trimmed')
 })
 
 test('coverage is ALL OR NOTHING, and requires the thread it belongs to', () => {
@@ -329,26 +315,6 @@ test('the NEW-CONTACT producer has the same two safeguards as the interaction on
 })
 
 console.log('\nthe worker contract')
-
-test('the two new refusal codes are NOT in WRITE_OK, so they forfeit the cursor', () => {
-  // This is what makes the concurrent-decision case safe: a refused write stops the loop
-  // and the next round re-reads the conversation instead of skipping it.
-  assert.deepStrictEqual([...WRITE_OK], ['created', 'refreshed', 'exists_terminal'])
-  for (const code of ['coverage_moved', 'coverage_uninitialized']) {
-    assert.ok(!WRITE_OK.includes(code), `${code} must never be treated as a successful write`)
-    assert.ok(FORWARD.includes(`'${code}'`), `${code} must be returned by the migration`)
-  }
-})
-
-test('the producer passes coverage through the pure plan builder, defaulting to null', () => {
-  const stage = read('supabase/functions/shared/outlookContentStage.js')
-  for (const a of ['p_conversation_fingerprint', 'p_covered_fingerprints', 'p_coverage_through_at']) {
-    assert.ok(stage.includes(a), `planContentWrite must pass ${a}`)
-  }
-  assert.ok(stage.includes('entry?.conversationFingerprint ?? null'),
-    'the thread comes from the entry the round already builds')
-  assert.ok(/segmentCoverage\?\.fingerprints/.test(stage), 'and the coverage from segmentCoverage')
-})
 
 test('the hint merge treats an ABSENT hint as empty, and writes both columns together', () => {
   const fn = FORWARD.slice(FORWARD.indexOf('FUNCTION public.record_outlook_thread_recovery('))

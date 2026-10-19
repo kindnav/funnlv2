@@ -1,10 +1,11 @@
 /**
  * retired-integrations-ui.test.js — the Outlook and Google Calendar connection cards and the Suggestions
- * experience are retired from the frontend (Stage B hid them; Stage D removed the code). These contracts keep them
- * retired, keep account deletion reachable, and pin the frontend modules that are deliberately KEPT
- * because retained backend-guard tests or the consent record still depend on them.
+ * experience are retired from the frontend (Stage B hid them; Stage D removed the code, then the
+ * integration backend and the review/consent helpers whose last consumers went with it). These
+ * contracts keep them retired, keep account deletion reachable, and pin the frontend modules that are
+ * deliberately KEPT because a retained check still depends on them.
  *
- * Backend functions, RPCs, migrations and tables are NOT retired here (later Stage D/F work).
+ * Integration tables remain until Stage F.
  *
  * Run with: node tests/retired-integrations-ui.test.js
  */
@@ -12,7 +13,6 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
-import { OAUTH_START_PATHS } from '../src/lib/oauthStartEndpoint.js'
 
 const ROOT = new URL('..', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')
 const read = (rel) => readFileSync(join(ROOT, rel), 'utf8')
@@ -27,16 +27,15 @@ const DELETED = [
   'src/lib/pendingSuggestions.js', 'src/lib/suggestionReview.js',
   // Google Calendar connection UI (Stage D, after Outlook).
   'src/components/GoogleConnectionCard.jsx', 'src/lib/googleConnection.js',
+  // Review and consent helpers whose last consumers (the integration functions, the acceptance
+  // RPCs and their tests) were retired with the integration backend.
+  'src/lib/calendarReview.js', 'src/lib/calendarIngestion.js', 'src/lib/newContactReview.js',
+  'src/lib/outlookConnection.js', 'src/lib/oauthStartEndpoint.js',
 ]
 // Kept on purpose: each still has a retained consumer.
 const KEPT = {
-  'src/lib/outlookDisclosure.js': 'consent record; worker/server notice-version tests derive from it',
+  'src/lib/outlookDisclosure.js': 'the consent record; the privacy-policy and consent-wording tests check the published notice against it',
   'src/lib/sha256.js': 'used by outlookDisclosure.js',
-  'src/lib/outlookConnection.js': 'imported by the backend pilot-gate and Graph-identity tests',
-  'src/lib/oauthStartEndpoint.js': 'imported by outlookConnection.js (startOutlookConsent) and the OAuth browser-binding tests',
-  'src/lib/calendarReview.js': 'imported by tests of the retained acceptance RPCs and migrations',
-  'src/lib/newContactReview.js': 'imported by tests of the retained acceptance RPCs and migrations',
-  'src/lib/calendarIngestion.js': 'imported by calendarReview.js',
 }
 
 const walk = (d, out = []) => { for (const e of readdirSync(join(ROOT, d))) { const p = `${d}/${e}`; statSync(join(ROOT, p)).isDirectory() ? walk(p, out) : /\.(jsx?|mjs)$/.test(e) && out.push(p) } return out }
@@ -90,19 +89,25 @@ test('Settings has no Google Calendar card or Connected accounts section', () =>
   }
 })
 
-test('the frontend starts or disconnects no Google provider flow', () => {
-  // The branded start-path table may still NAME the Gmail start path (Gmail is retired as its own
-  // unit later); nothing else in src may reach a Google OAuth function.
+test('the frontend starts or disconnects no provider flow and names no OAuth start path', () => {
   for (const f of walk('src')) {
     const src = read(f)
-    assert.ok(!src.includes("'google-oauth-"), `${f} calls a Google OAuth function`)
-    assert.ok(!src.includes('/api/google-oauth-start'), `${f} names the Google start path`)
-    if (f !== 'src/lib/oauthStartEndpoint.js') {
-      assert.ok(!src.includes('gmail-oauth-start'), `${f} wires a Gmail start`)
+    for (const gone of ["'google-oauth-", "'gmail-oauth-", "'outlook-oauth-", '/api/google-oauth',
+      '/api/gmail-oauth', '/api/outlook-oauth', 'OAUTH_START_PATHS', 'resolveOauthStartUrl']) {
+      assert.ok(!src.includes(gone), `${f}: ${gone}`)
     }
   }
-  assert.deepStrictEqual(Object.keys(OAUTH_START_PATHS).sort(), ['gmail', 'outlook'],
-    'calendar is no longer a client start path')
+})
+
+test('the frontend calls none of the retired integration RPCs', () => {
+  for (const f of walk('src')) {
+    const src = read(f)
+    for (const rpc of ['get_my_outlook_connection', 'get_my_outlook_sync_status', 'disconnect_my_outlook',
+      'disconnect_my_gmail', 'accept_interaction_candidate', 'accept_new_contact_candidate',
+      'dismiss_interaction_candidate', 'dismiss_new_contact_candidate', 'defer_candidate']) {
+      assert.ok(!src.includes(`rpc('${rpc}'`), `${f} calls ${rpc}`)
+    }
+  }
 })
 
 test('no Calendar flag or Google credential material is read by the frontend', () => {

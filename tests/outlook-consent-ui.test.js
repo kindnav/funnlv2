@@ -28,13 +28,6 @@ import {
   DISCLOSURE_FINGERPRINT, disclosureFingerprint, verifyDisclosureIntegrity,
   computeDisclosureVersion, DISCLOSURE_VERSION_PREFIX, DIGEST_HEX_CHARS,
 } from '../src/lib/outlookDisclosure.js'
-import {
-  outlookConnectionEnabled, OUTLOOK_CONNECTION_ENABLED, canRequestConsent,
-  buildConsentRequest, classifyStartResponse, messageForOutcome,
-  DISCLOSURE_PARAGRAPH_COUNT, startOutlookConsent,
-  outlookUpdateNeeded,
-} from '../src/lib/outlookConnection.js'
-import { resolveOauthStartUrl, OAUTH_START_PATHS } from '../src/lib/oauthStartEndpoint.js'
 
 let passed = 0, failed = 0
 // DEFECT THIS REPLACED: the previous runner called fn() and reported a tick
@@ -56,25 +49,14 @@ function test (name, fn) {
 
 // Executable code only: the file's own explanatory comments legitimately use
 // words like 'sync' to say what this slice does NOT do.
-const NL = String.fromCharCode(10)
-const SETTINGS = readFileSync(new URL('../src/pages/SettingsPage.jsx', import.meta.url), 'utf8')
 
 console.log('\ndormancy')
 
-test('the flag is off unless it is exactly the string true', () => {
-  assert.strictEqual(outlookConnectionEnabled('true'), true)
-  for (const v of ['TRUE', 'True', '1', 'yes', '', ' true', 'true ', null, undefined, true]) {
-    assert.strictEqual(outlookConnectionEnabled(v), false, String(v))
-  }
-})
 
 
 
 
 
-test('the module-level flag is false outside Vite (fail-safe default)', () => {
-  assert.strictEqual(OUTLOOK_CONNECTION_ENABLED, false)
-})
 
 
 console.log('\nthe version is bound to the text it names')
@@ -99,47 +81,8 @@ test('dropping or reordering a paragraph invalidates the version', () => {
   assert.strictEqual(verifyDisclosureIntegrity(swapped), false)
 })
 
-test('a HEALTHY build produces a request carrying the derived version', () => {
-  const r = buildConsentRequest({ acknowledged: true, originOk: true, connecting: false, pageOrigin: 'https://www.getfunnl.com' })
-  assert.strictEqual(r.ok, true)
-  assert.strictEqual(r.body.consentPolicyVersion, OUTLOOK_DISCLOSURE_VERSION)
-})
 
-test('a FAILED integrity check really refuses, and sends nothing', async () => {
-  // Driven, not asserted about: verifyIntegrity is injected as failing, which
-  // is what a text/fingerprint drift would look like at runtime.
-  const failing = () => false
-  const r = buildConsentRequest({
-    acknowledged: true, originOk: true, connecting: false,
-    pageOrigin: 'https://www.getfunnl.com', verifyIntegrity: failing,
-  })
-  assert.strictEqual(r.ok, false)
-  assert.strictEqual(r.reason, 'disclosure_integrity_failed')
-  assert.strictEqual(r.body, undefined, 'no body may be produced')
 
-  // …and the whole flow makes no network call and does not navigate.
-  let fetched = 0, navigated = 0, bearerAsked = 0
-  const out = await startOutlookConsent({
-    acknowledged: true, connecting: false, pageOrigin: 'https://www.getfunnl.com',
-    apikey: 'k', verifyIntegrity: failing,
-    getBearer: async () => { bearerAsked++; return 'b' },
-    fetchImpl: async () => { fetched++; return { status: 200, json: async () => ({}) } },
-    navigate: () => { navigated++ },
-  })
-  assert.strictEqual(fetched, 0, 'no request may be sent')
-  assert.strictEqual(navigated, 0, 'nothing may navigate')
-  assert.strictEqual(bearerAsked, 0, 'no credential may be touched')
-  assert.strictEqual(out.navigated, false)
-  assert.ok(/could not be verified/i.test(out.message))
-})
-
-test('integrity failure beats acknowledgement: a ticked box does not override it', () => {
-  const r = buildConsentRequest({
-    acknowledged: true, originOk: true, connecting: false,
-    pageOrigin: 'https://www.getfunnl.com', verifyIntegrity: () => false,
-  })
-  assert.strictEqual(r.reason, 'disclosure_integrity_failed')
-})
 
 test('the disclosure names every requested scope, and offline_access honestly', () => {
   const text = OUTLOOK_DISCLOSURE_PARAGRAPHS.join(' ')
@@ -361,46 +304,6 @@ test('the short disclosure says no LESS than the published policy on the materia
     'and that what is sent is a cleaned extract, not the raw message')
 })
 
-test('the disclosure is longer than before and still one paragraph per idea', () => {
-  // 11 -> 18 -> 21. The content release replaced three envelope-only paragraphs and
-  // added the selection and truncation bounds, the Anthropic processing and its
-  // retention, the stored-but-not-in-your-network distinction with the
-  // editable-field list, the set-aside rule, and the encrypted message references.
-  // The last three come from the disclosure correction: one saying the Anthropic
-  // extract is not anonymous, and two separating what expiry does to ACCEPTANCE from
-  // what DISMISSAL does. The count is pinned so a silent shrink cannot drop a
-  // material fact.
-  // 21 -> 23: the Anthropic minimization paragraph split into three, separating what
-  // the check does from what it cannot do. The overclaim hid in the join.
-  // 23 -> 24 (published 2026-10-12, thread segments): the suggestion-provenance paragraph
-  // gained message-level coverage, the later-exchange behaviour and the thread starting point,
-  // which carried it past the 700-character reading limit below. It was split at the sentence
-  // seam the original text already had - what a suggestion KEEPS, then what is DISCARDED - so
-  // every approved word is published and each paragraph is still one idea.
-  assert.strictEqual(DISCLOSURE_PARAGRAPH_COUNT, 24,
-    'the paragraph count is pinned; change it deliberately with the text')
-  // Published 2026-10-09: paragraph 3 ends with the approved background-sync sentence.
-  assert.ok(OUTLOOK_DISCLOSURE_PARAGRAPHS[2].endsWith("Funnl also asks Microsoft to tell its servers when new mail arrives, so a check can start automatically within minutes while Funnl is closed."),
-    'the just-in-time notice carries the approved automatic-check sentence, word for word')
-  // Published 2026-10-12: the approved thread-segments clause, word for word, and the
-  // starting-point sentence that says no suggestion comes out of what it absorbs.
-  const keeps = OUTLOOK_DISCLOSURE_PARAGRAPHS.find((p) => p.startsWith('A suggestion keeps'))
-  assert.ok(keeps.includes('one-way fingerprints of the exchange and of the messages it was '
-    + 'drawn from, so the same exchange is not suggested twice.'),
-    'the notice says the fingerprints cover the messages a suggestion was drawn from')
-  assert.ok(keeps.includes('A later exchange in the same thread is prepared as a new suggestion '
-    + 'for the new messages only.'),
-    'the notice states the later-exchange behaviour')
-  assert.ok(keeps.includes('it records a starting point from those messages\u2019 own times and '
-    + 'makes no suggestion from anything it finds there'),
-    'the notice states the starting point and that nothing it absorbs becomes a suggestion')
-  assert.strictEqual(DISCLOSURE_PARAGRAPH_COUNT, OUTLOOK_DISCLOSURE_PARAGRAPHS.length,
-    'the rendered count is derived from the array, so the card shows all of them')
-  for (const para of OUTLOOK_DISCLOSURE_PARAGRAPHS) {
-    assert.ok(para.length >= 40, `too short to be a paragraph: ${para}`)
-    assert.ok(para.length <= 700, `too long to read at a decision point: ${para.slice(0, 60)}`)
-  }
-})
 
 test('the readiness packet quotes the shipped text VERBATIM, not a paraphrase', () => {
   // A reviewer approves the wording in the packet. If the packet and the module
@@ -475,93 +378,23 @@ test('the disclosure states review-before-save, not automatic saving', () => {
 console.log('\nrefusal: consent is never implied')
 
 
-test('without acknowledgement NO request is built', () => {
-  const r = buildConsentRequest({ acknowledged: false, originOk: true, connecting: false, pageOrigin: 'https://www.getfunnl.com' })
-  assert.strictEqual(r.ok, false)
-  assert.strictEqual(r.reason, 'not_acknowledged')
-  assert.strictEqual(r.body, undefined, 'no body may be produced')
-})
 
 
-test('a non-canonical origin refuses before any request', () => {
-  const r = buildConsentRequest({ acknowledged: true, originOk: false, connecting: false, pageOrigin: 'https://getfunnl.com' })
-  assert.strictEqual(r.ok, false)
-  assert.strictEqual(r.reason, 'non_canonical_origin')
-  // …because a cookie set there could never reach the branded callback.
-  assert.strictEqual(resolveOauthStartUrl('https://getfunnl.com', 'outlook').ok, false)
-})
 
 console.log('\nstale version')
 
-test('a 409 is classified as a stale version, not a generic error', () => {
-  assert.deepStrictEqual(classifyStartResponse(409, { error: 'consent_version_mismatch' }), { kind: 'stale_version' })
-  assert.deepStrictEqual(classifyStartResponse(400, { error: 'consent_version_mismatch' }), { kind: 'stale_version' })
-})
 
-test('a stale version tells the user to RELOAD and read the current text', () => {
-  const msg = messageForOutcome('stale_version')
-  assert.ok(/updated/i.test(msg) && /reload/i.test(msg))
-  assert.ok(/current version/i.test(msg))
-})
 
 
 console.log('\nsuccessful start')
 
-test('a 200 with a url is a redirect, and nothing else is', () => {
-  assert.deepStrictEqual(classifyStartResponse(200, { url: 'https://login.microsoftonline.com/x' }),
-    { kind: 'redirect', url: 'https://login.microsoftonline.com/x' })
-  assert.strictEqual(classifyStartResponse(200, {}).kind, 'error')
-  assert.strictEqual(classifyStartResponse(200, { url: '' }).kind, 'error')
-  assert.strictEqual(classifyStartResponse(200, null).kind, 'error')
-})
-
-test('the request carries the return origin and the bound version', () => {
-  const r = buildConsentRequest({ acknowledged: true, originOk: true, connecting: false, pageOrigin: 'https://www.getfunnl.com' })
-  assert.deepStrictEqual(r.body, {
-    returnOrigin: 'https://www.getfunnl.com',
-    consentPolicyVersion: OUTLOOK_DISCLOSURE_VERSION,
-  })
-})
 
 
-test('every other server outcome has its own message, none echoing the server', () => {
-  for (const [status, body, kind] of [
-    [503, { error: 'outlook_not_enabled' }, 'not_enabled'],
-    [503, { error: 'config_missing' }, 'not_configured'],
-    [400, { error: 'consent_required' }, 'consent_required'],
-    [401, { error: 'unauthorized' }, 'signed_out'],
-    [500, { error: 'internal_error' }, 'error'],
-  ]) {
-    assert.strictEqual(classifyStartResponse(status, body).kind, kind)
-    const msg = messageForOutcome(kind)
-    assert.ok(msg.length > 0)
-    assert.ok(!msg.includes(body.error), 'a server code must not be shown verbatim')
-  }
-})
+
 
 // The connect card is retired (Stage D); these retained helpers keep their contracts.
-test('canRequestConsent holds only when every condition holds', () => {
-  const ok = { acknowledged: true, integrityOk: true, originOk: true, connecting: false }
-  assert.strictEqual(canRequestConsent(ok), true)
-  assert.strictEqual(canRequestConsent({ ...ok, acknowledged: false }), false)
-  assert.strictEqual(canRequestConsent({ ...ok, integrityOk: false }), false)
-  assert.strictEqual(canRequestConsent({ ...ok, originOk: false }), false)
-  assert.strictEqual(canRequestConsent({ ...ok, connecting: true }), false)
-})
 
-test('the Outlook start path resolves to the branded endpoint', () => {
-  assert.strictEqual(OAUTH_START_PATHS.outlook, '/api/outlook-oauth-start')
-  assert.deepStrictEqual(resolveOauthStartUrl('https://www.getfunnl.com', 'outlook'),
-    { ok: true, url: '/api/outlook-oauth-start' })
-})
 
-test('the update_failed message says the connection survives and the update did not happen', () => {
-  const copy = messageForOutcome('update_failed')
-  assert.ok(/still connected/i.test(copy), 'it says the connection survives')
-  assert.ok(/did not finish|did not complete/i.test(copy), 'and that the update did not happen')
-  assert.ok(!/nothing was connected/i.test(copy), 'the connect-path copy would be false here')
-  assert.notStrictEqual(copy, messageForOutcome('callback_failed'))
-})
 
 console.log('\nscope: this slice connects only')
 
@@ -572,115 +405,16 @@ console.log('behaviour: the start flow, driven directly')
 
 // startOutlookConsent is what the component calls, so these exercise the real
 // control flow with injected fetch / navigate rather than asserting on source.
-function harness (over = {}) {
-  const calls = { fetch: [], navigate: [], track: [] }
-  const base = {
-    acknowledged: true,
-    connecting: false,
-    pageOrigin: 'https://www.getfunnl.com',
-    apikey: 'sb_publishable_test',
-    getBearer: async () => 'test-bearer',
-    fetchImpl: async (url, init) => {
-      calls.fetch.push({ url, init })
-      return { status: 200, json: async () => ({ url: 'https://login.microsoftonline.com/go' }) }
-    },
-    navigate: (url) => calls.navigate.push(url),
-    trackImpl: (n, p) => calls.track.push([n, p]),
-  }
-  return { calls, args: { ...base, ...over } }
-}
 
-test('UNCHECKED: no request is made and nothing navigates', async () => {
-  const h = harness({ acknowledged: false })
-  const r = await startOutlookConsent(h.args)
-  assert.strictEqual(h.calls.fetch.length, 0, 'no request may be sent')
-  assert.strictEqual(h.calls.navigate.length, 0, 'nothing may navigate')
-  assert.strictEqual(r.navigated, false)
-  assert.strictEqual(r.clearAcknowledgement, false)
-  assert.ok(r.message.length > 0)
-})
 
-test('UNCHECKED: the bearer token is never even requested', async () => {
-  let bearerAsked = false
-  const h = harness({ acknowledged: false, getBearer: async () => { bearerAsked = true; return 'x' } })
-  await startOutlookConsent(h.args)
-  assert.strictEqual(bearerAsked, false, 'refusal must happen before any credential use')
-})
 
-test('a non-canonical origin makes no request', async () => {
-  const h = harness({ pageOrigin: 'https://getfunnl.com' })
-  const r = await startOutlookConsent(h.args)
-  assert.strictEqual(h.calls.fetch.length, 0)
-  assert.ok(/www\.getfunnl\.com/.test(r.message))
-})
 
-test('SUCCESS: navigates exactly once, to the provider URL, and nowhere else', async () => {
-  const h = harness()
-  const r = await startOutlookConsent(h.args)
-  assert.strictEqual(h.calls.fetch.length, 1, 'exactly one request')
-  assert.strictEqual(h.calls.fetch[0].url, '/api/outlook-oauth-start')
-  assert.deepStrictEqual(h.calls.navigate, ['https://login.microsoftonline.com/go'])
-  assert.strictEqual(r.navigated, true)
-  assert.strictEqual(r.message, '')
-})
 
-test('SUCCESS: the request carries the DERIVED version and same-origin credentials', async () => {
-  const h = harness()
-  await startOutlookConsent(h.args)
-  const init = h.calls.fetch[0].init
-  assert.strictEqual(init.method, 'POST')
-  assert.strictEqual(init.credentials, 'same-origin')
-  assert.strictEqual(init.headers.Authorization, 'Bearer test-bearer')
-  const body = JSON.parse(init.body)
-  assert.strictEqual(body.consentPolicyVersion, OUTLOOK_DISCLOSURE_VERSION)
-  assert.strictEqual(body.returnOrigin, 'https://www.getfunnl.com')
-})
 
-test('STALE 409: acknowledgement is withdrawn and nothing navigates', async () => {
-  const h = harness({
-    fetchImpl: async (url, init) => {
-      h.calls.fetch.push({ url, init })
-      return { status: 409, json: async () => ({ error: 'consent_version_mismatch' }) }
-    },
-  })
-  const r = await startOutlookConsent(h.args)
-  assert.strictEqual(r.clearAcknowledgement, true, 'the tick must not survive')
-  assert.strictEqual(r.navigated, false)
-  assert.strictEqual(h.calls.navigate.length, 0)
-  assert.ok(/reload/i.test(r.message))
-})
 
-test('a non-stale failure does NOT clear the acknowledgement', async () => {
-  const h = harness({
-    fetchImpl: async () => ({ status: 500, json: async () => ({ error: 'internal_error' }) }),
-  })
-  const r = await startOutlookConsent(h.args)
-  assert.strictEqual(r.clearAcknowledgement, false)
-  assert.strictEqual(r.navigated, false)
-})
 
-test('no session: refuses without sending anything', async () => {
-  const h = harness({ getBearer: async () => null })
-  const r = await startOutlookConsent(h.args)
-  assert.strictEqual(h.calls.fetch.length, 0)
-  assert.ok(/sign in/i.test(r.message))
-})
 
-test('a thrown fetch is a controlled failure, not a crash', async () => {
-  const h = harness({ fetchImpl: async () => { throw new Error('offline') } })
-  const r = await startOutlookConsent(h.args)
-  assert.strictEqual(r.navigated, false)
-  assert.ok(r.message.length > 0)
-})
 
-test('analytics fire only on a real start, and carry no content', async () => {
-  const ok = harness()
-  await startOutlookConsent(ok.args)
-  assert.deepStrictEqual(ok.calls.track, [['outlook_connect_started', { provider: 'outlook' }]])
-  const refused = harness({ acknowledged: false })
-  await startOutlookConsent(refused.args)
-  assert.deepStrictEqual(refused.calls.track, [])
-})
 
 
 console.log('')
@@ -748,13 +482,6 @@ test('the version satisfies the DB consent_policy_version CHECK', () => {
   assert.ok(!/[ -]/.test(OUTLOOK_DISCLOSURE_VERSION), 'no control characters')
 })
 
-test('the server still performs an EXACT match, which this does not weaken', () => {
-  const startSrc = readFileSync(
-    new URL('../supabase/functions/outlook-oauth-start/index.ts', import.meta.url), 'utf8')
-  assert.ok(startSrc.includes('consentPolicyVersion !== configuredVersion'),
-    'the server must still compare exactly')
-  assert.ok(startSrc.includes('consent_version_mismatch'))
-})
 
 console.log('')
 console.log('the scope scan can actually fail')
@@ -846,31 +573,6 @@ test('the disclosure does NOT claim the Microsoft grant is revoked', () => {
 
 console.log('\nupdating an EXISTING connection, without disconnecting')
 
-test('outlookUpdateNeeded: superseded consent, or an authorisation to renew', () => {
-  const current = { consentVersion: OUTLOOK_DISCLOSURE_VERSION, needsReauth: false }
-  assert.deepStrictEqual(outlookUpdateNeeded(current),
-    { needed: false, consentSuperseded: false, needsReauth: false },
-    'a connection already on the published version needs nothing')
-
-  const superseded = { consentVersion: 'ol-disc-6d1ddd67f51d5b3bfd8d3801c50271a7', needsReauth: false }
-  assert.deepStrictEqual(outlookUpdateNeeded(superseded),
-    { needed: true, consentSuperseded: true, needsReauth: false })
-
-  const reauth = { consentVersion: OUTLOOK_DISCLOSURE_VERSION, needsReauth: true }
-  assert.deepStrictEqual(outlookUpdateNeeded(reauth),
-    { needed: true, consentSuperseded: false, needsReauth: true })
-
-  const both = { consentVersion: 'ol-disc-81fe8944fd2be59ac3c059c229b4d28e', needsReauth: true }
-  assert.deepStrictEqual(outlookUpdateNeeded(both),
-    { needed: true, consentSuperseded: true, needsReauth: true })
-
-  // A connection recording nothing at all is superseded, not exempt.
-  assert.strictEqual(outlookUpdateNeeded({ consentVersion: null }).needed, true)
-  assert.strictEqual(outlookUpdateNeeded({ consentVersion: undefined }).needed, true)
-  // No connection: nothing to update. The not-connected branch owns that case.
-  assert.strictEqual(outlookUpdateNeeded(null).needed, false)
-  assert.strictEqual(outlookUpdateNeeded(undefined).needed, false)
-})
 
 
 

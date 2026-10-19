@@ -65,13 +65,6 @@ test('signatures and grants are restated exactly; no draft column is widened', (
   assert.strictEqual((FORWARD.match(/CREATE OR REPLACE FUNCTION/g) || []).length, 2)
 })
 
-test('the client bounds agree with the server: 10,000 for both editors; drafts stay 200', async () => {
-  const cal = await import('../src/lib/calendarReview.js')
-  const ncc = await import('../src/lib/newContactReview.js')
-  assert.strictEqual(cal.REVIEW_NOTES_MAX, 10000)
-  assert.strictEqual(ncc.NCC_BOUNDS.notes, 10000)
-})
-
 setTimeout(() => {
   console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed`)
   if (failed > 0) process.exit(1)

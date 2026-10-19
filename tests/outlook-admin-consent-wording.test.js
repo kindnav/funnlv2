@@ -17,14 +17,7 @@ import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
-import {
-  OUTLOOK_DISCLOSURE_PARAGRAPHS as P, OUTLOOK_DISCLOSURE_VERSION, computeDisclosureVersion,
-  verifyDisclosureIntegrity,
-} from '../src/lib/outlookDisclosure.js'
-import {
-  REQUIRED_CONTENT_CONSENT_VERSION, REQUIRED_THIRD_PARTY_CONSENT_VERSION,
-  REQUIRED_BACKGROUND_CONSENT_VERSION,
-} from '../supabase/functions/shared/outlookContentConsent.js'
+import { OUTLOOK_DISCLOSURE_PARAGRAPHS as P } from '../src/lib/outlookDisclosure.js'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const EM = String.fromCharCode(0x2014)
@@ -69,14 +62,6 @@ test('/privacy carries the same sentence, character for character', () => {
   const t = privacyText()
   assert.ok(t.includes(SENTENCE), 'sentence missing from /privacy')
   assert.ok(!/administrator consent by default/i.test(t), 'the old claim survives in /privacy')
-})
-
-test('the version is derived, and all three worker requirements carry it', () => {
-  assert.strictEqual(OUTLOOK_DISCLOSURE_VERSION, computeDisclosureVersion(P))
-  assert.strictEqual(OUTLOOK_DISCLOSURE_VERSION, 'ol-disc-1b6906af498ccff0f1e3292027ca0539')
-  assert.ok(verifyDisclosureIntegrity())
-  for (const v of [REQUIRED_CONTENT_CONSENT_VERSION, REQUIRED_THIRD_PARTY_CONSENT_VERSION,
-    REQUIRED_BACKGROUND_CONSENT_VERSION]) assert.strictEqual(v, OUTLOOK_DISCLOSURE_VERSION)
 })
 
 console.log('')

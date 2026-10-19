@@ -31,7 +31,6 @@ const MIG_REL = 'supabase/migrations/20260922175616_revoke_service_role_from_out
 const SQL = read(MIG_REL)
 const CODE = SQL.split('\n').filter(l => !/^\s*--/.test(l)).join('\n')
 const PRA = read('supabase/migrations/20260921000000_add_outlook_content_draft_primitives.sql')
-const RUNTIME = read('tests/sql/outlook-user-rpc-grants-runtime.sql')
 
 // The four user-action RPCs and their EXACT committed signatures (from 20260921000000).
 const USER_FNS = {
@@ -132,17 +131,6 @@ test('the four user RPCs still derive ownership only from auth.uid() and take no
 
 // ── Runtime harness coverage ──────────────────────────────────────────────────
 console.log('\nruntime harness coverage')
-test('runtime SQL reproduces the Production default-ACL condition before applying the fix', () => {
-  for (const s of ['PRODUCTION-LIKE PRE-FIX ACL', 'GRANT EXECUTE ON FUNCTION public.accept_new_contact_candidate',
-    'apply ONLY the new forward migration', 'service_role lost EXECUTE on exactly the four user RPCs',
-    'worker RPCs unchanged', 'review RPC ACLs unchanged', 'source hashes unchanged', 'no table ACL / policy / RLS / index / constraint / column / trigger / owner drift',
-    'zero Outlook rows']) {
-    assert.ok(RUNTIME.includes(s), `runtime SQL missing: ${s}`)
-  }
-  assert.ok(/RUN ONLY AGAINST A DISPOSABLE LOCAL SUPABASE STACK/.test(RUNTIME))
-  const addrs = [...RUNTIME.matchAll(/[\w.+-]+@[\w.-]+\.[a-z]+/gi)].map(m => m[0])
-  assert.ok(addrs.every(a => a.endsWith('@example.invalid')), `non-example.invalid address: ${addrs.join(', ')}`)
-})
 
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed\n`)
 if (failed > 0) process.exit(1)

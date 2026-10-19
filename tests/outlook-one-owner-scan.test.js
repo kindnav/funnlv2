@@ -20,7 +20,6 @@ const read = (p) => readFileSync(join(ROOT, p), 'utf8').replace(/\r\n/g, '\n')
 
 const APPLIED = 'supabase/migrations/20260928000000_outlook_add_user_read_scope.sql'
 const FIX = 'supabase/migrations/20261014000000_outlook_one_owner_per_microsoft_account.sql'
-const HANDLER = 'supabase/functions/outlook-oauth-callback/handler.js'
 
 let passed = 0
 let failed = 0
@@ -120,39 +119,6 @@ test('signature, security and grants are restated unchanged', () => {
     .split('\n').slice(0, 6).join('\n')
   assert.strictEqual(grants(fix), grants(applied))
   assert.ok(fixFn.includes('SECURITY DEFINER\nSET search_path = \'\'\n'))
-})
-
-test('the callback maps account_in_use to in_use only after binding, through its own module', () => {
-  const h = read(HANDLER)
-  const binding = h.indexOf('verifyMsBrowserBinding(')
-  const finalize = h.indexOf("'finalize_microsoft_connection'")
-  const map = h.indexOf('refusalRedirect(trustedOrigin, result)')
-  assert.ok(binding > 0 && binding < finalize && finalize < map, 'order: binding, finalize, mapping')
-  assert.ok(/import \{ refusalRedirect \} from '\.\/refusals\.js'/.test(h))
-})
-
-test('refusals.js maps exactly account_in_use, and only with a trusted origin', async () => {
-  const m = await import(new URL('../supabase/functions/outlook-oauth-callback/refusals.js', import.meta.url))
-  const o = 'https://www.getfunnl.com'
-  assert.strictEqual(m.refusalRedirect(o, 'account_in_use'), `${o}/settings?outlook=in_use`)
-  for (const r of ['stored', 'different_account', 'state_consumed', 'ACCOUNT_IN_USE', 'in_use', null, undefined, 42]) {
-    assert.strictEqual(m.refusalRedirect(o, r), null, String(r))
-  }
-  for (const bad of [null, undefined, '', 0]) assert.strictEqual(m.refusalRedirect(bad, 'account_in_use'), null)
-})
-
-test('the change stays inside the callback: the shared helper is untouched and no other function imports refusals.js', () => {
-  const shared = read('supabase/functions/shared/microsoftOauthHelpers.js')
-  assert.ok(/const r = result === 'connected' \? 'connected' : 'error'/.test(shared),
-    'buildOutlookSettingsRedirect must still emit only connected or error')
-  const fns = readdirSync(join(ROOT, 'supabase/functions')).filter((d) => d !== 'outlook-oauth-callback')
-  for (const d of fns) {
-    for (const f of ['index.ts', 'handler.js']) {
-      let t = ''
-      try { t = read(`supabase/functions/${d}/${f}`) } catch { continue }
-      assert.ok(!t.includes('refusals.js'), `${d}/${f} imports refusals.js`)
-    }
-  }
 })
 
 await Promise.all(pending)

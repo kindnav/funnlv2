@@ -33,15 +33,8 @@ const MIGRATION = read('supabase/migrations/20260921000000_add_outlook_content_d
 // only the migration cross-check waits for the file, and it is strict the moment it arrives.
 const NOTES_MIGRATION_PATH = 'supabase/migrations/20261010180000_detailed_ai_interaction_notes.sql'
 const NOTES_MIGRATION = existsSync(join(root, NOTES_MIGRATION_PATH)) ? read(NOTES_MIGRATION_PATH) : null
-const TRANSPORT = read('supabase/functions/shared/outlookGraphTransport.js')
-const NORMALIZE = read('supabase/functions/shared/outlookMessageNormalize.js')
 const DRAFT = read('supabase/functions/shared/outlookDraftContract.js')
 // The scopes the code actually requests, so the policy's count cannot drift from it.
-const OUTLOOK_OAUTH_SCOPES = JSON.parse(
-  '[' + /OUTLOOK_OAUTH_SCOPES = Object\.freeze\(\[([\s\S]*?)\]\)/
-    .exec(read('supabase/functions/shared/microsoftOauthHelpers.js'))[1]
-    .split(',').map((s) => s.trim()).filter(Boolean)
-    .map((s) => '"' + s.replace(/^'|'$/g, '') + '"').join(',') + ']')
 
 // The Outlook section only (so assertions cannot accidentally pass on Gmail wording).
 const START = POLICY.indexOf('<Section title="Outlook connection (invited accounts only)">')
@@ -214,42 +207,6 @@ test('the section describes the RESTRICTION, not non-existence', () => {
   }
 })
 
-test('the section describes the CONTENT RELEASE, with its bounds', () => {
-  // REPLACES 'the FIRST PILOT is described as envelope-only'. That guard asserted
-  // 'read message envelopes only', 'will not fetch message bodies or attachments'
-  // and 'send nothing to Anthropic or any other AI service' - all correct for the
-  // envelope-only pilot and all false now. A policy that denied body reading while
-  // the worker performed it would be the same failure in the opposite direction.
-  assert.ok(/message\s+<strong[^>]*>envelopes<\/strong>/.test(OUTLOOK)
-    || /message envelopes/.test(OUTLOOK_PROSE), 'the envelope read is still stated')
-  assert.ok(/text of up to six of those messages/.test(OUTLOOK_PROSE),
-    'the body read must be stated, with its bound')
-  assert.ok(/does not read attachments/.test(OUTLOOK_PROSE))
-  assert.ok(/does not read one-sided exchanges/.test(OUTLOOK_PROSE))
-
-  // The superseded absolutes must not come back.
-  for (const gone of [/read message envelopes only/,
-    /will not fetch message bodies or attachments/,
-    /send nothing to Anthropic or any other AI service/,
-    /produce no summaries or drafts/]) {
-    assert.ok(!gone.test(OUTLOOK_PROSE), `a superseded envelope-only claim is back: ${gone}`)
-  }
-
-  // And the bounds, because "reads the text" alone says nothing about how much.
-  assert.ok(/4,000 characters/.test(OUTLOOK_PROSE) && /12,000/.test(OUTLOOK_PROSE),
-    'both truncation bounds')
-  assert.ok(/the oldest are left out/.test(OUTLOOK_PROSE))
-  assert.ok(/your own is not sent/.test(OUTLOOK_PROSE), 'the signature asymmetry')
-
-  // The transport still uses the envelope projection for the DELTA request - the
-  // content projection is a separate, per-message read, which is what makes the
-  // six-message bound meaningful rather than decorative.
-  assert.ok(/\$select=\$\{DISCOVERY_SELECT\.join/.test(TRANSPORT),
-    'the folder delta request still uses the envelope projection')
-  assert.ok(/\$select=\$\{CONTENT_SELECT\.join/.test(TRANSPORT),
-    'and the per-message content read is its own bounded request')
-})
-
 test('no statement claims the pilot is running, verified or certified', () => {
   for (const bad of [
     /Outlook is (now )?(available|enabled|live)/i,
@@ -287,91 +244,6 @@ test('no statement claims the pilot is running, verified or certified', () => {
 
 // ── Permission scope ─────────────────────────────────────────────────────────
 console.log('\npermission scope')
-
-test('all six requested scopes are disclosed, and offline_access is not called a read', () => {
-  // The code requests six. Describing 'a single delegated permission' understated the
-  // grant; describing offline_access as a third READ permission would overstate it.
-  const requested = OUTLOOK_OAUTH_SCOPES
-  assert.strictEqual(requested.length, 6, `the code requests ${requested.length} scopes`)
-  assert.ok(/six delegated scopes/.test(OUTLOOK_PROSE), 'the count is stated')
-  for (const name of ['Mail.Read', 'User.Read', 'openid', 'profile', 'email',
-    'offline_access']) {
-    assert.ok(OUTLOOK.includes(name), `scope not disclosed: ${name}`)
-  }
-  // Two read data; three are sign-in; offline_access grants DURATION, not access.
-  assert.ok(/Two of them read data, and both are read-only/.test(OUTLOOK_PROSE))
-  assert.ok(/not a permission to read anything new/.test(OUTLOOK_PROSE),
-    'offline_access must not be presented as a read permission')
-  assert.ok(/lets Funnl keep using the two read permissions above while you are not using the app/
-    .test(OUTLOOK_PROSE), 'offline_access is described as continuing access')
-  // The honest half: the grant is broader than the use.
-  assert.ok(/granted at the mailbox level/.test(OUTLOOK_PROSE),
-    'discloses that Mail.Read is mailbox-wide')
-  assert.ok(/would technically allow reading message bodies and attachments anywhere in your mailbox/
-    .test(OUTLOOK_PROSE), 'does not hide the authority the permission grants')
-  assert.ok(/never send, reply to, delete, move or change anything in your mailbox/
-    .test(OUTLOOK_PROSE), 'read-only is stated as a behaviour')
-  // Admin consent, corrected: personal accounts approve themselves; an organisation can
-  // require an administrator for mail access, and Microsoft's recommended setting does.
-  assert.ok(/With a personal Microsoft account you approve them yourself\./.test(OUTLOOK_PROSE))
-  assert.ok(/A work or school organisation can require an administrator to approve an app that reads mail/
-    .test(OUTLOOK_PROSE), 'tenant policy caveat present')
-  assert.ok(/Microsoft's recommended setting for organisations does/.test(OUTLOOK_PROSE))
-  assert.ok(/you cannot connect it until an\s+administrator approves Funnl/.test(OUTLOOK_PROSE))
-  assert.ok(!/requires administrator consent by default/.test(OUTLOOK_PROSE),
-    'the misleading by-default claim is gone')
-  assert.ok(TRANSPORT.includes("GRAPH_MAIL_READ_SCOPE = 'Mail.Read'"), 'matches the code constant')
-})
-
-test('every category the code actually requests is disclosed', () => {
-  for (const claim of ['Inbox', 'Sent Items', 'sender', 'recipients', 'display names',
-    'subject', 'timestamps', 'conversation identifier']) {
-    assert.ok(OUTLOOK.includes(claim), `policy must disclose: ${claim}`)
-  }
-  // Body projections.
-  assert.ok(/plain-text body projections|plain-text body/.test(OUTLOOK), 'body text disclosed')
-  assert.ok(/unique body|"unique body"/.test(OUTLOOK), 'the quoted-history-excluded body disclosed')
-  // And the code really does select them.
-  const content = /CONTENT_SELECT = Object\.freeze\(\[([\s\S]*?)\]\)/.exec(TRANSPORT)[1]
-  for (const f of ['uniqueBody', 'body', 'internetMessageHeaders', 'from', 'toRecipients',
-    'ccRecipients', 'subject', 'conversationId']) {
-    assert.ok(content.includes(f), `CONTENT_SELECT really requests ${f}`)
-  }
-})
-
-test('the five allowlisted headers are named, and match the classifier exactly', () => {
-  const HEADERS = ['Auto-Submitted', 'Precedence', 'List-Id', 'List-Unsubscribe', 'X-Auto-Response-Suppress']
-  for (const h of HEADERS) assert.ok(OUTLOOK.includes(h), `policy must name ${h}`)
-  const looked = new Set([...NORMALIZE.matchAll(/valuesOf\('([a-z-]+)'\)|present\('([a-z-]+)'\)/g)]
-    .map((m) => m[1] || m[2]))
-  assert.deepStrictEqual([...looked].sort(),
-    HEADERS.map((h) => h.toLowerCase()).sort(),
-    'the disclosed five are exactly the five the code reads')
-})
-
-test('raw headers are described as reduced and discarded', () => {
-  assert.ok(/discards the\s*<\/strong>?\s*|discards the/.test(OUTLOOK) || /discard/i.test(OUTLOOK))
-  assert.ok(/no header name or value is kept, logged, or sent anywhere/.test(OUTLOOK))
-  // Code: only the classified facts leave readMessageContent.
-  assert.ok(/automation: automation\.facts/.test(TRANSPORT))
-  assert.ok(!/internetMessageHeaders/.test(
-    TRANSPORT.slice(TRANSPORT.indexOf('return {\n    ok: true,\n    bodyContentType'))),
-    'the header collection is not returned')
-})
-
-test('excluded authorities are disclosed and truly absent from the code', () => {
-  for (const claim of ['attachment', 'raw MIME', 'Microsoft contacts', 'calendars', 'files', 'shared mailbox']) {
-    assert.ok(new RegExp(claim, 'i').test(OUTLOOK), `policy must exclude: ${claim}`)
-  }
-  assert.ok(/never send, reply to, forward, delete, move, or mark mail/.test(OUTLOOK))
-  // Denylist and allowlist are stripped so the scan reads real request-building code.
-  const exec = TRANSPORT
-    .replace(/^const (FORBIDDEN_PATH_FRAGMENT_RE|ALLOWED_PATH_RE)\s*=[\s\S]*?\/[gimsuy]*\s*$/gm, '')
-    .split('\n').filter((l) => !/^\s*(\/\/|\*)/.test(l)).join('\n')
-  for (const bad of ['$value', '/attachments', '/contacts', '/calendars', '/drive', 'sendMail', '/users/']) {
-    assert.ok(!exec.includes(bad), `code must not build ${bad}`)
-  }
-})
 
 // ── Storage ──────────────────────────────────────────────────────────────────
 console.log('\nstorage and retention')
