@@ -10,8 +10,9 @@
 // running the file AND the same history INSERT: all of it commits, or none of it does.
 //
 // Real Postgres (every migration before this one), GoTrue and PostgREST, and the REAL shared helper
-// delete-account uses (supabase/functions/shared/googleCleanup.js) through supabase-js, in the order
-// delete-account runs it. Synthetic users and rows only; nothing reaches Production, Google or
+// delete-account used at this stage (supabase/functions/shared/googleCleanup.js, removed from the tree
+// in Stage F and loaded here from git history by ./retired-google-cleanup.mjs) through supabase-js, in
+// the order delete-account ran it. Later migrations (Stage F) are not applied. Synthetic users and rows only; nothing reaches Production, Google or
 // Microsoft. Reports carry only check names, counts and match/mismatch - never row content or digests.
 //
 // RUN (from the repository root): node tests/local/integration-backend-retirement.mjs
@@ -22,9 +23,10 @@ import { readFileSync, readdirSync } from 'node:fs'
 import { createHmac, randomBytes } from 'node:crypto'
 import { join } from 'node:path'
 import { createClient } from '@supabase/supabase-js'
-import { runGoogleLocalCleanup } from '../../supabase/functions/shared/googleCleanup.js'
+import { loadRetiredGoogleCleanup } from './retired-google-cleanup.mjs'
 
 const ROOT = join(import.meta.dirname, '..', '..')
+const { runGoogleLocalCleanup } = await loadRetiredGoogleCleanup(ROOT)
 const NEW_MIGRATION = '20261019000000_retire_integration_backend.sql'
 const MIGRATION_SQL = readFileSync(join(ROOT, 'supabase/migrations', NEW_MIGRATION), 'utf8')
 const NET = 'funnl-beret-net', PG = 'funnl-beret-pg', AUTH = 'funnl-beret-auth', REST = 'funnl-beret-rest'
@@ -206,10 +208,11 @@ async function main () {
     '-e', 'GOTRUE_MAILER_AUTOCONFIRM=true', '-e', 'GOTRUE_DISABLE_SIGNUP=false', AUTH_IMAGE])
   await waitHttp(`http://127.0.0.1:${P.auth}/health`, (r) => r.ok, 'GoTrue')
   const migrations = readdirSync(join(ROOT, 'supabase/migrations')).filter((f) => f.endsWith('.sql')).sort()
-  check('the retirement migration is the latest migration', migrations[migrations.length - 1] === NEW_MIGRATION, migrations.slice(-2).join(', '))
-  for (const m of migrations.filter((f) => f !== NEW_MIGRATION)) psql(readFileSync(join(ROOT, 'supabase/migrations', m), 'utf8'))
+  check('the retirement migration is present', migrations.includes(NEW_MIGRATION), String(migrations.length))
+  const before = migrations.filter((f) => f < NEW_MIGRATION)
+  for (const m of before) psql(readFileSync(join(ROOT, 'supabase/migrations', m), 'utf8'))
   psql(CLI_HISTORY_SETUP)
-  console.log(`  applied ${migrations.length - 1} migrations (everything before the retirement) and the CLI history table`)
+  console.log(`  applied ${before.length} migrations (everything before the retirement) and the CLI history table`)
   docker(['run', '-d', '--name', REST, '--network', NET, '-p', `${P.rest}:3000`, '-e', `PGRST_DB_URI=postgres://authenticator:${DB_PASSWORD}@${PG}:5432/postgres`,
     '-e', 'PGRST_DB_SCHEMAS=public', '-e', 'PGRST_DB_ANON_ROLE=anon', '-e', `PGRST_JWT_SECRET=${JWT_SECRET}`, REST_IMAGE])
   await waitHttp(`http://127.0.0.1:${P.rest}/`, (r) => r.status < 500, 'PostgREST')

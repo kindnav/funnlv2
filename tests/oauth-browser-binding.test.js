@@ -108,29 +108,4 @@ console.log('\nwiring and ordering')
 // The Calendar connect card that started Google OAuth is retired (Stage D); the frontend
 // starts no Google flow now, which tests/retired-integrations-ui.test.js pins.
 
-// ── 8. Bounded bodies are unchanged ──────────────────────────────────────────
-console.log('\nbounded callback bodies (unchanged behaviour)')
-
-test('the body cap and its Content-Length handling are untouched by this change', async () => {
-  const { readBoundedStream, CALLBACK_MAX_BODY_BYTES } =
-    await import('../supabase/functions/shared/googleOauthHelpers.js')
-  assert.strictEqual(CALLBACK_MAX_BODY_BYTES, 8192)
-
-  const streamOf = (text) => new ReadableStream({
-    start (c) { c.enqueue(new TextEncoder().encode(text)); c.close() },
-  })
-  const small = 'state=abc&code=def'
-
-  let r = await readBoundedStream(streamOf(small), { contentLength: String(small.length), maxBytes: 8192 })
-  assert.strictEqual(r.ok, true, 'honest Content-Length')
-  r = await readBoundedStream(streamOf(small), { contentLength: null, maxBytes: 8192 })
-  assert.strictEqual(r.ok, true, 'absent Content-Length still read')
-  r = await readBoundedStream(streamOf('x'.repeat(9000)), { contentLength: null, maxBytes: 8192 })
-  assert.strictEqual(r.ok, false, 'oversized body rejected without a Content-Length')
-  r = await readBoundedStream(streamOf(small), { contentLength: '99999', maxBytes: 8192 })
-  assert.strictEqual(r.ok, false, 'dishonest oversized Content-Length rejected up front')
-  r = await readBoundedStream(streamOf(small), { contentLength: 'abc', maxBytes: 8192 })
-  assert.strictEqual(r.ok, false, 'non-integer Content-Length rejected')
-})
-
 await finish()

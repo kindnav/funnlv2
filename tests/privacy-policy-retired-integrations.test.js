@@ -123,7 +123,10 @@ test('backups are never claimed destroyed', () => {
 test('account deletion removes the user-owned records (cascade from the account)', () => {
   assert.ok(VISIBLE.includes('removes your contacts, interactions, and your records left from the retired connections'))
   const del = read('supabase/functions/delete-account/index.ts')
-  assert.ok(del.includes('cleanupGoogle(admin, user.id)') && del.includes('admin.auth.admin.deleteUser(user.id)'))
+  // Stage F removed delete-account's separate Google cleanup step: deleting the auth user removes the
+  // remaining integration records through ON DELETE CASCADE (pinned below) while those tables exist.
+  assert.ok(del.includes(".from('contacts')") && del.includes('admin.auth.admin.deleteUser(user.id)'))
+  assert.ok(!del.includes('cleanupGoogle') && !del.includes('run_google_local_cleanup'))
   for (const table of ['interaction_candidates', 'new_contact_candidates', 'microsoft_oauth_states']) {
     const at = MIGRATIONS.indexOf(`CREATE TABLE public.${table}`)
     const ddl = MIGRATIONS.slice(at, MIGRATIONS.indexOf(');', at))

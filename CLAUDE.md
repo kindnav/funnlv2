@@ -19,7 +19,13 @@ Keep this file current. When we make a durable decision, finish a feature, chang
   - Migration `20261019000000_retire_integration_backend.sql` is **applied**. It unscheduled `outlook-worker-tick`, deleted its two Vault entries and dropped 48 integration RPCs.
   - The integration **tables and rows remain until Stage F**, including one expired non-pilot Microsoft OAuth state.
   - **Still supported:** account deletion (`delete-account` + `run_google_local_cleanup`), paste-email (`ai-paste-email`), and every other product feature.
-  - **Still pending:** Google provider retirement (blocked on the Google account's 2-step verification), destruction of the three integration keys, Stage E (privacy wording) and Stage F (tables).
+  - **Stage E (privacy wording) is published** (#113, Last updated October 19, 2026). It describes the records that remain until Stage F.
+  - **Stage F is PREPARED, NOT EXECUTED** (Draft PR, `docs/stage-f-integration-tables.md`).
+    - It removes `delete-account`'s Google cleanup and the three shared Google helpers.
+    - Migration `20261019180000_drop_integration_tables.sql` drops the 19 integration tables (including the settled suggestions with their proposed notes and the expired sign-in state) and the last 5 integration functions.
+    - **Order:** deploy `delete-account` → `db push` → merge → a separate privacy-wording PR.
+    - Irreversible; no backup is assumed.
+  - **Still pending:** Google provider retirement (blocked on the Google account's 2-step verification), destruction of the three integration keys, and executing Stage F.
   - Runbook and evidence: `docs/stage-d-backend-retirement.md`.
 
 ---
@@ -88,6 +94,8 @@ src/
     pro-access-status.js   Frontend wrapper for get_my_pro_access_status() RPC. Export: getProAccessStatus() → server-authoritative status object or null on error. Used by ai.js, Sidebar, FunnlAIPage, SettingsPage, WelcomePage. Never call new Date() for access decisions — use this instead.
 tests/
   local/integration-backend-retirement.mjs  Stage D migration proof on a disposable Postgres/GoTrue/PostgREST stack (synthetic data): applies 20261019000000 the way `db push` does (file + history row, one transaction), proves full rollback on a blocked DROP and on an active cron job, then the exact successful changes, and account deletion before and after. NOT part of `npm test`.
+  local/stage-f-integration-tables.mjs  Stage F migration proof on the same disposable stack (synthetic data). Covers: refusals; a late forced failure that rolls back the dropped tables; retained objects unchanged; old and new delete-account before and after; re-run.
+  local/retired-google-cleanup.mjs  Loads the removed shared/googleCleanup.js (as deployed in delete-account v69) from git history, so the harnesses can exercise the old deletion path.
   local/settings-retired-browser.mjs, suggestions-retired-browser.mjs, paste-email-browser.mjs, log-interaction-browser.mjs  Local browser harnesses (synthetic data); NOT part of `npm test`. (The Outlook worker harnesses were removed with the integration in #111.)
   csv-header-detect.test.js  27 zero-dependency Node.js tests for csvHeaderDetect.js. Run with: node tests/csv-header-detect.test.js. Covers fixtures A–F (LinkedIn preamble, clean CSV, BOM, misleading preamble, value whitespace, unrecognizable file) plus edge cases.
   App.jsx                  Auth gating, shared layout (Sidebar + main + BottomNav), all routes
@@ -101,6 +109,7 @@ docs/
   posthog-pilot-dashboard.md  Setup instructions for 12 PostHog insights: signup funnel, confirmation conversion trend, official activation funnel (email_confirmed → activation_completed), activation milestone diagnostic, first core-loop diagnostic, time to activation, WAU (Core product activity Action), follow-up loop, CSV adoption, AI adoption, 7-day retention (activation_completed cohort, 30%/25% thresholds), error monitoring
   pilot-feedback-guide.md  5-minute observation checklist, non-leading questions, post-session questions, severity system (P0–P3), feature request frequency rule
   stage-d-backend-retirement.md  Stage D integration retirement: what was removed and kept, the executed operational sequence (undeploy, migration, merge) with evidence location, and what remains
+  stage-f-integration-tables.md  Stage F plan (NOT executed): deletion scope versus what survives; ordered steps (delete-account deploy before the migration); preconditions, verification and recovery limits (irreversible, no backup assumed); the privacy wording that becomes stale afterwards.
   simplification-cleanup-plan.md  The simplification workstream plan and the stage-by-stage record (Packet A, Stages B-D; E and F pending)
   (The outlook-*, google-*, gmail-* and phase-e* docs below and in docs/ are HISTORICAL records of the retired integrations; their instructions must not be run.)
   outlook-background-sync-plan.md  Background-sync slice: latency target, fixture vs live evidence, activation plan (section 6) with the one-value consent cutover, next workstreams
@@ -267,6 +276,11 @@ supabase/
 | `activation_completed_at` | timestamptz | Nullable — set when all three activation steps are complete. Same idempotent write. |
 
 **Applied migrations:**
+- `supabase/migrations/20261019180000_drop_integration_tables.sql` — **NOT APPLIED (Stage F, Draft PR).**
+  - Drops the 19 retired integration tables and 5 functions, without CASCADE.
+  - Refuses first if it finds active state, a pending suggestion, an unexpired sign-in state, an integration cron job or an outside dependency.
+  - Verifies before commit that the seven application tables and `interactions_source_check` survive.
+  - **Apply only after the new `delete-account` is deployed and verified.** See `docs/stage-f-integration-tables.md`.
 - `supabase/migrations/20261019000000_retire_integration_backend.sql` — **APPLIED to Production 2026-10-19 15:46:42Z** with `supabase db push --linked` (CLI 2.109.0) from the reviewed head `a8fa5e6`, after the nine integration Edge Functions were undeployed. It runs as one transaction with its history row: `db push` sends the file and the INSERT as a single batch closed by one Sync.
   - **Effects:** unscheduled `outlook-worker-tick`; deleted Vault `outlook_worker_url` and `outlook_worker_secret` (Vault is now empty); dropped 48 integration RPCs by exact signature, without CASCADE.
   - **Verified object by object against a pre-apply snapshot:** history gained only this version; each of the 13 remaining public functions is identical in signature, definition, ACL, security and config; all 26 tables (membership and content) and all 12 triggers are unchanged; the 15 protected records match P0.
