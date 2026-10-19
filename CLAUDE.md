@@ -17,15 +17,15 @@ Keep this file current. When we make a durable decision, finish a feature, chang
   - Their UI is gone: #109, #110.
   - Their nine Edge Functions are undeployed, and their source is removed: #111.
   - Migration `20261019000000_retire_integration_backend.sql` is **applied**. It unscheduled `outlook-worker-tick`, deleted its two Vault entries and dropped 48 integration RPCs.
-  - The integration **tables and rows remain until Stage F**, including one expired non-pilot Microsoft OAuth state.
-  - **Still supported:** account deletion (`delete-account` + `run_google_local_cleanup`), paste-email (`ai-paste-email`), and every other product feature.
-  - **Stage E (privacy wording) is published** (#113, Last updated October 19, 2026). It describes the records that remain until Stage F.
-  - **Stage F is PREPARED, NOT EXECUTED** (Draft PR, `docs/stage-f-integration-tables.md`).
-    - It removes `delete-account`'s Google cleanup and the three shared Google helpers.
-    - Migration `20261019180000_drop_integration_tables.sql` drops the 19 integration tables (including the settled suggestions with their proposed notes and the expired sign-in state) and the last 5 integration functions.
-    - **Order:** deploy `delete-account` → `db push` → merge → a separate privacy-wording PR.
-    - Irreversible; no backup is assumed.
-  - **Still pending:** Google provider retirement (blocked on the Google account's 2-step verification), destruction of the three integration keys, and executing Stage F.
+  - **Stage F is EXECUTED (2026-10-19, PR #114).** The integration tables and their rows are gone.
+    - `delete-account` **v70** (17:57Z) no longer has the Google cleanup step. It authenticates, deletes the user's contacts, then deletes the auth user. Source byte-verified; verify_jwt true.
+    - Migration `20261019180000_drop_integration_tables.sql` (applied 18:03:41Z) dropped the 19 integration tables and the last 5 integration functions. That deleted 27 settled suggestions (including their proposed notes), 3 new-contact records and the expired non-pilot Microsoft sign-in state.
+    - No export, backup or copy was made. Whether a provider-side backup exists is not established.
+    - Saved contacts and interactions, their source labels and every retained object are verified identical.
+    - Record and evidence: `docs/stage-f-integration-tables.md`.
+  - **Still supported:** account deletion (`delete-account`), paste-email (`ai-paste-email`), and every other product feature.
+  - **Stage E (privacy wording) is published** (#113, Last updated October 19, 2026). **It still describes records that "remain for now", which Stage F deleted. A separate privacy-wording update is pending.**
+  - **Still pending:** that privacy update, Google provider retirement (blocked on the Google account's 2-step verification), and destruction of the three integration keys.
   - Runbook and evidence: `docs/stage-d-backend-retirement.md`.
 
 ---
@@ -109,7 +109,7 @@ docs/
   posthog-pilot-dashboard.md  Setup instructions for 12 PostHog insights: signup funnel, confirmation conversion trend, official activation funnel (email_confirmed → activation_completed), activation milestone diagnostic, first core-loop diagnostic, time to activation, WAU (Core product activity Action), follow-up loop, CSV adoption, AI adoption, 7-day retention (activation_completed cohort, 30%/25% thresholds), error monitoring
   pilot-feedback-guide.md  5-minute observation checklist, non-leading questions, post-session questions, severity system (P0–P3), feature request frequency rule
   stage-d-backend-retirement.md  Stage D integration retirement: what was removed and kept, the executed operational sequence (undeploy, migration, merge) with evidence location, and what remains
-  stage-f-integration-tables.md  Stage F plan (NOT executed): deletion scope versus what survives; ordered steps (delete-account deploy before the migration); preconditions, verification and recovery limits (irreversible, no backup assumed); the privacy wording that becomes stale afterwards.
+  stage-f-integration-tables.md  Stage F record (EXECUTED 2026-10-19: delete-account v70, migration 20261019180000, evidence paths), then the original plan kept as history: deletion scope versus what survives; ordered steps (delete-account deploy before the migration); preconditions, verification and recovery limits (irreversible, no backup assumed); the privacy wording that becomes stale afterwards.
   simplification-cleanup-plan.md  The simplification workstream plan and the stage-by-stage record (Packet A, Stages B-D; E and F pending)
   (The outlook-*, google-*, gmail-* and phase-e* docs below and in docs/ are HISTORICAL records of the retired integrations; their instructions must not be run.)
   outlook-background-sync-plan.md  Background-sync slice: latency target, fixture vs live evidence, activation plan (section 6) with the one-value consent cutover, next workstreams
@@ -118,7 +118,7 @@ docs/
   outlook-thread-segments-rollout.md  Owner packet for that workstream: the one open provider fact and its prepared owner-run check, the exact unpublished policy and just-in-time wording with what each sentence is accountable to, the ordered rollout (migration BEFORE worker deploy; one notice version carried into browser + server + all three worker requirements together; re-consent as a same-account OAuth UPDATE, never a disconnect), the live acceptance, the limitations and the rollback.
   outlook-detailed-ai-notes.md  Detailed AI notes workstream: what the generated note must record, why 2,000 characters, the end-to-end changes, fixture-versus-model-quality evidence, prepared policy wording, ordered rollout (migration BEFORE worker deploy) and rollback
 scripts/
-  outlook-acceptance/        Two read-only SQL instruments from the retired Outlook second-account acceptance (historical; they read tables that remain until Stage F).
+  outlook-acceptance/        Two read-only SQL instruments from the retired Outlook second-account acceptance (historical; the tables they read were dropped in Stage F, so they no longer run).
   (The Outlook owner tools - note-quality check, filter check, worker-flag helper - were removed with the integration: #111 and the follow-up route/docs PR.)
 supabase/
   templates/
@@ -276,15 +276,20 @@ supabase/
 | `activation_completed_at` | timestamptz | Nullable — set when all three activation steps are complete. Same idempotent write. |
 
 **Applied migrations:**
-- `supabase/migrations/20261019180000_drop_integration_tables.sql` — **NOT APPLIED (Stage F, Draft PR).**
-  - Drops the 19 retired integration tables and 5 functions, without CASCADE.
-  - Refuses first if it finds active state, a pending suggestion, an unexpired sign-in state, an integration cron job or an outside dependency.
-  - Verifies before commit that the seven application tables and `interactions_source_check` survive.
-  - **Apply only after the new `delete-account` is deployed and verified.** See `docs/stage-f-integration-tables.md`.
+- `supabase/migrations/20261019180000_drop_integration_tables.sql` — **APPLIED to Production 2026-10-19 18:03:41Z.**
+  - **How:** `supabase db push --linked --yes` (CLI 2.109.0) from the reviewed head `64d1cd6`, after `delete-account` v70 was deployed and verified. One transaction with its history row.
+  - **Effects:** dropped the 19 retired integration tables and 5 functions, without CASCADE. Their rows are gone: 27 settled suggestions with proposed notes, 3 new-contact records and 1 expired sign-in state. No export or backup was made.
+  - **Verified object by object:**
+    - history gained only this version (40 rows);
+    - only the targets and their own constraints, indexes, policies, grants and one trigger were removed;
+    - all 124 retained objects are identical: the 7 app tables' rows, the source labels, `interactions_source_check`, 8 functions and 11 triggers;
+    - the 9 Edge Functions are unchanged.
+  - **Recovery:** the tables could only come back empty, through a new forward migration. The rows cannot be re-created.
+  - Merged as #114. Evidence: `docs/stage-f-integration-tables.md`.
 - `supabase/migrations/20261019000000_retire_integration_backend.sql` — **APPLIED to Production 2026-10-19 15:46:42Z** with `supabase db push --linked` (CLI 2.109.0) from the reviewed head `a8fa5e6`, after the nine integration Edge Functions were undeployed. It runs as one transaction with its history row: `db push` sends the file and the INSERT as a single batch closed by one Sync.
   - **Effects:** unscheduled `outlook-worker-tick`; deleted Vault `outlook_worker_url` and `outlook_worker_secret` (Vault is now empty); dropped 48 integration RPCs by exact signature, without CASCADE.
   - **Verified object by object against a pre-apply snapshot:** history gained only this version; each of the 13 remaining public functions is identical in signature, definition, ACL, security and config; all 26 tables (membership and content) and all 12 triggers are unchanged; the 15 protected records match P0.
-  - **Kept on purpose:** `run_google_local_cleanup` (account deletion), `outlook_sync_state_consume_wake`, `outlook_unpaired_valid`, and the two dormant `expire_pending_*` helpers. Tables remain until Stage F.
+  - **Kept on purpose at the time:** `run_google_local_cleanup` (account deletion), `outlook_sync_state_consume_wake`, `outlook_unpaired_valid`, and the two dormant `expire_pending_*` helpers. Stage F (`20261019180000`) later dropped them with the tables.
   - **Recovery:** a dropped function can only come back through a new forward migration; the two Vault values are gone.
   - Merged as #111 (`a801a3e`).
 - `supabase/migrations/20261015000000_add_contact_school.sql` — **APPLIED to production 2026-10-14** (ledger 38/38 matched, nothing pending). Adds nullable `contacts.school text` (no default, no backfill, no CHECK, RLS/grants unchanged). Verified: 492 contacts before and after, fingerprint of the 12 pre-existing columns unchanged; constraints and policies unchanged. It was applied BEFORE `ai-chat` (which selects it) and the website (which writes it). Rollback: leave the column in place; dropping it would delete user data.

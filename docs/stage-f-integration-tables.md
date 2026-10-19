@@ -1,13 +1,66 @@
 # Stage F: drop the retired integration tables — execution plan
 
-## Status (2026-10-19): prepared, NOT executed
+## Status (2026-10-19): EXECUTED
 
-This is a Draft PR and a plan. Nothing here has been deployed or applied:
-- `delete-account` in Production is still **v69**, which runs the old Google cleanup.
-- Migration `20261019180000_drop_integration_tables.sql` is **pending**.
-- Every integration table and its rows are still in Production.
+Steps 1 and 2 ran on Production on 2026-10-19, each under its own authorization. Step 3 is the merge of PR #114, which this record accompanies. Step 4, the privacy wording, is **still pending**.
 
-Each step below needs its own authorization.
+## Execution record
+
+### Step 1: `delete-account` v69 → v70 (17:57:40–17:57:44Z)
+
+- **Command:** `npx supabase functions deploy delete-account --project-ref jzybxhvgnksrwxfivdwt --use-api`, from a clean checkout at the reviewed head `64d1cd6`. One asset was uploaded: `delete-account/index.ts`.
+- **Preflight:**
+  - The 9 deployed functions matched the post-Stage-D inventory.
+  - The gate passed 11/11: integration tables empty, no open suggestions, settled counts 27 and 3, one expired non-pilot Microsoft state, no cron job, Vault empty, the 15 protected records equal to Stage C P0, and the state identical to the post-Stage-D snapshot.
+  - The v69 source was downloaded and recorded: `index.ts` plus the three shared Google helpers, byte-identical to `e417192` as a Windows (autocrlf) checkout.
+- **After:**
+  - `delete-account` is **v70**, ACTIVE, **verify_jwt true**, with the same function id.
+  - The downloaded source is one file, byte-identical to the reviewed file. It has no Google cleanup, shared import or RPC; it keeps the authentication checks, the `user_id`-scoped contacts delete and `deleteUser(user.id)`.
+  - The other 8 functions are identical in every field, and the full database snapshot is identical before and after.
+- **Not done:** account deletion was not invoked, and no Production test account was created. Its behaviour rests on the local harness.
+- **Evidence:** `C:/Users/nkindra/FunnlOps/stage-f/20261019T175459Z-step1` (`SUMMARY.txt`, `sf.mjs`).
+
+### Step 2: migration `20261019180000` (18:03:32–18:03:41Z)
+
+- **Command:** `supabase db push --linked --yes` (CLI 2.109.0), from the same pinned checkout.
+  - Its ignored `supabase/.temp` link metadata was copied from the primary checkout, as in Stage D.
+  - The migration file matched the reviewed blob, and the dry run listed only this version.
+  - The run exited 0. The only warning was the local pg-delta catalog-cache one, the same as in Stage D.
+- **Preflight:**
+  - The gate passed 11/11 again.
+  - `delete-account` was v70, with its source re-verified.
+  - A baseline snapshot was taken at 18:03:24Z. For the deleted tables it records counts only: 27 / 3 / 1 rows.
+- **Verified object by object** (snapshot at 18:03:57Z against the baseline):
+  - **History:** exactly one new version, `20261019180000` (`drop_integration_tables`), for 40 in total.
+  - **Removed:**
+    - all 19 targeted tables and all 5 targeted functions;
+    - with them, only their own objects: 215 constraints, 69 indexes, 5 policies, 19 relation grants, 64 column grants and 1 trigger.
+  - **Identical:** all 124 retained objects.
+    - **The 7 app tables, membership and content:** contacts 492, interactions 16, profiles 13, pro_trials 6, subscriptions 2, checkout_operations 1, stripe_webhook_events 26.
+    - **Source labels:** `google_calendar` 1, `manual` 10, `outlook` 5, plus `interactions_source_check`.
+    - **Other objects:** the 8 remaining functions, the 11 remaining triggers (including the `auth.users` triggers), the remaining constraints, policies, indexes and grants, and the schema grants.
+  - **Nothing new:** no object appeared; cron and Vault are still empty.
+  - **Edge Functions:** all 9 unchanged afterwards.
+- **Limitation:** the Stage C protected-record query could not be re-run after the migration, because it reads dropped tables. Contacts and interactions were compared through full-table membership-and-content fingerprints instead.
+- **Evidence:** `C:/Users/nkindra/FunnlOps/stage-f/20261019T180053Z-step2` (`SUMMARY.txt`, `sf2.mjs`, snapshots and comparison).
+
+### Recovery limits (now in force)
+
+- **Deleted rows:** 27 settled interaction suggestions (including their proposed notes), 3 settled new-contact records and 1 expired non-pilot Microsoft sign-in state. They cannot be re-created by Funnl.
+- **No copy was made.** This operation created no export, backup or copy of them.
+- **Provider backups:** whether a provider-side backup exists, and for how long, was not established. Funnl makes no claim either way.
+- **Tables:** the structure could only come back, empty, through a new forward migration.
+- **`delete-account`:** v69 is recorded in the Step 1 evidence and could be redeployed from `e417192`. Account deletion with that old code also works on the new schema (local harness).
+
+### Still pending
+
+- **The live privacy wording** still describes records that "remain for now". It needs the separate update described in Step 4 below. Until then the page overstates what Funnl holds; it does not understate it.
+- **Key destruction**, for the three integration keys.
+- **Google provider retirement**, blocked on the Google account's 2-step verification.
+
+---
+
+*The plan below is kept as it was reviewed, as historical context.*
 
 **Irreversible.** Step 2 deletes tables and the rows in them, including the proposed notes kept in settled suggestions. **Nothing in this plan exports, backs up or copies those rows**, on purpose. Whether a provider backup exists, and for how long, is **not established**, and this plan does not assume one. Once Step 2 commits, treat the rows as gone.
 
