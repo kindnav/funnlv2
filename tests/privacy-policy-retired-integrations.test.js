@@ -62,30 +62,70 @@ test('authorization: deleted from Funnl, with no claim that access was revoked a
   assert.ok(!/revoked/i.test(RETIRED), 'the section must not claim a revocation it cannot show')
 })
 
-test('remaining records are stated precisely, including the notes that were never erased', () => {
-  assert.ok(RETIRED.includes('settled suggestion records'))
-  assert.ok(RETIRED.includes('for Google Calendar, the event') && RETIRED.includes('(up to 200 characters)'))
-  assert.ok(RETIRED.includes('for Outlook, a drafted summary of the email exchange (up to 2,000 characters)'))
-  assert.ok(RETIRED.includes('one expired Outlook sign-in attempt'))
-  assert.ok(RETIRED.includes('the keys') && RETIRED.includes("which Funnl's servers still hold"))
-  assert.ok(RETIRED.includes('has not yet set a date'), 'no invented deletion date')
-  assert.ok(RETIRED.includes('does not remove copies that may exist in backups'), 'backups are not claimed destroyed')
-  // Schema evidence: the proposed note is bounded at 2,000 and NO migration ever clears it, while the
-  // subject line and next step ARE cleared on settlement and new-contact proposals must be erased.
+// One top-level bullet of the retired section, found by its bold label (nested lists included).
+function bullet (label) {
+  const at = RETIRED.indexOf(`<strong className="text-hi font-semibold">${label}</strong>`)
+  assert.ok(at > 0, `bullet "${label}" exists`)
+  const start = RETIRED.lastIndexOf('<li>', at)
+  let depth = 0, i = start
+  for (; i < RETIRED.length; i++) {
+    if (RETIRED.startsWith('<li', i)) depth++
+    else if (RETIRED.startsWith('</li>', i) && --depth === 0) break
+  }
+  return RETIRED.slice(start, i + 5).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ')
+}
+const ANTHROPIC_BLOCK = (() => {
+  const a = POLICY.indexOf('Anthropic (Claude) — powers AI features'), b = POLICY.indexOf('PostHog — product analytics and error reporting')
+  assert.ok(a > 0 && b > a)
+  return POLICY.slice(a, b).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ')
+})()
+const TERMS = (() => {
+  const m = POLICY.match(/<p className="mt-2" data-testid="privacy-anthropic-terms">[\s\S]*?<[/]p>/)
+  assert.ok(m, 'the Anthropic terms paragraph exists')
+  return m[0].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ')
+})()
+
+test('user-owned records: precise contents, protected by row-level security, removed by account deletion', () => {
+  const records = bullet('Records that remain for now')
+  assert.ok(records.includes('each belonging to the account that used them'))
+  assert.ok(records.includes('settled suggestion records') && records.includes('one expired Outlook sign-in attempt'))
+  assert.ok(records.includes("for Google Calendar, the event's title (up to 200 characters)"))
+  assert.ok(records.includes('for Outlook, a drafted summary of the email exchange (up to 2,000 characters)'))
+  assert.ok(records.includes('Row-level security means no other account can read them, and deleting your account deletes yours'))
+  assert.ok(records.includes('has not yet set a date'))
+  assert.ok(!/key/i.test(records), 'keys are not described as account records')
+  // Schema: RLS is on for each table that still holds rows, and the only user policies are SELECT-own.
+  for (const table of ['interaction_candidates', 'new_contact_candidates', 'microsoft_oauth_states']) {
+    assert.ok(MIGRATIONS.includes(`ALTER TABLE public.${table} ENABLE ROW LEVEL SECURITY`), `${table} has RLS`)
+    const policies = [...MIGRATIONS.matchAll(new RegExp(`CREATE POLICY "[^"]+"\\s+ON public[.]${table}\\s+FOR (\\w+)`, 'g'))].map((m) => m[1])
+    assert.ok(policies.every((p) => p === 'SELECT'), `${table} has only SELECT policies (${policies.join(',') || 'none'})`)
+  }
+  // Schema: the never-erased note, and what IS erased on settlement.
   assert.ok(/CHECK \(proposed_notes IS NULL OR char_length\(proposed_notes\) <= 2000\)/.test(MIGRATIONS))
   assert.ok(!/proposed_notes\s*=\s*NULL/.test(MIGRATIONS), 'if a migration starts clearing proposed_notes, update the policy')
   assert.ok(/retained_subject\s*=\s*NULL/.test(MIGRATIONS) && /draft_follow_up\s*=\s*NULL/.test(MIGRATIONS))
   assert.ok(MIGRATIONS.includes('CONSTRAINT ncc_terminal_erased CHECK ('))
 })
 
-test('account deletion still removes the remaining records (cascade from the account)', () => {
-  assert.ok(/delete my account|Delete your account/i.test(VISIBLE))
-  assert.ok(VISIBLE.includes('removes your contacts, interactions, and any records left from the retired connections'))
+test('server keys are stated separately: shared, retained, and NOT removed by deleting an account', () => {
+  const keys = bullet("Keys kept on Funnl's servers")
+  assert.ok(keys.includes('shared server-side keys, not records in anyone') && keys.includes('deleting your account does not remove them'))
+  assert.ok(!keys.includes('row-level') && !keys.includes('deletes yours'), 'no record-level protection or deletion claim for keys')
+  assert.ok(VISIBLE.includes("It does not remove Funnl's shared server keys or any backup copies"), 'Your rights says the same')
+})
+
+test('backups are never claimed destroyed', () => {
+  const backups = bullet('Backups')
+  assert.ok(backups.includes('removes it from Funnl') && backups.includes('does not remove copies that may exist in backups'))
+  assert.ok(!/backups?[^.]{0,80}(destroyed|deleted|erased|purged)/i.test(VISIBLE.replace('does not remove copies that may exist in backups', '')))
+})
+
+test('account deletion removes the user-owned records (cascade from the account)', () => {
+  assert.ok(VISIBLE.includes('removes your contacts, interactions, and your records left from the retired connections'))
   const del = read('supabase/functions/delete-account/index.ts')
   assert.ok(del.includes('cleanupGoogle(admin, user.id)') && del.includes('admin.auth.admin.deleteUser(user.id)'))
   for (const table of ['interaction_candidates', 'new_contact_candidates', 'microsoft_oauth_states']) {
     const at = MIGRATIONS.indexOf(`CREATE TABLE public.${table}`)
-    assert.ok(at >= 0, `${table} defined`)
     const ddl = MIGRATIONS.slice(at, MIGRATIONS.indexOf(');', at))
     assert.ok(/user_id\s+uuid\s+NOT NULL\s+REFERENCES auth[.]users\(id\)\s+ON DELETE CASCADE/.test(ddl), `${table} cascades from the account`)
   }
@@ -108,13 +148,48 @@ test('paste-email and its AI processing are still described as supported', () =>
   assert.ok(VISIBLE.includes('When you use Funnl AI or the AI Fill feature'))
 })
 
-test("Anthropic's terms for extracts sent before retirement are stated once, and are the only 30-day figure", () => {
-  for (const fact of ['within 30 days', 'up to 2 years', 'up to 7 years', 'Zero Data Retention agreement',
-    'cannot have an individual API record deleted on request']) {
-    assert.strictEqual(VISIBLE.split(fact).length - 1, 1, `${fact} must appear exactly once`)
+test('training: "by default" wording only, with exceptions, and no claim that Funnl opted out', () => {
+  assert.ok(TERMS.includes('by default Anthropic does not use inputs or outputs from its commercial products to train its models'))
+  assert.ok(TERMS.includes('such as data explicitly reported to Anthropic as feedback'))
+  assert.ok(!/does not use (API|your) data to train/i.test(VISIBLE), 'the absolute training statement is gone')
+  assert.ok(!/opted out|opt-out|opt out|organi[sz]ation settings/i.test(VISIBLE), 'no unverified claim about Funnl settings')
+  assert.ok(TERMS.includes('https://privacy.claude.com/en/articles/7996868-is-my-data-used-for-model-training') || POLICY.includes('href="https://privacy.claude.com/en/articles/7996868-is-my-data-used-for-model-training"'))
+})
+
+test('retention: complete for the API Funnl uses, with every documented exception and the current links', () => {
+  for (const part of ['within 30 days of receiving or generating them', 'to enforce its Usage Policy',
+    'inputs and outputs for up to 2 years', 'trust-and-safety classification scores for up to 7 years',
+    'where the law requires it', 'where a customer has agreed different terms or uses a longer-retention service under its own control',
+    'Funnl does not have a Zero Data Retention agreement', 'cannot have an individual API record deleted on request']) {
+    assert.ok(TERMS.includes(part), part)
   }
-  assert.strictEqual(VISIBLE.split('30 days').length - 1, 1, 'no Funnl-side 30-day promise anywhere')
-  assert.ok(RETIRED.includes('https://privacy.claude.com/en/articles/7996866-how-long-do-you-store-personal-data'))
+  for (const href of ['https://privacy.claude.com/en/articles/7996866-how-long-do-you-store-my-organization-s-data',
+    'https://privacy.claude.com/en/articles/7996868-is-my-data-used-for-model-training']) {
+    assert.strictEqual(POLICY.split(`href="${href}"`).length - 1, 1, `${href} linked once`)
+  }
+  assert.ok(!POLICY.includes('7996866-how-long-do-you-store-personal-data'), 'the superseded consumer-policy link is gone')
+  // Each retention figure appears once on the page, so there is no second, Funnl-side 30-day promise.
+  for (const fact of ['30 days', 'up to 2 years', 'up to 7 years']) assert.strictEqual(VISIBLE.split(fact).length - 1, 1, fact)
+  // Evidence for "standard message API rather than a longer-retention service": the only Anthropic endpoint called.
+  const fnSrc = readdirSync(join(ROOT, 'supabase/functions'), { recursive: true }).filter((f) => /[.](ts|js)$/.test(f))
+    .map((f) => read(join('supabase/functions', f))).join('\n')
+  const endpoints = [...new Set(fnSrc.match(/https:[/][/]api[.]anthropic[.]com[A-Za-z0-9/_.-]*/g))]
+  assert.deepStrictEqual(endpoints, ['https://api.anthropic.com/v1/messages'])
+  assert.ok(!/v1[/]files|anthropic-beta/i.test(fnSrc))
+})
+
+test('the terms apply to every AI feature (including paste-email), and current terms are kept apart from historical requests', () => {
+  assert.ok(ANTHROPIC_BLOCK.includes('How Anthropic handles this data'), 'the terms sit in the Anthropic section, not only in the retired one')
+  assert.ok(TERMS.includes('Every AI request Funnl makes — Funnl AI, AI Fill, smart CSV import and pasting an email — goes to Anthropic'))
+  assert.ok(TERMS.includes("These are Anthropic's terms as published when this policy was last updated, and Anthropic can change them; earlier requests were handled under the terms in effect when they were sent"))
+  const extracts = bullet('Email extracts sent to Anthropic before retirement')
+  assert.ok(extracts.includes('handled under Anthropic') && extracts.includes('terms in effect when they were sent'))
+  assert.ok(extracts.includes("the terms described above are Anthropic's current ones"))
+  assert.ok(!/30 days|2 years|7 years/.test(extracts), 'historical extracts are not given the current figures as if they governed them')
+  // Every AI function named really calls Anthropic.
+  for (const dir of ['ai-chat', 'ai-parse-contact', 'ai-map-csv', 'ai-categorize-contacts', 'ai-paste-email']) {
+    assert.ok(existsSync(join(ROOT, 'supabase/functions', dir, 'index.ts')), `${dir} exists`)
+  }
 })
 
 test('the Limited Use statement is kept, in the past tense, with every required disclosure', () => {
