@@ -18,7 +18,7 @@ is in `C:\Users\nkindra\FunnlOps\stage-d\20261019T031210Z` (`SUMMARY.txt`).
 | 3. Merge #111 | **Merged `a801a3e`.** Production deployment succeeded, and the live JS is byte-identical to the previous bundle. |
 
 **Still open:**
-- the five `vercel.json` OAuth rewrites (see "Retired API addresses" below);
+- the five `vercel.json` OAuth rewrites: removed in the follow-up routes/docs PR, with `/api` excluded from the SPA fallback (see "Retired API addresses" below). Hosted verification comes after merge;
 - Google provider retirement (blocked until the Google account has 2-step verification);
 - destruction of the three keys;
 - Stage E (privacy wording);
@@ -26,15 +26,38 @@ is in `C:\Users\nkindra\FunnlOps\stage-d\20261019T031210Z` (`SUMMARY.txt`).
 
 ## Retired API addresses (`/api/*-oauth-*`)
 
-**Before removal:** `vercel.json` forwarded the five addresses to Supabase. With the functions undeployed, Production returned **HTTP 404, JSON `{"code":"NOT_FOUND","message":"Requested function was not found"}`** for all five (checked read-only, 2026-10-19).
+**Before this change (Production, checked read-only on 2026-10-19):**
+- `vercel.json` forwarded the five addresses to Supabase. With the functions undeployed, all five returned **HTTP 404 with JSON `{"code":"NOT_FOUND","message":"Requested function was not found"}`**.
+- Any other unknown `/api/...` path (and `/api` itself) fell through to the catch-all `/(.*)`, so it returned the **app's HTML shell with status 200**.
 
-**After removing the five rewrites:** the only rule left is the SPA catch-all `/(.*)` → `/index.html`. A static model of `vercel.json` (`tests/vercel-routes.test.js`) shows the five paths would then fall through to it, so the hosted response would be the **app's HTML shell with status 200**. That is not an API retirement response. Any other unknown `/api/...` path already returns that today; it was checked read-only.
+**This change:**
+- The five rewrites are removed.
+- The SPA fallback becomes `{"source": "/((?!api(?:/|$)).*)", "destination": "/index.html"}`. Its destination and the `git.deploymentEnabled` setting are unchanged.
+- No middleware, function, legacy `routes` or custom 410 response is added.
 
-**Proposed smallest change, not applied (needs approval):** narrow the catch-all to skip `/api/`, i.e. `"source": "/((?!api/).*)"`.
-- With no file and no rewrite for `/api/...`, the platform's own **404** would answer every `/api/` path.
-- The app has no other `/api/` route, so app routes are unaffected; the static model checks this pattern.
-- An explicit **410** would need more than `rewrites` (for example Vercel middleware or the legacy `routes` format). That is not recommended for five addresses.
-- The hosted result can only be confirmed after a deployment. Preview URLs require Vercel login, so that check would have to come after merge.
+**Why this pattern:**
+- The lookahead `(?!api(?:/|$))` excludes `/api` and `/api/...` but not paths like `/apiary`.
+- The unnamed group keeps the compiled destination exactly `/index.html`. Vercel's named-parameter form (`/:path(...)`) compiles to `/index.html?path=$1`: a named parameter that the destination does not use is appended as a query.
+
+**Validated with Vercel's own routing library.** This used `@vercel/routing-utils` 6.6.0, installed temporarily outside the repository; the evidence is in `C:\Users\nkindra\FunnlOps\stage-d\routes-validation-*`.
+- `rewritesSchema`: valid.
+- `getTransformedRoutes`: compiles to `[{handle: filesystem}, {src: "^(?:/((?!api(?:/|$)).*))$", dest: "/index.html", check: true}]`.
+
+Resolving paths through that compiled table, with a static-file check against a build of this branch, gives:
+
+| Path | Result |
+|---|---|
+| The five retired addresses, with and without query strings | No match, so **expected platform 404** |
+| `/api`, `/api/`, `/api/unknown-route`, `/api?x=1` | No match, so **expected platform 404** |
+| `/`, `/signin`, `/settings`, `/privacy`, `/contacts`, a contact-detail path, `/suggestions`, `/apiary` | Rewritten to `/index.html` |
+| Built assets (`/assets/*.js`, `/assets/*.css`, `/favicon.svg`) | Served by the filesystem phase, before any rewrite |
+
+**Static repository checks:** `tests/vercel-routes.test.js` pins the same paths and the retained calls. Account deletion (`supabase.functions.invoke('delete-account')`) and paste-email (`invoke('ai-paste-email')`) call Supabase directly, and no `src` file calls an `/api/` address. That test is a small model of these rules, **not** Vercel's router.
+
+**Hosted behaviour is not yet verified.** The library above is Vercel's parser and route compiler, not its edge network. What a deployed site actually returns for `/api/...` (the body and headers of the platform 404, and how query strings are handled) can only be checked after a deployment. This branch's automatic preview requires Vercel login, so the check is planned read-only on Production after merge:
+- each retired address, `/api` and `/api/...` should return 404;
+- app paths and `/apiary` should return 200 HTML;
+- assets should return 200.
 
 ## What the PR contains
 

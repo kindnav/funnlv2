@@ -99,7 +99,7 @@ test('vercel.json no longer routes the retired branded OAuth paths (functions un
   for (const p of ['/api/google-oauth-callback', '/api/google-oauth-start', '/api/gmail-oauth-start']) {
     assert.ok(!sources.includes(p), `retired rewrite still present: ${p}`)
   }
-  assert.strictEqual(sources[sources.length - 1], '/(.*)', 'SPA catch-all stays last')
+  assert.strictEqual(sources[sources.length - 1], '/((?!api(?:/|$)).*)', 'SPA catch-all (excluding /api) stays last')
 })
 
 // ── 7. Wiring and ordering proofs ────────────────────────────────────────────

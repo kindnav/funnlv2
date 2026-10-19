@@ -31,7 +31,8 @@ test('git.deploymentEnabled is unchanged ({ main: true, "*": false })', () => {
   assert.deepStrictEqual(vercel.git?.deploymentEnabled, { main: true, '*': false })
 })
 test('SPA catch-all still maps to /index.html', () => {
-  const spa = vercel.rewrites.find(x => x.source === '/(.*)')
+  // The catch-all excludes /api (Stage D); see tests/vercel-routes.test.js.
+  const spa = vercel.rewrites.find(x => x.source === '/((?!api(?:/|$)).*)')
   assert.strictEqual(spa.destination, '/index.html')
 })
 test('it is a REWRITE, not a redirect (no redirects, no statusCode)', () => {
