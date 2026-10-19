@@ -102,6 +102,11 @@ const FUNCTION_JWT_SETTINGS = {
   // handler re-checks the user and Pro entitlement before anything else.
   'ai-paste-email': 'true',
   'delete-account': 'true',
+  // Billing, reconciled from the deployed functions: Stripe calls the webhook without a Supabase
+  // JWT (the handler verifies the Stripe signature); the portal is called by the signed-in user.
+  // create-checkout-session has no section and keeps the default (true).
+  'stripe-webhook': 'false',
+  'create-billing-portal-session': 'true',
   // The Google, Gmail and Outlook functions are retired (Stage D) together with their
   // sections; none of them may reappear here without a reviewed change.
 }
