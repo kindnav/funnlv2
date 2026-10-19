@@ -19,9 +19,9 @@
 /** The one host the branded callback lives on. Must match EXPECTED_GOOGLE_CALLBACK_URL. */
 export const CANONICAL_OAUTH_ORIGIN = 'https://www.getfunnl.com'
 
-/** Branded paths, mirrored by rewrites in vercel.json. */
+/** Branded paths, mirrored by rewrites in vercel.json. The Google Calendar connect
+ *  card is retired (Stage D), so `calendar` is no longer a client start path. */
 export const OAUTH_START_PATHS = Object.freeze({
-  calendar: '/api/google-oauth-start',
   gmail: '/api/gmail-oauth-start',
   outlook: '/api/outlook-oauth-start',
 })
@@ -33,7 +33,7 @@ export const OAUTH_START_PATHS = Object.freeze({
  * request is same-origin: no CORS, and Set-Cookie is stored for exactly that host.
  *
  * @param {string} pageOrigin typically window.location.origin
- * @param {'calendar'|'gmail'|'outlook'} integration
+ * @param {'gmail'|'outlook'} integration
  * @returns {{ ok: true, url: string } | { ok: false, reason: string }}
  */
 export function resolveOauthStartUrl (pageOrigin, integration) {

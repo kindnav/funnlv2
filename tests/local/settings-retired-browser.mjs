@@ -1,10 +1,12 @@
 #!/usr/bin/env node
-// SETTINGS WITH THE OUTLOOK CARD RETIRED (Stage D), IN A REAL BROWSER - desktop (1366px) and phone (390px).
+// SETTINGS WITH THE OUTLOOK AND GOOGLE CALENDAR CARDS RETIRED (Stage D), IN A REAL BROWSER - desktop (1366px)
+// and phone (390px).
 //
 // Real Postgres (every migration), GoTrue and PostgREST, and a production build of this checkout in headless
-// Chrome. The build turns Production's Outlook flags ON and invites the synthetic user, so on a tree that still
-// had the card it would render; here nothing Outlook-related may appear, and account deletion must still open.
-// Nothing is deleted (the deletion dialog is opened and cancelled). No Edge Function, Microsoft or Production.
+// Chrome. The build turns the old Outlook and Calendar flags ON, invites the synthetic user and seeds a synthetic
+// connection for each, so on a tree that still had either card it would render; here nothing Outlook- or
+// Google-related may appear, and account deletion must still open. Nothing is deleted (the deletion dialog is
+// opened and cancelled). No Edge Function, Microsoft, Google or Production.
 //
 // RUN (from the repository root): node tests/local/settings-retired-browser.mjs [screenshot-dir]
 
@@ -211,12 +213,16 @@ async function main () {
         -- A SYNTHETIC Microsoft connection (local database only), so a tree that still had the Outlook card
         -- would render it with its Disconnect control; the retired tree must render nothing.
         INSERT INTO public.microsoft_connections (user_id, ms_account_id, account_type, ms_email, scopes, consented_at, consent_policy_version)
-        VALUES ('${U}', 'synthetic-account-0001', 'personal', 'synthetic.mailbox@example.test', ARRAY['Mail.Read','User.Read','offline_access','openid','email','profile'], now(), 'ol-disc-synthetic');`)
+        VALUES ('${U}', 'synthetic-account-0001', 'personal', 'synthetic.mailbox@example.test', ARRAY['Mail.Read','User.Read','offline_access','openid','email','profile'], now(), 'ol-disc-synthetic');
+        -- A SYNTHETIC Google connection too, so a tree that still had the Calendar card would render it as
+        -- connected with its Disconnect control.
+        INSERT INTO public.google_connections (user_id, google_sub, google_email, scopes)
+        VALUES ('${U}', 'synthetic-sub-0001', 'synthetic.calendar@example.test', ARRAY['https://www.googleapis.com/auth/calendar.events.readonly','openid','email']);`)
 
-  // Build AFTER the user exists, with Production's Outlook flags ON and this synthetic user as the
-  // invited viewer: on main this would show the Outlook card; with it retired, nothing may appear.
-  console.log('building the app (Outlook connection + review flags ON, synthetic user invited)')
-  execFileSync('npx', ['vite', 'build', '--outDir', DIST, '--emptyOutDir'], { cwd: ROOT, stdio: 'pipe', shell: true, env: { ...process.env, VITE_SUPABASE_URL: GW, VITE_SUPABASE_ANON_KEY: ANON_KEY, VITE_POSTHOG_KEY: '', VITE_OUTLOOK_REVIEW_ENABLED: 'true', VITE_OUTLOOK_CONNECTION_ENABLED: 'true', VITE_OUTLOOK_PILOT_USER_ID: U } })
+  // Build AFTER the user exists, with the old Outlook AND Calendar flags ON and this synthetic user as the
+  // invited viewer: on a tree that still had either card it would render; retired, nothing may appear.
+  console.log('building the app (Outlook connection + review flags and Calendar connection flag ON, synthetic user invited)')
+  execFileSync('npx', ['vite', 'build', '--outDir', DIST, '--emptyOutDir'], { cwd: ROOT, stdio: 'pipe', shell: true, env: { ...process.env, VITE_SUPABASE_URL: GW, VITE_SUPABASE_ANON_KEY: ANON_KEY, VITE_POSTHOG_KEY: '', VITE_OUTLOOK_REVIEW_ENABLED: 'true', VITE_OUTLOOK_CONNECTION_ENABLED: 'true', VITE_OUTLOOK_PILOT_USER_ID: U, VITE_CALENDAR_CONNECTION_ENABLED: 'true', VITE_CALENDAR_INGESTION_ENABLED: 'true' } })
   gw = await startGateway()
 
   const cdp = await freePort()
@@ -240,6 +246,7 @@ async function main () {
     const t = await page.eval('return document.body.innerText')
     check(`${label}: no Outlook card, Connect or Disconnect control`, !/outlook/i.test(t) && !/connect outlook|disconnect outlook/i.test(t), (t.match(/[^\n]*outlook[^\n]*/i) || [''])[0].slice(0, 80))
     check(`${label}: no Connected accounts section`, !/connected accounts/i.test(t))
+    check(`${label}: no Google Calendar card, Connect or Disconnect control`, !/google/i.test(t) && !/connect google calendar/i.test(t), (t.match(/[^\n]*google[^\n]*/i) || [''])[0].slice(0, 80))
     check(`${label}: the account-deletion control is present and visible`, await page.eval('const b=[...document.querySelectorAll("button")].find(b=>/delete my account/i.test(b.innerText)); return !!b && b.getBoundingClientRect().width>0'))
     check(`${label}: no Suggestions link anywhere on the page`, !(await page.eval('return !!document.querySelector(\'a[href="/suggestions"]\')')))
   }
@@ -264,6 +271,7 @@ async function main () {
   await page.shot('03-settings-phone')
   check('the user still exists (nothing was deleted)', one(`SELECT count(*) FROM auth.users WHERE id='${U}'`) === '1')
   check('no request was made to the Outlook RPCs', !gwLog.some(e => /get_my_outlook|disconnect_my_outlook|get_my_outlook_sync_status/.test(e.path)), JSON.stringify(gwLog.filter(e => /outlook/.test(e.path)).slice(0, 3)))
+  check('no request was made for the Google connection or a Google OAuth function', !gwLog.some(e => /google/.test(e.path)), JSON.stringify(gwLog.filter(e => /google/.test(e.path)).slice(0, 3)))
 }
 
 let harnessError = null

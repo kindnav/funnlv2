@@ -226,8 +226,7 @@ const googleSources = [
   'supabase/functions/shared/googleTokenCrypto.js',
   'supabase/functions/shared/googleCleanup.js',
   'supabase/functions/shared/googleConnect.js',
-  'src/components/GoogleConnectionCard.jsx',
-  'src/lib/googleConnection.js',
+  // The Settings card and its helper are retired (Stage D) and no longer exist to scan.
   migrationRel(),
 ].map(rel => ({ rel, text: read(rel) }))
 
