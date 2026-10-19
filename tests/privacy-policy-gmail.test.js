@@ -20,7 +20,6 @@ function test(name, fn) {
 }
 
 const POLICY = flat(read('src/pages/PrivacyPage.jsx'))
-const CLEANUP = read('supabase/functions/shared/googleCleanup.js')
   // applied in Production 2026-09-19
 
 console.log('\nconditional wording while Gmail is unavailable')
@@ -36,32 +35,6 @@ console.log('\npersisted data and retention — every claim is enforced by code,
 console.log('\nthird-party boundaries — narrow, source-backed statements')
 test('the broad "never sent to Anthropic, PostHog, Resend" claim is gone', () => {
   assert.ok(!/Gmail data is never sent to Anthropic, PostHog, Resend/.test(POLICY))
-})
-
-// Whole-Google local cleanup: two reviewed contracts satisfy the published disclosure that the
-// Google connection and its state are removed. Evaluated on comment-stripped code so prose in
-// comments can never satisfy (or break) a contract check.
-//   direct-delete (currently deployed): the helper itself deletes google_oauth_states + google_connections
-//   atomic RPC (reviewed PR-B):          the helper calls run_google_local_cleanup(p_user_id) and issues no client deletes
-const CLEANUP_CODE = CLEANUP.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' ')
-const usesDirectDeleteContract =
-  /\.from\('google_oauth_states'\)[\s\S]*?\.delete\(\)/.test(CLEANUP_CODE) &&
-  /\.from\('google_connections'\)[\s\S]*?\.delete\(\)/.test(CLEANUP_CODE) &&
-  !/\.rpc\(/.test(CLEANUP_CODE)
-const usesAtomicCleanupRpcContract =
-  /run_google_local_cleanup/.test(CLEANUP_CODE) &&
-  /\.rpc\([^)]*\{\s*p_user_id:\s*userId\s*\}\s*\)/.test(CLEANUP_CODE) &&
-  !/\.delete\(\)/.test(CLEANUP_CODE)
-// Under BOTH contracts the JavaScript helper never edits candidate rows itself; under the RPC
-// contract the database function owns candidate cleanup.
-const helperNeverEditsCandidates =
-  !/interaction_candidates|retained_subject|context_expires_at|source_fingerprint/.test(CLEANUP_CODE)
-
-console.log('\nwhole-Google local cleanup contract')
-test('googleCleanup.js implements exactly one reviewed local-cleanup contract and never edits candidate rows directly', () => {
-  assert.ok(usesDirectDeleteContract || usesAtomicCleanupRpcContract, 'the helper must implement a reviewed local-cleanup contract (direct delete or atomic RPC)')
-  assert.ok(!(usesDirectDeleteContract && usesAtomicCleanupRpcContract), 'exactly one contract, never a mix')
-  assert.ok(helperNeverEditsCandidates, 'the JS helper never edits interaction_candidates / retained_subject / context_expires_at / source_fingerprint directly')
 })
 
 console.log('\ndisconnect and deletion — two distinct paths')

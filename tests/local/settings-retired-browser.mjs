@@ -210,6 +210,9 @@ async function main () {
   check('user created by the real GoTrue', /^[0-9a-f-]{36}$/.test(U))
   psql(`UPDATE public.profiles SET display_name = 'Sam Rivera', activation_five_contacts_at = now(), activation_first_interaction_at = now(), activation_first_followup_at = now(), activation_completed_at = now() - interval '2 days' WHERE id = '${U}';
         INSERT INTO public.contacts (user_id, name, company) VALUES ('${U}','Ada Byron','Analytical Engines');
+        -- Stage F drops the connection tables; on that schema no connection can exist at all, so these two
+        -- synthetic rows are seeded only while the tables are still there.
+        DO $seed$ BEGIN IF to_regclass('public.microsoft_connections') IS NOT NULL THEN
         -- A SYNTHETIC Microsoft connection (local database only), so a tree that still had the Outlook card
         -- would render it with its Disconnect control; the retired tree must render nothing.
         INSERT INTO public.microsoft_connections (user_id, ms_account_id, account_type, ms_email, scopes, consented_at, consent_policy_version)
@@ -217,7 +220,8 @@ async function main () {
         -- A SYNTHETIC Google connection too, so a tree that still had the Calendar card would render it as
         -- connected with its Disconnect control.
         INSERT INTO public.google_connections (user_id, google_sub, google_email, scopes)
-        VALUES ('${U}', 'synthetic-sub-0001', 'synthetic.calendar@example.test', ARRAY['https://www.googleapis.com/auth/calendar.events.readonly','openid','email']);`)
+        VALUES ('${U}', 'synthetic-sub-0001', 'synthetic.calendar@example.test', ARRAY['https://www.googleapis.com/auth/calendar.events.readonly','openid','email']);
+        END IF; END $seed$;`)
 
   // Build AFTER the user exists, with the old Outlook AND Calendar flags ON and this synthetic user as the
   // invited viewer: on a tree that still had either card it would render; retired, nothing may appear.

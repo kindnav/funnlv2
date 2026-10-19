@@ -169,6 +169,9 @@ test('applied migrations are unmodified; the only addition is the forward scope 
     // entries and DROPs the retired integration RPCs by their latest signatures, so it must
     // apply after every file above that last re-issued one of them.
     '20261019000000_retire_integration_backend.sql',
+    // Stage F: drops the retired integration tables and their last functions. It drops
+    // run_google_local_cleanup and the tables the files above created, so it applies last.
+    '20261019180000_drop_integration_tables.sql',
   ]
   assert.deepStrictEqual(files.slice(-FORWARD_TAIL.length), FORWARD_TAIL,
     'the forward migrations must be the newest, in this order')

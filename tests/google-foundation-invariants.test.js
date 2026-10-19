@@ -87,8 +87,8 @@ test('PKCE verifier is stored as ciphertext + nonce (encrypted)', () => {
 })
 
 // The Google OAuth and Calendar functions are retired (Stage D): their source and their
-// config.toml sections are gone. The tables, the cleanup RPC and the helpers delete-account
-// uses remain until Stage F, and are pinned below.
+// config.toml sections are gone. Stage F removes delete-account's Google cleanup step and the
+// shared helpers it used; the Stage F migration drops the tables and the cleanup RPC.
 
 // ── delete-account: platform JWT verification + handler-side authorization ────
 // delete-account is invoked from the browser through supabase.functions.invoke,
@@ -143,27 +143,24 @@ test('handler calls auth.getUser() and rejects failure with 401', () => {
   assert.ok(/await supabaseUser\.auth\.getUser\(\)/.test(deleteAccountSrc))
   assert.ok(/if \(authError \|\| !user\)[\s\S]*?status: 401/.test(deleteAccountSrc))
 })
-test('authentication precedes admin construction, cleanupGoogle, contact deletion, and deleteUser', () => {
+test('authentication precedes admin construction, contact deletion, and deleteUser', () => {
   const at = (needle) => { const i = deleteAccountSrc.indexOf(needle); assert.ok(i !== -1, `missing ${needle}`); return i }
   const headerGuard = at('if (!authHeader)')
   const getUser = at('.auth.getUser()')
   const authGuard = at('if (authError || !user)')
   const adminClient = at('const admin = createClient(')
-  const cleanup = at('await cleanupGoogle(admin, user.id)')
   const contacts = at(".from('contacts')")
   const deleteUser = at('.auth.admin.deleteUser(user.id)')
   assert.ok(headerGuard < getUser && getUser < authGuard, 'header guard → getUser → auth guard')
   assert.ok(authGuard < adminClient, 'admin client is constructed only after authentication')
-  assert.ok(adminClient < cleanup && cleanup < contacts && contacts < deleteUser, 'admin → cleanup → contacts → deleteUser')
+  assert.ok(adminClient < contacts && contacts < deleteUser, 'admin → contacts → deleteUser')
   // The user-scoped client exists only to verify the caller; it never deletes.
   assert.ok(!/supabaseUser\.(from|rpc)\(/.test(deleteAccountSrc), 'user-scoped client performs no data operations')
 })
 test('every destructive operation is scoped from the verified user.id', () => {
   assert.ok(/\.from\('contacts'\)\s*\.delete\(\)\s*\.eq\('user_id', user\.id\)/.test(deleteAccountSrc))
-  assert.ok(/cleanupGoogle\(admin, user\.id\)/.test(deleteAccountSrc))
   assert.ok(/\.auth\.admin\.deleteUser\(user\.id\)/.test(deleteAccountSrc))
   assert.ok(!/deleteUser\((?!user\.id\))/.test(deleteAccountSrc), 'deleteUser only ever receives user.id')
-  assert.ok(!/cleanupGoogle\(admin, (?!user\.id\))/.test(deleteAccountSrc), 'cleanupGoogle only ever receives user.id')
   assert.ok(!/\.delete\(\)(?![\s\S]{0,40}\.eq\('user_id', user\.id\))/.test(deleteAccountSrc), 'every delete is user_id-scoped')
 })
 test('no identity is accepted from body, query, custom headers, user_metadata, or app_metadata', () => {
@@ -174,15 +171,24 @@ test('no identity is accepted from body, query, custom headers, user_metadata, o
   assert.ok(!/user_metadata|app_metadata/.test(deleteAccountSrc), 'no metadata-derived identity')
   assert.ok(!/\b(body|params|query)\s*[.[]\s*['"]?user_?id/i.test(deleteAccountSrc), 'no request-supplied user id')
 })
-test('the success response is unreachable until cleanup, contact deletion, and deleteUser complete', () => {
+test('the success response is unreachable until contact deletion and deleteUser complete', () => {
   const success = deleteAccountSrc.indexOf('success: true')
   assert.ok(success !== -1)
   const idx = (n) => deleteAccountSrc.indexOf(n)
-  assert.ok(idx('await cleanupGoogle(admin, user.id)') < success)
   assert.ok(idx(".from('contacts')") < success && idx('if (contactsErr) throw') < success, 'contacts delete + error check before success')
   assert.ok(idx('.auth.admin.deleteUser(user.id)') < success && idx('if (deleteErr) throw') < success, 'deleteUser + error check before success')
   assert.strictEqual((deleteAccountSrc.match(/success: true/g) || []).length, 1, 'exactly one success path')
   assert.ok(/if \(deleteErr\) throw[\s\S]*?success: true/.test(deleteAccountSrc))
+})
+test('delete-account no longer calls the Google cleanup or touches any integration object (Stage F)', () => {
+  for (const name of ['cleanupGoogle', 'googleCleanup', 'googleOauthHelpers', 'googleTokenCrypto', 'run_google_local_cleanup',
+    'google_connections', 'google_tokens', 'google_oauth_states', 'microsoft_', 'outlook_', 'interaction_candidates', 'new_contact_candidates']) {
+    assert.ok(!deleteAccountSrc.includes(name), 'delete-account still references ' + name)
+  }
+  assert.strictEqual(deleteAccountSrc.split('.from(').length - 1, 1, 'exactly one table call')
+  assert.ok(deleteAccountSrc.includes(".from('contacts')"), 'the one table call is contacts')
+  assert.ok(!deleteAccountSrc.includes('.rpc('), 'no RPC call')
+  assert.ok(!deleteAccountSrc.includes('/shared/'), 'no shared helper import')
 })
 test('CORS preflight and error contract are unchanged', () => {
   assert.ok(/if \(req\.method === 'OPTIONS'\)[\s\S]*?return new Response\('ok', \{ headers: corsHeaders \}\)/.test(deleteAccountSrc))
@@ -194,10 +200,7 @@ test('CORS preflight and error contract are unchanged', () => {
 console.log('\nno scope creep')
 const googleSources = [
   // The OAuth functions, googleConnect.js, the Settings card and its helper are retired
-  // (Stage D). These three helpers remain because delete-account imports them.
-  'supabase/functions/shared/googleOauthHelpers.js',
-  'supabase/functions/shared/googleTokenCrypto.js',
-  'supabase/functions/shared/googleCleanup.js',
+  // (Stage D); the shared Google helpers delete-account used are removed in Stage F.
   migrationRel(),
 ].map(rel => ({ rel, text: read(rel) }))
 
@@ -222,11 +225,6 @@ for (const { rel, text } of googleSources) {
   })
 }
 
-// Sanity: the intended read-only Calendar scope IS present in the helper.
-test('helper requests calendar.events.readonly (in-scope)', () => {
-  assert.ok(/calendar\.events\.readonly/.test(read('supabase/functions/shared/googleOauthHelpers.js')))
-})
-
 // No stray extra Google tables/functions beyond Phase 0A were added.
 test('exactly three google_* tables defined in the migration', () => {
   const tables = [...migration.matchAll(/CREATE TABLE public\.(google_\w+)/g)].map(m => m[1]).sort()
@@ -236,10 +234,13 @@ test('no google-* or gmail-* edge function remains (retired in Stage D)', () => 
   const fns = readdirSync(join(root, 'supabase/functions')).filter(n => n.startsWith('google') || n.startsWith('gmail'))
   assert.deepStrictEqual(fns, [])
 })
+test('no shared Google helper remains (removed in Stage F)', () => {
+  const shared = readdirSync(join(root, 'supabase/functions/shared')).filter(n => n.toLowerCase().startsWith('google'))
+  assert.deepStrictEqual(shared, [])
+})
 
 // ── Atomic persistence RPC (hardening pass) ───────────────────────────────────
 console.log('\natomic persistence RPC')
-const helpers = read('supabase/functions/shared/googleOauthHelpers.js')
 
 test('store_google_connection RPC exists, SECURITY DEFINER, empty search_path', () => {
   assert.ok(/CREATE OR REPLACE FUNCTION public\.store_google_connection\(/.test(migration))
@@ -255,21 +256,6 @@ test('RPC execution revoked from PUBLIC/anon/authenticated, granted only to serv
   assert.ok(/GRANT EXECUTE ON FUNCTION public\.store_google_connection\([\s\S]*?\) TO service_role/.test(migration))
 })
 
-// ── Lifecycle hardening invariants ────────────────────────────────────────────
-console.log('\nlifecycle hardening')
-test('auth URL requests offline access + re-consent + account selection', () => {
-  assert.ok(/access_type:\s*'offline'/.test(helpers))
-  assert.ok(/prompt:\s*'consent select_account'/.test(helpers))
-})
-test('identity validation requires email_verified === true', () => {
-  assert.ok(/email_verified !== true/.test(helpers), 'must reject unverified email')
-})
-test('refresh preservation is account-scoped (sameSub) — never cross-account', () => {
-  assert.ok(/sameSub === true/.test(helpers), 'preserve only for same account')
-})
-test('auth URL requests response_mode=form_post', () => {
-  assert.ok(/response_mode:\s*'form_post'/.test(helpers))
-})
 // The OAuth start, callback and disconnect functions are retired (Stage D); their
 // handler checks went with them.
 
