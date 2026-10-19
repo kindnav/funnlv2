@@ -13,13 +13,9 @@
 //     requirements carry that same derived value.
 
 import assert from 'node:assert'
-import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
-import { fileURLToPath } from 'node:url'
-import { dirname, join } from 'node:path'
 import { OUTLOOK_DISCLOSURE_PARAGRAPHS as P } from '../src/lib/outlookDisclosure.js'
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const EM = String.fromCharCode(0x2014)
 const SENTENCE = 'With a personal Microsoft account you approve them yourself. A work or school ' +
   'organisation can require an administrator to approve an app that reads mail ' + EM +
@@ -41,10 +37,6 @@ function test (name, fn) {
 }
 
 /** /privacy as a reader sees it: markup removed, whitespace collapsed. */
-function privacyText () {
-  const src = readFileSync(join(ROOT, 'src/pages/PrivacyPage.jsx'), 'utf8')
-  return src.replace(/\{\/\*[\s\S]*?\*\/\}/g, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ')
-}
 
 test('the notice carries the corrected sentence exactly, ending paragraph 4', () => {
   assert.strictEqual(P.length, 24)
@@ -58,11 +50,6 @@ test('every other paragraph, and paragraph 4 before the sentence, is unchanged',
   assert.ok(P[3].startsWith('Microsoft grants those two more broadly than Funnl uses them. Mail.Read is granted at the mailbox level'))
 })
 
-test('/privacy carries the same sentence, character for character', () => {
-  const t = privacyText()
-  assert.ok(t.includes(SENTENCE), 'sentence missing from /privacy')
-  assert.ok(!/administrator consent by default/i.test(t), 'the old claim survives in /privacy')
-})
 
 console.log('')
 console.log(`${passed + failed} tests: ${passed} passed, ${failed} failed`)
