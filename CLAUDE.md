@@ -13,7 +13,9 @@ Keep this file current. When we make a durable decision, finish a feature, chang
 - Resend.com is the transactional email provider (existing, connected via Supabase SMTP). Resend sending domain is `getfunnl.com` (Verified); DKIM at `resend._domainkey.getfunnl.com`, SPF and return-path MX at `send.getfunnl.com` — all verified. Gmail delivery reaches Primary inbox. iCloud places in Junk (unresolved — not a DNS failure). Outlook not yet tested. See Task 1 in Known future work.
 - Supabase URL configuration: Site URL = `https://www.getfunnl.com`; Redirect URLs include `/welcome` and `/**`. Confirm signup template applied 2026-07-13.
 - **Not yet shared with real students** — iCloud Junk placement and Outlook test still pending; see Task 1 in Known future work
-- **Outlook, Google Calendar and Gmail integrations are RETIRED (Stage D, 2026-10-19).**
+- **Outlook, Google Calendar and Gmail integrations are RETIRED. The application, backend and database retirement and its privacy follow-up are COMPLETE (2026-10-19).**
+  - **Final state:** main `fac140d` (merge of #115); Production deployment `7184033629` succeeded and the live `/privacy` passed a rendered desktop and phone check.
+  - **Status table and residual items:** `docs/simplification-cleanup-plan.md`.
   - Their UI is gone: #109, #110.
   - Their nine Edge Functions are undeployed, and their source is removed: #111.
   - Migration `20261019000000_retire_integration_backend.sql` is **applied**. It unscheduled `outlook-worker-tick`, deleted its two Vault entries and dropped 48 integration RPCs.
@@ -24,8 +26,19 @@ Keep this file current. When we make a durable decision, finish a feature, chang
     - Saved contacts and interactions, their source labels and every retained object are verified identical.
     - Record and evidence: `docs/stage-f-integration-tables.md`.
   - **Still supported:** account deletion (`delete-account`), paste-email (`ai-paste-email`), and every other product feature.
-  - **Stage E (privacy wording) is published** (#113, Last updated October 19, 2026). **It still describes records that "remain for now", which Stage F deleted. A separate privacy-wording update is pending.**
-  - **Still pending:** that privacy update, Google provider retirement (blocked on the Google account's 2-step verification), and destruction of the three integration keys.
+  - **Privacy wording:**
+    - **Stage E** was published in #113.
+    - **The post-Stage-F correction** was published in **#115** (merged `fac140d`, "Last updated: October 19, 2026"). It states that the leftover suggestion records, with their proposed notes, and the expired sign-in attempt were deleted on October 19, 2026, without an export.
+    - The live page was verified rendered on desktop and phone (evidence: `C:\Users\nkindra\FunnlOps\stage-f\20261019T202034Z-privacy-publish`).
+  - **Still pending:**
+    - **Google provider retirement**, blocked on the Google account's 2-step verification. Funnl may still appear in users' Google or Microsoft connected-app lists.
+    - **The three retained keys** (`MICROSOFT_TOKEN_ENCRYPTION_KEY_V1`, `GOOGLE_TOKEN_ENCRYPTION_KEY_V1`, `OUTLOOK_FINGERPRINT_HMAC_KEY_V1`). They are no longer used, and destroying them is a separate decision.
+    - **Provider backups.** Whether provider-side backups of the deleted records exist, and for how long, is unknown.
+- **Residual housekeeping, carried forward (not done, not verified unless stated):**
+  - **Microsoft Entra app registrations.** The Funnl registration was kept after its only secret was deleted in Stage C. A second Funnl registration, with no credentials, also exists. Removing either is a provider action that has not been taken.
+  - **Unused Vercel environment variables.** The code reads none of the old integration `VITE_*` flags any more. Whether any are still set in the Vercel project settings has not been checked. Removing them is a Vercel settings change.
+  - **Vercel preview builds.** Non-main pushes still produce preview deployments despite `git.deploymentEnabled`; the cause is not diagnosed. See the "Vercel main-only deployments" row.
+  - **Billing source reconciliation.** Proposed in section 5 of the cleanup plan, as a separate PR needing separate approval. #24 stays untouched.
   - Runbook and evidence: `docs/stage-d-backend-retirement.md`.
 
 ---

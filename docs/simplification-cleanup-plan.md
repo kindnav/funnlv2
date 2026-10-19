@@ -9,7 +9,12 @@ Pro/subscription/billing access.
 Each **Production action** below needed its own explicit approval. The plan as written (sections 1-4)
 is preserved; what was executed is recorded in this status table.
 
-## Status (2026-10-19)
+## Status (2026-10-19): application, backend and database retirement COMPLETE
+
+**Closeout.** The retirement of Outlook, Google Calendar and Gmail is complete in the application, the backend, the database and the published privacy policy.
+- **Final main:** `fac140d0237698e5b112582c3d0299fe99b3c91a`, the merge of #115.
+- **Production deployment:** `7184033629` succeeded. The live `/privacy` passed 16 rendered checks on desktop and phone.
+- **Not part of this closeout:** the items under "Still pending" and "Residual housekeeping" below.
 
 | Stage | Status |
 |---|---|
@@ -17,11 +22,22 @@ is preserved; what was executed is recorded in this status table.
 | Packet A: stop Outlook processing | **Executed 2026-10-16.** Evidence: `C:\Users\nkindra\FunnlOps\packet-a\20261016T014818Z`. |
 | B. Hide Suggestions (#108) | Merged and deployed. |
 | C. Credentials | **Executed 2026-10-19.** Secrets unset; Outlook disconnected; Google local cleanup; Microsoft consent and Entra secret removed. Evidence: `C:\Users\nkindra\FunnlOps\stage-c\20261019T000148Z`. **Google provider actions remain blocked** until the Google account has 2-step verification. |
-| D. Undeploy + remove source | **Done 2026-10-19.** Frontend in #109 and #110; backend in #111, after the 9 functions were undeployed and migration `20261019000000` was applied. See `docs/stage-d-backend-retirement.md`. The obsolete `vercel.json` OAuth rewrites and the operational docs follow in a separate PR. |
-| E. Policy | Pending; needs owner-approved wording. |
-| F. Schema | Pending. It will drop the integration tables, including the one expired non-pilot Microsoft OAuth state. |
+| D. Undeploy + remove source | **Done 2026-10-19.** Frontend in #109 and #110; backend in #111, after the 9 functions were undeployed and migration `20261019000000` was applied. See `docs/stage-d-backend-retirement.md`. The obsolete `vercel.json` OAuth rewrites and the operational docs followed in #112 (merged `841047e`; the retired `/api` paths return 404). |
+| E. Policy | **Published 2026-10-19** in #113 (merged `e417192`). |
+| F. Schema | **Executed 2026-10-19.** `delete-account` v70 was deployed first, then migration `20261019180000` dropped the 19 integration tables and 5 functions, including the expired non-pilot Microsoft OAuth state and the settled suggestions' proposed notes. Saved contacts, interactions, source labels and every retained object were verified unchanged. No export or backup was made. Merged in #114 (`950a334`). See `docs/stage-f-integration-tables.md`. |
+| Privacy follow-up | **Published 2026-10-19** in #115 (merged `fac140d`, "Last updated: October 19, 2026"): the leftover records and their proposed notes were deleted on October 19, 2026. Production deployment `7184033629` succeeded. Live rendered check: `C:\Users\nkindra\FunnlOps\stage-f\20261019T202034Z-privacy-publish`. |
 
-Also pending: destroying the three integration keys (a separate decision).
+**Still pending:**
+- **Google provider retirement.** It is blocked until the Google account has 2-step verification. No claim is made that Google or Microsoft access was revoked for every user.
+- **The three retained keys.** `MICROSOFT_TOKEN_ENCRYPTION_KEY_V1`, `GOOGLE_TOKEN_ENCRYPTION_KEY_V1` and `OUTLOOK_FINGERPRINT_HMAC_KEY_V1` were last confirmed present (by name only) in the Stage D gates. Account deletion does not remove them. Nothing in the database uses them now. Destroying them is a separate decision.
+- **Provider backups.** Whether provider-side backups of the deleted records exist, and for how long, is not established. The policy says so.
+
+**Residual housekeeping (carried forward; not done, not verified unless stated):**
+- **Microsoft Entra app registrations.** The Funnl registration was kept after Stage C deleted its only secret, and a second Funnl registration with no credentials exists. Removing either is a provider action not yet taken.
+- **Vercel environment variables.** The code no longer reads any of the old integration `VITE_*` flags. Whether any are still set in the Vercel project settings has not been checked.
+- **Vercel previews.** Non-main pushes still produce preview deployments despite `git.deploymentEnabled`, and the cause is not diagnosed.
+- **Billing reconciliation.** The proposal in section 5 needs a separate PR and approval. #24 stays untouched.
+- **Historical records.** `docs/stage-f-integration-tables.md` still lists its Step 4 (privacy) as pending. That section is the execution record as written, and this table supersedes it.
 
 The step-by-step packets below are historical. Their scripts (for example `scripts/outlook-worker-flag.ps1`) were removed after use, and they must not be re-run.
 
