@@ -1,5 +1,7 @@
 # Phase E1 — Email Classifier Foundation (design)
 
+> **Historical record - integration retired 2026-10-19.** Funnl retired its Outlook, Google Calendar and Gmail integrations in Stage D: the UI was removed (#109, #110), the Edge Functions were undeployed and their source removed (#111), and migration `20261019000000` dropped their RPCs, cron job and Vault entries. Everything below is kept unchanged as the record of what was built, decided, consented to and done; its instructions, commands and rollback steps no longer apply and must not be run. Current state: `docs/stage-d-backend-retirement.md`.
+
 Provider-neutral, deterministic email-classification foundation. **Pure functions only** —
 no network, no DB, no secrets, no OAuth, no migrations, no UI, no feature flags. Gmail and
 Outlook raw-response adapters (transport) are deferred to E2/E3. Calendar code is untouched;

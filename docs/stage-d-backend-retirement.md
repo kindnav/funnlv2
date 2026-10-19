@@ -6,6 +6,36 @@ Microsoft OAuth state. Account deletion keeps working at every step.
 
 Each operational step below needs its own authorization. The PR itself changes only the repository.
 
+## Status (2026-10-19): executed
+
+Each step was separately authorized. Evidence (sanitized: names, versions, digests and counts only)
+is in `C:\Users\nkindra\FunnlOps\stage-d\20261019T031210Z` (`SUMMARY.txt`).
+
+| Step | Result |
+|---|---|
+| 1. Undeploy the 9 functions | **Done 03:14–03:15Z.** One at a time, each target absent afterwards, every other function identical in version and bundle. 9 functions remain: 5 AI, `delete-account`, 3 billing. Re-confirmed at 15:41Z and 15:47Z. |
+| 2. Migration `20261019000000` | **Applied 15:46:42Z** via `db push` (CLI 2.109.0) from `a8fa5e6`. History +1. Job gone. Vault: only the two worker entries removed, leaving it empty. 48 RPCs gone; each of the 13 remaining functions identical. 26 tables and 12 triggers identical. 15 protected records = P0. |
+| 3. Merge #111 | **Merged `a801a3e`.** Production deployment succeeded, and the live JS is byte-identical to the previous bundle. |
+
+**Still open:**
+- the five `vercel.json` OAuth rewrites (see "Retired API addresses" below);
+- Google provider retirement (blocked until the Google account has 2-step verification);
+- destruction of the three keys;
+- Stage E (privacy wording);
+- Stage F (tables).
+
+## Retired API addresses (`/api/*-oauth-*`)
+
+**Before removal:** `vercel.json` forwarded the five addresses to Supabase. With the functions undeployed, Production returned **HTTP 404, JSON `{"code":"NOT_FOUND","message":"Requested function was not found"}`** for all five (checked read-only, 2026-10-19).
+
+**After removing the five rewrites:** the only rule left is the SPA catch-all `/(.*)` → `/index.html`. A static model of `vercel.json` (`tests/vercel-routes.test.js`) shows the five paths would then fall through to it, so the hosted response would be the **app's HTML shell with status 200**. That is not an API retirement response. Any other unknown `/api/...` path already returns that today; it was checked read-only.
+
+**Proposed smallest change, not applied (needs approval):** narrow the catch-all to skip `/api/`, i.e. `"source": "/((?!api/).*)"`.
+- With no file and no rewrite for `/api/...`, the platform's own **404** would answer every `/api/` path.
+- The app has no other `/api/` route, so app routes are unaffected; the static model checks this pattern.
+- An explicit **410** would need more than `rewrites` (for example Vercel middleware or the legacy `routes` format). That is not recommended for five addresses.
+- The hosted result can only be confirmed after a deployment. Preview URLs require Vercel login, so that check would have to come after merge.
+
 ## What the PR contains
 
 | Area | Change |
@@ -25,10 +55,10 @@ Each operational step below needs its own authorization. The PR itself changes o
 - **`expire_pending_email_context` and `expire_pending_outlook_context`:** dormant retention helpers for rows that remain until Stage F.
 - **`src/lib/outlookDisclosure.js` and `sha256.js`:** the consent record; the privacy-policy tests check against it.
 - **All three encryption/HMAC keys, `MICROSOFT_CLIENT_ID`, the callback URLs, `OUTLOOK_DISCLOSURE_VERSION` and `OUTLOOK_PILOT_USER_ID`:** unchanged. Key destruction remains a separate decision (A7).
-- **Out of this PR's scope, left as is:**
-  - `vercel.json` rewrites for the five `/api/*-oauth-*` paths. After undeployment they return Supabase's not-found; removing them is a Vercel configuration change for separate approval.
-  - `scripts/outlook-worker-flag.ps1` and its offline test. The flag it toggles is already absent, and the tool becomes moot once the worker is undeployed.
-  - Docs that describe the retired workflows.
+- **Out of #111's scope, handled in the follow-up routes/docs PR:**
+  - `vercel.json` rewrites for the five `/api/*-oauth-*` paths: see "Retired API addresses" above.
+  - `scripts/outlook-worker-flag.ps1`, its offline test and the synthetic CLI behind it: removed. No retained workflow uses them.
+  - Docs that describe the retired workflows: kept as historical records, each with a retirement banner.
 
 ## Operational sequence
 

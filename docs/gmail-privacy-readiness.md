@@ -1,5 +1,7 @@
 # Gmail integration — privacy, compliance & retention readiness
 
+> **Historical record - integration retired 2026-10-19.** Funnl retired its Outlook, Google Calendar and Gmail integrations in Stage D: the UI was removed (#109, #110), the Edge Functions were undeployed and their source removed (#111), and migration `20261019000000` dropped their RPCs, cron job and Vault entries. Everything below is kept unchanged as the record of what was built, decided, consented to and done; its instructions, commands and rollback steps no longer apply and must not be run. Current state: `docs/stage-d-backend-retirement.md`.
+
 **Status: engineering readiness notes + an UNSHIPPED policy draft for legal review.**
 Nothing here is live. `src/pages/PrivacyPage.jsx` (the shipped policy) is **not** edited by
 this phase. Production Gmail access is **blocked** until the human gates below clear.

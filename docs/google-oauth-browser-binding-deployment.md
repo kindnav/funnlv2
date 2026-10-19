@@ -1,5 +1,7 @@
 # Deploying the Google OAuth browser binding
 
+> **Historical record - integration retired 2026-10-19.** Funnl retired its Outlook, Google Calendar and Gmail integrations in Stage D: the UI was removed (#109, #110), the Edge Functions were undeployed and their source removed (#111), and migration `20261019000000` dropped their RPCs, cron job and Vault entries. Everything below is kept unchanged as the record of what was built, decided, consented to and done; its instructions, commands and rollback steps no longer apply and must not be run. Current state: `docs/stage-d-backend-retirement.md`.
+
 Companion to the browser-binding fix (PR #53). The fix makes
 `google-oauth-callback` refuse any completion that does not present the
 `__Host-fnl_oauth_bind` cookie issued by `google-oauth-start`.
