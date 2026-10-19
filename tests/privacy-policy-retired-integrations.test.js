@@ -2,7 +2,10 @@
  * privacy-policy-retired-integrations.test.js — the CURRENT /privacy wording after Google Calendar, Gmail
  * and Outlook were retired, checked against the code and schema that make each claim true.
  *
- * What is pinned here is the present state. The wording that applied while those connections were
+ * What is pinned here is the present state. The records left from those connections were deleted on
+ * 2026-10-19 by migration 20261019180000, so schema claims are checked against the schema the migrations
+ * LEAVE BEHIND (every CREATE and DROP replayed in order), never against a historical CREATE TABLE alone.
+ * The wording that applied while those connections were
  * available is in git history, and the Outlook consent record (src/lib/outlookDisclosure.js) is kept as
  * historical evidence - its own integrity is checked by tests/outlook-consent-ui.test.js and
  * tests/outlook-admin-consent-wording.test.js, not re-derived here.
@@ -22,6 +25,22 @@ const POLICY = read('src/pages/PrivacyPage.jsx')
 const VISIBLE = POLICY.replace(/[{][/][*][\s\S]*?[*][/][}]/g, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ')
 const MIGRATIONS = readdirSync(join(ROOT, 'supabase/migrations')).filter((f) => f.endsWith('.sql')).sort()
   .map((f) => read(`supabase/migrations/${f}`)).join('\n')
+// The public tables and functions the migrations leave behind, replaying every CREATE and DROP in order.
+const MIGRATION_LINES = readdirSync(join(ROOT, 'supabase/migrations')).filter((f) => f.endsWith('.sql')).sort()
+  .flatMap((f) => read('supabase/migrations/' + f).split(String.fromCharCode(10)).map((l) => l.trim()))
+function replay (createRe, dropRe) {
+  const live = new Set()
+  for (const line of MIGRATION_LINES) {
+    const c = line.match(createRe); if (c) live.add(c[1])
+    const d = line.match(dropRe); if (d) live.delete(d[1])
+  }
+  return live
+}
+const FINAL_TABLES = replay(/^CREATE TABLE (?:IF NOT EXISTS )?public[.]([a-z_]+)/i, /^DROP TABLE (?:IF EXISTS )?public[.]([a-z_]+)/i)
+const FINAL_FUNCTIONS = replay(/^CREATE (?:OR REPLACE )?FUNCTION public[.]([a-z_]+)[(]/i, /^DROP FUNCTION (?:IF EXISTS )?public[.]([a-z_]+)[(]/i)
+const APP_TABLES = ['checkout_operations', 'contacts', 'interactions', 'pro_trials', 'profiles', 'stripe_webhook_events', 'subscriptions']
+const RETIRED_TABLES = ['interaction_candidates', 'new_contact_candidates', 'microsoft_oauth_states', 'google_oauth_states', 'google_connections',
+  'google_tokens', 'microsoft_connections', 'microsoft_tokens', 'outlook_sync_state', 'outlook_subscriptions', 'email_candidate_refs']
 const RETIRED_START = '<Section title="Retired connections: Google Calendar, Gmail and Outlook">'
 const RETIRED = (() => {
   const a = POLICY.indexOf(RETIRED_START), b = POLICY.indexOf('<Section title="Analytics: behavior, not content">')
@@ -85,26 +104,36 @@ const TERMS = (() => {
   return m[0].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ')
 })()
 
-test('user-owned records: precise contents, protected by row-level security, removed by account deletion', () => {
-  const records = bullet('Records that remain for now')
-  assert.ok(records.includes('each belonging to the account that used them'))
-  assert.ok(records.includes('settled suggestion records') && records.includes('one expired Outlook sign-in attempt'))
-  assert.ok(records.includes("for Google Calendar, the event's title (up to 200 characters)"))
-  assert.ok(records.includes('for Outlook, a drafted summary of the email exchange (up to 2,000 characters)'))
-  assert.ok(records.includes('Row-level security means no other account can read them, and deleting your account deletes yours'))
-  assert.ok(records.includes('has not yet set a date'))
-  assert.ok(!/key/i.test(records), 'keys are not described as account records')
-  // Schema: RLS is on for each table that still holds rows, and the only user policies are SELECT-own.
-  for (const table of ['interaction_candidates', 'new_contact_candidates', 'microsoft_oauth_states']) {
-    assert.ok(MIGRATIONS.includes(`ALTER TABLE public.${table} ENABLE ROW LEVEL SECURITY`), `${table} has RLS`)
-    const policies = [...MIGRATIONS.matchAll(new RegExp(`CREATE POLICY "[^"]+"\\s+ON public[.]${table}\\s+FOR (\\w+)`, 'g'))].map((m) => m[1])
-    assert.ok(policies.every((p) => p === 'SELECT'), `${table} has only SELECT policies (${policies.join(',') || 'none'})`)
+test('the records left from the retired connections are described as deleted, with their notes, and nothing as remaining', () => {
+  const gone = bullet('The last records were deleted')
+  assert.ok(gone.includes('on October 19, 2026, Funnl deleted the records that were left from these connections from its database'))
+  assert.ok(gone.includes('the settled suggestion records, together with the notes they had proposed'))
+  assert.ok(gone.includes("such as a calendar event's title or a drafted summary of an email exchange"))
+  assert.ok(gone.includes('one expired Outlook sign-in attempt'))
+  assert.ok(gone.includes('Funnl did not export or copy them first'))
+  assert.ok(gone.includes("No suggestion, sign-in or connection records from these connections remain in Funnl's database, and none are waiting for a later cleanup"))
+  assert.ok(!/key|backup/i.test(gone), 'keys and backups are stated separately, not as deleted')
+  // Every stale "still held" passage is gone from what a reader sees.
+  for (const stale of ['remain for now', 'Records that remain', 'records left from retired connections', 'records left from the retired connections',
+    'are stored there too', 'what remains of either', 'intends to remove the rest', 'has not yet set a date.', 'can also still hold the note']) {
+    assert.ok(!VISIBLE.includes(stale), 'stale wording left: ' + stale)
   }
-  // Schema: the never-erased note, and what IS erased on settlement.
-  assert.ok(/CHECK \(proposed_notes IS NULL OR char_length\(proposed_notes\) <= 2000\)/.test(MIGRATIONS))
-  assert.ok(!/proposed_notes\s*=\s*NULL/.test(MIGRATIONS), 'if a migration starts clearing proposed_notes, update the policy')
-  assert.ok(/retained_subject\s*=\s*NULL/.test(MIGRATIONS) && /draft_follow_up\s*=\s*NULL/.test(MIGRATIONS))
-  assert.ok(MIGRATIONS.includes('CONSTRAINT ncc_terminal_erased CHECK ('))
+  // Saved records stay ordinary records with their source label.
+  const saved = bullet('What you saved stays yours')
+  assert.ok(saved.includes('is an ordinary Funnl record') && saved.includes('"Google Calendar" or "Outlook" label'))
+})
+
+test('schema: the migrations leave no integration table or function, and keep the app tables and the source labels', () => {
+  for (const t of RETIRED_TABLES) assert.ok(!FINAL_TABLES.has(t), t + ' still exists after the migrations')
+  assert.deepStrictEqual([...FINAL_TABLES].sort(), APP_TABLES, 'exactly the seven application tables remain')
+  for (const fn of ['run_google_local_cleanup', 'outlook_sync_state_consume_wake', 'outlook_unpaired_valid', 'expire_pending_email_context', 'expire_pending_outlook_context']) {
+    assert.ok(!FINAL_FUNCTIONS.has(fn), fn + ' still exists after the migrations')
+  }
+  // The drop migration refuses to run on pending or live state and never touches the saved-record label rule.
+  const drop = read('supabase/migrations/20261019180000_drop_integration_tables.sql')
+  assert.ok(drop.includes("status IN ('pending', 'deferred')") && drop.includes('expires_at > now()'))
+  assert.ok(!/CASCADE;/.test(drop) && !/ALTER TABLE public[.]interactions/.test(drop), 'no cascade, and interactions is not altered')
+  assert.ok(drop.includes("pg_get_constraintdef(oid) LIKE '%outlook%'") && drop.includes("LIKE '%google_calendar%'"), 'it verifies the source labels survive')
 })
 
 test('server keys are stated separately: shared, retained, and NOT removed by deleting an account', () => {
@@ -116,30 +145,31 @@ test('server keys are stated separately: shared, retained, and NOT removed by de
 
 test('backups are never claimed destroyed', () => {
   const backups = bullet('Backups')
-  assert.ok(backups.includes('removes it from Funnl') && backups.includes('does not remove copies that may exist in backups'))
-  assert.ok(!/backups?[^.]{0,80}(destroyed|deleted|erased|purged)/i.test(VISIBLE.replace('does not remove copies that may exist in backups', '')))
+  assert.ok(backups.includes("deleting your account removes your records from Funnl's database") && backups.includes('the deletion described above removed those records from it'))
+  assert.ok(backups.includes('Neither removes copies that may exist in backups'))
+  assert.ok(backups.includes('Funnl has not established whether any such copies exist or when they expire'))
+  assert.ok(!/backups?[^.]{0,80}(destroyed|deleted|erased|purged)/i.test(VISIBLE.replace('Neither removes copies that may exist in backups', '')))
 })
 
-test('account deletion removes the user-owned records (cascade from the account)', () => {
-  assert.ok(VISIBLE.includes('removes your contacts, interactions, and your records left from the retired connections'))
+test('account deletion removes contacts and interactions; keys and backups are not claimed', () => {
+  assert.ok(VISIBLE.includes('which removes your contacts and interactions, including any you saved from the retired connections'))
+  assert.ok(VISIBLE.includes("It does not remove Funnl's shared server keys or any backup copies"))
   const del = read('supabase/functions/delete-account/index.ts')
-  // Stage F removed delete-account's separate Google cleanup step: deleting the auth user removes the
-  // remaining integration records through ON DELETE CASCADE (pinned below) while those tables exist.
   assert.ok(del.includes(".from('contacts')") && del.includes('admin.auth.admin.deleteUser(user.id)'))
   assert.ok(!del.includes('cleanupGoogle') && !del.includes('run_google_local_cleanup'))
-  for (const table of ['interaction_candidates', 'new_contact_candidates', 'microsoft_oauth_states']) {
-    const at = MIGRATIONS.indexOf(`CREATE TABLE public.${table}`)
-    const ddl = MIGRATIONS.slice(at, MIGRATIONS.indexOf(');', at))
-    assert.ok(/user_id\s+uuid\s+NOT NULL\s+REFERENCES auth[.]users\(id\)\s+ON DELETE CASCADE/.test(ddl), `${table} cascades from the account`)
-  }
+  // Interactions go with their contact, and contacts with the account, in the schema left behind.
+  assert.ok(FINAL_TABLES.has('contacts') && FINAL_TABLES.has('interactions'))
+  const at = MIGRATIONS.indexOf('CREATE TABLE public.interactions'), ddl = MIGRATIONS.slice(at, MIGRATIONS.indexOf(');', at))
+  assert.ok(/REFERENCES public[.]contacts[(]id[)] ON DELETE CASCADE/.test(ddl), 'interactions cascade from their contact')
 })
 
-test('remaining records are not sent to Anthropic: the AI functions read only contacts and interactions', () => {
-  assert.ok(VISIBLE.includes('The records left from retired connections are not sent to Anthropic'))
+test('the AI functions read only contacts and interactions, and no remaining-records claim is made', () => {
+  assert.ok(!VISIBLE.includes('not sent to Anthropic'), 'no sentence about records that no longer exist')
+  assert.ok(VISIBLE.includes('An interaction you accepted from a suggestion is an ordinary interaction, so if you use Funnl AI it may be sent to Anthropic like any other'))
   for (const dir of ['ai-chat', 'ai-paste-email', 'ai-parse-contact', 'ai-map-csv', 'ai-categorize-contacts']) {
     for (const f of readdirSync(join(ROOT, 'supabase/functions', dir))) {
-      const src = read(`supabase/functions/${dir}/${f}`)
-      assert.ok(!/interaction_candidates|new_contact_candidates|microsoft_|google_connections/.test(src), `${dir}/${f} reads an integration table`)
+      const src = read('supabase/functions/' + dir + '/' + f)
+      assert.ok(!/interaction_candidates|new_contact_candidates|microsoft_|google_connections/.test(src), dir + '/' + f + ' reads an integration table')
     }
   }
 })
@@ -208,6 +238,16 @@ test('the page exposes no internal stage names, project identifiers or pilot det
   for (const internal of ['Stage ', 'Packet', 'jzybxhvgnksrwxfivdwt', 'pilot', 'migration', 'cron', 'Vault', 'HMAC']) {
     assert.ok(!VISIBLE.includes(internal), `visible text mentions ${internal}`)
   }
+})
+
+test('the earlier erasure-wording discrepancy stays recorded, and the schema history still supports it', () => {
+  const record = read('docs/stage-f-integration-tables.md')
+  assert.ok(record.includes('The prior erasure discrepancy'), 'the discrepancy record is kept')
+  assert.ok(record.includes('was never erased by accept, dismiss or invalidate'))
+  // What it records: no migration ever cleared proposed_notes; subjects and next steps were cleared on settlement.
+  assert.ok(/CHECK [(]proposed_notes IS NULL OR char_length[(]proposed_notes[)] <= 2000[)]/.test(MIGRATIONS))
+  assert.ok(!/proposed_notes *= *NULL/.test(MIGRATIONS))
+  assert.ok(/retained_subject *= *NULL/.test(MIGRATIONS) && /draft_follow_up *= *NULL/.test(MIGRATIONS))
 })
 
 test('the historical Outlook consent record is retained, unchanged in shape, and no longer quoted as current policy', () => {
