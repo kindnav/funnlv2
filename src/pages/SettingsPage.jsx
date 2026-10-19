@@ -18,6 +18,8 @@ import {
 import {
   moveThemeRadio,
   classifyDeleteAccountResponse,
+  readDeleteAccountErrorCode,
+  deleteAccountErrorMessage,
   canCloseDialog,
   THEME_ORDER,
 } from '../lib/settingsLifecycle'
@@ -331,7 +333,9 @@ function SettingsPage() {
     if (!mountedRef.current || accountGenRef.current !== capturedGen) return
     const result = classifyDeleteAccountResponse(error, data)
     if (!result.ok) {
-      setDeleteError('Something went wrong. Please try again.')
+      const code = await readDeleteAccountErrorCode(error, result.code)
+      if (!mountedRef.current || accountGenRef.current !== capturedGen) return
+      setDeleteError(deleteAccountErrorMessage(code))
       setDeleting(false)
       return
     }
@@ -688,7 +692,8 @@ function SettingsPage() {
             </h2>
             <p className="text-[11.5px] text-muted leading-[1.55] mb-3">
               This permanently deletes your account, {summarizeContactCount(contactCount)}, and all
-              interactions and notes. There is no recovery.
+              interactions and notes. There is no recovery. If you have a Funnl Pro subscription,
+              it is canceled immediately, without a refund.
             </p>
             {deleting && (
               <p role="status" aria-live="assertive" className="sr-only">Deleting account…</p>

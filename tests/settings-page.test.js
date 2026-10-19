@@ -349,7 +349,7 @@ test('delete-account calls the Edge Function delete-account', () => {
 })
 test('delete-account navigates to /signup after sign-out', () => {
   const handleDeleteIdx = sp.indexOf('async function handleDeleteAccount(')
-  const fn = sp.slice(handleDeleteIdx, handleDeleteIdx + 750)
+  const fn = sp.slice(handleDeleteIdx, handleDeleteIdx + 1100)
   assert.ok(fn.includes('/signup'), 'must navigate to /signup after successful deletion')
 })
 
@@ -639,12 +639,12 @@ test('delete-account checks for invoke error', () => {
 })
 test('delete-account post-deletion destination is /signup', () => {
   const daIdx = sp.indexOf('async function handleDeleteAccount(')
-  const fn = sp.slice(daIdx, daIdx + 700)
+  const fn = sp.slice(daIdx, daIdx + 1100)
   assert.ok(fn.includes('/signup'), 'post-deletion navigation must go to /signup')
 })
 test('delete-account calls signOut before navigating', () => {
   const daIdx = sp.indexOf('async function handleDeleteAccount(')
-  const fn = sp.slice(daIdx, daIdx + 700)
+  const fn = sp.slice(daIdx, daIdx + 1100)
   const signOutIdx = fn.indexOf('signOut()')
   const navIdx = fn.indexOf('/signup')
   assert.ok(signOutIdx !== -1, 'must call signOut() before navigating')
@@ -979,7 +979,7 @@ test('settingsLifecycle.js has no Supabase import (Node-safe)', () => {
 })
 test('classifyDeleteAccountResponse used in handleDeleteAccount (not raw .data check)', () => {
   const daIdx = sp.indexOf('async function handleDeleteAccount(')
-  const fn = sp.slice(daIdx, daIdx + 700)
+  const fn = sp.slice(daIdx, daIdx + 1100)
   assert.ok(fn.includes('classifyDeleteAccountResponse'), 'handleDeleteAccount must use classifyDeleteAccountResponse helper')
 })
 test('canCloseDialog used in modal close functions', () => {

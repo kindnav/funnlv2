@@ -61,6 +61,42 @@ export function classifyDeleteAccountResponse(invokeError, data) {
 }
 
 /**
+ * Reads the controlled error code from a failed delete-account invoke. supabase.functions.invoke
+ * reports a non-2xx response as an error whose `context` is the raw Response; its JSON body is
+ * { error: { code } }. Returns `fallback` when there is no readable code.
+ *
+ * @param {unknown} invokeError
+ * @param {string}  fallback
+ * @returns {Promise<string>}
+ */
+export async function readDeleteAccountErrorCode (invokeError, fallback) {
+  try {
+    const body = await invokeError?.context?.json?.()
+    const code = body?.error?.code
+    return typeof code === 'string' && code ? code : fallback
+  } catch {
+    return fallback
+  }
+}
+
+/**
+ * The message shown for a failed account deletion. Only controlled codes are mapped; nothing from
+ * Stripe or the database is ever shown.
+ *
+ * @param {string} code
+ * @returns {string}
+ */
+export function deleteAccountErrorMessage (code) {
+  if (code === 'subscription_cancel_unconfirmed') {
+    return "Your Funnl Pro subscription couldn't be canceled just now, so your account was not deleted. Please try again in a few minutes."
+  }
+  if (code === 'subscription_needs_support') {
+    return "Your Funnl Pro subscription couldn't be canceled automatically, so your account was not deleted. Please email navbir12345@gmail.com and we'll sort it out."
+  }
+  return 'Something went wrong. Please try again.'
+}
+
+/**
  * Returns true when a modal dialog can safely be closed (not blocked by an in-progress mutation).
  *
  * @param {boolean} isBusy - true when a deletion or save is in progress
