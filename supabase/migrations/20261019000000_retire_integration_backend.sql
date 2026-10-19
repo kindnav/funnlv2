@@ -7,9 +7,16 @@
 -- docs/stage-d-backend-retirement.md): the nine integration Edge Functions are already UNDEPLOYED,
 -- so nothing can call the functions dropped here. outlook-worker-tick is already inactive.
 --
+-- ATOMICITY: `supabase db push` (CLI 2.109.0, pkg/migration/file.go ExecBatch) sends every statement
+-- of this file AND its supabase_migrations.schema_migrations row as ONE pgconn batch closed by a
+-- single Sync, which PostgreSQL commits or rolls back as one implicit transaction. Any failure below
+-- therefore undoes every earlier step and records no version. This file contains no BEGIN/COMMIT.
+--
 -- What this does, in one transaction:
 --   1. Unschedules the inactive pg_cron job outlook-worker-tick (it only ever posted to the
---      now-undeployed outlook-import-worker).
+--      now-undeployed outlook-import-worker). It REFUSES - failing the whole migration - when more
+--      than one job has that name, when the job is ACTIVE, or when its command is not the expected
+--      worker call; an absent job is already retired and is skipped.
 --   2. Deletes the two Vault entries only that job read: outlook_worker_url, outlook_worker_secret.
 --      No other Vault entry is touched.
 --   3. Drops the 48 integration RPCs whose every caller (the integration Edge Functions, the retired
@@ -39,11 +46,28 @@
 
 -- 1. The cron job ------------------------------------------------------------------------------
 DO $$
+DECLARE
+  v_count integer;
+  v_job   record;
 BEGIN
-  IF to_regclass('cron.job') IS NOT NULL
-     AND EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'outlook-worker-tick') THEN
-    PERFORM cron.unschedule('outlook-worker-tick');
+  IF to_regclass('cron.job') IS NULL THEN
+    RETURN;
   END IF;
+  SELECT count(*) INTO v_count FROM cron.job WHERE jobname = 'outlook-worker-tick';
+  IF v_count = 0 THEN
+    RETURN;  -- already retired
+  END IF;
+  IF v_count > 1 THEN
+    RAISE EXCEPTION 'refusing to retire outlook-worker-tick: % jobs carry that name', v_count;
+  END IF;
+  SELECT jobid, active, command INTO v_job FROM cron.job WHERE jobname = 'outlook-worker-tick';
+  IF v_job.active THEN
+    RAISE EXCEPTION 'refusing to retire outlook-worker-tick: the job is ACTIVE; deactivate it deliberately first';
+  END IF;
+  IF position('outlook_worker_url' IN v_job.command) = 0 OR position('outlook_worker_secret' IN v_job.command) = 0 THEN
+    RAISE EXCEPTION 'refusing to retire outlook-worker-tick: its command is not the expected worker call';
+  END IF;
+  PERFORM cron.unschedule(v_job.jobid);
 END
 $$;
 

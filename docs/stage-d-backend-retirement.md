@@ -35,14 +35,19 @@ Each operational step below needs its own authorization. The PR itself changes o
 ### Step 0 — Preconditions (read-only)
 
 - The live function list shows exactly the 9 integration functions below, plus the retained ones.
-- `outlook-worker-tick` exists and is **inactive**.
+- **Exactly one** `cron.job` row is named `outlook-worker-tick`, it is **inactive**, and its command reads both worker Vault names. The migration refuses to run otherwise (see Step 2), so check this first.
 - `OUTLOOK_IMPORT_WORKER_ENABLED` is absent. Stage C already removed the integration client secrets and the worker secret.
 - There are 0 Microsoft connections and 0 Google connections.
-- Record a baseline:
-  - per-table row counts;
-  - the md5 of every retained function body and its ACL;
-  - the Vault entry **names** only, never values;
-  - the `delete-account` version.
+- `supabase migration list --linked` shows `20261019000000` as the only pending version.
+- Record a baseline. Report only match or mismatch and row counts, never row content or digest values:
+  - **Every public table:** a membership-and-content digest, i.e. the md5 over the sorted md5 of each row's text, plus the row count. Any added, removed or edited row changes it.
+  - **The protected records:** the same digest, per table.
+  - **Every public function:** signature, md5 of the body, ACL, `SECURITY DEFINER` and config.
+  - **`cron.job`:** id, name, schedule, md5 of the command, active.
+  - **`vault.secrets`:** the names, plus a per-row digest of every entry the migration must keep. Never values.
+  - **Triggers.**
+  - **`supabase_migrations.schema_migrations`:** the versions.
+  - **The `delete-account` version.**
 
 ### Step 1 — Undeploy the 9 functions, one at a time
 
@@ -74,14 +79,21 @@ Receivers go first, then starters. After each one, re-list the functions and con
 
 1. Check `supabase migration list --linked`: exactly one pending migration, `20261019000000`.
 2. Apply it from the pinned reviewed head with `supabase db push --linked`.
-3. Verify with read-only queries:
-   - `outlook-worker-tick` is absent from `cron.job`;
-   - the two worker Vault names are absent, and every other name is unchanged;
-   - 0 public functions carry any of the 48 names;
-   - every retained function has an identical md5 and ACL to the baseline;
-   - row counts and triggers are unchanged.
+3. Verify with read-only queries, against the Step 0 baseline:
+   - **History:** `supabase_migrations.schema_migrations` has exactly one new version, `20261019000000`.
+   - **Cron:** `outlook-worker-tick` is absent from `cron.job`, and every other job is unchanged.
+   - **Vault:** the two worker names are absent, and every other entry's per-row digest is unchanged.
+   - **Functions:** 0 public functions carry any of the 48 names, and every other function matches the baseline exactly, including its ACL.
+   - **Data:** every public table's membership-and-content digest, every protected-record digest and every trigger is unchanged.
 
-The migration also verifies itself and rolls back entirely if any check fails.
+**Atomicity, established from source rather than assumed:**
+- **Single batch:** with CLI 2.109.0, `db push` runs `ApplyMigrations`, and that calls `ExecBatch` once per file (`apps/cli-go/pkg/migration/file.go`). `ExecBatch` puts every statement and the history `INSERT` into one pgconn batch (pgconn v1.14.3). The batch ends with a single `Sync`, which PostgreSQL commits, or rolls back on error, as one implicit transaction (protocol docs, extended query and pipelining).
+- **On failure:** nothing from the file is kept, and no version is recorded. The file itself contains no `BEGIN`/`COMMIT`.
+- **Failure modes:**
+  - The cron guard refuses an active job, more than one job with that name, or an unexpected command.
+  - A `DROP FUNCTION` without CASCADE refuses an unexpected dependent.
+  - The final verification block refuses an incomplete result.
+- **What a failure means for you:** the migration stays pending and Production is unchanged. Investigate before any retry; there is no automatic retry.
 
 **Order:** Step 1 comes first, so nothing deployed can call a dropped RPC. Every caller is already removed from the frontend by #109/#110.
 
@@ -103,16 +115,22 @@ Merging deploys the frontend through Vercel. It changes no behaviour: the delete
 
 ## Local evidence
 
-`node tests/local/integration-backend-retirement.mjs` runs Postgres, GoTrue and PostgREST with every migration applied, using synthetic users. It drives the real `googleCleanup.js` through supabase-js in `delete-account`'s order. It covers:
+`node tests/local/integration-backend-retirement.mjs` runs Postgres, GoTrue and PostgREST with every earlier migration and the CLI's history table, using synthetic users. It applies the migration the way `db push` does: the file plus its history row, run with `psql --single-transaction -v ON_ERROR_STOP=1`. It drives the real `googleCleanup.js` through supabase-js in `delete-account`'s order. It covers:
 
-- deletion before the migration;
-- the migration's exact effects;
-- unchanged rows, triggers and retained functions;
-- a dropped RPC returning 404;
-- both expiry helpers still running;
-- deletion after the migration;
-- an untouched bystander;
-- an idempotent re-apply.
+- **Deletion before the migration**, leaving none of that user's rows.
+- **Blocked last drop.** A real dependency (a synthetic view calling the last dropped function) blocks the final `DROP FUNCTION`. By then the job has been unscheduled, both Vault rows deleted and 47 functions dropped. The attempt fails on that dependency, and every digest above is identical to before: tables, auth users, Vault, cron, functions and grants, triggers and history. Removing only the blocker restores the exact start state.
+- **Unexpected active job.** With the job made active (on a once-a-year schedule, so it cannot fire), the attempt fails on the cron guard and changes nothing. Restoring the job restores the exact start state.
+- **The successful run:**
+  - exactly one history row;
+  - the job gone, and only the two Vault rows gone, with the kept entry's digest unchanged;
+  - 0 of the 48 functions left;
+  - every table's membership-and-content digest unchanged;
+  - only Vault, cron, functions and history changed.
+- **After the run:**
+  - a dropped RPC returns 404, and both expiry helpers still run;
+  - the protected user's rows are unchanged by the migration and then deleted cleanly;
+  - the bystander's digests are unchanged throughout.
+- **Re-running the body:** succeeds and changes nothing.
 
 ## Still pending, outside this plan
 
