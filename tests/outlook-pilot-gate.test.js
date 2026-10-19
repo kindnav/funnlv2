@@ -776,11 +776,6 @@ test('the browser predicate admits every invited viewer and nobody else', () => 
   assert.strictEqual(OUTLOOK_PILOT_VIEWER_ID, null, 'and it is unset outside Vite')
 })
 
-test('the review flag is still a plain build flag, and names no account', () => {
-  const gate = read('src/lib/suggestionReview.js')
-  assert.ok(gate.includes('import.meta.env'), 'it is a build-time flag')
-  assert.ok(!gate.includes('PILOT'), 'the review flag is not per-account')
-})
 await Promise.all(pending)
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed`)
 if (failed > 0) process.exit(1)

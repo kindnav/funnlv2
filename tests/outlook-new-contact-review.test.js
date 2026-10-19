@@ -52,8 +52,6 @@ function test (name, fn) {
 }
 
 const read = (p) => readFileSync(new URL(`../${p}`, import.meta.url), 'utf8')
-const CARD_SRC = read('src/components/NewContactSuggestionCard.jsx')
-const PAGE_SRC = read('src/pages/SuggestionsPage.jsx')
 const MIGRATION = read('supabase/migrations/20260921000000_add_outlook_content_draft_primitives.sql')
 const codeOnly = (src) => src.split(String.fromCharCode(10))
   .filter((l) => !/^[ ]*([/][/]|[*]|[/][*])/.test(l)).join(String.fromCharCode(10))
@@ -120,11 +118,6 @@ async function loadModuleUrl (abs) {
   return moduleUrlCache.get(abs)
 }
 
-async function loadCard () {
-  const abs = resolve(dirname(fileURLToPath(import.meta.url)), '..',
-    'src/components/NewContactSuggestionCard.jsx')
-  return import(await loadModule(abs))
-}
 
 // ── a fixture candidate row, as PostgREST would return it ───────────────────
 const ROW = Object.freeze({
@@ -464,207 +457,22 @@ test('evidence is described in words a reviewer can act on', () => {
 console.log('')
 console.log('a REAL render of the card')
 
-test('the card shows the person, the exchange and the editable fields', async () => {
-  globalThis.__supabaseStub = supabaseStub()
-  globalThis.__tracked = []
-  calls.length = 0
-  const mod = await loadCard()
-  const html = renderToStaticMarkup(createElement(mod.default, {
-    candidate: ROW, onResolved: () => {},
-  }))
 
-  // THE CLAIM THAT MATTERS: rendering created nothing and queried nothing.
-  assert.deepStrictEqual(calls, [], 'rendering the card must issue no call at all')
-  assert.deepStrictEqual(globalThis.__tracked, [], 'and track no event')
 
-  // The person.
-  assert.ok(html.includes('New person'))
-  assert.ok(html.includes('Priya Sharma'))
-  assert.ok(html.includes('priya.sharma@goldman.test'), 'the envelope address is shown')
-  assert.ok(html.includes('from their signature'), 'and how the name was arrived at')
-  // The exchange, with the real summary.
-  assert.ok(html.includes('analyst'), 'the summary is shown')
-  assert.ok(html.includes('Send the updated CV before Friday.'))
-  assert.ok(html.includes('2026-09-22'))
-  // The editable fields, all of them.
-  for (const label of ['Name', 'Company', 'Role', 'How you met', 'Relationship', 'Tags',
-    'Interaction type', 'Date', 'Note', 'Follow up on']) {
-    assert.ok(html.includes(label), `the card must offer ${label}`)
-  }
-  // And ONE explicit action that creates both.
-  assert.ok(html.includes('Save contact &amp; interaction'), 'one explicit acceptance')
-  assert.ok(html.includes('Dismiss'))
-})
 
-test('the email field is not editable, because the RPC would ignore an edit', async () => {
-  globalThis.__supabaseStub = supabaseStub()
-  globalThis.__tracked = []
-  const mod = await loadCard()
-  const html = renderToStaticMarkup(createElement(mod.default, {
-    candidate: ROW, onResolved: () => {},
-  }))
-  // No input carries the address as a value.
-  assert.ok(!/<input[^>]*value="priya\.sharma@goldman\.test"/.test(html),
-    'the address must not appear as an editable value')
-  assert.ok(!/<input[^>]*type="email"/.test(html))
-})
 
-test('NO SUMMARY renders the honest sentence, never a placeholder note', async () => {
-  globalThis.__supabaseStub = supabaseStub()
-  globalThis.__tracked = []
-  const mod = await loadCard()
-  const html = renderToStaticMarkup(createElement(mod.default, {
-    candidate: { ...ROW, draft_summary: null, draft_follow_up: null },
-    onResolved: () => {},
-  }))
-  assert.ok(html.includes('No summary was prepared'), html.slice(0, 200))
-  assert.ok(html.includes('Add your own note'))
-  // And the note field is EMPTY, not seeded with a subject or a count.
-  assert.ok(!/Summer analyst referral/.test(html), 'the subject is not used as a note')
-  const textarea = html.match(/<textarea[^>]*>([^<]*)<\/textarea>/)
-  assert.ok(textarea === null || textarea[1].trim() === '', 'the note must start empty')
-})
-
-test('a name with no evidence renders no evidence claim', async () => {
-  globalThis.__supabaseStub = supabaseStub()
-  globalThis.__tracked = []
-  const mod = await loadCard()
-  const html = renderToStaticMarkup(createElement(mod.default, {
-    candidate: { ...ROW, proposed_name_evidence: null }, onResolved: () => {},
-  }))
-  assert.ok(!html.includes('Name from'), 'no evidence means no claim about evidence')
-})
-
-test('the dismiss confirmation promises that nothing is created', async () => {
-  // Rendered from the source, since the confirmation is behind state this render
-  // cannot reach. Asserted on the string the component ships.
-  assert.ok(/No contact or interaction will be created/.test(CARD_SRC),
-    'the confirmation must say what dismissing does NOT do')
-})
 
 // ════════════════════════════════════════════════════════════════════════════
 console.log('')
 console.log('nothing is created by opening the queue, editing, or dismissing')
 
-test('the card calls exactly TWO rpcs, and only one of them writes a network record', () => {
-  const names = [...new Set([...codeOnly(CARD_SRC).matchAll(/supabase\.rpc\(\s*'([a-z_]+)'/g)]
-    .map((m) => m[1]))].sort()
-  assert.deepStrictEqual(names, ['accept_new_contact_candidate', 'dismiss_new_contact_candidate'])
-  // No direct table write of any kind: every write goes through an RPC, and the table
-  // grants `authenticated` no INSERT/UPDATE/DELETE anyway.
-  for (const forbidden of ['.insert(', '.update(', '.upsert(', '.delete(']) {
-    assert.ok(!codeOnly(CARD_SRC).includes(forbidden), `the card must not call ${forbidden}`)
-  }
-  assert.ok(MIGRATION.includes('No INSERT/UPDATE/DELETE for authenticated'))
-})
 
-test('the accept rpc is behind a button, not an effect', () => {
-  const code = codeOnly(CARD_SRC)
-  // The only call site is inside handleAccept, which is only referenced by onClick.
-  const acceptIdx = code.indexOf("supabase.rpc(\n        'accept_new_contact_candidate'")
-    + code.indexOf("'accept_new_contact_candidate'")
-  assert.ok(acceptIdx > 0)
-  const handler = code.slice(code.indexOf('async function handleAccept'),
-    code.indexOf('async function handleDismiss'))
-  assert.ok(handler.includes('accept_new_contact_candidate'),
-    'the accept call must live in handleAccept')
-  assert.ok(/onClick=\{handleAccept\}/.test(code), 'and be reached only by a click')
-  // No useEffect may reference either write.
-  for (const m of code.matchAll(/useEffect\(\(\) => \{([\s\S]*?)\n  \}, \[/g)) {
-    assert.ok(!/accept_new_contact_candidate|dismiss_new_contact_candidate/.test(m[1]),
-      'no effect may write')
-  }
-})
 
-test('a single-flight guard stops a double submission creating two contacts', () => {
-  const code = codeOnly(CARD_SRC)
-  const handler = code.slice(code.indexOf('async function handleAccept'),
-    code.indexOf('async function handleDismiss'))
-  assert.ok(/if \(busy\) return/.test(handler), 'accept must refuse while busy')
-  assert.ok(/setBusy\(true\)/.test(handler))
-  assert.ok(/disabled=\{busy\}/.test(code), 'and the button must be disabled')
-})
 
-test('the QUEUE only reads, and reads both tables', () => {
-  const code = codeOnly(PAGE_SRC)
-  assert.ok(code.includes("from('new_contact_candidates')"), 'the proposals must be listed')
-  assert.ok(code.includes("from('interaction_candidates')"))
-  assert.ok(code.includes('NCC_SELECT'))
-  // Only pending rows, from both - the two page reads, and the two by-id reads the
-  // background refresh uses to merge arrivals and refreshed proposals into the loaded list.
-  assert.strictEqual([...code.matchAll(/\.eq\('status', 'pending'\)/g)].length, 4)
-  // And no write of any kind on the page itself.
-  for (const forbidden of ['.insert(', '.update(', '.upsert(',
-    'accept_new_contact_candidate']) {
-    assert.ok(!code.includes(forbidden), `the page must not ${forbidden}`)
-  }
-  // `.delete(` appears only on the page's own in-memory Maps and Sets (the refresh's
-  // known-signature, busy and held bookkeeping) - never on a Supabase query.
-  const deletes = [...code.matchAll(/\.delete\(/g)].length
-  const inMemoryDeletes = [...code.matchAll(/Ref\.current\.delete\(/g)].length
-  assert.ok(deletes > 0 && deletes === inMemoryDeletes, `every .delete( must be an in-memory one (${inMemoryDeletes}/${deletes})`)
-  // A Supabase delete is a `.from('<table>')` chain ending in `.delete(`; JSX has few semicolons,
-  // so the chain is matched by its own shape rather than "anything up to a semicolon".
-  assert.ok(!/\.from\('[^']+'\)(\s*\.[A-Za-z]+\([^()]*\))*\s*\.delete\(/.test(code), 'no Supabase delete on the page')
-})
 
-test('an empty interaction queue with a proposal waiting is NOT "all caught up"', () => {
-  const code = codeOnly(PAGE_SRC)
-  assert.ok(/const queueEmpty = items\.length === 0 && proposals\.length === 0/.test(code),
-    'emptiness must span both queues')
-  // AND neither queue may have anything past its own cursor. "All caught up" with
-  // proposal 21 still in the database was the defect: the proposals queue had a bare
-  // limit of 20 and no continuation at all, so draining the visible page ended the
-  // review. Emptiness now requires both lists empty AND both cursors exhausted.
-  assert.ok(/const anyMore = hasMore \|\| proposalsHaveMore/.test(code),
-    'exhaustion must span both cursors')
-  assert.ok(/status === 'ready' && queueEmpty && !anyMore/.test(code),
-    'the "all caught up" state must be gated on both')
-  assert.ok(!/items\.length === 0 && !hasMore/.test(code),
-    'the old items-only emptiness test must be gone')
-})
 
-test('the proposals queue is keyset-paged, refilled, and single-flighted', () => {
-  const code = codeOnly(PAGE_SRC)
-  // Its OWN cursor, not a shared one: the two tables have independent id spaces.
-  assert.ok(/proposalCursorRef/.test(code), 'the proposals queue needs its own cursor')
-  assert.ok(/fetchProposals = useCallback\(async \(cursor\)/.test(code),
-    'and the fetch must take one')
-  assert.ok(/keysetFilter\(cursor\)/.test(code))
-  // Reusing the existing helpers rather than a new pagination layer. Both queues are
-  // ordered by the same pair, so the same keyset applies unchanged.
-  assert.ok(/cursorFrom\(proposals\)/.test(code))
-  assert.ok(/computeHasMore\(proposals\.length\)/.test(code))
-  // A refill when the visible page drains but more remain.
-  assert.ok(/proposals\.length === 0 && proposalsHaveMore/.test(code),
-    'draining the visible proposals must pull the next page')
-  // And a synchronous single-flight, so a refill and a Load more cannot race.
-  assert.ok(/loadingProposalsRef/.test(code))
-  // No bare limit without continuation anywhere in the proposals path.
-  const fetchFn = code.slice(code.indexOf('const fetchProposals'),
-    code.indexOf('const loadInitial'))
-  assert.ok(/\.limit\(REVIEW_PAGE_SIZE\)/.test(fetchFn), 'still one bounded page at a time')
-  assert.ok(/\.or\(filter\)/.test(fetchFn), 'with the keyset applied')
-})
 
-test('the page explains that nothing is saved until acceptance', () => {
-  assert.ok(/Nothing is saved to your network until you\s*\n?\s*accept it/.test(PAGE_SRC)
-    || /Nothing is saved to your network until you/.test(PAGE_SRC), 'the promise must be stated')
-  assert.ok(/Dismissing a suggestion creates nothing/.test(PAGE_SRC))
-})
 
-test('analytics carry booleans and a controlled source, never content', () => {
-  const code = codeOnly(CARD_SRC)
-  const props = code.slice(code.indexOf('suggestionEventProps(candidate.source, {'),
-    code.indexOf('window.dispatchEvent'))
-  for (const leak of ['state.name', 'state.company', 'proposed_email', 'draft_summary',
-    'state.interactionNotes', 'email']) {
-    assert.ok(!props.includes(leak), `analytics must not carry ${leak}`)
-  }
-  assert.ok(props.includes('edited'))
-  assert.ok(props.includes('proposed_contact: true'))
-  assert.ok(props.includes('with_interaction'))
-})
 
 // ════════════════════════════════════════════════════════════════════════════
 console.log('')
@@ -683,8 +491,6 @@ test('NO RAW CONTROL BYTE is present in any file this slice added', () => {
   // source. Hence the rule the fix encodes - describe such an escape, never write it.
   const FILES = [
     'src/lib/newContactReview.js',
-    'src/components/NewContactSuggestionCard.jsx',
-    'src/pages/SuggestionsPage.jsx',
     'supabase/functions/shared/outlookContentPass.js',
     'supabase/functions/shared/outlookContentStage.js',
     'supabase/functions/shared/outlookHandleProducer.js',

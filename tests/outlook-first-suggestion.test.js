@@ -47,14 +47,7 @@ import {
 import {
   SOURCE_PROVIDERS, getSourceProvider, isValidInteractionSource,
 } from '../src/lib/interactionSource.js'
-import {
-  outlookReviewEnabled, suggestionReviewEnabled, OUTLOOK_REVIEW_ENABLED,
-  SUGGESTION_REVIEW_ENABLED,
-} from '../src/lib/suggestionReview.js'
 import { CANDIDATE_SELECT, validateOverrides } from '../src/lib/calendarReview.js'
-import {
-  SUGGESTION_EVENTS, SUGGESTION_SOURCES, suggestionSourceLabel, suggestionEventProps,
-} from '../src/lib/suggestionAnalytics.js'
 const CONSENTED = 'ol-disc-' + '0'.repeat(32)   // the version this fixture's connection consented under; injected as the background requirement
 
 /**
@@ -96,10 +89,7 @@ function test (name, fn) {
 const read = (p) => readFileSync(new URL(`../${p}`, import.meta.url), 'utf8')
 const RUN_SRC = read('supabase/functions/shared/outlookImportRun.js')
 const MIGRATION = read('supabase/migrations/20260930000000_outlook_interaction_candidate_write.sql')
-const PAGE = read('src/pages/SuggestionsPage.jsx')
 const BADGE_SRC = read('src/components/InteractionSourceBadge.jsx')
-const GATE_SRC = read('src/lib/suggestionReview.js')
-const ENTRY = read('src/components/SuggestionsEntry.jsx')
 const codeOnly = (src) => src.split(String.fromCharCode(10))
   .filter((l) => !/^[ ]*([/][/]|[*]|[/][*])/.test(l)).join(String.fromCharCode(10))
 
@@ -703,44 +693,9 @@ test('the Outlook glyph claims no Microsoft branding', () => {
 
 console.log('\nthe review surface: the gate, and what stays a source scan')
 
-test('the gate is source-neutral and OFF in every environment', () => {
-  assert.strictEqual(outlookReviewEnabled('true'), true)
-  for (const v of ['TRUE', 'True', '1', 'yes', '', ' true', 'true ', null, undefined, true]) {
-    assert.strictEqual(outlookReviewEnabled(v), false, String(v))
-  }
-  assert.strictEqual(suggestionReviewEnabled({ calendar: false, outlook: false }), false)
-  assert.strictEqual(suggestionReviewEnabled({ calendar: true, outlook: false }), true)
-  assert.strictEqual(suggestionReviewEnabled({ calendar: false, outlook: true }), true)
-  // In Node, import.meta.env is undefined, so both resolve to the fail-safe default -
-  // which is also their value in every real environment today.
-  assert.strictEqual(OUTLOOK_REVIEW_ENABLED, false)
-  assert.strictEqual(SUGGESTION_REVIEW_ENABLED, false)
-})
 
-test('the review flag is separate from the CONNECT flag', () => {
-  assert.ok(/VITE_OUTLOOK_REVIEW_ENABLED/.test(GATE_SRC))
-  assert.ok(/Separate from VITE_OUTLOOK_CONNECTION_ENABLED/.test(GATE_SRC),
-    'connecting a mailbox and reviewing its output are different decisions')
-})
 
-test('STRUCTURAL ONLY: the page renders the badge and binds the edit fields', () => {
-  // renderToStaticMarkup cannot dispatch events and this repo has no JSDOM, so these
-  // are source assertions. The accept-with-edits ACTION is executed instead at the
-  // data layer by tests/local/outlook-first-suggestion.mjs.
-  assert.ok(/InteractionSourceBadge/.test(PAGE), 'the badge must be rendered per row')
-  assert.ok(/source=\{/.test(PAGE), 'and given the row source')
-  assert.ok(/accept_interaction_candidate/.test(PAGE))
-  assert.ok(/dismiss_interaction_candidate/.test(PAGE))
-  assert.ok(/p_override_type/.test(PAGE) && /p_override_date/.test(PAGE) && /p_override_notes/.test(PAGE),
-    'the edits must reach the accept RPC')
-  assert.ok(/validateOverrides/.test(PAGE), 'and be validated before it is called')
-})
 
-test('the queue is source-neutral: it never filters on source', () => {
-  assert.ok(/\.eq\('status', 'pending'\)/.test(PAGE))
-  assert.ok(!/\.eq\('source'/.test(PAGE), 'an Outlook row must not be filtered out')
-  assert.ok(CANDIDATE_SELECT.includes('source'), 'and the source must be selected so it can be labelled')
-})
 
 test('the selected columns still exclude every identifier', () => {
   for (const forbidden of ['source_fingerprint', 'user_id', 'interaction_id', 'context_expires_at']) {
@@ -777,8 +732,7 @@ test('the run module touches no body, no Anthropic and no scheduler', () => {
 })
 
 test('no file under src/ mentions a service-role key', () => {
-  for (const f of ['src/lib/suggestionReview.js', 'src/lib/interactionSource.js',
-    'src/pages/SuggestionsPage.jsx', 'src/components/InteractionSourceBadge.jsx']) {
+  for (const f of ['src/lib/interactionSource.js', 'src/components/InteractionSourceBadge.jsx']) {
     assert.ok(!/service_role|SERVICE_ROLE|serviceRoleKey/.test(read(f)), f)
   }
 })
@@ -1056,71 +1010,14 @@ test('summarizeRun exposes intended, accepted and created separately', async () 
 console.log('')
 console.log('the review analytics are source-correct')
 
-test('the event names are source-neutral and the source travels as a property', () => {
-  assert.deepStrictEqual(Object.values(SUGGESTION_EVENTS).sort(),
-    ['suggestion_accepted', 'suggestion_dismissed', 'suggestion_review_viewed'])
-  for (const name of Object.values(SUGGESTION_EVENTS)) {
-    assert.ok(!/calendar|gmail|outlook/i.test(name),
-      `a source must not be baked into the event name: ${name}`)
-  }
-})
 
-test('an unrecognised source becomes a controlled label, never passed through', () => {
-  for (const s of SUGGESTION_SOURCES) assert.strictEqual(suggestionSourceLabel(s), s)
-  for (const bad of ['Outlook', ' outlook', 'manual', 'microsoft', '', null, undefined, 7, {}]) {
-    assert.strictEqual(suggestionSourceLabel(bad), 'unknown', JSON.stringify(bad))
-  }
-})
 
-test('the event properties carry behaviour only, never content', () => {
-  assert.deepStrictEqual(suggestionEventProps('outlook'), { source: 'outlook' })
-  assert.deepStrictEqual(suggestionEventProps('outlook', { edited: true }),
-    { source: 'outlook', edited: true })
-  assert.deepStrictEqual(suggestionEventProps('outlook', { edited: false }),
-    { source: 'outlook', edited: false })
-  // Anything else offered is dropped rather than forwarded.
-  const props = suggestionEventProps('outlook', {
-    edited: 'yes', contactId: 'c1', notes: 'private', email: 'a@b.test', candidateId: 'x',
-  })
-  assert.deepStrictEqual(props, { source: 'outlook' })
-})
 
-test('STRUCTURAL: the page emits the source-neutral events with the ROW source', () => {
-  // renderToStaticMarkup dispatches no events, so the wiring is asserted on source.
-  assert.ok(!/calendar_candidate_accepted|calendar_candidate_dismissed|calendar_review_viewed/.test(PAGE),
-    'the calendar-named events must be gone: an Outlook row emitted them before')
-  assert.ok(/track\(SUGGESTION_EVENTS\.accepted,/.test(PAGE))
-  assert.ok(/track\(SUGGESTION_EVENTS\.dismissed, suggestionEventProps\(candidate\.source\)\)/.test(PAGE))
-  assert.ok(/suggestionEventProps\(candidate\.source, \{ edited: !!edited \}\)/.test(PAGE),
-    'the accept event must carry the row source and the edited flag')
-  assert.ok(/track\(SUGGESTION_EVENTS\.viewed, suggestionEventProps\(s\)\)/.test(PAGE),
-    'the viewed event must carry a source too')
-  // ACROSS BOTH QUEUES. The scan used to be `rows.map(...)`, which stopped being
-  // sufficient when the page gained the proposed-people queue: a view holding only a
-  // proposed Outlook contact would have recorded no source at all.
-  assert.ok(/new Set\(\[\.\.\.rows, \.\.\.proposals\]\.map\(\(r\) => r\.source\)\)/.test(PAGE),
-    'a queue holding two sources, in either table, must not be recorded as one')
-})
 
 console.log('')
 console.log('the entry count does not call an interaction a person')
 
-test('the copy counts SUGGESTIONS, in both singular and plural', () => {
-  assert.ok(/'suggestion' : 'suggestions'/.test(ENTRY),
-    'an interaction suggestion for an existing contact is not a person to review')
-  assert.ok(!/'person' : 'people'/.test(ENTRY))
-  assert.ok(!/\bpeople to review\b/.test(ENTRY))
-  assert.ok(/to review from your connected sources/.test(ENTRY), 'and stays source-neutral')
-})
 
-test('the entry still shows a count only, never any candidate or contact detail', () => {
-  const code = codeOnly(ENTRY)
-  for (const banned of ['proposed_notes', 'retained_subject', 'contacts(', 'name', 'email',
-    'source_fingerprint']) {
-    assert.ok(!code.includes(banned), `the entry must not read ${banned}`)
-  }
-  assert.ok(/count: 'exact', head: true/.test(code), 'a head count is all it needs')
-})
 
 async function finish () {
   await Promise.all(pending)

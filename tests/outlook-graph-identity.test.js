@@ -458,15 +458,6 @@ test('the notice is short, actionable and carries NO provider detail', () => {
   assert.notStrictEqual(m, messageForOutcome('unknown_outcome'))
 })
 
-test('the card renders it through the shared helper and message map', () => {
-  const CARD = exec(read('src/components/OutlookConnectionCard.jsx'))
-  assert.ok(/readOutlookCallbackResult\(searchParams\)/.test(CARD))
-  assert.ok(/messageForOutcome\('callback_failed'\)/.test(CARD))
-  assert.ok(!/location\.search/.test(CARD), 'must not parse the query string by hand')
-  for (const leak of ['graph_identity_mismatch', 'mailbox_unresolved', 'diagnostic']) {
-    assert.ok(!CARD.includes(leak), `the card references ${leak}`)
-  }
-})
 
 // One Funnl owner per Microsoft account (migration 20261014000000). The refusal is the one
 // the person can act on, so it gets its own accurate notice - which must not identify the
@@ -485,17 +476,6 @@ test('the account-in-use notice is accurate and identifies no one', () => {
   assert.notStrictEqual(m, messageForOutcome('callback_failed'))
 })
 
-test('the card shows the account-in-use notice only for ?outlook=in_use while not connected', () => {
-  const CARD = exec(read('src/components/OutlookConnectionCard.jsx'))
-  assert.ok(/const accountInUse =\s*readOutlookCallbackResult\(searchParams\) === 'in_use' && status !== 'connected'/.test(CARD))
-  const uses = CARD.match(/messageForOutcome\('callback_in_use'\)/g) || []
-  assert.strictEqual(uses.length, 1, 'rendered exactly once')
-  const i = CARD.indexOf('{accountInUse && (')
-  assert.ok(i > 0, 'the notice is gated on accountInUse')
-  assert.ok(CARD.slice(i, i + 500).includes("messageForOutcome('callback_in_use')"))
-  // in_use must not trigger the generic failure copy.
-  assert.ok(/const callbackFailed =\s*readOutlookCallbackResult\(searchParams\) === 'error'/.test(CARD))
-})
 
 await Promise.all(pending)
 console.log('')

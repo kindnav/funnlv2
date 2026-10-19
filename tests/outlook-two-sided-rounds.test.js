@@ -1305,23 +1305,6 @@ await test('the queue selects the two draft columns the card renders, and still 
     assert.ok(CANDIDATE_SELECT.indexOf(bad) < 0, 'the queue must not select ' + bad)
   }
 })
-await test('the card lets the reviewer keep, edit or clear the step, choose a date, and sends only approved values', () => {
-  const PAGE = read('src/pages/SuggestionsPage.jsx')
-  assert.ok(PAGE.indexOf('useState(candidate.draft_follow_up || \'\')') >= 0, 'the step starts as drafted')
-  assert.ok(PAGE.indexOf('useState(\'\')') >= 0 && PAGE.indexOf('setFollowUpDate') >= 0, 'the date starts EMPTY: never derived from the step')
-  assert.ok(PAGE.indexOf('name="nextStep"') >= 0 && PAGE.indexOf('name="followUpDate"') >= 0, 'both are editable fields')
-  assert.ok(PAGE.indexOf('maxLength={REVIEW_FOLLOW_UP_MAX}') >= 0)
-  assert.ok(PAGE.indexOf('p_follow_up: nextStep.trim() || null') >= 0, 'a cleared step is sent as null')
-  assert.ok(PAGE.indexOf('p_follow_up_date: followUpDate || null') >= 0, 'an unchosen date is sent as null')
-  assert.ok(PAGE.indexOf("candidate.extraction_status === 'ai_extracted'") >= 0, 'the provenance line stays conditional')
-  assert.ok(PAGE.indexOf('p_override_notes: notes || null') >= 0)
-  assert.ok(PAGE.indexOf('p_draft_follow_up') < 0 && PAGE.indexOf('p_extraction_status') < 0, 'the browser never writes draft columns')
-  assert.strictEqual(REVIEW_FOLLOW_UP_MAX, 160)
-  assert.deepStrictEqual(validateOverrides({ followUp: 'x'.repeat(160), followUpDate: '2026-10-21' }), { ok: true })
-  assert.strictEqual(validateOverrides({ followUp: 'x'.repeat(161) }).code, 'invalid_follow_up')
-  assert.strictEqual(validateOverrides({ followUpDate: 'next week' }).code, 'invalid_follow_up_date')
-  assert.deepStrictEqual(validateOverrides({ followUp: '', followUpDate: '' }), { ok: true }, 'blank is a valid choice for both')
-})
 
 console.log('')
 

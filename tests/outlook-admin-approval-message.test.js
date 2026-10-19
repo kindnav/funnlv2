@@ -53,24 +53,6 @@ test('the admin-approval sentence is conditional, truthful and leaks nothing', (
   assert.notStrictEqual(m, messageForOutcome('callback_failed'))
 })
 
-test('the card shows the admin-approval sentence only inside the generic failed-connection notice', () => {
-  const CARD = exec(read('src/components/OutlookConnectionCard.jsx'))
-  const uses = CARD.match(/messageForOutcome\('callback_admin_approval'\)/g) || []
-  assert.strictEqual(uses.length, 1, 'rendered exactly once')
-  const block = CARD.slice(CARD.indexOf('{callbackFailed && ('))
-  // The block's own closing line - `)}` alone - not the `)}` that ends an inline call.
-  const end = block.search(/\n\s*\)\}\s*\n/)
-  assert.ok(end > 0, 'callbackFailed block found')
-  const inside = block.slice(0, end)
-  assert.ok(inside.includes("messageForOutcome('callback_failed')"), 'paired with callback_failed')
-  assert.ok(inside.includes("messageForOutcome('callback_admin_approval')"), 'inside the same block')
-  // The generic notice is gated on ?outlook=error only - never on a result the callback can
-  // name precisely (connected, or in_use once #97 lands).
-  assert.ok(/const callbackFailed =\s*readOutlookCallbackResult\(searchParams\) === 'error'/.test(CARD))
-  // Not on the connected-account update failure: that account consented before, and the
-  // update copy already says nothing changed.
-  assert.ok(!/updateFailed[\s\S]{0,400}callback_admin_approval/.test(CARD))
-})
 
 console.log('')
 console.log(`${passed + failed} tests: ${passed} passed, ${failed} failed`)

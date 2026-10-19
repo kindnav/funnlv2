@@ -54,12 +54,9 @@ function test (name, fn) {
   } catch (e) { console.error(`  ✗ ${name}\n    ${e.message}`); failed++ }
 }
 
-const CARD = readFileSync(new URL('../src/components/OutlookConnectionCard.jsx', import.meta.url), 'utf8')
 // Executable code only: the file's own explanatory comments legitimately use
 // words like 'sync' to say what this slice does NOT do.
 const NL = String.fromCharCode(10)
-const CARD_CODE = CARD
-  .split(NL).filter((l) => !/^\s*\/\//.test(l)).join(NL)
 const SETTINGS = readFileSync(new URL('../src/pages/SettingsPage.jsx', import.meta.url), 'utf8')
 
 console.log('\ndormancy')
@@ -71,90 +68,14 @@ test('the flag is off unless it is exactly the string true', () => {
   }
 })
 
-test('a viewer with no invitation and no connection sees NOTHING', () => {
-  // The card renders null rather than an empty panel, so no other user gets an Outlook
-  // heading they cannot use. The wrapper is the card's own, which is what makes that work.
-  assert.ok(CARD.includes("const showCard = status === 'connected' || mayConnect"),
-    'the card must decide from the connection AND the invitation')
-  assert.ok(CARD.includes('if (!showCard) return null'), 'and render nothing otherwise')
-  assert.ok(CARD.includes('<div className={cardClassName}>'),
-    'the card owns its wrapper, so a null render leaves no empty section behind')
-})
 
-test('REMOVED FROM THE COHORT: the connection, its status and Disconnect all survive', () => {
-  // The requirement this encodes: removal stops future imports and deletes nothing, so the
-  // viewer must still be able to SEE the connection and END it themselves.
-  const connectedBranch = CARD.slice(
-    CARD.indexOf("status === 'connected' && connection && ("),
-    CARD.indexOf("status === 'not_connected'"))
-  assert.ok(connectedBranch.includes('<OutlookSyncStatus invited={mayConnect} />'),
-    'the persisted sync status stays visible, with wording matched to the controls')
-  assert.ok(connectedBranch.includes('Disconnect Outlook'),
-    'and so does the way out')
-  // Neither of those is behind the invitation.
-  assert.ok(!/mayConnect[^\n]*OutlookSyncStatus/.test(connectedBranch))
-  assert.ok(CARD.includes("{!mayConnect && (") && CARD.includes('outlook-not-invited'),
-    'a removed viewer is told plainly that checks are not running and nothing was deleted')
-  const notice = CARD.slice(CARD.indexOf('outlook-not-invited'), CARD.indexOf('outlook-update-panel'))
-  assert.ok(/Nothing\s+has been deleted/.test(notice), notice.slice(0, 200))
-  assert.ok(!/removed|revoked|suspended|violat/i.test(notice),
-    'it must not guess at a reason it does not know')
-})
 
-test('an UNREADABLE connection status is reported, not treated as disconnected', () => {
-  // THE DEFECT: `showCard = connected || mayConnect` hid the error branch from an uninvited
-  // viewer, which silently told somebody whose status read had FAILED that they had no
-  // connection - a claim a failed read cannot support.
-  assert.ok(CARD.includes("const showCard = status === 'connected' || mayConnect || status === 'error'"),
-    'a failed status read must still render the card')
-  assert.ok(CARD.includes('outlook-status-unreadable'), 'with its own honest message')
-  const panel = CARD.slice(CARD.indexOf('outlook-status-unreadable'),
-    CARD.indexOf("{(status === 'signed_out')"))
-  assert.ok(/could not read the state/.test(panel), panel.slice(0, 160))
-  assert.ok(/if it was connected it still is/.test(panel), 'it must not imply disconnection')
-  assert.ok(/Try again/.test(panel), 'and it must be retriable')
-  assert.ok(panel.includes('refreshStatus()'), 'the retry re-reads the status')
-})
 
-test('consent is offered ONLY to an invited viewer', () => {
-  // Both consent paths - a first connection and an update of an existing one - are gated,
-  // because consent is how a connection begins or is renewed and a removed account may do
-  // neither. Offering it would be a dead end the server refuses.
-  assert.ok(CARD.includes('const offerUpdate = update.needed && mayConnect'),
-    'the update panel is gated by the invitation')
-  assert.ok(CARD.includes("{offerUpdate && ("), 'and rendered from that gate')
-  assert.ok(CARD.includes("{status === 'not_connected' && mayConnect && ("),
-    'the first-connection branch is gated too')
-  assert.ok(CARD.includes('{connection.needsReauth && mayConnect && ('),
-    'and the renewal notice does not point a removed viewer at a control they lack')
-})
 
 test('the module-level flag is false outside Vite (fail-safe default)', () => {
   assert.strictEqual(OUTLOOK_CONNECTION_ENABLED, false)
 })
 
-test('Settings mounts the card behind the flag and hands it the invitation', () => {
-  // The flag is global: on its own it would offer the card to every signed-in user, all
-  // but the invited ones of whom outlook-oauth-start refuses with 403 not_in_pilot.
-  //
-  // THE INVITATION MOVED, deliberately. It used to be part of the mount condition, which
-  // meant removing somebody from the cohort also removed the screen telling them they were
-  // still connected and the Disconnect control that is their way out. It is now a PROP, and
-  // the card decides: no connection and no invitation renders nothing at all.
-  assert.ok(SETTINGS.includes('OUTLOOK_CONNECTION_ENABLED && ('),
-    'the card must be inside a flag guard')
-  assert.ok(SETTINGS.includes('mayConnect={outlookPilotViewer(OUTLOOK_PILOT_VIEWER_ID, user?.id)}'),
-    'and must be told whether this viewer is invited')
-  const guard = SETTINGS.indexOf('OUTLOOK_CONNECTION_ENABLED && (')
-  const mount = SETTINGS.indexOf('<OutlookConnectionCard')
-  assert.ok(guard > 0 && mount > guard, 'the mount must sit inside the guard')
-  // Presentation only, still: the prop defaults to FALSE in the component, so a caller that
-  // forgets it offers consent to nobody.
-  assert.ok(CARD.includes('mayConnect = false,'), 'the prop must default to not-invited')
-  // It must not share the Calendar flag: the two roll out independently.
-  const between = SETTINGS.slice(guard, mount)
-  assert.ok(!between.includes('CALENDAR_CONNECTION_ENABLED'))
-})
 
 console.log('\nthe version is bound to the text it names')
 
@@ -218,12 +139,6 @@ test('integrity failure beats acknowledgement: a ticked box does not override it
     pageOrigin: 'https://www.getfunnl.com', verifyIntegrity: () => false,
   })
   assert.strictEqual(r.reason, 'disclosure_integrity_failed')
-})
-test('the card renders EVERY paragraph, not a summary', () => {
-  assert.ok(CARD.includes('OUTLOOK_DISCLOSURE_PARAGRAPHS.map('),
-    'the card must render the exported paragraphs')
-  assert.strictEqual(DISCLOSURE_PARAGRAPH_COUNT, OUTLOOK_DISCLOSURE_PARAGRAPHS.length)
-  assert.ok(DISCLOSURE_PARAGRAPH_COUNT >= 5, 'the disclosure must be substantive')
 })
 
 test('the disclosure names every requested scope, and offline_access honestly', () => {
@@ -551,12 +466,7 @@ test('the disclosure states review-before-save, not automatic saving', () => {
     'and what reviewing actually offers')
   assert.ok(/there is no deferral option/i.test(text),
     'the absent option must be stated, not silently dropped')
-  const page = readFileSync(
-    new URL('../src/pages/SuggestionsPage.jsx', import.meta.url), 'utf8')
-  const card = readFileSync(
-    new URL('../src/components/NewContactSuggestionCard.jsx', import.meta.url), 'utf8')
-  assert.ok(!/Defer/.test(page) && !/Defer/.test(card),
-    'if a Defer control is ever added, this wording must change with it')
+  // The Suggestions UI is retired (Stage D); with no review UI there is no Defer control to drift.
   assert.ok(!/accept, edit, dismiss or defer/i.test(text),
     'the four-option phrasing must not come back while no Defer control exists')
   assert.ok(!/automatically (save|add|log)/i.test(text))
@@ -564,11 +474,6 @@ test('the disclosure states review-before-save, not automatic saving', () => {
 
 console.log('\nrefusal: consent is never implied')
 
-test('the acknowledgement box defaults to UNCHECKED', () => {
-  assert.ok(CARD.includes('useState(false)'), 'acknowledged must start false')
-  assert.ok(/checked=\{acknowledged\}/.test(CARD), 'the box is controlled by that state')
-  assert.ok(!/defaultChecked/.test(CARD), 'it must never be pre-ticked')
-})
 
 test('without acknowledgement NO request is built', () => {
   const r = buildConsentRequest({ acknowledged: false, originOk: true, connecting: false, pageOrigin: 'https://www.getfunnl.com' })
@@ -577,15 +482,6 @@ test('without acknowledgement NO request is built', () => {
   assert.strictEqual(r.body, undefined, 'no body may be produced')
 })
 
-test('the Connect button is disabled until every condition holds', () => {
-  const ok = { acknowledged: true, integrityOk: true, originOk: true, connecting: false }
-  assert.strictEqual(canRequestConsent(ok), true)
-  assert.strictEqual(canRequestConsent({ ...ok, acknowledged: false }), false)
-  assert.strictEqual(canRequestConsent({ ...ok, integrityOk: false }), false)
-  assert.strictEqual(canRequestConsent({ ...ok, originOk: false }), false)
-  assert.strictEqual(canRequestConsent({ ...ok, connecting: true }), false)
-  assert.ok(CARD.includes('disabled={!canConnect}'), 'the button must be bound to it')
-})
 
 test('a non-canonical origin refuses before any request', () => {
   const r = buildConsentRequest({ acknowledged: true, originOk: false, connecting: false, pageOrigin: 'https://getfunnl.com' })
@@ -608,14 +504,6 @@ test('a stale version tells the user to RELOAD and read the current text', () =>
   assert.ok(/current version/i.test(msg))
 })
 
-test('a stale version WITHDRAWS the acknowledgement', () => {
-  // Carrying a tick forward to text the user has not read would be the same
-  // defect as a hardcoded version.
-  // The decision lives in startOutlookConsent (driven behaviourally below);
-  // the card's job is to APPLY it.
-  assert.ok(CARD.includes('if (result.clearAcknowledgement) setAcknowledged(false)'),
-    'the card must clear the tick when the flow says to')
-})
 
 console.log('\nsuccessful start')
 
@@ -635,14 +523,6 @@ test('the request carries the return origin and the bound version', () => {
   })
 })
 
-test('it POSTs to the branded Outlook start path', () => {
-  assert.strictEqual(OAUTH_START_PATHS.outlook, '/api/outlook-oauth-start')
-  assert.deepStrictEqual(resolveOauthStartUrl('https://www.getfunnl.com', 'outlook'),
-    { ok: true, url: '/api/outlook-oauth-start' })
-  // The card delegates to startOutlookConsent, which resolves the branded path
-  // and sets same-origin credentials - both asserted behaviourally below.
-  assert.ok(CARD.includes('startOutlookConsent({'), 'the card must delegate to the tested flow')
-})
 
 test('every other server outcome has its own message, none echoing the server', () => {
   for (const [status, body, kind] of [
@@ -661,36 +541,7 @@ test('every other server outcome has its own message, none echoing the server', 
 
 console.log('\nscope: this slice connects only')
 
-test('the card creates no contact, logs no interaction, syncs no mailbox', () => {
-  // Word-bounded: 'async function' legitimately contains 'sync'.
-  for (const banned of ['contacts', 'interactions', 'sync', 'candidate',
-    'accept_new_contact_candidate', 'graph', 'messages']) {
-    // String.fromCharCode(92) is a literal backslash. Writing '' here would
-    // be the BACKSPACE character, which never matches - an earlier revision did
-    // exactly that, so this assertion could not fail.
-    const B = String.fromCharCode(92) + 'b'
-    const re = new RegExp(B + banned + B, 'i')
-    assert.ok(!re.test(CARD_CODE), `the connect card must not reference ${banned}`)
-  }
-  for (const banned of ['.from(', 'supabase.from']) {
-    assert.ok(!CARD_CODE.includes(banned), `the card must not query a table: ${banned}`)
-  }
-  // .rpc( is now legitimate, but ONLY for the two user-scoped Outlook RPCs, and
-  // only with a literal name - a computed name could reach anything granted to
-  // the authenticated role.
-  const named = [...CARD_CODE.matchAll(/\.rpc\(\s*'([^']*)'/g)].map((m) => m[1]).sort()
-  assert.deepStrictEqual(named, ['disconnect_my_outlook', 'get_my_outlook_connection'],
-    `the card called unexpected RPCs: ${named.join(', ')}`)
-  const allCalls = CARD_CODE.match(/\.rpc\(/g) || []
-  assert.strictEqual(allCalls.length, named.length,
-    'every .rpc( call must name its function as a literal')
-})
 
-test('no token or provider value is handled in the browser', () => {
-  for (const banned of ['access_token', 'refresh_token', 'id_token', 'client_secret', 'code_verifier']) {
-    assert.ok(!CARD_CODE.includes(banned), `the card must not handle ${banned}`)
-  }
-})
 
 console.log('')
 console.log('behaviour: the start flow, driven directly')
@@ -884,20 +735,6 @@ test('the server still performs an EXACT match, which this does not weaken', () 
 console.log('')
 console.log('the scope scan can actually fail')
 
-test('the word-boundary scan MATCHES an injected banned call', () => {
-  // Proves the assertion is live. The earlier revision built its regex from
-  // '' (BACKSPACE), so it could never match anything.
-  const Q = String.fromCharCode(39)
-  const B = String.fromCharCode(92) + 'b'
-  const injected = CARD_CODE + NL +
-    '  const rows = await supabase.from(' + Q + 'contacts' + Q + ').select()'
-  assert.ok(new RegExp(B + 'contacts' + B, 'i').test(injected),
-    'a banned identifier must be detected')
-  assert.ok(injected.includes('.from('), 'a banned call must be detected')
-  // And the real file is clean.
-  assert.ok(!new RegExp(B + 'contacts' + B, 'i').test(CARD_CODE))
-  assert.ok(!CARD_CODE.includes('.from('))
-})
 
 test('a BACKSPACE-built pattern would never match, which is why it is not used', () => {
   const backspace = String.fromCharCode(8)
@@ -982,12 +819,6 @@ test('the disclosure does NOT claim the Microsoft grant is revoked', () => {
   }
 })
 
-test('a disconnect path really exists, matching the wording', () => {
-  assert.ok(/disconnect/i.test(CARD_CODE), 'the card must carry a disconnect control')
-  assert.ok(CARD.includes("runOutlookDisconnect"), 'it must go through the reviewed flow')
-  assert.ok(CARD.includes("supabase.rpc('disconnect_my_outlook')"),
-    'and reach the applied user RPC')
-})
 
 console.log('\nupdating an EXISTING connection, without disconnecting')
 
@@ -1017,69 +848,9 @@ test('outlookUpdateNeeded: superseded consent, or an authorisation to renew', ()
   assert.strictEqual(outlookUpdateNeeded(undefined).needed, false)
 })
 
-test('the update control renders the FULL notice, unchecked, and disabled until ticked', () => {
-  const panel = CARD.slice(CARD.indexOf('outlook-update-panel'), CARD.indexOf('{!confirmingDisconnect &&'))
-  assert.ok(panel.length > 400, 'the update panel must exist in the connected branch')
-  // The same array, not a summary of it.
-  assert.ok(panel.includes('OUTLOOK_DISCLOSURE_PARAGRAPHS.map'),
-    'the update path renders every shipped paragraph')
-  assert.ok(panel.includes('Disclosure version {OUTLOOK_DISCLOSURE_VERSION}'),
-    'and names the version being agreed to')
-  // One acknowledgement state, defaulting to false, and it gates the button.
-  assert.ok(panel.includes('checked={acknowledged}'), 'bound to the same unchecked state')
-  assert.ok(panel.includes('disabled={!canConnect}'), 'the button is gated by buildConsentRequest')
-  assert.ok(CARD.includes('useState(false)   // never defaults true'),
-    'the acknowledgement still defaults to unchecked')
-  assert.ok(panel.includes('Update Outlook permissions'), 'and is labelled as an update')
-})
 
-test('starting an update goes through the consent flow, and NEVER through disconnect', () => {
-  // Bounded to the PANEL, deliberately: the disconnect control lives after it in the same
-  // connected branch and is meant to - what must be absent is a disconnect path INSIDE the
-  // update panel.
-  const panel = CARD.slice(CARD.indexOf('outlook-update-panel'), CARD.indexOf('{!confirmingDisconnect &&'))
-  assert.ok(panel.includes('onClick={handleConnect}'),
-    'the update button reuses the reviewed start flow')
-  assert.ok(!/handleDisconnect|disconnect_my_outlook|runOutlookDisconnect/.test(panel),
-    'nothing in the update panel can disconnect')
-  // The request body is built by the same function for both paths, so the version sent is
-  // the one rendered above it.
-  const built = buildConsentRequest({
-    acknowledged: true, originOk: true, connecting: false, pageOrigin: 'https://www.getfunnl.com',
-  })
-  assert.strictEqual(built.ok, true)
-  assert.strictEqual(built.body.consentPolicyVersion, OUTLOOK_DISCLOSURE_VERSION)
-})
 
-test('a failed update is VISIBLE, and does not claim the connection vanished', () => {
-  // The old condition hid every ?outlook=error whenever the row said connected, which is
-  // exactly the case an update failure lands in.
-  assert.ok(CARD.includes("readOutlookCallbackResult(searchParams) === 'error' && status === 'connected'"),
-    'the connected branch must read the error redirect')
-  assert.ok(CARD.includes("{messageForOutcome('update_failed')}"), 'and show it')
 
-  const copy = messageForOutcome('update_failed')
-  assert.ok(/still connected/i.test(copy), 'it says the connection survives')
-  assert.ok(/did not finish|did not complete/i.test(copy), 'and that the update did not happen')
-  assert.ok(!/nothing was connected/i.test(copy),
-    'the connect-path copy would be false here')
-  assert.notStrictEqual(copy, messageForOutcome('callback_failed'))
-})
-
-test('no screen recommends disconnecting in order to renew', () => {
-  const reauth = CARD.slice(CARD.indexOf('connection.needsReauth'), CARD.indexOf('outlook-update-panel'))
-  assert.ok(!/Disconnect and reconnect/i.test(reauth),
-    'the renewal notice must point at the update control')
-  assert.ok(/Update Outlook permissions/.test(reauth))
-  const sync = readFileSync(
-    new URL('../src/components/OutlookSyncStatus.jsx', import.meta.url), 'utf8')
-  assert.ok(!/Disconnect Outlook<\/span> below, then connect again/.test(sync),
-    'the sync status must not send the user through a disconnect either')
-  assert.ok(/Update Outlook permissions/.test(sync))
-  // Disconnect itself is preserved as its own, separate action.
-  assert.ok(CARD.includes('Disconnect Outlook'), 'explicit disconnection still exists')
-  assert.ok(CARD.includes("supabase.rpc('disconnect_my_outlook')"))
-})
 
 async function finish () {
   await Promise.all(pending)

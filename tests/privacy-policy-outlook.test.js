@@ -516,10 +516,7 @@ test('no automatic contact or interaction creation is claimed', () => {
     'the three options that exist must be named')
   assert.ok(/There is no deferral option/.test(OUTLOOK_PROSE),
     'and the absent one stated rather than silently dropped')
-  const page = read('src/pages/SuggestionsPage.jsx')
-  const card = read('src/components/NewContactSuggestionCard.jsx')
-  assert.ok(!/Defer/.test(page) && !/Defer/.test(card),
-    'if a Defer control is ever added, this wording must change with it')
+  // The Suggestions UI is retired (Stage D); with no review UI there is no Defer control to drift.
   assert.ok(/never creates a contact or an interaction on its own/.test(OUTLOOK))
   for (const bad of [/automatically (creates|adds) (a )?contact/i, /added for you automatically/i]) {
     assert.ok(!bad.test(OUTLOOK), `must not claim: ${bad}`)

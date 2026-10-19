@@ -249,8 +249,6 @@ test('whole-Google/Calendar disconnect: connection removed, cascade, Gmail ended
   assert.ok(!/DELETE FROM public\.interaction_candidates/.test(rpc) && !/source_fingerprint\s*=/.test(rpc), 'tombstone + fingerprint preserved')
   assert.ok(/DELETE FROM public\.google_oauth_states WHERE user_id = p_user_id/.test(rpc) && /DELETE FROM public\.google_connections WHERE user_id = p_user_id/.test(rpc))
   assert.ok((E2A_MIG.match(/REFERENCES public\.google_connections\(id, user_id\) ON DELETE CASCADE/g) || []).length >= 3)
-  // UI: only pending candidates are shown, so an invalidated one disappears from active Suggestions.
-  assert.ok(/\.eq\('status', 'pending'\)/.test(read('src/pages/SuggestionsPage.jsx')))
   // PUBLICATION GATE (not a deployment claim): this wording may be PUBLISHED only once the deployed
   // whole-Google cleanup path calls run_google_local_cleanup (PR-B). This test pins the text to the
   // database primitive; it does not assert that the Edge helper already calls it.

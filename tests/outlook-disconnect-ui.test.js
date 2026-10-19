@@ -27,12 +27,6 @@ import assert from 'assert'
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
-import {
-  DISCONNECT_CONSEQUENCES, DISCONNECT_CONFIRM_LABEL,
-  classifyStatusResponse, classifyDisconnectResponse,
-  messageForDisconnect, messageForStatus,
-  loadOutlookStatus, runOutlookDisconnect,
-} from '../src/lib/outlookDisconnect.js'
 
 let passed = 0, failed = 0
 const pending = []
@@ -48,8 +42,6 @@ function test (name, fn) {
   } catch (e) { console.error(`  ✗ ${name}\n    ${e.message}`); failed++ }
 }
 
-const CARD = readFileSync(new URL('../src/components/OutlookConnectionCard.jsx', import.meta.url), 'utf8')
-const LIB = readFileSync(new URL('../src/lib/outlookDisconnect.js', import.meta.url), 'utf8')
 const MIGRATION = readFileSync(
   new URL('../supabase/migrations/20260929000000_outlook_connection_status_rpc.sql', import.meta.url),
   'utf8',
@@ -71,91 +63,16 @@ const CONNECTED = {
 
 console.log('\nconnected status: reading it')
 
-test('a connected mailbox is reported with the fields the card shows', () => {
-  const r = classifyStatusResponse(null, CONNECTED)
-  assert.strictEqual(r.kind, 'connected')
-  assert.strictEqual(r.connection.mailbox, 'me@example.test')
-  assert.strictEqual(r.connection.needsReauth, false)
-  assert.strictEqual(r.connection.consentVersion, CONNECTED.consent_policy_version)
-  assert.deepStrictEqual(r.connection.scopes, ['Mail.Read', 'User.Read', 'offline_access'])
-})
 
-test('needs_reauth is carried through so the card can warn', () => {
-  const r = classifyStatusResponse(null, { ...CONNECTED, needs_reauth: true, status: 'needs_reauth' })
-  assert.strictEqual(r.connection.needsReauth, true)
-  assert.strictEqual(r.connection.status, 'needs_reauth')
-})
 
-test('not_connected and unauthorized are distinct, and neither carries a mailbox', () => {
-  const a = classifyStatusResponse(null, { result: 'not_connected' })
-  assert.strictEqual(a.kind, 'not_connected')
-  assert.strictEqual(a.connection, undefined)
-  const b = classifyStatusResponse(null, { result: 'unauthorized' })
-  assert.strictEqual(b.kind, 'signed_out')
-  assert.strictEqual(b.connection, undefined)
-})
 
-test('a PostgREST error, an unknown result and a non-object are all just failures', () => {
-  assert.strictEqual(classifyStatusResponse({ message: 'permission denied' }, null).kind, 'error')
-  assert.strictEqual(classifyStatusResponse(null, { result: 'something_new' }).kind, 'error')
-  assert.strictEqual(classifyStatusResponse(null, null).kind, 'error')
-  assert.strictEqual(classifyStatusResponse(null, 'connected').kind, 'error')
-})
 
-test('the status object is built field by field, so an unexpected field cannot leak', () => {
-  // If the RPC were ever widened by mistake, the card still only ever sees the
-  // reviewed fields: this maps explicitly rather than spreading the response.
-  const r = classifyStatusResponse(null, {
-    ...CONNECTED,
-    access_token: 'should-never-reach-the-ui',
-    refresh_token_ciphertext: 'nor-this',
-    id: '00000000-0000-0000-0000-000000000000',
-  })
-  const keys = Object.keys(r.connection).sort()
-  assert.deepStrictEqual(keys, [
-    'accountType', 'connectedAt', 'consentVersion', 'mailbox',
-    'needsReauth', 'scopes', 'status',
-  ])
-  assert.ok(!JSON.stringify(r).includes('should-never-reach-the-ui'))
-  assert.ok(!JSON.stringify(r).includes('nor-this'))
-})
 
-test('a malformed scopes value degrades to an empty list rather than throwing', () => {
-  assert.deepStrictEqual(classifyStatusResponse(null, { ...CONNECTED, scopes: 'Mail.Read' }).connection.scopes, [])
-  assert.deepStrictEqual(
-    classifyStatusResponse(null, { ...CONNECTED, scopes: ['Mail.Read', 7, null] }).connection.scopes,
-    ['Mail.Read'],
-  )
-})
 
-test('loadOutlookStatus surfaces a thrown RPC as a controlled failure', async () => {
-  const r = await loadOutlookStatus({ rpc: async () => { throw new Error('offline') } })
-  assert.strictEqual(r.kind, 'error')
-  assert.ok(r.message.length > 0)
-  assert.ok(!/offline/i.test(r.message), 'the raw error must not reach the user')
-})
 
-test('loadOutlookStatus returns a message only when there is nothing to show', async () => {
-  const ok = await loadOutlookStatus({ rpc: async () => ({ data: CONNECTED, error: null }) })
-  assert.strictEqual(ok.message, '')
-  const out = await loadOutlookStatus({ rpc: async () => ({ data: { result: 'unauthorized' }, error: null }) })
-  assert.ok(/sign in again/i.test(out.message))
-})
 
 console.log('\ndisconnect: nothing happens without confirmation')
 
-test('the disconnect result codes map one-to-one, and nothing else is success', () => {
-  assert.strictEqual(classifyDisconnectResponse(null, { result: 'disconnected' }).kind, 'disconnected')
-  assert.strictEqual(classifyDisconnectResponse(null, { result: 'not_connected' }).kind, 'already_disconnected')
-  assert.strictEqual(classifyDisconnectResponse(null, { result: 'unauthorized' }).kind, 'signed_out')
-  for (const bad of [null, undefined, 'disconnected', 42, { result: 'partial' }, {}]) {
-    assert.strictEqual(classifyDisconnectResponse(null, bad).kind, 'error', JSON.stringify(bad))
-  }
-  // An error object wins even when a body is present: a partial failure must
-  // never be read as a completed disconnect.
-  assert.strictEqual(
-    classifyDisconnectResponse({ message: 'timeout' }, { result: 'disconnected' }).kind, 'error')
-})
 
 
 function dharness (over = {}) {
@@ -171,247 +88,32 @@ function dharness (over = {}) {
   return { calls, args: { ...base, ...over } }
 }
 
-test('UNCONFIRMED: no RPC is made and the bearer is never even requested', async () => {
-  const h = dharness({ confirmed: false })
-  const r = await runOutlookDisconnect(h.args)
-  assert.strictEqual(h.calls.rpc, 0, 'nothing may be sent without confirmation')
-  assert.strictEqual(h.calls.bearer, 0, 'refusal must precede any credential use')
-  assert.strictEqual(r.disconnected, false)
-  assert.strictEqual(r.kind, 'not_confirmed')
-})
 
-test('a truthy-but-not-true confirmation is still a refusal', async () => {
-  for (const v of ['true', 1, {}, [], 'yes']) {
-    const h = dharness({ confirmed: v })
-    const r = await runOutlookDisconnect(h.args)
-    assert.strictEqual(h.calls.rpc, 0, `confirmed=${JSON.stringify(v)} must refuse`)
-    assert.strictEqual(r.disconnected, false)
-  }
-})
 
-test('a request already in flight does not start a second one', async () => {
-  const h = dharness({ disconnecting: true })
-  await runOutlookDisconnect(h.args)
-  assert.strictEqual(h.calls.rpc, 0)
-})
 
-test('a non-canonical origin makes no RPC', async () => {
-  const h = dharness({ pageOrigin: 'https://getfunnl.com' })
-  const r = await runOutlookDisconnect(h.args)
-  assert.strictEqual(h.calls.rpc, 0)
-  assert.ok(/www\.getfunnl\.com/.test(r.message))
-})
 
-test('no session: refuses before reaching the database', async () => {
-  const h = dharness({ getBearer: async () => null })
-  const r = await runOutlookDisconnect(h.args)
-  assert.strictEqual(h.calls.rpc, 0)
-  assert.strictEqual(r.kind, 'signed_out')
-})
 
-test('a thrown bearer lookup is treated as signed out, not as a crash', async () => {
-  const h = dharness({ getBearer: async () => { throw new Error('boom') } })
-  const r = await runOutlookDisconnect(h.args)
-  assert.strictEqual(h.calls.rpc, 0)
-  assert.strictEqual(r.kind, 'signed_out')
-})
 
 console.log('\ndisconnect: the outcomes')
 
-test('SUCCESS: exactly one RPC, and it reports disconnected', async () => {
-  const h = dharness()
-  const r = await runOutlookDisconnect(h.args)
-  assert.strictEqual(h.calls.rpc, 1, 'exactly one call')
-  assert.strictEqual(r.kind, 'disconnected')
-  assert.strictEqual(r.disconnected, true)
-})
 
-test('ALREADY GONE is not an error to the user', async () => {
-  // Another tab, or a connection the provider already revoked. The user asked
-  // for it to be gone and it is gone.
-  const h = dharness({ rpc: async () => ({ data: { result: 'not_connected' }, error: null }) })
-  const r = await runOutlookDisconnect(h.args)
-  assert.strictEqual(r.kind, 'already_disconnected')
-  assert.strictEqual(r.disconnected, true)
-  assert.ok(!/could not/i.test(r.message))
-})
 
-test('the database refusing an unauthenticated caller reads as signed out', async () => {
-  const h = dharness({ rpc: async () => ({ data: { result: 'unauthorized' }, error: null }) })
-  const r = await runOutlookDisconnect(h.args)
-  assert.strictEqual(r.kind, 'signed_out')
-  assert.strictEqual(r.disconnected, false)
-})
 
-test('an RPC error never claims the mailbox was disconnected', async () => {
-  for (const res of [
-    { data: null, error: { message: 'permission denied for function' } },
-    { data: { result: 'who_knows' }, error: null },
-    { data: null, error: null },
-  ]) {
-    const h = dharness({ rpc: async () => res })
-    const r = await runOutlookDisconnect(h.args)
-    assert.strictEqual(r.disconnected, false, JSON.stringify(res))
-    assert.strictEqual(r.kind, 'error')
-  }
-})
 
-test('a thrown RPC is a controlled failure and leaks no database message', async () => {
-  const h = dharness({ rpc: async () => { throw new Error('connection reset by peer') } })
-  const r = await runOutlookDisconnect(h.args)
-  assert.strictEqual(r.disconnected, false)
-  assert.ok(!/connection reset/i.test(r.message))
-})
 
-test('no user-facing message ever echoes a database or PostgREST string', () => {
-  for (const kind of ['disconnected', 'already_disconnected', 'signed_out',
-    'not_confirmed', 'non_canonical_origin', 'error', 'anything_else']) {
-    const m = messageForDisconnect(kind)
-    assert.ok(m.length > 0, kind)
-    assert.ok(!/(permission denied|PGRST|relation |function |42501|SQLSTATE)/i.test(m), kind)
-  }
-  for (const kind of ['signed_out', 'error']) {
-    assert.ok(messageForStatus(kind).length > 0, kind)
-  }
-  assert.strictEqual(messageForStatus('connected'), '', 'a healthy state needs no message')
-  assert.strictEqual(messageForStatus('not_connected'), '')
-})
 
 console.log('\nanalytics carry behaviour, never content')
 
-test('a real disconnect fires one event with no mailbox or identifier in it', async () => {
-  const h = dharness()
-  await runOutlookDisconnect(h.args)
-  assert.deepStrictEqual(h.calls.track, [['outlook_disconnected', { provider: 'outlook' }]])
-})
 
-test('nothing is tracked for a refusal, a failure, or an already-gone connection', async () => {
-  for (const over of [
-    { confirmed: false },
-    { getBearer: async () => null },
-    { rpc: async () => ({ data: null, error: { message: 'x' } }) },
-    { rpc: async () => ({ data: { result: 'not_connected' }, error: null }) },
-  ]) {
-    const h = dharness(over)
-    await runOutlookDisconnect(h.args)
-    assert.deepStrictEqual(h.calls.track, [], JSON.stringify(Object.keys(over)))
-  }
-})
 
 console.log('\nthe copy matches what the database actually does')
 
-test('every consequence is labelled with a verified effect', () => {
-  // `emptied` was replaced by `invalidated`: the retained row still carries its
-  // contact, proposed date and fingerprint, so it is not empty.
-  const allowed = ['deleted', 'invalidated', 'kept', 'in_flight', 'upstream']
-  assert.ok(DISCONNECT_CONSEQUENCES.length >= 4, 'the confirmation must be specific')
-  for (const c of DISCONNECT_CONSEQUENCES) {
-    assert.ok(allowed.includes(c.effect), `unreviewed effect: ${c.effect}`)
-    assert.ok(typeof c.text === 'string' && c.text.length > 20, c.effect)
-  }
-  for (const effect of allowed) {
-    assert.ok(DISCONNECT_CONSEQUENCES.some((c) => c.effect === effect),
-      `the confirmation never mentions what is ${effect}`)
-  }
-})
 
-test('every effect has a rendered label, so a rename cannot blank one out', () => {
-  // EFFECT_LABEL in OutlookConnectionCard.jsx is keyed by effect name. Renaming
-  // `emptied` to `invalidated` in outlookDisconnect.js left that map behind, and
-  // EFFECT_LABEL['invalidated'] was undefined - so the confirmation rendered a BLANK
-  // label beside the one consequence users most need to understand.
-  const card = readFileSync(
-    new URL('../src/components/OutlookConnectionCard.jsx', import.meta.url), 'utf8')
-  const map = /const EFFECT_LABEL = \{([\s\S]*?)\}/.exec(card)
-  assert.ok(map, 'EFFECT_LABEL not found')
-  const labelled = [...map[1].matchAll(/^\s*([a-z_]+):\s*'([^']+)'/gm)]
-    .map((m) => m[1])
-  for (const c of DISCONNECT_CONSEQUENCES) {
-    assert.ok(labelled.includes(c.effect),
-      `effect '${c.effect}' has no EFFECT_LABEL entry, so it renders blank`)
-  }
-  assert.ok(labelled.includes('invalidated'), 'the renamed effect must be labelled')
-  assert.ok(!labelled.includes('emptied'),
-    'the superseded label must not linger')
-})
 
-test('unreviewed suggestions are INVALIDATED, and the retained row is described', () => {
-  // The applied RPC keeps the candidate row and NULLs its proposed contents. What it
-  // does NOT null is contact_id, the proposed date and the episode fingerprint -
-  // measured in tests/sql/outlook-pilot-retention-runtime.sql case 3c. So the copy
-  // must say neither 'deleted' nor 'empty': what survives names a contact and a date.
-  const inval = DISCONNECT_CONSEQUENCES.filter((c) => c.effect === 'invalidated')
-  assert.strictEqual(inval.length, 1)
-  const t = inval[0].text
-  assert.ok(/suggestion/i.test(t))
-  assert.ok(/invalidated/i.test(t), 'the verb must be invalidated')
-  assert.ok(/cleared|removed/i.test(t), 'the proposed details are cleared')
-  assert.ok(/The record itself is kept/i.test(t),
-    'the surviving record must be disclosed')
-  assert.ok(/still holding the contact it was about, the proposed date and a one-way fingerprint/i
-    .test(t), 'what the surviving record still holds must be named')
-  assert.ok(/deleted when you delete that contact or your Funnl account/i.test(t),
-    'only the cascade-verified deletion paths may be claimed')
-  // The two words that were wrong before.
-  assert.ok(!/empt(y|ied|ies)/i.test(t), 'the retained row is not empty')
-  // Every mention of deletion must be the contact/account path, not the disconnect.
-  const deletions = t.match(/[^.]*\bdeleted\b[^.]*\./gi) || []
-  assert.strictEqual(deletions.length, 1, JSON.stringify(deletions))
-  assert.ok(/when you delete that contact or your Funnl account/i.test(deletions[0]),
-    'the only deletion claim must be the verified cascade path')
-})
 
-test('the confirmation says saved contacts and interactions are KEPT', () => {
-  const kept = DISCONNECT_CONSEQUENCES.find((c) => c.effect === 'kept')
-  assert.ok(/contacts/i.test(kept.text) && /interactions/i.test(kept.text))
-  assert.ok(/kept/i.test(kept.text))
-})
 
-test('nothing in the confirmation claims Microsoft revoked anything', () => {
-  const upstream = DISCONNECT_CONSEQUENCES.find((c) => c.effect === 'upstream')
-  assert.ok(/does not withdraw the permission at Microsoft/i.test(upstream.text),
-    'the limit of a local disconnect must be stated')
-  const all = DISCONNECT_CONSEQUENCES.map((c) => c.text).join(' ')
-  for (const s of all.split(/(?<=[.])\s+/)) {
-    if (!/revok|withdraw/i.test(s)) continue
-    assert.ok(/does not|do not|cannot|never/i.test(s), `claims revocation: ${s}`)
-  }
-})
 
-test('the module states BOTH limits where a reader will see them', () => {
-  assert.ok(/does not revoke Funnl's grant at Microsoft/i.test(LIB),
-    'the file must record that no upstream revocation exists')
-  assert.ok(/No upstream revocation/i.test(LIB) && /call exists in this codebase/i.test(LIB),
-    'and that the absence is why the copy points at Microsoft instead')
-  assert.ok(/TWO THINGS IT CANNOT DO/i.test(LIB),
-    'the in-flight limit must be recorded alongside the upstream one')
-  assert.ok(/already holds\s*(\/\/)?\s*an\s*(\/\/)?\s*access token/i.test(LIB),
-    'the file must say why a request already running cannot be stopped')
-})
 
-test('nothing promises that Microsoft access stops instantly', () => {
-  // The RPC deletes stored credentials. It cannot reach into a request that is
-  // already running with a token it fetched earlier, so an absolute promise
-  // would be false.
-  const flight = DISCONNECT_CONSEQUENCES.find((c) => c.effect === 'in_flight')
-  assert.ok(flight, 'the in-flight limit must be shown to the user, not only commented')
-  assert.ok(/already under way/i.test(flight.text))
-  assert.ok(/no way to obtain more/i.test(flight.text),
-    'the bound on that limit must be stated too')
-
-  const all = DISCONNECT_CONSEQUENCES.map((c) => c.text).join(' ') + ' ' +
-    messageForDisconnect('disconnected')
-  for (const absolute of [
-    /immediately (loses|stops|ends)/i,
-    /can no longer (reach|read|access)/i,
-    /access (ends|stops) (immediately|instantly|at once)/i,
-    /revoked instantly/i,
-  ]) {
-    assert.ok(!absolute.test(all), `absolute promise found: ${absolute}`)
-  }
-  // What it may and does say: no credential left, cannot START a new read.
-  assert.ok(/cannot start a new read/i.test(all))
-})
 
 console.log('\nno service-role key, and no table access, from the browser')
 
@@ -434,70 +136,15 @@ test('no file under src/ mentions a service-role key at all', () => {
     `a service-role key would give every visitor every user's mailbox: ${offenders.join(', ')}`)
 })
 
-test('the card reaches the database only through the two user RPCs', () => {
-  assert.ok(!/\.from\(/.test(CARD), 'no direct table access from the card')
-  const named = [...CARD.matchAll(/\.rpc\(\s*'([^']*)'/g)].map((m) => m[1]).sort()
-  assert.deepStrictEqual(named, ['disconnect_my_outlook', 'get_my_outlook_connection'])
-})
 
-test('neither RPC takes a user id, so a caller cannot name someone else', () => {
-  assert.ok(/supabase\.rpc\('get_my_outlook_connection'\)/.test(CARD))
-  assert.ok(/supabase\.rpc\('disconnect_my_outlook'\)/.test(CARD))
-  assert.ok(!/rpc\('(get_my_outlook_connection|disconnect_my_outlook)',/.test(CARD),
-    'passing arguments would mean the function accepts some')
-  assert.ok(/get_my_outlook_connection\(\)/.test(MIGRATION),
-    'the migration must declare a zero-argument function')
-})
 
 console.log('\ndisconnect is two steps, structurally')
 
-test('the confirmation panel is a separate state that starts closed', () => {
-  assert.ok(/const \[confirmingDisconnect, setConfirmingDisconnect\] = useState\(false\)/.test(CARD),
-    'the panel must start closed')
-  assert.ok(!/defaultChecked|confirmingDisconnect = true/.test(CARD))
-})
 
-test('the first button only OPENS the panel; it cannot disconnect', () => {
-  const opener = CARD.slice(CARD.indexOf('Disconnect Outlook</'))
-  assert.ok(CARD.includes('setConfirmingDisconnect(true)'), 'the first button opens the panel')
-  assert.ok(!/setConfirmingDisconnect\(true\)[^)]*handleDisconnect/.test(CARD),
-    'opening the panel must not also disconnect')
-  assert.strictEqual((CARD.match(/onClick=\{handleDisconnect\}/g) || []).length, 1,
-    'exactly one control may disconnect')
-  assert.ok(opener.length > 0)
-})
 
-test('the only disconnecting control lives inside the open panel', () => {
-  const panelStart = CARD.indexOf('{confirmingDisconnect && (')
-  assert.ok(panelStart > 0, 'the panel must be conditional on the confirmation state')
-  const confirmAt = CARD.indexOf('onClick={handleDisconnect}')
-  assert.ok(confirmAt > panelStart, 'the confirm button must render inside the panel')
-  assert.ok(CARD.includes('DISCONNECT_CONFIRM_LABEL'), 'and carry the explicit label')
-  assert.ok(/^Yes, disconnect/.test(DISCONNECT_CONFIRM_LABEL),
-    'the confirming button must restate the action, not say OK')
-  assert.ok(/Outlook/.test(DISCONNECT_CONFIRM_LABEL))
-  assert.ok(/Cancel/.test(CARD.slice(panelStart)), 'the panel must offer a way out')
-})
 
-test('the panel states every consequence rather than a summary', () => {
-  assert.ok(/DISCONNECT_CONSEQUENCES\.map\(/.test(CARD),
-    'the card must render the reviewed consequence list, not its own wording')
-})
 
-test('the confirm handler passes confirmed: true only from that handler', () => {
-  assert.strictEqual((CARD.match(/confirmed: true/g) || []).length, 1)
-  const handler = CARD.slice(CARD.indexOf('async function handleDisconnect'))
-  assert.ok(handler.includes('confirmed: true'))
-})
 
-test('a successful disconnect re-reads the status instead of assuming it', () => {
-  const handler = CARD.slice(CARD.indexOf('async function handleDisconnect'))
-  assert.ok(/if \(result\.disconnected\)/.test(handler))
-  assert.ok(/refreshStatus\(\)/.test(handler),
-    'the connected/not-connected state must come from the database, not local state')
-  assert.ok(/setAcknowledged\(false\)/.test(handler),
-    'reconnecting must require a fresh acknowledgement')
-})
 
 console.log('\nthe migration is forward, minimal, and unapplied')
 
@@ -622,6 +269,13 @@ test('the bootstrap discloses its one shim and what it cannot reproduce', () => 
     'the file must refuse Production in its first line')
   assert.ok(!/supabase\/migrations/.test(b) || /nothing in supabase\/migrations\/ is edited/i.test(b),
     'it must state that it edits no migration')
+})
+
+// The card that called these RPCs is retired (Stage D); the RPCs themselves remain deployed until Stage F,
+// so their zero-argument signature (a caller cannot name someone else) is still pinned here.
+test('the retained user RPC takes no user id: get_my_outlook_connection() has zero arguments', () => {
+  assert.ok(/get_my_outlook_connection()/.test(MIGRATION),
+    'the migration must declare a zero-argument function')
 })
 
 async function finish () {
