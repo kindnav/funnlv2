@@ -309,15 +309,6 @@ test('signatures and worker-only grants are restated exactly', () => {
   }
 })
 
-test('the reviewer can always edit and save the longest generated note', () => {
-  // The generated ceiling must stay inside the reviewed ceiling, or a draft could arrive that
-  // the editor refuses to save - the one combination that would strand a suggestion.
-  const cal = read('src/lib/calendarReview.js')
-  const ncc = read('src/lib/newContactReview.js')
-  assert.ok(/REVIEW_NOTES_MAX = 10000/.test(cal) && /notes: 10000/.test(ncc))
-  assert.ok(BOUNDS.summary < 10000, 'the generated note fits the reviewed allowance with room to edit')
-})
-
 // == ACCURACY CONTROLS for the four rules added after the FIRST REAL MODEL SAMPLES ==========
 //
 // READ THIS BEFORE TRUSTING ANYTHING BELOW. These are FIXTURE CONTROLS, not model evidence.

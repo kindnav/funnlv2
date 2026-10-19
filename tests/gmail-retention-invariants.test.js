@@ -26,14 +26,12 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const ROOT = join(__dirname, '..')
 const read = (p) => readFileSync(join(ROOT, p), 'utf8')
 const stripSql = (s) => s.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/--[^\n]*/g, ' ')
-const stripJs = (s) => s.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' ')
 
 const RET_MIG = read('supabase/migrations/20260918000000_add_gmail_retention_cleanup.sql')
 const CAL_MIG = read('supabase/migrations/20260817000000_add_calendar_ingestion.sql')
 const E2A_MIG = read('supabase/migrations/20260907000000_add_gmail_transport_foundation.sql')
 const E2B_MIG = read('supabase/migrations/20260910000000_add_gmail_worker_primitives.sql')
 const RET = stripSql(RET_MIG)
-const GMAIL_WORKER = stripJs(read('supabase/functions/shared/gmailWorker.js'))
 const POLICY = read('src/pages/PrivacyPage.jsx')
 const ALL_MIGS = ['20260817000000_add_calendar_ingestion.sql', '20260823074250_add_calendar_reconciliation.sql',
   '20260825002308_add_calendar_candidate_review_rpcs.sql', '20260829002747_add_interaction_source.sql',
@@ -122,11 +120,6 @@ test('expiry returns controlled codes and counts only (no subject, id, or user d
 })
 test('the partial index matches the expiry predicate and order', () => {
   assert.ok(/CREATE INDEX IF NOT EXISTS interaction_candidates_pending_context_expiry_idx\s+ON public\.interaction_candidates \(context_expires_at, id\)\s+WHERE status = 'pending' AND context_expires_at IS NOT NULL/.test(RET))
-})
-test('no runtime code calls the expiry (it is scheduler-only); the worker never calls it', () => {
-  for (const p of ['supabase/functions/gmail-sync-worker/index.ts', 'supabase/functions/shared/gmailWorker.js', 'supabase/functions/google-calendar-sync/index.ts', 'supabase/functions/google-oauth-callback/index.ts']) {
-    assert.ok(!/expire_pending_email_context/.test(read(p)), `${p} must not call the expiry`)
-  }
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -224,9 +217,6 @@ test('browser roles cannot select the fingerprint or context deadline; refs/curs
   assert.ok(/REVOKE ALL ON TABLE public\.email_candidate_refs FROM authenticated;[\s\S]*?GRANT ALL\s+ON TABLE public\.email_candidate_refs TO service_role;/.test(E2A_MIG))
   assert.ok(!/GRANT[^;]*ON TABLE public\.email_candidate_refs TO (authenticated|anon)/.test(E2A_MIG + E2B_MIG + RET_MIG))
   assert.ok(!/GRANT/.test(RET.replace(/GRANT EXECUTE ON FUNCTION[^;]*;/g, '')), 'the retention migration adds no table grant')
-})
-test('the worker still never persists provider ids/headers (tombstone content cannot regress via the worker)', () => {
-  assert.ok(!/message_id:|thread_id:|threadId:|messageId:|snippet|payload\.headers|raw:/.test(GMAIL_WORKER.match(/upsert_email_candidate[\s\S]{0,600}/g)?.join('') || ''))
 })
 
 // ─────────────────────────────────────────────────────────────────────────────

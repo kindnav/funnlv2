@@ -21,8 +21,6 @@ function test(name, fn) {
 }
 
 const vercel = JSON.parse(read('vercel.json'))
-const start = read('supabase/functions/google-oauth-start/index.ts')
-const callback = read('supabase/functions/google-oauth-callback/index.ts')
 const helpers = read('supabase/functions/shared/googleOauthHelpers.js')
 
 const CALLBACK_PATH = '/api/google-oauth-callback'
@@ -68,34 +66,9 @@ test('helper exports the exact branded URL + validator', () => {
   assert.ok(/EXPECTED_GOOGLE_CALLBACK_URL = 'https:\/\/www\.getfunnl\.com\/api\/google-oauth-callback'/.test(helpers))
   assert.ok(/export function isValidConfiguredCallbackUrl/.test(helpers))
 })
-test('start fails closed via isValidConfiguredCallbackUrl before building the auth URL', () => {
-  assert.ok(start.includes('isValidConfiguredCallbackUrl(callbackUrl)'), 'start validates the callback URL')
-  const guardIdx = start.indexOf('isValidConfiguredCallbackUrl(callbackUrl)')
-  const buildIdx = start.indexOf('buildGoogleAuthUrl(')
-  assert.ok(guardIdx !== -1 && buildIdx !== -1 && guardIdx < buildIdx, 'validation precedes auth-URL construction')
-})
-test('callback fails closed via isValidConfiguredCallbackUrl before the token exchange', () => {
-  assert.ok(callback.includes('isValidConfiguredCallbackUrl(callbackUrl)'), 'callback validates the callback URL')
-  const guardIdx = callback.indexOf('isValidConfiguredCallbackUrl(callbackUrl)')
-  // Anchor on the actual token-exchange CALL, not the import of GOOGLE_TOKEN_ENDPOINT.
-  const exchangeIdx = callback.indexOf('boundedFetch(GOOGLE_TOKEN_ENDPOINT')
-  assert.ok(guardIdx !== -1 && exchangeIdx !== -1 && guardIdx < exchangeIdx, 'validation precedes token exchange')
-})
-test('the rejected configured value is never logged', () => {
-  // Config-invalid branches log a controlled code, not the URL value.
-  assert.ok(/console\.error\('google-oauth-start config_invalid'\)/.test(start))
-  assert.ok(/console\.error\('google-oauth-callback config_invalid'\)/.test(callback))
-  assert.ok(!/console\.(error|log)\([^)]*callbackUrl/.test(start), 'start never logs callbackUrl')
-  assert.ok(!/console\.(error|log)\([^)]*callbackUrl/.test(callback), 'callback never logs callbackUrl')
-})
 
 // ── No VITE Google credential ─────────────────────────────────────────────────
 console.log('\nno VITE Google credential introduced')
-test('no VITE Google credential in the changed server/config files', () => {
-  for (const src of [start, callback, helpers, read('vercel.json')]) {
-    assert.ok(!/VITE_GOOGLE_|VITE_.*CLIENT|import\.meta\.env/i.test(src), 'no VITE Google credential')
-  }
-})
 
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed\n`)
 if (failed > 0) process.exit(1)

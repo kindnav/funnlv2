@@ -20,12 +20,6 @@ function test(name, fn) {
 }
 
 const POLICY = flat(read('src/pages/PrivacyPage.jsx'))
-const TRANSPORT = read('supabase/functions/shared/gmailTransport.js')
-const CLASSIFIER = read('supabase/functions/shared/emailConversationClassifier.js')
-const FINGERPRINT = read('supabase/functions/shared/emailFingerprint.js')
-const CRYPTO = read('supabase/functions/shared/googleTokenCrypto.js')
-const WORKER = read('supabase/functions/shared/gmailWorker.js')
-const HISTORY = read('supabase/functions/shared/gmailHistory.js')
 const E2A_MIG = read('supabase/migrations/20260907000000_add_gmail_transport_foundation.sql')
 const E2B_MIG = read('supabase/migrations/20260910000000_add_gmail_worker_primitives.sql')
 const CAL_MIG = read('supabase/migrations/20260817000000_add_calendar_ingestion.sql')
@@ -46,54 +40,12 @@ test('absolute "does not read your Gmail" claims are gone; conditional wording i
 })
 
 console.log('\ntransient vs persisted: what is processed while checking mail')
-test('the header list is exactly the committed allowlist', () => {
-  const allow = TRANSPORT.match(/METADATA_HEADER_ALLOWLIST = Object\.freeze\(\[([\s\S]*?)\]\)/)[1].match(/'([^']+)'/g).map((x) => x.replace(/'/g, ''))
-  assert.deepStrictEqual(allow, ['from', 'to', 'cc', 'date', 'message-id', 'auto-submitted', 'x-auto-response-suppress', 'precedence', 'list-id', 'list-unsubscribe', 'subject'])
-  for (const w of ['From, To, and Cc addresses', 'the Date', 'the Subject', 'the Message-ID', 'Auto-Submitted, X-Auto-Response-Suppress, Precedence, List-Id, List-Unsubscribe']) assert.ok(POLICY.includes(w), w)
-  assert.ok(/metadata-only format/.test(POLICY) && /format: 'metadata'/.test(TRANSPORT))
-})
-test('transient processing of ids, timestamps, labels, cursors, and mailbox address is disclosed', () => {
-  for (const w of ['Gmail message and conversation identifiers', 'message timestamps', 'inbox, sent mail, spam, or trash', 'the page cursors Gmail uses within that single check', 'the address of the connected mailbox', 'transient processing']) assert.ok(POLICY.includes(w), w)
-  // persisted history cursor vs transient page cursors are distinguished explicitly
-  assert.ok(/the only position marker Funnl keeps between checks is the history cursor/.test(POLICY))
-  assert.ok(/a persisted Gmail history cursor \(Gmail's own position marker for your mailbox, not a message\)[^<]*different from the page cursors above, which live only for one check/.test(POLICY))
-  assert.ok(/history_id/.test(E2A_MIG) && !/page_token|pageToken/.test(E2A_MIG + E2B_MIG), 'page cursors are never persisted')
-  assert.ok(/internalDate/.test(TRANSPORT) && /'SENT'|'INBOX'/.test(TRANSPORT) && /SCOPE_EXIT_LABELS = Object\.freeze\(\['TRASH', 'SPAM'\]\)/.test(HISTORY))
-  assert.ok(/gmailAddress:\s+data\.google_email/.test(read('supabase/functions/gmail-sync-worker/index.ts')))
-})
 
 console.log('\nsnippet, header, and body wording is precise')
-test('snippet may be received but is never accessed; non-allowlisted headers discarded; body fails closed', () => {
-  assert.ok(/Google may include a short preview \("snippet"\) in its metadata response; Funnl's code does not read, copy, use, display, store, or log it/.test(POLICY))
-  assert.ok(!/snippets are never received|never receives a snippet/i.test(POLICY))
-  assert.ok(/Headers other than those listed above are discarded/.test(POLICY))
-  assert.ok(!/any header .* causes .* reject/i.test(POLICY), 'must not claim every extra header is rejected')
-  assert.ok(/If a response unexpectedly contains body content, Funnl rejects that message/.test(POLICY))
-  assert.ok(/never requests message bodies, HTML, attachments, images, or raw messages, and never stores them/.test(POLICY))
-  // code: snippet always returned by Gmail but never read; allowlist-only survives; body -> unexpected_body
-  assert.ok(/`snippet` is ALWAYS returned by Gmail even in metadata mode/.test(TRANSPORT))
-  assert.ok(!/raw\.snippet|\.snippet\b/.test(TRANSPORT.replace(/\/\/.*|\/\*[\s\S]*?\*\//g, '')), 'adapter code never touches snippet')
-  assert.ok(/'unexpected_body'/.test(TRANSPORT) && /everything else discarded/.test(TRANSPORT))
-  assert.ok(!/\.snippet|payload\.body\.data|attachmentId/.test(WORKER))
-})
 
 console.log('\nsynchronization description')
-test('90 days is the INITIAL import only; History thereafter; runs are bounded', () => {
-  assert.ok(/The first check looks back roughly 90 days; after that, Funnl processes only new and changed messages using Gmail's change history/.test(POLICY))
-  assert.ok(!/reads a bounded amount of recent header data each time \(it starts with roughly the last 90 days and then only changes\)/.test(POLICY))
-  assert.ok(/limited in the number of pages, messages, conversations, and bytes it will read, how many requests it makes at once, and how long it may run/.test(POLICY))
-  assert.ok(/INITIAL_WINDOW_DAYS = 90/.test(TRANSPORT))
-  for (const k of ['maxPagesPerRun', 'maxMessagesPerRun', 'maxConversationsPerRun', 'maxBytesPerRun', 'maxConcurrency', 'runtimeBudgetMs']) assert.ok(new RegExp(`${k}:`).test(WORKER), k)
-})
 
 console.log('\npersisted data and retention — every claim is enforced by code, and unenforced maxima are NOT published')
-test('persisted categories are named: tokens, capability status, cursor/state, fingerprint+key version, provenance, subject, accepted fields', () => {
-  for (const w of ['encrypted at rest with AES-256-GCM', 'the status of your Gmail connection', 'a persisted Gmail history cursor', 'plus timestamps, retry state, and short result codes', 'the fact that it came from Gmail', 'shortened to at most 160 characters', 'HMAC-SHA256, with the version of the key used']) assert.ok(POLICY.includes(w), w)
-  assert.ok(/AES-GCM/.test(CRYPTO) && /32-byte \(256-bit\)/.test(CRYPTO))
-  assert.ok(/history_id/.test(E2A_MIG) && /retry_count/.test(E2A_MIG) && /last_result_code/.test(E2A_MIG))
-  assert.ok(/key_version/.test(E2A_MIG) && /HMAC-SHA256/.test(FINGERPRINT))
-  assert.ok(/subjectPreviewMax: 160/.test(CLASSIFIER) && /char_length\(retained_subject\) <= 160/.test(E2A_MIG))
-})
 test('"no identifiers are stored" is NOT claimed; the precise statement is', () => {
   assert.ok(!/No message identifiers are stored/.test(POLICY))
   assert.ok(/Raw Gmail message and conversation identifiers are not stored in suggestions or in Funnl's email reference records/.test(POLICY))
@@ -187,10 +139,6 @@ test('PostHog: account identifier + email disclosed; Gmail content boundaries st
   assert.ok(/Automatic capture of page interactions is disabled/.test(POLICY))
   assert.ok(/posthog\.identify\(userId, \{ email \}\)/.test(ANALYTICS), 'identifyUser sends the account email')
   assert.ok(/autocapture:\s*false/.test(ANALYTICS), 'autocapture disabled in code')
-})
-test('Resend: account email only; no Gmail content', () => {
-  assert.ok(/Your Funnl account email address is passed to Resend to deliver these messages; no Gmail mailbox content or Gmail-derived suggestion data is ever sent to Resend/.test(POLICY))
-  assert.ok(!/resend/i.test(WORKER + HISTORY + TRANSPORT), 'no Gmail code path touches Resend')
 })
 test('the broad "never sent to Anthropic, PostHog, Resend" claim is gone', () => {
   assert.ok(!/Gmail data is never sent to Anthropic, PostHog, Resend/.test(POLICY))

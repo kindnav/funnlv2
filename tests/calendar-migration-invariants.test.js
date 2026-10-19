@@ -24,13 +24,6 @@ const MIGRATION = readFileSync(
   join(ROOT, 'supabase/migrations/20260817000000_add_calendar_ingestion.sql'),
   'utf8',
 )
-const SHARED = {
-  emailMatch: readFileSync(join(ROOT, 'supabase/functions/shared/calendarEmailMatch.js'), 'utf8'),
-  fingerprint: readFileSync(join(ROOT, 'supabase/functions/shared/calendarFingerprint.js'), 'utf8'),
-  time: readFileSync(join(ROOT, 'supabase/functions/shared/calendarTime.js'), 'utf8'),
-  relevance: readFileSync(join(ROOT, 'supabase/functions/shared/calendarRelevance.js'), 'utf8'),
-  flag: readFileSync(join(ROOT, 'src/lib/calendarIngestion.js'), 'utf8'),
-}
 // Comment strippers so scope-guard / count scans see CODE only, not the
 // descriptive "NO Gmail / NO webhook / no Supabase" wording in the comments.
 function stripSql(sql) {
@@ -38,15 +31,8 @@ function stripSql(sql) {
     .replace(/\/\*[\s\S]*?\*\//g, ' ')  // block comments
     .replace(/--[^\n]*/g, ' ')          // line comments
 }
-function stripJs(js) {
-  return js
-    .replace(/\/\*[\s\S]*?\*\//g, ' ')      // block comments
-    .replace(/(^|[^:])\/\/[^\n]*/g, '$1')   // // line comments (not http://)
-}
 
 const MIGRATION_CODE = stripSql(MIGRATION)
-const HELPERS_CODE = [SHARED.emailMatch, SHARED.fingerprint, SHARED.time, SHARED.relevance].map(stripJs).join('\n')
-const ALL_PHASE_A_CODE = MIGRATION_CODE + '\n' + HELPERS_CODE + '\n' + stripJs(SHARED.flag)
 
 let passed = 0
 let failed = 0
@@ -323,32 +309,6 @@ console.log('\nScope guard (no Gmail / Calendar-write / API / scheduler / webhoo
 
 // All scope-guard scans run against comment-stripped CODE so the legitimate
 // "we do NOT do X" wording in the file headers cannot trip them.
-test('no Gmail scope or Gmail API anywhere in Phase A code', () => {
-  assert.ok(!/gmail/i.test(ALL_PHASE_A_CODE), 'Gmail reference found in code')
-  assert.ok(!/mail\.google\.com/i.test(ALL_PHASE_A_CODE))
-})
-test('no Calendar-write scope in code', () => {
-  // full (writable) calendar scope must never appear; readonly is not used here anyway.
-  assert.ok(!/auth\/calendar(\.events)?(?!\.readonly)/.test(ALL_PHASE_A_CODE), 'writable calendar scope must not appear')
-})
-test('no live Calendar API surface in Phase A code', () => {
-  assert.ok(!/googleapis\.com\/calendar/i.test(ALL_PHASE_A_CODE))
-  assert.ok(!/events\.list|events\.watch|nextSyncToken|syncToken/.test(ALL_PHASE_A_CODE), 'sync-engine API surface must not be in Phase A')
-})
-test('no network I/O in shared helpers (pure)', () => {
-  assert.ok(!/\bfetch\s*\(/.test(HELPERS_CODE), 'fetch found in a pure helper')
-  assert.ok(!/createClient|\bsupabase\b/i.test(HELPERS_CODE), 'Supabase usage found in a pure helper')
-})
-test('no scheduler / cron / webhook / push in Phase A code', () => {
-  assert.ok(!/cron|pg_cron|\bschedule\b|webhook|events\.watch|X-Goog|pubsub|pub\/sub/i.test(ALL_PHASE_A_CODE))
-})
-test('no AI / model call in Phase A code', () => {
-  assert.ok(!/anthropic|claude|openai|\bLLM\b/i.test(ALL_PHASE_A_CODE))
-})
-test('flag foundation is not rendered/imported into any page yet', () => {
-  // The flag file itself must not import React or render UI.
-  assert.ok(!/from 'react'|jsx|<[A-Za-z]/.test(SHARED.flag))
-})
 
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed\n`)
 if (failed > 0) process.exit(1)

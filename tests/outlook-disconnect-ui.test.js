@@ -46,20 +46,7 @@ const MIGRATION = readFileSync(
   new URL('../supabase/migrations/20260929000000_outlook_connection_status_rpc.sql', import.meta.url),
   'utf8',
 )
-const SQL_TEST = readFileSync(
-  new URL('../tests/sql/outlook-disconnect-runtime.sql', import.meta.url), 'utf8',
-)
 
-const CONNECTED = {
-  result: 'connected',
-  mailbox: 'me@example.test',
-  account_type: 'personal',
-  status: 'active',
-  needs_reauth: false,
-  connected_at: '2026-09-29T12:00:00+00:00',
-  consent_policy_version: 'ol-disc-c7d331bdc76c22b11e8faedc31f71259',
-  scopes: ['Mail.Read', 'User.Read', 'offline_access'],
-}
 
 console.log('\nconnected status: reading it')
 
@@ -75,18 +62,6 @@ console.log('\ndisconnect: nothing happens without confirmation')
 
 
 
-function dharness (over = {}) {
-  const calls = { rpc: 0, bearer: 0, track: [] }
-  const base = {
-    confirmed: true,
-    disconnecting: false,
-    pageOrigin: 'https://www.getfunnl.com',
-    getBearer: async () => { calls.bearer++; return 'test-bearer' },
-    rpc: async () => { calls.rpc++; return { data: { result: 'disconnected' }, error: null } },
-    trackImpl: (n, p) => calls.track.push([n, p]),
-  }
-  return { calls, args: { ...base, ...over } }
-}
 
 
 
@@ -193,83 +168,16 @@ test('it says plainly that it is not applied', () => {
 
 console.log('\nthe database claims are backed by the SQL runtime test')
 
-test('the SQL test asserts each of the five things disconnect must handle', () => {
-  for (const claim of [
-    /CONNECTION survived disconnect/,
-    /ENCRYPTED TOKENS survived disconnect/,
-    /SYNC CURSORS \/ LEASES survived disconnect/,
-    /UNCONSUMED OAUTH STATES survived disconnect/,
-    /the pending suggested contact was not invalidated/,
-    /the pending suggested interaction was not invalidated/,
-  ]) {
-    assert.ok(claim.test(SQL_TEST), `the SQL test does not cover ${claim}`)
-  }
-})
 
-test('the SQL test proves the shells are RETAINED and emptied, not deleted', () => {
-  assert.ok(/should REMAIN as a shell, not be deleted/.test(SQL_TEST))
-  assert.ok(/MAIL-DERIVED CONTENT survived on the suggested contact/.test(SQL_TEST))
-  assert.ok(/MAIL-TO-SUGGESTION LINKAGE survived disconnect/.test(SQL_TEST))
-})
 
-test('the SQL test sweeps every user-scoped table, not a hand-picked list', () => {
-  assert.ok(/information_schema\.columns/.test(SQL_TEST))
-  assert.ok(/still holds %s row\(s\) for the disconnected user/.test(SQL_TEST))
-})
 
-test('the SQL test states, rather than assumes, that no upstream grant is revoked', () => {
-  assert.ok(/nothing here revokes Funnl's grant at/i.test(SQL_TEST))
-  assert.ok(/local teardown only/i.test(SQL_TEST))
-})
 
 console.log('')
 console.log('the verification limits are stated, not glossed over')
 
-test('both SQL runtime tests say plainly that they are NOT end-to-end', () => {
-  for (const f of ['outlook-disconnect-runtime.sql', 'outlook-connection-status-runtime.sql']) {
-    const body = readFileSync(new URL(`../tests/sql/${f}`, import.meta.url), 'utf8')
-    assert.ok(/NOT A BROWSER-TO-DATABASE END-TO-END TEST/i.test(body),
-      `${f} must refuse that description of itself`)
-    assert.ok(/PRIVILEGED `postgres` role/i.test(body),
-      `${f} must say which role it actually runs as`)
-    assert.ok(/no JWT, no PostgREST, no Kong/i.test(body), `${f} must list what is absent`)
-    assert.ok(/outlook-rpc-postgrest\.mjs/.test(body),
-      `${f} must point at the harness that does cover the gap`)
-  }
-})
 
-test('a real HTTP-through-PostgREST harness exists and covers the role gap', () => {
-  const h = readFileSync(new URL('../tests/local/outlook-rpc-postgrest.mjs', import.meta.url), 'utf8')
-  // The two checks the SQL tests structurally cannot make, because a privileged
-  // role bypasses them.
-  assert.ok(/permission denied for table microsoft_connections/.test(h),
-    'it must assert the direct table read is refused for the authenticated role')
-  assert.ok(/authenticated CAN execute both RPCs/.test(h),
-    'and that the grant is what admits the RPC')
-  assert.ok(/PGRST_JWT_SECRET/.test(h) && /Bearer/.test(h),
-    'it must go through a real JWT over HTTP')
-  assert.ok(/service_role cannot execute either RPC/.test(h),
-    'and confirm the least-privilege rule over the wire')
-})
 
-test('that harness also states what it still does NOT cover', () => {
-  const h = readFileSync(new URL('../tests/local/outlook-rpc-postgrest.mjs', import.meta.url), 'utf8')
-  assert.ok(/It is NOT an end-to-end\s*(\/\/)?\s*browser test/i.test(h))
-  assert.ok(/GoTrue/.test(h), 'no real session issuance')
-  assert.ok(/Kong/.test(h), 'no gateway apikey check')
-  assert.ok(/THE ASSUMPTION, STATED/.test(h),
-    "the auth.uid() shim's scope must be declared, not buried")
-})
 
-test('the bootstrap discloses its one shim and what it cannot reproduce', () => {
-  const b = readFileSync(new URL('../tests/sql/_bootstrap-disposable-db.sql', import.meta.url), 'utf8')
-  assert.ok(/email_confirmed_at/.test(b), 'the GoTrue column difference must be named')
-  assert.ok(/WHAT IT DOES NOT AND CANNOT REPRODUCE/i.test(b))
-  assert.ok(/NEVER run against/i.test(b) && /Production/.test(b),
-    'the file must refuse Production in its first line')
-  assert.ok(!/supabase\/migrations/.test(b) || /nothing in supabase\/migrations\/ is edited/i.test(b),
-    'it must state that it edits no migration')
-})
 
 // The card that called these RPCs is retired (Stage D); the RPCs themselves remain deployed until Stage F,
 // so their zero-argument signature (a caller cannot name someone else) is still pinned here.

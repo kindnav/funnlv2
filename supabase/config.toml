@@ -383,19 +383,8 @@ inspector_port = 8083
 deno_version = 2
 
 # ── Per-function JWT verification settings ────────────────────────────────────
-# google-oauth-callback receives Google's browser redirect, which carries no
-# Supabase JWT. JWT verification is disabled here; security comes instead from the
-# one-time, hashed, expiring OAuth state validated inside the handler.
-# google-oauth-start and google-oauth-disconnect keep the default verify_jwt = true.
-[functions.google-oauth-callback]
-verify_jwt = false
-
-# google-calendar-sync is JWT-authenticated: the platform verifies the Supabase JWT
-# and the handler ALSO calls auth.getUser(), deriving the user solely from the token.
-# Explicit for documentation; true is already the default.
-[functions.google-calendar-sync]
-verify_jwt = true
-
+# The Google, Gmail and Outlook functions are retired (Stage D): their [functions.*] sections
+# were removed with their source. Only retained functions are configured below.
 # delete-account is called from the browser through supabase.functions.invoke, which
 # sends the user's session JWT in Authorization (the project key travels separately in
 # apikey). The platform check validates that user JWT before the handler runs
@@ -403,24 +392,6 @@ verify_jwt = true
 # delete solely from the verified user.id. Explicit for documentation; true is the default.
 [functions.delete-account]
 verify_jwt = true
-
-# ── E2B: Gmail (DORMANT) ──────────────────────────────────────────────────────
-# gmail-oauth-start is JWT-authenticated exactly like google-oauth-start: the platform
-# verifies the Supabase JWT and the handler ALSO calls auth.getUser(). It additionally
-# refuses to run at all unless the server-side GMAIL_INTEGRATION_ENABLED secret is the
-# exact string 'true', so a Gmail consent is impossible until a human enables it.
-[functions.gmail-oauth-start]
-verify_jwt = true
-
-# gmail-sync-worker is PRIVATE and NOT user-callable. Platform JWT verification is
-# intentionally disabled for this private worker endpoint because user JWTs grant no
-# authority. The endpoint instead requires a separate high-entropy worker secret
-# (GMAIL_WORKER_SECRET, >= 32 chars), compares it in constant time inside the handler
-# (authorizeWorkerRequest), exposes no CORS path, and calls only service-role RPCs.
-# Without that secret the endpoint answers 503 worker_not_configured, and no scheduler/Cron
-# invokes it, so it cannot run until a human configures it.
-[functions.gmail-sync-worker]
-verify_jwt = false
 
 # [edge_runtime.secrets]
 # secret_key = "env(SECRET_VALUE)"
@@ -452,40 +423,6 @@ enabled = true
 # declarative_schema_path = "./database"
 # JSON string passed through to pg-delta SQL formatting.
 # format_options = "{\"keywordCase\":\"upper\",\"indent\":2,\"maxWidth\":80,\"commaStyle\":\"trailing\"}"
-
-# outlook-oauth-start mints a bound OAuth state and is user-initiated: the platform
-# verifies the Supabase JWT and the handler ALSO calls auth.getUser().
-[functions.outlook-oauth-start]
-verify_jwt = true
-
-# outlook-oauth-callback receives Microsoft response_mode=form_post. Microsoft does
-# NOT present a Supabase JWT, so platform verification must be off or every
-# completion would be rejected before reaching the handler. Authorisation comes from
-# the browser-binding cookie plus the single-use hashed state, checked in the handler
-# before any database or token work.
-[functions.outlook-oauth-callback]
-verify_jwt = false
-
-# outlook-import-worker is PRIVATE and NOT user-callable. Platform JWT verification is
-# intentionally disabled because a user JWT grants no authority on a worker endpoint:
-# authorisation is a separate high-entropy secret (OUTLOOK_WORKER_SECRET, >= 32 chars)
-# compared in constant time inside the handler, exactly as gmail-sync-worker does.
-#
-# It is DORMANT twice over: the handler returns 503 not_enabled unless BOTH
-# OUTLOOK_INTEGRATION_ENABLED and OUTLOOK_IMPORT_WORKER_ENABLED are exactly 'true',
-# and neither is set in any environment. The dormancy check runs BEFORE the secret
-# comparison, so a disabled endpoint cannot be used to probe the secret.
-[functions.outlook-import-worker]
-verify_jwt = false
-
-# outlook-notifications is the endpoint Microsoft Graph POSTs change notifications to, and
-# the one it validates when a subscription is created. Microsoft carries no Funnl JWT, so
-# platform JWT verification is disabled; authentication is the per-subscription clientState
-# (its SHA-256 is compared in the database before any wake-up is recorded) and the
-# subscription id. It is dormant unless OUTLOOK_INTEGRATION_ENABLED is exactly 'true', and
-# it never reads a message: a notification is a wake-up signal for the delta pipeline.
-[functions.outlook-notifications]
-verify_jwt = false
 
 # Paste-email capture (Pro). Called by the signed-in browser only, so the gateway requires a
 # valid user JWT, like AI Fill (which relies on the same default). The function re-checks the

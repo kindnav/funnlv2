@@ -86,15 +86,9 @@ test('PKCE verifier is stored as ciphertext + nonce (encrypted)', () => {
   assert.ok(/pkce_verifier_ciphertext/.test(stateSection) && /pkce_verifier_nonce/.test(stateSection))
 })
 
-// ── config.toml verify_jwt ─────────────────────────────────────────────────────
-console.log('\nconfig.toml verify_jwt')
-test('callback is verify_jwt=false', () => {
-  assert.ok(/\[functions\.google-oauth-callback\][\s\S]*verify_jwt\s*=\s*false/.test(config))
-})
-test('start and disconnect are NOT set to verify_jwt=false', () => {
-  assert.ok(!/\[functions\.google-oauth-start\]/.test(config))
-  assert.ok(!/\[functions\.google-oauth-disconnect\]/.test(config))
-})
+// The Google OAuth and Calendar functions are retired (Stage D): their source and their
+// config.toml sections are gone. The tables, the cleanup RPC and the helpers delete-account
+// uses remain until Stage F, and are pinned below.
 
 // ── delete-account: platform JWT verification + handler-side authorization ────
 // delete-account is invoked from the browser through supabase.functions.invoke,
@@ -107,29 +101,9 @@ const FUNCTION_JWT_SETTINGS = {
   // Paste an email (Pro). User-initiated: the platform verifies the caller's JWT, and the
   // handler re-checks the user and Pro entitlement before anything else.
   'ai-paste-email': 'true',
-  'google-oauth-callback': 'false',
-  'google-calendar-sync': 'true',
   'delete-account': 'true',
-  'gmail-oauth-start': 'true',
-  'gmail-sync-worker': 'false',
-  // Outlook OAuth binding phase. The start is user-initiated, so the platform
-  // verifies the caller's JWT. The callback receives Microsoft's form_post,
-  // which carries no Supabase JWT, so platform verification must be off there
-  // or every completion would be rejected before the handler's binding gate
-  // could run — the same shape as google-oauth-callback.
-  'outlook-oauth-start': 'true',
-  'outlook-oauth-callback': 'false',
-  // Outlook metadata-pass slice. A PRIVATE worker endpoint: a user JWT grants no
-  // authority on it, so platform verification is off and authorisation is a separate
-  // >= 32-character secret compared in constant time inside the handler - the same
-  // shape as gmail-sync-worker. It is additionally dormant behind two flags, checked
-  // before the secret so a disabled endpoint cannot be used to probe it.
-  'outlook-import-worker': 'false',
-  // Outlook background-sync slice. Microsoft Graph POSTs change notifications and the
-  // validation handshake here; it carries no Supabase JWT, so platform verification is
-  // off. Authentication is the per-subscription clientState, whose SHA-256 the database
-  // compares before any wake-up is recorded. Dormant behind OUTLOOK_INTEGRATION_ENABLED.
-  'outlook-notifications': 'false',
+  // The Google, Gmail and Outlook functions are retired (Stage D) together with their
+  // sections; none of them may reappear here without a reviewed change.
 }
 // Non-comment, non-blank settings lines of one [functions.<name>] section.
 function functionSectionSettings(name) {
@@ -216,17 +190,14 @@ test('CORS preflight and error contract are unchanged', () => {
   assert.ok(/catch \(err\)[\s\S]*?status: 500/.test(deleteAccountSrc))
 })
 
-// ── No scope creep across all Google function/shared/lib files ────────────────
+// ── No scope creep across the Google files that remain ─────────────────────────
 console.log('\nno scope creep')
 const googleSources = [
-  'supabase/functions/google-oauth-start/index.ts',
-  'supabase/functions/google-oauth-callback/index.ts',
-  'supabase/functions/google-oauth-disconnect/index.ts',
+  // The OAuth functions, googleConnect.js, the Settings card and its helper are retired
+  // (Stage D). These three helpers remain because delete-account imports them.
   'supabase/functions/shared/googleOauthHelpers.js',
   'supabase/functions/shared/googleTokenCrypto.js',
   'supabase/functions/shared/googleCleanup.js',
-  'supabase/functions/shared/googleConnect.js',
-  // The Settings card and its helper are retired (Stage D) and no longer exist to scan.
   migrationRel(),
 ].map(rel => ({ rel, text: read(rel) }))
 
@@ -261,17 +232,14 @@ test('exactly three google_* tables defined in the migration', () => {
   const tables = [...migration.matchAll(/CREATE TABLE public\.(google_\w+)/g)].map(m => m[1]).sort()
   assert.deepStrictEqual(tables, ['google_connections', 'google_oauth_states', 'google_tokens'])
 })
-test('only the expected google-* edge functions exist', () => {
-  // Phase 0A added the three google-oauth-* functions; Phase C1 adds the JWT-gated
-  // google-calendar-sync engine. No other google-* function should exist.
-  const fns = readdirSync(join(root, 'supabase/functions')).filter(n => n.startsWith('google'))
-  assert.deepStrictEqual(fns.sort(), ['google-calendar-sync', 'google-oauth-callback', 'google-oauth-disconnect', 'google-oauth-start'])
+test('no google-* or gmail-* edge function remains (retired in Stage D)', () => {
+  const fns = readdirSync(join(root, 'supabase/functions')).filter(n => n.startsWith('google') || n.startsWith('gmail'))
+  assert.deepStrictEqual(fns, [])
 })
 
 // ── Atomic persistence RPC (hardening pass) ───────────────────────────────────
 console.log('\natomic persistence RPC')
 const helpers = read('supabase/functions/shared/googleOauthHelpers.js')
-const callback = read('supabase/functions/google-oauth-callback/index.ts')
 
 test('store_google_connection RPC exists, SECURITY DEFINER, empty search_path', () => {
   assert.ok(/CREATE OR REPLACE FUNCTION public\.store_google_connection\(/.test(migration))
@@ -286,12 +254,6 @@ test('RPC execution revoked from PUBLIC/anon/authenticated, granted only to serv
   assert.ok(/REVOKE ALL ON FUNCTION public\.store_google_connection\([\s\S]*?\) FROM PUBLIC, anon, authenticated/.test(migration))
   assert.ok(/GRANT EXECUTE ON FUNCTION public\.store_google_connection\([\s\S]*?\) TO service_role/.test(migration))
 })
-test('callback persists via the atomic RPC (not two separate table writes)', () => {
-  assert.ok(callback.includes("admin.rpc('store_google_connection'"), 'callback must call the atomic RPC')
-  assert.ok(!/\.from\('google_connections'\)[\s\S]*?\.upsert\(/.test(callback), 'no direct connection upsert')
-  assert.ok(!/\.from\('google_tokens'\)[\s\S]*?\.upsert\(/.test(callback), 'no direct token upsert')
-  assert.ok(callback.includes('finalizeGoogleConnection'), 'callback delegates to finalize')
-})
 
 // ── Lifecycle hardening invariants ────────────────────────────────────────────
 console.log('\nlifecycle hardening')
@@ -305,71 +267,11 @@ test('identity validation requires email_verified === true', () => {
 test('refresh preservation is account-scoped (sameSub) — never cross-account', () => {
   assert.ok(/sameSub === true/.test(helpers), 'preserve only for same account')
 })
-test('start performs bounded best-effort stale-state cleanup', () => {
-  const start = read('supabase/functions/google-oauth-start/index.ts')
-  assert.ok(/google_oauth_states'\)\.delete\(\)\.lt\('created_at'/.test(start))
-})
-
-// ── Correction round 2: callback fail-closed, headers, method, JSON, disconnect ─
-console.log('\ncallback fail-closed on lookups')
-const startSrc = read('supabase/functions/google-oauth-start/index.ts')
-const disconnectSrc = read('supabase/functions/google-oauth-disconnect/index.ts')
-
-test('callback inspects BOTH lookup errors and returns before persistence', () => {
-  assert.ok(/error:\s*connLookupErr[\s\S]*?if \(connLookupErr\)[\s\S]*?return redirect/.test(callback),
-    'connection lookup error must fail closed')
-  assert.ok(/error:\s*tokenLookupErr[\s\S]*?if \(tokenLookupErr\)[\s\S]*?return redirect/.test(callback),
-    'token lookup error must fail closed')
-})
-test('callback does NOT revoke on an unresolved lookup failure', () => {
-  // The lookup-error branches return the error redirect without a revokeToken call.
-  const connBranch = callback.slice(callback.indexOf('if (connLookupErr)'), callback.indexOf('if (connLookupErr)') + 160)
-  assert.ok(!/revokeToken/.test(connBranch), 'no blind revoke on connection lookup failure')
-})
-
-console.log('\nOAuth security headers + method')
-test('callback is POST-only (form_post); non-POST → 405 without processing', () => {
-  assert.ok(/req\.method !== 'POST'[\s\S]*?status: 405/.test(callback), 'must reject non-POST with 405')
-  assert.ok(!/req\.method !== 'GET'/.test(callback), 'must NOT gate on GET anymore')
-})
-test('callback processes the form_post body, never GET query params (no URL-log re-entry)', () => {
-  assert.ok(callback.includes('parseCallbackFormBody('), 'must parse the form body')
-  assert.ok(callback.includes('readBoundedStream(req.body'), 'must read the request body (bounded)')
-  assert.ok(!/searchParams/.test(callback), 'no query-parameter reading remains')
-  assert.ok(!/new URL\(req\.url\)/.test(callback), 'no request-URL parsing remains (no GET fallback)')
-})
 test('auth URL requests response_mode=form_post', () => {
   assert.ok(/response_mode:\s*'form_post'/.test(helpers))
 })
-test('callback redirects use 303 See Other (never 301/302/307/308)', () => {
-  const fn = callback.slice(callback.indexOf('function redirect('), callback.indexOf('function redirect(') + 220)
-  assert.ok(/status:\s*303/.test(fn), 'redirect helper must use 303')
-  assert.ok(!/status:\s*30[1278]/.test(fn), 'no 301/302/307/308')
-})
-test('callback uses a bounded streaming read, not an unbounded req.text()', () => {
-  assert.ok(callback.includes('readBoundedStream(req.body'), 'must use the bounded reader')
-  assert.ok(!/await req\.text\(\)/.test(callback), 'no unbounded req.text() body read')
-})
-test('callback + start set no-store / no-referrer / nosniff security headers', () => {
-  for (const [name, src] of [['callback', callback], ['start', startSrc]]) {
-    assert.ok(/'Cache-Control':\s*'no-store'/.test(src), `${name} Cache-Control`)
-    assert.ok(/'Referrer-Policy':\s*'no-referrer'/.test(src), `${name} Referrer-Policy`)
-    assert.ok(/'X-Content-Type-Options':\s*'nosniff'/.test(src), `${name} nosniff`)
-    assert.ok(/'Pragma':\s*'no-cache'/.test(src), `${name} Pragma`)
-  }
-})
-
-console.log('\nmalformed provider JSON')
-test('callback guards token + userinfo .json() parsing', () => {
-  assert.ok(/tokenData = await tokenRes\.json\(\)[\s\S]*?catch[\s\S]*?token_json_malformed/.test(callback))
-  assert.ok(/identity = await userinfoRes\.json\(\)[\s\S]*?catch[\s\S]*?userinfo_json_malformed/.test(callback))
-})
-
-console.log('\ndisconnect requires the atomic local cleanup to succeed')
-test('disconnect returns 500 when the atomic local cleanup RPC errors', () => {
-  assert.ok(/if \(localCleanupError\)[\s\S]*?internal_error[\s\S]*?500/.test(disconnectSrc))
-  assert.ok(!/oauthStateDeleteError|connectionDeleteError/.test(disconnectSrc), 'the two-call contract is gone')
-})
+// The OAuth start, callback and disconnect functions are retired (Stage D); their
+// handler checks went with them.
 
 console.log(`\n${passed + failed} tests: ${passed} passed, ${failed} failed\n`)
 if (failed > 0) process.exit(1)

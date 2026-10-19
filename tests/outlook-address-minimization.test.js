@@ -46,7 +46,6 @@ import {
   sanitizeMessageContent, sanitizeSubject, redactEmailAddresses, safeProviderDisplayName,
   EMAIL_REDACTED,
 } from '../supabase/functions/shared/outlookContentSanitizer.js'
-import { counterpartyFromEnvelopes } from '../supabase/functions/shared/outlookContentPass.js'
 import {
   buildDraftRequest, assertRequestMinimization,
 } from '../supabase/functions/shared/outlookDraftContract.js'
@@ -82,11 +81,6 @@ const sanitize = (html) => sanitizeMessageContent({
   subject: 'RE: Following up',
 })
 
-const envelope = (from, to, name) => ({
-  direction: from === ME ? 'outbound' : 'inbound',
-  from: { address: from, name },
-  toRecipients: [{ address: to, name: 'x' }],
-})
 
 /** The request the content pass would send for this sanitized message. */
 const requestFor = ({ text, signature, displayName }) => buildDraftRequest({
@@ -230,54 +224,9 @@ test('REPRODUCED: an address as the display name is refused by the guard', () =>
   assert.deepStrictEqual(verdict.found, ['address'])
 })
 
-test('FIXED: counterpartyFromEnvelopes drops a display name that IS an address', () => {
-  const party = counterpartyFromEnvelopes([envelope(THEM, ME, 'noor@fund.test')], new Set([ME]))
-  assert.strictEqual(party.ok, true)
-  assert.strictEqual(party.address, THEM, 'the ENVELOPE address is still authoritative')
-  assert.strictEqual(party.displayName, null,
-    'nothing name-like remained, so there is no display name - and none is invented')
-})
-
-test('NEVER invented from the local part', () => {
-  const party = counterpartyFromEnvelopes([envelope(THEM, ME, 'noor@fund.test')], new Set([ME]))
-  assert.strictEqual(party.displayName, null)
-  assert.ok(party.displayName !== 'noor', 'the local part is not a name')
-  // Same for the shapes a provider uses when it has nothing better.
-  for (const n of ['noor@fund.test', '<noor@fund.test>', 'noor@fund.test ', 'NOOR@FUND.TEST']) {
-    assert.strictEqual(safeProviderDisplayName(n), null, n)
-  }
-})
-
-test('FIXED: "Name <address>" keeps the NAME and loses the address', () => {
-  const party = counterpartyFromEnvelopes(
-    [envelope(THEM, ME, 'Noor Haddad <noor@fund.test>')], new Set([ME]))
-  assert.strictEqual(party.ok, true)
-  assert.strictEqual(party.displayName, 'Noor Haddad')
-  const verdict = assertRequestMinimization(
-    requestFor({ text: 'Thursday works.', signature: null, displayName: party.displayName }),
-    { addresses: [THEM, ME] })
-  assert.deepStrictEqual(verdict, { ok: true })
-})
-
-test('an ordinary display name is passed through unchanged', () => {
-  const party = counterpartyFromEnvelopes([envelope(THEM, ME, 'Noor Haddad')], new Set([ME]))
-  assert.strictEqual(party.displayName, 'Noor Haddad')
-  assert.strictEqual(safeProviderDisplayName('Dr. Ana-María O’Neill'), 'Dr. Ana-María O’Neill')
-})
-
 test('an entity-encoded address in a display name does not survive either', () => {
   assert.strictEqual(safeProviderDisplayName('noor&#64;fund&#46;test'), null)
   assert.strictEqual(safeProviderDisplayName('Noor Haddad &lt;noor&#64;fund.test&gt;'), 'Noor Haddad')
-})
-
-test('the outbound direction is read the same way, from toRecipients', () => {
-  const party = counterpartyFromEnvelopes(
-    [{ direction: 'outbound', from: { address: ME, name: 'me' },
-       toRecipients: [{ address: THEM, name: 'noor@fund.test' }] }],
-    new Set([ME]))
-  assert.strictEqual(party.ok, true)
-  assert.strictEqual(party.address, THEM)
-  assert.strictEqual(party.displayName, null)
 })
 
 console.log('\nthe guards themselves are intact')
