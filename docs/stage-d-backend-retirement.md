@@ -6,6 +6,59 @@ Microsoft OAuth state. Account deletion keeps working at every step.
 
 Each operational step below needs its own authorization. The PR itself changes only the repository.
 
+## Status (2026-10-19): executed
+
+Each step was separately authorized. Evidence (sanitized: names, versions, digests and counts only)
+is in `C:\Users\nkindra\FunnlOps\stage-d\20261019T031210Z` (`SUMMARY.txt`).
+
+| Step | Result |
+|---|---|
+| 1. Undeploy the 9 functions | **Done 03:14–03:15Z.** One at a time, each target absent afterwards, every other function identical in version and bundle. 9 functions remain: 5 AI, `delete-account`, 3 billing. Re-confirmed at 15:41Z and 15:47Z. |
+| 2. Migration `20261019000000` | **Applied 15:46:42Z** via `db push` (CLI 2.109.0) from `a8fa5e6`. History +1. Job gone. Vault: only the two worker entries removed, leaving it empty. 48 RPCs gone; each of the 13 remaining functions identical. 26 tables and 12 triggers identical. 15 protected records = P0. |
+| 3. Merge #111 | **Merged `a801a3e`.** Production deployment succeeded, and the live JS is byte-identical to the previous bundle. |
+
+**Still open:**
+- the five `vercel.json` OAuth rewrites: removed in the follow-up routes/docs PR, with `/api` excluded from the SPA fallback (see "Retired API addresses" below). Hosted verification comes after merge;
+- Google provider retirement (blocked until the Google account has 2-step verification);
+- destruction of the three keys;
+- Stage E (privacy wording);
+- Stage F (tables).
+
+## Retired API addresses (`/api/*-oauth-*`)
+
+**Before this change (Production, checked read-only on 2026-10-19):**
+- `vercel.json` forwarded the five addresses to Supabase. With the functions undeployed, all five returned **HTTP 404 with JSON `{"code":"NOT_FOUND","message":"Requested function was not found"}`**.
+- Any other unknown `/api/...` path (and `/api` itself) fell through to the catch-all `/(.*)`, so it returned the **app's HTML shell with status 200**.
+
+**This change:**
+- The five rewrites are removed.
+- The SPA fallback becomes `{"source": "/((?!api(?:/|$)).*)", "destination": "/index.html"}`. Its destination and the `git.deploymentEnabled` setting are unchanged.
+- No middleware, function, legacy `routes` or custom 410 response is added.
+
+**Why this pattern:**
+- The lookahead `(?!api(?:/|$))` excludes `/api` and `/api/...` but not paths like `/apiary`.
+- The unnamed group keeps the compiled destination exactly `/index.html`. Vercel's named-parameter form (`/:path(...)`) compiles to `/index.html?path=$1`: a named parameter that the destination does not use is appended as a query.
+
+**Validated with Vercel's own routing library.** This used `@vercel/routing-utils` 6.6.0, installed temporarily outside the repository; the evidence is in `C:\Users\nkindra\FunnlOps\stage-d\routes-validation-*`.
+- `rewritesSchema`: valid.
+- `getTransformedRoutes`: compiles to `[{handle: filesystem}, {src: "^(?:/((?!api(?:/|$)).*))$", dest: "/index.html", check: true}]`.
+
+Resolving paths through that compiled table, with a static-file check against a build of this branch, gives:
+
+| Path | Result |
+|---|---|
+| The five retired addresses, with and without query strings | No match, so **expected platform 404** |
+| `/api`, `/api/`, `/api/unknown-route`, `/api?x=1` | No match, so **expected platform 404** |
+| `/`, `/signin`, `/settings`, `/privacy`, `/contacts`, a contact-detail path, `/suggestions`, `/apiary` | Rewritten to `/index.html` |
+| Built assets (`/assets/*.js`, `/assets/*.css`, `/favicon.svg`) | Served by the filesystem phase, before any rewrite |
+
+**Static repository checks:** `tests/vercel-routes.test.js` pins the same paths and the retained calls. Account deletion (`supabase.functions.invoke('delete-account')`) and paste-email (`invoke('ai-paste-email')`) call Supabase directly, and no `src` file calls an `/api/` address. That test is a small model of these rules, **not** Vercel's router.
+
+**Hosted behaviour is not yet verified.** The library above is Vercel's parser and route compiler, not its edge network. What a deployed site actually returns for `/api/...` (the body and headers of the platform 404, and how query strings are handled) can only be checked after a deployment. This branch's automatic preview requires Vercel login, so the check is planned read-only on Production after merge:
+- each retired address, `/api` and `/api/...` should return 404;
+- app paths and `/apiary` should return 200 HTML;
+- assets should return 200.
+
 ## What the PR contains
 
 | Area | Change |
@@ -25,10 +78,10 @@ Each operational step below needs its own authorization. The PR itself changes o
 - **`expire_pending_email_context` and `expire_pending_outlook_context`:** dormant retention helpers for rows that remain until Stage F.
 - **`src/lib/outlookDisclosure.js` and `sha256.js`:** the consent record; the privacy-policy tests check against it.
 - **All three encryption/HMAC keys, `MICROSOFT_CLIENT_ID`, the callback URLs, `OUTLOOK_DISCLOSURE_VERSION` and `OUTLOOK_PILOT_USER_ID`:** unchanged. Key destruction remains a separate decision (A7).
-- **Out of this PR's scope, left as is:**
-  - `vercel.json` rewrites for the five `/api/*-oauth-*` paths. After undeployment they return Supabase's not-found; removing them is a Vercel configuration change for separate approval.
-  - `scripts/outlook-worker-flag.ps1` and its offline test. The flag it toggles is already absent, and the tool becomes moot once the worker is undeployed.
-  - Docs that describe the retired workflows.
+- **Out of #111's scope, handled in the follow-up routes/docs PR:**
+  - `vercel.json` rewrites for the five `/api/*-oauth-*` paths: see "Retired API addresses" above.
+  - `scripts/outlook-worker-flag.ps1`, its offline test and the synthetic CLI behind it: removed. No retained workflow uses them.
+  - Docs that describe the retired workflows: kept as historical records, each with a retirement banner.
 
 ## Operational sequence
 

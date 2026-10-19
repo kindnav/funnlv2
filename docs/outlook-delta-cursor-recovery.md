@@ -1,5 +1,7 @@
 # Outlook committed delta cursor recovery
 
+> **Historical record - integration retired 2026-10-19.** Funnl retired its Outlook, Google Calendar and Gmail integrations in Stage D: the UI was removed (#109, #110), the Edge Functions were undeployed and their source removed (#111), and migration `20261019000000` dropped their RPCs, cron job and Vault entries. Everything below is kept unchanged as the record of what was built, decided, consented to and done; its instructions, commands and rollback steps no longer apply and must not be run. Current state: `docs/stage-d-backend-retirement.md`.
+
 Funnl must resume automatic networking capture when Microsoft invalidates a saved
 committed sync token. The webhook, durable wake-up and scheduled fallback design stays
 in place; this change closes a specific failure-recovery gap before pilot activation.

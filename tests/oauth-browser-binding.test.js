@@ -93,15 +93,13 @@ console.log('\nrefusal, expiry and replay')
 // ── 6. Where a flow may start (apex vs www) ──────────────────────────────────
 console.log('\nstart endpoint resolution (apex vs www)')
 
-test('vercel.json still routes the branded Google and Gmail paths', () => {
+test('vercel.json no longer routes the retired branded OAuth paths (functions undeployed in Stage D)', () => {
   const vercel = JSON.parse(read('vercel.json'))
   const sources = vercel.rewrites.map((r) => r.source)
   for (const p of ['/api/google-oauth-callback', '/api/google-oauth-start', '/api/gmail-oauth-start']) {
-    assert.ok(sources.includes(p), `rewrite missing: ${p}`)
-    const dest = vercel.rewrites.find((r) => r.source === p).destination
-    assert.ok(/^https:\/\/[a-z0-9]+\.supabase\.co\/functions\/v1\//.test(dest), `bad destination for ${p}`)
+    assert.ok(!sources.includes(p), `retired rewrite still present: ${p}`)
   }
-  assert.strictEqual(sources[sources.length - 1], '/(.*)', 'SPA catch-all stays last')
+  assert.strictEqual(sources[sources.length - 1], '/((?!api(?:/|$)).*)', 'SPA catch-all (excluding /api) stays last')
 })
 
 // ── 7. Wiring and ordering proofs ────────────────────────────────────────────

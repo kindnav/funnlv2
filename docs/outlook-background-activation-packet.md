@@ -1,5 +1,7 @@
 # Outlook background sync — owner packet: disclosure wording and ordered activation
 
+> **Historical record - integration retired 2026-10-19.** Funnl retired its Outlook, Google Calendar and Gmail integrations in Stage D: the UI was removed (#109, #110), the Edge Functions were undeployed and their source removed (#111), and migration `20261019000000` dropped their RPCs, cron job and Vault entries. Everything below is kept unchanged as the record of what was built, decided, consented to and done; its instructions, commands and rollback steps no longer apply and must not be run. Current state: `docs/stage-d-backend-retirement.md`.
+
 Status (2026-10-09): **steps 1-5 done; steps 6-10 pending.** Step 1: migration `20261009000000`
 applied and catalog-verified. Step 2: PR #76 merged as `4bc50c8` (pinned to the approved head
 `505523f`), `outlook-notifications` v1 and `outlook-import-worker` v40 deployed, closures

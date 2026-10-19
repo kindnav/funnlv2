@@ -6,8 +6,24 @@ unused Gmail path, safely and in order. Preserve contacts, School, interactions 
 follow-ups, search, CSV import, paste-email, Ask AI, authentication, privacy protections and
 Pro/subscription/billing access.
 
-Nothing in this document has been executed in Production. Each **Production action** below needs
-its own explicit approval.
+Each **Production action** below needed its own explicit approval. The plan as written (sections 1-4)
+is preserved; what was executed is recorded in this status table.
+
+## Status (2026-10-19)
+
+| Stage | Status |
+|---|---|
+| P1 (#107) | Merged and deployed. |
+| Packet A: stop Outlook processing | **Executed 2026-10-16.** Evidence: `C:\Users\nkindra\FunnlOps\packet-a\20261016T014818Z`. |
+| B. Hide Suggestions (#108) | Merged and deployed. |
+| C. Credentials | **Executed 2026-10-19.** Secrets unset; Outlook disconnected; Google local cleanup; Microsoft consent and Entra secret removed. Evidence: `C:\Users\nkindra\FunnlOps\stage-c\20261019T000148Z`. **Google provider actions remain blocked** until the Google account has 2-step verification. |
+| D. Undeploy + remove source | **Done 2026-10-19.** Frontend in #109 and #110; backend in #111, after the 9 functions were undeployed and migration `20261019000000` was applied. See `docs/stage-d-backend-retirement.md`. The obsolete `vercel.json` OAuth rewrites and the operational docs follow in a separate PR. |
+| E. Policy | Pending; needs owner-approved wording. |
+| F. Schema | Pending. It will drop the integration tables, including the one expired non-pilot Microsoft OAuth state. |
+
+Also pending: destroying the three integration keys (a separate decision).
+
+The step-by-step packets below are historical. Their scripts (for example `scripts/outlook-worker-flag.ps1`) were removed after use, and they must not be re-run.
 
 ## 1. What P1 (this PR) does
 

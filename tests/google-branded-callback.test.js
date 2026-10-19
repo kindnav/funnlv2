@@ -1,6 +1,6 @@
 // Branded Google OAuth callback patch invariants:
-//  - vercel.json puts the exact callback REWRITE before the SPA catch-all;
-//  - it is a rewrite (not a redirect) to the internal Supabase destination;
+//  - (retired in Stage D: the callback rewrite was removed with the undeployed function; see
+//    tests/vercel-routes.test.js for what vercel.json routes now);
 //  - git.deploymentEnabled is unchanged;
 //  - start + callback validate the configured callback URL before use;
 //  - no VITE Google credential is introduced.
@@ -23,8 +23,6 @@ function test(name, fn) {
 const vercel = JSON.parse(read('vercel.json'))
 const helpers = read('supabase/functions/shared/googleOauthHelpers.js')
 
-const CALLBACK_PATH = '/api/google-oauth-callback'
-const SUPABASE_DEST = 'https://jzybxhvgnksrwxfivdwt.supabase.co/functions/v1/google-oauth-callback'
 
 // ── vercel.json routing ───────────────────────────────────────────────────────
 console.log('\nvercel.json routing')
@@ -32,19 +30,9 @@ console.log('\nvercel.json routing')
 test('git.deploymentEnabled is unchanged ({ main: true, "*": false })', () => {
   assert.deepStrictEqual(vercel.git?.deploymentEnabled, { main: true, '*': false })
 })
-test('callback rewrite exists, points to the Supabase destination', () => {
-  const r = vercel.rewrites.find(x => x.source === CALLBACK_PATH)
-  assert.ok(r, 'callback rewrite present')
-  assert.strictEqual(r.destination, SUPABASE_DEST)
-})
-test('callback rewrite PRECEDES the SPA catch-all', () => {
-  const cbIdx = vercel.rewrites.findIndex(x => x.source === CALLBACK_PATH)
-  const spaIdx = vercel.rewrites.findIndex(x => x.source === '/(.*)')
-  assert.ok(cbIdx !== -1 && spaIdx !== -1, 'both rules present')
-  assert.ok(cbIdx < spaIdx, 'callback rule must come before the SPA fallback')
-})
 test('SPA catch-all still maps to /index.html', () => {
-  const spa = vercel.rewrites.find(x => x.source === '/(.*)')
+  // The catch-all excludes /api (Stage D); see tests/vercel-routes.test.js.
+  const spa = vercel.rewrites.find(x => x.source === '/((?!api(?:/|$)).*)')
   assert.strictEqual(spa.destination, '/index.html')
 })
 test('it is a REWRITE, not a redirect (no redirects, no statusCode)', () => {
@@ -52,11 +40,6 @@ test('it is a REWRITE, not a redirect (no redirects, no statusCode)', () => {
   for (const r of vercel.rewrites) {
     assert.ok(!('statusCode' in r) && !('permanent' in r), 'rewrite has no redirect fields')
   }
-})
-test('rewrite preserves query params (no query stripping in source/destination)', () => {
-  // A path-only rewrite forwards the original query string unchanged.
-  const r = vercel.rewrites.find(x => x.source === CALLBACK_PATH)
-  assert.ok(!r.source.includes('?') && !r.destination.includes('?'), 'no query manipulation in the rule')
 })
 
 // ── Config validated before use ───────────────────────────────────────────────
