@@ -1305,6 +1305,14 @@ await test('the queue selects the two draft columns the card renders, and still 
     assert.ok(CANDIDATE_SELECT.indexOf(bad) < 0, 'the queue must not select ' + bad)
   }
 })
+// The review card is retired (Stage D); the retained calendarReview.js helper keeps its follow-up bounds.
+await test('the retained review helper bounds the next step at 160 characters and validates the date', () => {
+  assert.strictEqual(REVIEW_FOLLOW_UP_MAX, 160)
+  assert.deepStrictEqual(validateOverrides({ followUp: 'x'.repeat(160), followUpDate: '2026-10-21' }), { ok: true })
+  assert.strictEqual(validateOverrides({ followUp: 'x'.repeat(161) }).code, 'invalid_follow_up')
+  assert.strictEqual(validateOverrides({ followUpDate: 'next week' }).code, 'invalid_follow_up_date')
+  assert.deepStrictEqual(validateOverrides({ followUp: '', followUpDate: '' }), { ok: true }, 'blank is a valid choice for both')
+})
 
 console.log('')
 

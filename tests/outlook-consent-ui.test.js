@@ -539,6 +539,30 @@ test('every other server outcome has its own message, none echoing the server', 
   }
 })
 
+// The connect card is retired (Stage D); these retained helpers keep their contracts.
+test('canRequestConsent holds only when every condition holds', () => {
+  const ok = { acknowledged: true, integrityOk: true, originOk: true, connecting: false }
+  assert.strictEqual(canRequestConsent(ok), true)
+  assert.strictEqual(canRequestConsent({ ...ok, acknowledged: false }), false)
+  assert.strictEqual(canRequestConsent({ ...ok, integrityOk: false }), false)
+  assert.strictEqual(canRequestConsent({ ...ok, originOk: false }), false)
+  assert.strictEqual(canRequestConsent({ ...ok, connecting: true }), false)
+})
+
+test('the Outlook start path resolves to the branded endpoint', () => {
+  assert.strictEqual(OAUTH_START_PATHS.outlook, '/api/outlook-oauth-start')
+  assert.deepStrictEqual(resolveOauthStartUrl('https://www.getfunnl.com', 'outlook'),
+    { ok: true, url: '/api/outlook-oauth-start' })
+})
+
+test('the update_failed message says the connection survives and the update did not happen', () => {
+  const copy = messageForOutcome('update_failed')
+  assert.ok(/still connected/i.test(copy), 'it says the connection survives')
+  assert.ok(/did not finish|did not complete/i.test(copy), 'and that the update did not happen')
+  assert.ok(!/nothing was connected/i.test(copy), 'the connect-path copy would be false here')
+  assert.notStrictEqual(copy, messageForOutcome('callback_failed'))
+})
+
 console.log('\nscope: this slice connects only')
 
 

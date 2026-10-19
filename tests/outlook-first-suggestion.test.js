@@ -703,6 +703,10 @@ test('the selected columns still exclude every identifier', () => {
   }
 })
 
+test('the retained select still includes source, so a row can be labelled by where it came from', () => {
+  assert.ok(CANDIDATE_SELECT.includes('source'))
+})
+
 test('an Outlook row with no proposed note is valid to accept, with the user\'s own note', () => {
   // The row Funnl writes has proposed_notes NULL. The user supplies the note, and the
   // client validator must accept both an empty and a real note.
