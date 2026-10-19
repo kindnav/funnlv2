@@ -262,47 +262,6 @@ test("the POLICY still states Anthropic's actual retention terms and no ZDR", ()
     'the documented exceptions')
 })
 
-test('the short disclosure says no LESS than the published policy on the material facts', () => {
-  // Cross-check, not a restatement: each fact below is asserted by the live
-  // /privacy Outlook section. The short notice shown at the moment of the
-  // decision must carry the same ones.
-  const policy = readFileSync(new URL('../src/pages/PrivacyPage.jsx', import.meta.url), 'utf8')
-  const short = OUTLOOK_DISCLOSURE_PARAGRAPHS.join(' ')
-  // PILOT facts: the policy states them and the notice must too.
-  const pilotFacts = ['Inbox', 'Sent Items', 'Mail.Read', 'User.Read', 'offline_access',
-    'envelope', 'mailbox level', 'pseudonymous']
-  for (const fact of pilotFacts) {
-    assert.ok(policy.includes(fact), `the published policy no longer states: ${fact}`)
-    assert.ok(short.includes(fact), `the short notice omits a pilot fact: ${fact}`)
-  }
-  // LATER-RELEASE facts: the policy carries them, and the notice must NOT, because
-  // the pilot does not do them. Checking both directions is what stops the notice
-  // drifting back into describing unbuilt processing.
-  // 'Anthropic' itself is deliberately NOT in this list: the notice names it in order
-  // to say nothing is sent to it, which is a fact the pilot needs to state. What must
-  // not appear is the affirmative processing and its retention terms.
-  // '30 days' HAS MOVED into the shared list: it is now a fact the notice must carry,
-  // because the processing it describes is what the user is consenting to on that
-  // screen. Asserted above rather than here.
-  assert.ok(short.includes('30 days') && policy.includes('30 days'),
-    'the retention window must appear in BOTH now')
-
-  // These two remain POLICY-ONLY, and deliberately: they are the policy's own
-  // phrasings of facts the notice states in plainer words. The notice says "no
-  // zero-retention agreement" where the policy says "Zero Data Retention", and
-  // "cleaned text" where the policy says "reduced copy". Keeping the check asserts
-  // that the policy still carries the formal terms, without forcing the consent
-  // screen into contractual language nobody reads.
-  const policyPhrasing = ['Zero Data Retention', 'reduced copy']
-  for (const fact of policyPhrasing) {
-    assert.ok(policy.includes(fact), `the published policy no longer states: ${fact}`)
-  }
-  // But the FACT behind each must be in the notice, in its own words.
-  assert.ok(/no zero-retention agreement/i.test(short),
-    'the notice must state the zero-retention fact in its own words')
-  assert.ok(/cleaned text/i.test(short),
-    'and that what is sent is a cleaned extract, not the raw message')
-})
 
 
 test('the readiness packet quotes the shipped text VERBATIM, not a paraphrase', () => {

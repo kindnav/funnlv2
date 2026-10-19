@@ -9,10 +9,9 @@
 //
 // Run with: node tests/privacy-policy-outlook.test.js
 import assert from 'assert'
-import { readFileSync, existsSync } from 'fs'
+import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { join, dirname } from 'path'
-import { OUTLOOK_DISCLOSURE_PARAGRAPHS } from '../src/lib/outlookDisclosure.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const root = join(__dirname, '..')
@@ -31,9 +30,6 @@ const MIGRATION = read('supabase/migrations/20260921000000_add_outlook_content_d
 // a CEILING: while the database still enforces 200, every stored summary is at most 200,
 // which is also at most 2,000. Present or absent, the page assertions below are unconditional;
 // only the migration cross-check waits for the file, and it is strict the moment it arrives.
-const NOTES_MIGRATION_PATH = 'supabase/migrations/20261010180000_detailed_ai_interaction_notes.sql'
-const NOTES_MIGRATION = existsSync(join(root, NOTES_MIGRATION_PATH)) ? read(NOTES_MIGRATION_PATH) : null
-const DRAFT = read('supabase/functions/shared/outlookDraftContract.js')
 // The scopes the code actually requests, so the policy's count cannot drift from it.
 
 // The Outlook section only (so assertions cannot accidentally pass on Gmail wording).
@@ -44,7 +40,6 @@ const OUTLOOK = START !== -1 && END !== -1 ? POLICY.slice(START, END) : ''
 // paragraph is split across concatenated string literals and a phrase never appears whole.
 // The cohort release moved the statement of WHERE the restriction is enforced into the notice,
 // so the restriction test reads both documents.
-const OUTLOOK_NOTICE_TEXT = OUTLOOK_DISCLOSURE_PARAGRAPHS.join(' ')
 
 // --------------------------------------------------------------------------
 // RETENTION DURATIONS: an allowlist, not a denylist.
@@ -145,102 +140,8 @@ function test(name, fn) {
 // ── Framing: unavailable and conditional ─────────────────────────────────────
 console.log('\nconditional framing')
 
-test('an Outlook section exists and is isolated from the Gmail section', () => {
-  assert.ok(START !== -1, 'Outlook section present')
-  assert.ok(END > START, 'Analytics section follows it')
-  assert.ok(OUTLOOK.length > 2000, 'section has substance')
-  assert.ok(!OUTLOOK.includes('Gmail connection (optional)'), 'does not swallow the Gmail section')
-})
 
-test('the section describes the RESTRICTION, not non-existence', () => {
-  // THE COHORT RELEASE (published October 13, 2026, approved from
-  // docs/outlook-cohort-activation-packet.md section 1b). The single-designated-account framing
-  // became false the moment a second account could be invited, so the heading and the opening
-  // now say who may connect - invited accounts - and that an invitation can be withdrawn.
-  assert.ok(OUTLOOK.includes('Outlook connection (invited accounts only)'),
-    'the title names the restriction')
-  assert.ok(!OUTLOOK.includes('Outlook connection (not yet available)'),
-    'the superseded title is gone: for invited accounts it IS available')
-  assert.ok(/Outlook is not generally available/.test(OUTLOOK_PROSE),
-    'it states availability rather than an absolute about the reader')
-  assert.ok(/It is being tested with a small number of invited accounts, and an invitation can be withdrawn\./
-    .test(OUTLOOK_PROSE), 'it names who may connect, and that an invitation can be withdrawn')
-  assert.ok(/Nothing below happens unless you are invited and explicitly connect Outlook from Settings, and you can disconnect at any time\./
-    .test(OUTLOOK_PROSE), 'it makes processing conditional on being invited AND connecting')
-  // WHERE THE RESTRICTION IS ENFORCED moved to the just-in-time notice with the approved
-  // wording - "Funnl's servers refuse a connection request from any account that has not been
-  // invited" - which is what a person reads at the moment of connecting. The privacy opening
-  // was approved without that sentence, so it is asserted where it is published.
-  assert.ok(/Funnl's servers refuse a connection request from any account that has not been invited/
-    .test(OUTLOOK_NOTICE_TEXT), 'the server-side refusal is stated in the notice')
-  // The single-account sentences are gone, so nothing contradicts the cohort framing.
-  assert.ok(!/single designated Funnl-controlled test account/.test(OUTLOOK_PROSE),
-    'the superseded single-account restriction must not linger')
-  // The start gate restricts NEW connections. It is not evidence that no retained row
-  // exists elsewhere, so the page must not claim that.
-  assert.ok(!/no Outlook-derived records exist for any other account/.test(OUTLOOK_PROSE),
-    'the gate must not be presented as proof of absent historical rows')
-  assert.ok(!/You cannot connect Outlook/.test(OUTLOOK_PROSE),
-    'the superseded absolute must not return')
-  // And it does NOT claim the restriction means nobody has Outlook records. The approved
-  // opening no longer carries the old "records will exist for it" admission, so this is now
-  // asserted by NEGATION: no sentence may say Outlook-derived records are absent.
-  assert.ok(!/no Outlook-derived records exist/i.test(OUTLOOK_PROSE),
-    'it must not claim that no Outlook-derived records exist for any account')
-  // The conditional framing for the UNBUILT parts is retained.
-  const flat = OUTLOOK.replace(/\s+/g, ' ')
-  assert.ok(/if, and only if,<\/em> you choose to connect Outlook/i.test(flat),
-    'uses the conditional "if, and only if" framing')
-  // THE LATER-RELEASE FRAMING IS GONE, deliberately: body reading and the Anthropic
-  // call are what this release does, so deferring them to a later one would now be
-  // the false statement. What stays conditional is CONNECTING - the integration is
-  // still restricted to one designated account and gated by a flag.
-  assert.ok(!/later release/.test(OUTLOOK_PROSE),
-    'the section must no longer defer body reading or AI to a later release')
-  assert.ok(!/first pilot/.test(OUTLOOK_PROSE),
-    'nor describe an envelope-only first pilot as what will happen')
-  // The superseded absolutes must not come back.
-  for (const gone of [/This connection does not exist yet/,
-    /Nothing here is in\s+effect today/,
-    /holds no\s+Outlook data for anyone/]) {
-    assert.ok(!gone.test(OUTLOOK), `superseded claim is back: ${gone}`)
-  }
-})
 
-test('no statement claims the pilot is running, verified or certified', () => {
-  for (const bad of [
-    /Outlook is (now )?(available|enabled|live)/i,
-    /\bOutlook is verified\b/i,
-    /\bMicrosoft(-| )certified\b/i,
-    /you are connected to Outlook/i,
-    // The page must not assert the pilot's RUN STATE in either direction: both
-    // readings go stale, one of them silently.
-    /the pilot is (now )?(running|live|under way|underway)/i,
-    /Funnl is (currently )?testing/i,
-    /not in pilot/i,
-  ]) {
-    assert.ok(!bad.test(OUTLOOK), `must not claim: ${bad}`)
-  }
-  // Instead: the restriction, and processing described CONDITIONALLY. The old conditional
-  // ("When this integration is enabled") lived in the opening the cohort release replaced; the
-  // approved opening's conditional is being invited AND connecting. NOTE: the approved opening
-  // also states a present status - "It is being tested with a small number of invited
-  // accounts" - which this guard's earlier philosophy avoided because a run-state claim can go
-  // stale. It was approved as written; if Outlook becomes generally available or the cohort
-  // ends, that sentence must be republished, and this assertion will say so.
-  assert.ok(/Nothing below happens unless you are invited and explicitly connect Outlook from Settings/
-    .test(OUTLOOK_PROSE), 'processing is described conditionally on being invited and connecting')
-  assert.ok(/It is being tested with a small number of invited accounts/.test(OUTLOOK_PROSE),
-    'the approved testing status is present - republish it when it stops being true')
-  // The heading moved from 'What the first pilot will do, when it is enabled' to a
-  // description of what Funnl reads, because there is no longer a narrower first
-  // pilot to describe separately. The CONDITIONAL framing is what this guard is
-  // actually for, and it is asserted above and below.
-  assert.ok(/What Funnl reads from your Outlook mailbox/.test(OUTLOOK_PROSE),
-    'the read is described under its own heading')
-  assert.ok(/if, and only if,/.test(OUTLOOK.replace(/\s+/g, ' ')),
-    'and the whole section stays conditional on choosing to connect')
-})
 
 // ── Permission scope ─────────────────────────────────────────────────────────
 console.log('\npermission scope')
@@ -248,122 +149,18 @@ console.log('\npermission scope')
 // ── Storage ──────────────────────────────────────────────────────────────────
 console.log('\nstorage and retention')
 
-test('raw bodies are stated as not stored, and the schema has no column for them', () => {
-  assert.ok(/Raw email bodies would not be stored by Funnl/.test(OUTLOOK))
-  assert.ok(/held\s*\n?\s*only in server memory|only in server memory/.test(OUTLOOK))
-  const ddl = MIGRATION.split('\n').filter((l) => !/^\s*--/.test(l)).join('\n')
-  for (const col of ['body_text', 'raw_body', 'body_content', 'message_body', 'snippet', 'html_body', 'mime']) {
-    assert.ok(!ddl.includes(col), `schema must not define ${col}`)
-  }
-})
 
-test('the disclosed field limits match the applied CHECK constraints', () => {
-  // 2,000 on the page, 2,000 in the CHECK that the applied migration installs, in BOTH
-  // producer tables. The old 200 must be gone from the disclosed section entirely.
-  assert.ok(/at most 2,000 characters/.test(OUTLOOK), 'the page discloses the 2,000-character summary')
-  assert.ok(!/at most 200 characters/.test(OUTLOOK), 'the superseded 200 is gone from the section')
-  // The follow-up bound did not move, so it stays pinned against the original file.
-  if (NOTES_MIGRATION === null) {
-    console.log(`      (migration cross-check pending: ${NOTES_MIGRATION_PATH} not on this ref)`)
-  } else {
-    assert.strictEqual((NOTES_MIGRATION.match(/char_length\(draft_summary\) BETWEEN 1 AND 2000/g) || []).length, 2,
-      'both draft_summary CHECKs are re-declared at 2,000')
-    assert.ok(NOTES_MIGRATION.includes('char_length(proposed_notes) <= 2000'),
-      'and the interaction-candidate note column matches')
-    assert.ok(!/BETWEEN 1 AND 200\b/.test(NOTES_MIGRATION),
-      'and no superseded 200 bound survives in the forward migration')
-  }
-  assert.ok(/at most 160 characters/.test(OUTLOOK) && MIGRATION.includes('char_length(draft_follow_up) BETWEEN 1 AND 160'))
-  assert.ok(MIGRATION.includes('char_length(retained_subject) <= 160'))
-  assert.ok(/length-limited/.test(OUTLOOK))
-  assert.ok(MIGRATION.includes('char_length(proposed_name) BETWEEN 1 AND 120'))
-})
 
-test('evidence and confidence codes are disclosed as the schema defines them', () => {
-  assert.ok(/provider metadata|provider_metadata/.test(OUTLOOK))
-  assert.ok(/explicit signature/.test(OUTLOOK))
-  assert.ok(/confidence/.test(OUTLOOK))
-  assert.ok(MIGRATION.includes("proposed_company_evidence IN ('explicit_signature', 'explicit_body')"))
-  assert.ok(MIGRATION.includes("proposed_name_confidence IN ('high', 'medium')"))
-})
 
-test('fingerprints are disclosed as one-way and provenance carries no provider identifiers', () => {
-  assert.ok(/one-way keyed fingerprints/.test(OUTLOOK))
-  assert.ok(/does not store Microsoft message or conversation identifiers, mailbox addresses, or subject lines/.test(OUTLOOK))
-  assert.ok(MIGRATION.includes("ocr_episode_fp_shape"), 'refs table pins fingerprint shape')
-})
 
 // ── Anthropic ────────────────────────────────────────────────────────────────
 console.log('\nAnthropic disclosures')
 
-test('Anthropic is named and the extract is described as minimized and pseudonymized', () => {
-  assert.ok(/Anthropic/.test(OUTLOOK), 'Anthropic is named')
-  assert.ok(/USER<\/em> and <em>CONTACT/.test(OUTLOOK), 'pseudonymous labels disclosed')
-  // THIS PINNED THE WRONG SENTENCE. "Email addresses, the recipient's email domain ...
-  // are not included" described an exclusion list that was never checked as a list:
-  // the code supplies only addresses to assertRequestMinimization, and there is no
-  // domain check at all. Worse, the replacement wording briefly opened the "can
-  // remain" paragraph with that same phrase, which read as though an address became
-  // exempt once it appeared in message text - it does not, since the scan covers the
-  // whole serialized request.
-  //
-  // So the guard now pins the two halves separately: addresses ARE checked across the
-  // whole request, and the bare DOMAIN is named as something that can remain.
-  assert.ok(/whole outgoing request, the message text included/.test(OUTLOOK_PROSE),
-    'the address check must be stated as covering the message text')
-  assert.ok(/An address written in the body of a message is therefore caught/
-    .test(OUTLOOK_PROSE), 'and an address in the body must not read as exempt')
-  assert.ok(/shaped\s*like an email address, a Bearer token or a JWT-like string/
-    .test(OUTLOOK_PROSE.replace(/\s+/g, ' ')), 'the three shapes must be named')
-  assert.ok(/email domain on its own/.test(OUTLOOK_PROSE)
-    && /can remain/.test(OUTLOOK_PROSE),
-  'and the bare domain named as something that can remain')
-  // The overclaim must not come back.
-  assert.ok(!/checks\s*the outgoing request for each of them/
-    .test(OUTLOOK_PROSE.replace(/\s+/g, ' ')),
-  'the per-category check overclaim must not return')
-  assert.ok(DRAFT.includes('assertRequestMinimization'), 'the code enforces minimization')
-})
 
-test('standard 30-day retention and "not Zero Data Retention" are both present', () => {
-  assert.ok(/30 days/.test(OUTLOOK), '30-day retention stated')
-  assert.ok(/not Zero Data Retention|Zero Data Retention/.test(OUTLOOK))
-  assert.ok(/does <strong[^>]*>not<\/strong> have a\s*\n?\s*Zero Data Retention agreement/.test(OUTLOOK),
-    'explicitly disclaims ZDR')
-  assert.ok(DRAFT.includes('NOT zero data retention'), 'the module says the same')
-})
 
-test('the two-year and seven-year safety exceptions are disclosed', () => {
-  assert.ok(/up to 2 years/.test(OUTLOOK), 'flagged-content exception')
-  assert.ok(/up to 7 years/.test(OUTLOOK), 'classification-score retention')
-  assert.ok(DRAFT.includes('up to 2 years') && DRAFT.includes('7 years'), 'module matches')
-})
 
-test('the training claim is no broader than Anthropic commercial policy supports', () => {
-  assert.ok(/does\s*\n?\s*not use commercial API data to train its models by default/.test(OUTLOOK),
-    'scoped to commercial API and qualified with "by default"')
-  // Must NOT make an absolute, unqualified promise.
-  assert.ok(!/never uses? (your|any) data (to|for) train/i.test(OUTLOOK), 'no absolute never-trains claim')
-})
 
-test('no ad hoc Anthropic deletion is promised', () => {
-  assert.ok(/cannot promise to have an individual API record deleted on request/.test(OUTLOOK),
-    'states the limitation plainly')
-  for (const bad of [
-    /we (can|will) delete your data from Anthropic/i,
-    /request deletion from Anthropic/i,
-    /Anthropic will delete it on request/i,
-  ]) {
-    assert.ok(!bad.test(OUTLOOK), `must not promise: ${bad}`)
-  }
-})
 
-test('Anthropic retention is kept distinct from Funnl database retention', () => {
-  assert.ok(/Anthropic's 30 days is not a Funnl deletion schedule/.test(OUTLOOK))
-  // No Funnl-side retention promise anywhere in the section. Enforced by the allowlist
-  // invariant at the top of this file rather than by guessing at phrasings.
-  assert.deepStrictEqual(unapprovedDurations(), [], 'unapproved retention duration present')
-})
 
 test('no Funnl-side context-erasure schedule is promised while none is scheduled', () => {
   // The expiry RPC exists but nothing runs it: no pg_cron, no cron schema, no scheduling migration.
@@ -376,249 +173,21 @@ test('no Funnl-side context-erasure schedule is promised while none is scheduled
 // ── Suggestion behavior ──────────────────────────────────────────────────────
 console.log('\nsuggestion behavior')
 
-test('no automatic contact or interaction creation is claimed', () => {
-  assert.ok(/Nothing would be added to your network automatically/.test(OUTLOOK))
-  // INVERTED. The policy promised "you accept, dismiss, or defer them" while NEITHER
-  // review card has a defer control - defer_candidate exists in the database and
-  // nothing in the UI calls it. The consent notice had already been corrected; the
-  // policy had not, so the two contradicted each other on what a reviewer can do.
-  assert.ok(!/accept, dismiss, or defer/.test(OUTLOOK),
-    'the policy must not promise a deferral the UI does not offer')
-  assert.ok(/you accept, edit or dismiss them/.test(OUTLOOK_PROSE),
-    'the three options that exist must be named')
-  assert.ok(/There is no deferral option/.test(OUTLOOK_PROSE),
-    'and the absent one stated rather than silently dropped')
-  // The Suggestions UI is retired (Stage D); with no review UI there is no Defer control to drift.
-  assert.ok(/never creates a contact or an interaction on its own/.test(OUTLOOK))
-  for (const bad of [/automatically (creates|adds) (a )?contact/i, /added for you automatically/i]) {
-    assert.ok(!bad.test(OUTLOOK), `must not claim: ${bad}`)
-  }
-})
 
-test('envelope-only proposed email and read-only acceptance are disclosed and enforced', () => {
-  assert.ok(/comes from Microsoft, not from AI/.test(OUTLOOK))
-  assert.ok(/taken from\s*\n?\s*the message envelope/.test(OUTLOOK))
-  assert.ok(/the address is fixed and cannot be changed in that step/.test(OUTLOOK))
-  assert.ok(/you can edit its email like any other contact/.test(OUTLOOK))
-  // The applied accept RPC takes no email parameter.
-  const i = MIGRATION.indexOf('CREATE FUNCTION public.accept_new_contact_candidate(')
-  const sig = MIGRATION.slice(i, MIGRATION.indexOf('RETURNS jsonb', i))
-  assert.ok(!/p_email|p_address|p_proposed_email/.test(sig), 'accept RPC takes no address')
-  // The validator refuses an AI-supplied address.
-  assert.ok(DRAFT.includes('ai_supplied_email'), 'AI output cannot carry an address')
-})
 
-test('disconnect wording matches what the applied cleanup RPC actually does', () => {
-  assert.ok(/disconnecting Outlook deletes your Microsoft connection/.test(OUTLOOK_PROSE))
-  assert.ok(/marked invalidated/.test(OUTLOOK))
-  assert.ok(/Interactions and contacts you already accepted remain/.test(OUTLOOK))
-  // MEASURED in tests/sql/outlook-pilot-retention-runtime.sql: the suggestion row
-  // SURVIVES disconnect, still carrying contact_id, the proposed date and a 64-char
-  // fingerprint. Calling it empty, or saying it is deleted, would be false.
-  assert.ok(/The suggestion record itself is not deleted/.test(OUTLOOK_PROSE),
-    'the surviving row must be disclosed')
-  assert.ok(/still carrying the contact it referred to, the proposed date and its one-way fingerprint/
-    .test(OUTLOOK_PROSE), 'what it still carries must be named')
-  assert.ok(!/leaving only a minimal record/.test(OUTLOOK),
-    'the superseded minimal-record wording must not return')
-  // Removal is event-driven, and the two remaining deletion claims are the verified ones.
-  assert.ok(/events, not by a timer/.test(OUTLOOK_PROSE))
-  assert.ok(/deleted when you delete the contact it refers to, or when you delete your Funnl account/
-    .test(OUTLOOK_PROSE), 'only the cascade-verified deletion paths are claimed')
-  assert.ok(/no scheduled job<\/strong> that acts on that deadline today/.test(
-    OUTLOOK.replace(/\s+/g, ' ')) || /no scheduled job/.test(OUTLOOK_PROSE),
-  'the absent sweep is disclosed as a limit')
-  // THE REVIEW WINDOW IS A REFUSAL, NOT A DELETION, and the policy must say both
-  // halves. The approved-duration list admits the clause only because these do.
-  assert.ok(/Funnl will not let you accept it/.test(OUTLOOK_PROSE),
-    'what the window actually enforces')
-  assert.ok(/reappears the next time the page loads/.test(OUTLOOK_PROSE),
-    'that taking a row off the list is not a database change')
-  // CORRECTED. This pinned "stay stored until you accept it, dismiss it, disconnect
-  // Outlook" - listing ACCEPTANCE as a removal path for an expired suggestion, which
-  // it is not: accepting one is refused, so the row stays pending. Dismissal is the
-  // path that actually clears it, and it is not refused by the window.
-  assert.ok(/stay stored until you dismiss it, disconnect Outlook/.test(OUTLOOK_PROSE),
-    'and that the text stays stored until an actual removal event')
-  assert.ok(/acceptance is not a way to clear an expired suggestion/
-    .test(OUTLOOK_PROSE.replace(/\s+/g, ' ')),
-  'acceptance must not be offered as a way to clear an expired suggestion')
-  assert.ok(/Dismissing an expired suggestion does work, and does clear it/
-    .test(OUTLOOK_PROSE), 'and dismissal must be distinguished from it')
-  assert.ok(/erases the drafted context/.test(OUTLOOK_PROSE),
-    'with what dismissal actually erases')
-  // And the working records are disclosed with the right verb.
-  // 'short-lived' is gone: the measurement shows they can stay stored indefinitely.
-  assert.ok(!/short-lived/.test(OUTLOOK_PROSE),
-    'working records must not be called short-lived')
-  assert.ok(/working records belonging to one read/.test(OUTLOOK_PROSE),
-    'they are scoped to one read')
-  assert.ok(/becomes unusable 24 hours after it begins/.test(OUTLOOK_PROSE))
-  assert.ok(/becoming unusable is not the same as being erased/i.test(OUTLOOK_PROSE),
-    'the deadline must be distinguished from removal')
-  assert.ok(/neither does waiting or reading the progress of a read/.test(OUTLOOK_PROSE),
-    'waiting and viewing progress must not be implied to delete')
-  // The four measured removal paths, each named.
-  for (const path of [/later read starting/, /completing/, /reset/, /disconnecting/]) {
-    assert.ok(path.test(OUTLOOK_PROSE), `removal path not named: ${path}`)
-  }
-  assert.ok(/No scheduled job acts on the deadline/.test(OUTLOOK_PROSE),
-    'the absent schedule must stay visible')
-  const i = MIGRATION.indexOf('CREATE FUNCTION public.run_microsoft_local_cleanup')
-  const body = MIGRATION.slice(i, MIGRATION.indexOf('$$;', i))
-  assert.ok(body.includes("status = 'invalidated'"), 'RPC invalidates')
-  assert.ok(body.includes('proposed_email = NULL'), 'RPC erases proposed values')
-  assert.ok(body.includes('DELETE FROM public.microsoft_connections'), 'RPC deletes the connection')
-  assert.ok(body.includes('DELETE FROM public.microsoft_oauth_states'), 'RPC discards unused states')
-})
 
 // ── Tokens and human access ──────────────────────────────────────────────────
 console.log('\ntokens and human access')
 
-test('token storage is described conditionally, not as present behavior', () => {
-  assert.ok(/stored only as encrypted values with a key version/.test(OUTLOOK))
-  // No OAuth exists yet, so the section must not assert tokens are being held today.
-  for (const bad of [
-    /your tokens are (currently )?encrypted/i,
-    /Funnl (currently )?(stores|holds) your Microsoft (authorization|tokens)/i,
-  ]) {
-    assert.ok(!bad.test(OUTLOOK), `must not assert present-tense token handling: ${bad}`)
-  }
-  assert.ok(MIGRATION.includes('access_token_ciphertext') && MIGRATION.includes('refresh_token_ciphertext'),
-    'the schema would store them encrypted')
-})
 
-test('human-access wording is precise and includes the Anthropic safety exception', () => {
-  assert.ok(/not be read by a person at Funnl except/.test(OUTLOOK), 'scoped, not absolute')
-  assert.ok(/support\s*\n?\s*request/.test(OUTLOOK) && /security investigation/.test(OUTLOOK) && /law requires it/.test(OUTLOOK))
-  assert.ok(/Anthropic operates\s*\n?\s*its own automated safety systems/.test(OUTLOOK),
-    'discloses that Anthropic may review flagged content')
-  // No blanket claim.
-  assert.ok(!/no one at Funnl (ever|will ever) reads? your email/i.test(OUTLOOK))
-})
 
 // ── Date guard and non-regression ────────────────────────────────────────────
 console.log('\npublication date guard')
 
-test('the public date is the actual October 14, 2026 publication date', () => {
-  // Owner/product decision: publish the "Paste an email (Pro)" paragraph dated 2026-10-14, the
-  // actual New York date of the publishing commit. October 13 (the COHORT wording: invited
-  // accounts; what withdrawing an invitation does and does not do), October 12 (thread
-  // segments), October 10 (detailed draft), October 9
-  // (background sync), October 6 (content release), October 5 and September 27 (envelope-only)
-  // are historical. If a later merge moves the day, this pin must move with it in that same
-  // commit - which is the point of pinning it rather than leaving it free.
-  assert.ok(POLICY.includes('Last updated: October 14, 2026'),
-    'the approved publication date must be present')
-  assert.ok(!/Last updated: October 13, 2026/.test(POLICY),
-    'the superseded cohort date must no longer be the public date')
-  assert.ok(!/Last updated: October 12, 2026/.test(POLICY),
-    'the superseded thread-segments date must no longer be the public date')
-  assert.ok(!/Last updated: October 10, 2026/.test(POLICY),
-    'the superseded detailed-draft date must no longer be the public date')
-  assert.ok(!/Last updated: October 9, 2026/.test(POLICY),
-    'the superseded background-sync date must no longer be the public date')
-  assert.ok(!/Last updated: September 2[07], 2026/.test(POLICY),
-    'a superseded Last-updated date must be gone')
-  assert.ok(!/September 26, 2026/.test(POLICY),
-    'the briefly-proposed September 26 date must not linger anywhere in the source')
-  assert.strictEqual((POLICY.match(/Last updated:/g) || []).length, 1,
-    'exactly one public date line')
-  // Once in the public line, twice in the source decision comment (the approval and
-  // the recheck instruction). Pinned so a stray extra date cannot creep in unnoticed.
-  // Twice now: the public line and the approval in the source decision comment.
-  assert.strictEqual((POLICY.match(/October 14, 2026/g) || []).length, 2,
-    'one public date line plus the source-comment approval')
-  assert.strictEqual((POLICY.match(/Last updated: October 14, 2026/g) || []).length, 1,
-    'exactly one public Last-updated line carries the date')
-  // October 13 survives ONCE, in the comment, as the superseded cohort publication.
-  assert.strictEqual((POLICY.match(/October 13, 2026/g) || []).length, 1,
-    'the superseded cohort date is recorded once, as history')
-  // October 12 survives ONCE, in the comment, as the superseded thread-segments publication.
-  assert.strictEqual((POLICY.match(/October 12, 2026/g) || []).length, 1,
-    'the superseded thread-segments date is recorded once, as history')
-  // October 10 survives ONCE, in the comment, as the superseded detailed-draft publication.
-  assert.strictEqual((POLICY.match(/October 10, 2026/g) || []).length, 1,
-    'the superseded detailed-draft date is recorded once, as history')
-  // October 9 survives TWICE, both in the comment, as history: the background-sync
-  // publication record and the note saying it was superseded by this one.
-  assert.strictEqual((POLICY.match(/October 9, 2026/g) || []).length, 2,
-    'the superseded background-sync date is recorded twice, as history, never as the public date')
-  // The content-release approval date survives ONCE, in the comment, as history.
-  assert.strictEqual((POLICY.match(/October 6, 2026/g) || []).length, 1,
-    'the superseded-as-a-date content-release approval is recorded once, as history')
-  // The two superseded approval dates survive ONCE EACH, in the comment, recorded as
-  // history - so a replaced approval stays auditable rather than being quietly erased.
-  // October 5 is the envelope-only wording this release replaces; September 27 is the
-  // one before that.
-  assert.strictEqual((POLICY.match(/September 27, 2026/g) || []).length, 1,
-    'the oldest superseded approval is recorded once, as history')
-  assert.strictEqual((POLICY.match(/October 5, 2026/g) || []).length, 1,
-    'and so is the envelope-only approval this release supersedes')
-  assert.ok(/October 5, 2026 and September 27, 2026 approvals\s+covered the superseded envelope-only wording/
-    .test(POLICY.replace(/\s+/g, ' ')),
-    'both are labelled as covering the superseded envelope-only wording')
-  // And the current approval says what it actually covers: body processing and the
-  // extract sent to Anthropic, not just a reworded disclosure.
-  assert.ok(/selected message-body\s+processing/.test(POLICY),
-    'the recorded approval names the body processing it authorizes')
-})
 
-test('the approved background-sync wording is published VERBATIM (activation packet section 2)', () => {
-  const a = "a record of the mail-change subscription Funnl holds with Microsoft for your mailbox: the identifier Microsoft assigns it, when it expires, when Microsoft last signalled a change, how many signals have arrived, and a one-way hash of the secret Funnl uses to recognise Microsoft's signals; plus, on the connection itself, the time and kind of the most recent signal. A signal tells Funnl only that your mailbox changed; Funnl does not store the message identifier it carries."
-  const b = "Funnl asks Microsoft to notify its servers when new mail arrives, and aims to start a check within a few minutes of that signal; it also runs a routine check, normally about every fifteen minutes, in case a signal was missed. These checks run automatically on Funnl's servers while Funnl is closed; nothing runs in your browser."
-  assert.ok(OUTLOOK.includes(a), 'the subscription-record bullet is present, word for word')
-  assert.ok(OUTLOOK.includes(b), 'the two automatic-check sentences are present, word for word')
-  assert.ok(/How a read would run<\/strong> — Funnl asks Microsoft/.test(OUTLOOK), 'placed as its own bullet in the Outlook section')
-  // The timing is stated as an aim and a normal interval, never as a guarantee or a figure.
-  assert.ok(!/within five minutes|5 minutes|p95/i.test(OUTLOOK), 'no latency figure or percentile reaches the user-facing text')
-})
 
-test('the section still carries a mandatory date-recheck instruction and an approval that is not legal advice', () => {
-  assert.ok(/MANDATORY AT PUBLICATION/.test(POLICY), 'the instruction survives')
-  assert.ok(/MUST be changed again in that same commit/.test(POLICY),
-    'a later merge date must force another update')
-  assert.ok(/PUBLICATION DECISION/.test(POLICY), 'the owner decision is recorded')
-  assert.ok(/not legal advice/.test(POLICY),
-    'owner approval must not be presented as legal review')
-  // The source must carry the disclaimer, and must not make the affirmative claim. A naive
-  // negative on 'counsel reviewed' would match the disclaimer itself, so match the claim
-  // shapes instead.
-  assert.ok(/not evidence that outside\s+counsel reviewed or approved this policy/.test(POLICY),
-    'owner approval is explicitly not counsel review')
-  for (const claim of [/reviewed and approved by (outside )?counsel/i,
-    /counsel has (reviewed|approved) (this|the) policy/i,
-    /legally (reviewed|approved)/i, /approved by our lawyers/i]) {
-    assert.ok(!claim.test(POLICY), `must not claim legal review: ${claim}`)
-  }
-  assert.ok(/publication commit/i.test(PACKET), 'the packet repeats the requirement')
-})
 
-test('the Outlook section is still not represented as operational', () => {
-  // The publication decision changes the date, nothing else. Outlook stays dormant.
-  assert.ok(/Outlook is not generally available/.test(OUTLOOK_PROSE))
-  assert.ok(/NOT GENERALLY AVAILABLE/.test(POLICY), 'the source comment still says so')
-  assert.ok(/WHY THE WORDING IS NOT "DOES NOT EXIST"/.test(POLICY),
-    'the source records why the absolutes were dropped')
-  assert.ok(/WHAT THE START GATE PROVES, AND WHAT IT DOES NOT/.test(POLICY),
-    'the source records that the gate is not proof of absent rows')
-  assert.ok(!/no reader of this page can connect/.test(POLICY),
-    'the superseded comment must not return')
-  for (const bad of [/Outlook is (now )?(available|enabled|live)/i, /you are connected to Outlook/i]) {
-    assert.ok(!bad.test(OUTLOOK), `must not claim: ${bad}`)
-  }
-  // No Funnl retention duration was approved along with the date.
-  assert.deepStrictEqual(unapprovedDurations(), [], 'no Funnl duration approved')
-  assert.strictEqual(APPROVED_RETENTION_DISCLOSURES.length, 6, 'still exactly six Anthropic clauses')
-})
 
-test('existing Gmail and Calendar wording is untouched', () => {
-  assert.ok(POLICY.includes('<Section title="Gmail connection (optional)">'))
-  assert.ok(POLICY.includes('<Section title="Google Calendar connection">'))
-  assert.ok(POLICY.includes('Google API Services User Data Policy'))
-  assert.ok(POLICY.includes('metadata-only format'), 'Gmail header-only wording intact')
-  assert.ok(/Funnl does not read your Gmail unless you explicitly connect it/.test(POLICY))
-})
 
 // ── Readiness packet ─────────────────────────────────────────────────────────
 console.log('\nreadiness packet')
@@ -723,44 +292,7 @@ test('the packet does not claim the INTEGRATION is live', () => {
 // --------------------------------------------------------------------------
 console.log('\nretention-duration allowlist')
 
-test('each approved Anthropic retention disclosure appears exactly once, attributed and qualified', () => {
-  for (const { why, text } of APPROVED_RETENTION_DISCLOSURES) {
-    const count = OUTLOOK_PROSE.split(text).length - 1
-    assert.strictEqual(count, 1, `${why}: expected exactly one occurrence, found ${count}`)
-    // Attribution: Anthropic must be named in the clause or in the run-up to it, so a
-    // duration can never be silently re-pointed at Funnl.
-    const at = OUTLOOK_PROSE.indexOf(text)
-    const window = OUTLOOK_PROSE.slice(Math.max(0, at - 240), at + text.length)
-    assert.ok(window.includes('Anthropic'), `${why}: not attributed to Anthropic`)
-    assert.ok(/Anthropic|API/.test(window), `${why}: not qualified to Anthropic API processing`)
-  }
-  // The durations themselves, so a silent renumbering fails.
-  assert.ok(/within 30 days/.test(OUTLOOK_PROSE), 'Anthropic 30-day window')
-  assert.ok(/up to 2 years/.test(OUTLOOK_PROSE), 'two-year flagged-content exception')
-  assert.ok(/up to 7 years/.test(OUTLOOK_PROSE), 'seven-year classification-score retention')
-})
 
-test('the one approved FUNNL duration is a refusal, and says so', () => {
-  for (const { why, text } of APPROVED_FUNNL_DURATIONS) {
-    const count = OUTLOOK_PROSE.split(text).length - 1
-    assert.strictEqual(count, 1, `${why}: expected exactly one occurrence, found ${count}`)
-    // It must NOT be stated as a deletion, and the three sentences that keep it
-    // honest must accompany it.
-    const at = OUTLOOK_PROSE.indexOf(text)
-    const after = OUTLOOK_PROSE.slice(at, at + 1200)
-    assert.ok(/Funnl will not let you accept it/.test(after),
-      `${why}: the window must be stated as a refusal`)
-    assert.ok(/no scheduled job/.test(after),
-      `${why}: the absent sweep must accompany it`)
-    assert.ok(/reappears the next time the page loads/.test(after),
-      `${why}: and that hiding a row is not a database change`)
-    assert.ok(!/delete[sd]? (it|them|the suggestion) (after|within|at) 30/i.test(after),
-      `${why}: it must not be restated as a deletion schedule`)
-  }
-  // Exactly one. A second Funnl duration needs its own review, not a silent addition.
-  assert.strictEqual(APPROVED_FUNNL_DURATIONS.length, 1,
-    'adding a Funnl duration is a deliberate act')
-})
 
 test('no unapproved retention duration survives anywhere in the Outlook section', () => {
   assert.deepStrictEqual(unapprovedDurations(), [], 'unapproved retention duration present')

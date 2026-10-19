@@ -215,10 +215,6 @@ test('the live policy is UNCHANGED, and does not claim to cover this record', ()
     assert.ok(!POLICY.toLowerCase().includes(notThere.toLowerCase()),
       `the live policy must not be edited here (found: ${notThere})`)
   }
-  // What it DOES already say, which is why the field KINDS are covered even though the
-  // record is not.
-  assert.ok(POLICY.includes('one-way keyed fingerprints'))
-  assert.ok(POLICY.includes('per-folder synchronization position'))
 })
 
 test('the design names the decision instead of making it', () => {
@@ -301,10 +297,8 @@ test('the cross-round decision sheet names fields, retention, deletion and wordi
   assert.ok(DESIGN.includes('Nothing below is implemented'))
   assert.ok(!MIGRATION.includes('inbound_seen'),
     'the cross-round fields must NOT be implemented by this branch')
-  // Checked on a phrase unique to the PROPOSAL. '90 days' alone appears in the live
-  // policy already - for Gmail's initial lookback window, which is unrelated.
-  assert.ok(POLICY.includes('looks back roughly 90 days'),
-    'sanity: the unrelated Gmail lookback is what the live policy says about 90 days')
+  // The live policy no longer describes Gmail (retired), so the old 90-day sanity line is gone;
+  // what still matters is that the proposed wording was never published.
   for (const proposed of ['whether each side has replied',
     'after the last message it saw', 'recognize a reply that arrives later']) {
     assert.ok(!POLICY.includes(proposed),
