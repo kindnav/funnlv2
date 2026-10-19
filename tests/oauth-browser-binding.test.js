@@ -313,10 +313,11 @@ test('replay of a consumed state is refused even with a matching cookie', () => 
 console.log('\nstart endpoint resolution (apex vs www)')
 
 test('the canonical www origin yields a same-origin relative path', () => {
-  assert.deepStrictEqual(resolveOauthStartUrl('https://www.getfunnl.com', 'calendar'),
-    { ok: true, url: '/api/google-oauth-start' })
   assert.deepStrictEqual(resolveOauthStartUrl('https://www.getfunnl.com', 'gmail'),
     { ok: true, url: '/api/gmail-oauth-start' })
+  // The Calendar connect card is retired (Stage D); calendar is no longer a client start path.
+  assert.deepStrictEqual(resolveOauthStartUrl('https://www.getfunnl.com', 'calendar'),
+    { ok: false, reason: 'unknown_integration' })
 })
 
 test('apex, previews and localhost are refused rather than starting an uncompletable flow', () => {
@@ -326,7 +327,7 @@ test('apex, previews and localhost are refused rather than starting an uncomplet
     'http://localhost:5173',
     'https://evil.example',
   ]) {
-    const r = resolveOauthStartUrl(origin, 'calendar')
+    const r = resolveOauthStartUrl(origin, 'gmail')
     assert.strictEqual(r.ok, false, `must refuse ${origin}`)
     assert.strictEqual(r.reason, 'non_canonical_origin')
     assert.strictEqual(canStartOauthFrom(origin), false)
@@ -342,7 +343,7 @@ test('the canonical origin matches the callback host the server enforces', () =>
     `cookie host ${CANONICAL_OAUTH_ORIGIN} must be the callback host ${m[1]}`)
 })
 
-test('vercel.json routes every branded path used by the client', () => {
+test('vercel.json still routes the branded Google and Gmail paths', () => {
   const vercel = JSON.parse(read('vercel.json'))
   const sources = vercel.rewrites.map((r) => r.source)
   for (const p of ['/api/google-oauth-callback', '/api/google-oauth-start', '/api/gmail-oauth-start']) {
@@ -395,13 +396,8 @@ test('every callback response clears the binding cookie', () => {
     'the single redirect helper clears it, so every terminal path does')
 })
 
-test('the frontend no longer starts Calendar OAuth via a direct Supabase invoke', () => {
-  const card = read('src/components/GoogleConnectionCard.jsx')
-  assert.ok(!/functions\.invoke\('google-oauth-start'/.test(card),
-    'a direct invoke would set the cookie on supabase.co and the callback would reject every completion')
-  assert.ok(/resolveOauthStartUrl\(window\.location\.origin, 'calendar'\)/.test(card))
-  assert.ok(/credentials: 'same-origin'/.test(card), 'Set-Cookie must be honoured')
-})
+// The Calendar connect card that started Google OAuth is retired (Stage D); the frontend
+// starts no Google flow now, which tests/retired-integrations-ui.test.js pins.
 
 test('Gmail stays fail-closed behind its server-side flag', () => {
   const src = read('supabase/functions/gmail-oauth-start/index.ts')
@@ -409,7 +405,6 @@ test('Gmail stays fail-closed behind its server-side flag', () => {
   const flagAt = src.indexOf('GMAIL_INTEGRATION_ENABLED')
   const cookieAt = src.indexOf('buildBindingCookie')
   assert.ok(flagAt < cookieAt, 'the flag is checked before a cookie is ever minted')
-  assert.ok(!/gmail-oauth-start/.test(read('src/components/GoogleConnectionCard.jsx')), 'no Gmail UI wired')
 })
 
 // ── 8. Bounded bodies are unchanged ──────────────────────────────────────────
