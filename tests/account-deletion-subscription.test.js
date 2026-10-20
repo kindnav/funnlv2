@@ -11,7 +11,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { cancelAccountSubscriptions, makeStripeRequest, stripeKeyMode, ENDED_STATUSES } from '../supabase/functions/delete-account/subscriptionCancellation.js'
+import { cancelAccountSubscriptions, makeStripeRequest, stripeKeyMode, ENDED_STATUSES, UNCERTAIN_CREATION_SECONDS } from '../supabase/functions/delete-account/subscriptionCancellation.js'
 
 const USER = '11111111-1111-4111-8111-111111111111'
 const OTHER = '22222222-2222-4222-8222-222222222222'
@@ -19,15 +19,24 @@ const TEST_KEY = 'sk_test_synthetic'
 const LIVE_KEY = 'sk_live_synthetic'
 
 // ── Fakes ────────────────────────────────────────────────────────────────────────────────────────
-function fakeAdmin ({ sub = null, op = null, subError = false, opError = false } = {}) {
-  return {
+// The database side: begin_account_deletion() (fence + checkout state) and the subscriptions row.
+// `op` is a convenience for a 'ready' operation with one session; `fence` overrides the RPC result.
+function fakeAdmin ({ sub = null, op = null, subError = false, fenceError = false, fence = null } = {}) {
+  const fenceData = fence ?? { fenced: true, checkout_state: op ? 'ready' : 'none', creating_age_seconds: null, sessions: op?.stripe_session_id ? [op.stripe_session_id] : [] }
+  const admin = {
+    rpcCalls: [],
+    async rpc (name, args) {
+      admin.rpcCalls.push({ name, args })
+      if (name !== 'begin_account_deletion' || fenceError) return { data: null, error: { code: 'x' } }
+      return { data: fenceData, error: null }
+    },
     from (table) {
-      const row = table === 'subscriptions' ? sub : table === 'checkout_operations' ? op : null
-      const failing = table === 'subscriptions' ? subError : opError
-      const q = { select () { return q }, eq () { return q }, async maybeSingle () { return failing ? { data: null, error: { code: 'x' } } : { data: row, error: null } } }
+      if (table !== 'subscriptions') throw new Error('unexpected table ' + table)
+      const q = { select () { return q }, eq () { return q }, async maybeSingle () { return subError ? { data: null, error: { code: 'x' } } : { data: sub, error: null } } }
       return q
     },
   }
+  return admin
 }
 const timeoutErr = () => { const e = new Error('stripe_request_timeout'); e.name = 'TimeoutError'; return e }
 
@@ -92,7 +101,7 @@ test('billing rows without a usable Stripe key: account kept, retryable, Stripe 
 })
 test('a database lookup failure keeps the account (retryable)', async () => {
   assert.equal((await run(fakeStripe(), fakeAdmin({ subError: true }))).reason, 'billing_lookup_failed')
-  assert.equal((await run(fakeStripe(), fakeAdmin({ opError: true }))).reason, 'billing_lookup_failed')
+  assert.deepEqual(await run(fakeStripe(), fakeAdmin({ fenceError: true })), { ok: false, retryable: true, reason: 'deletion_fence_failed' })
 })
 
 // ── Every known subscription state ──────────────────────────────────────────────────────────────
@@ -169,7 +178,7 @@ test('a subscription whose Stripe metadata names another Funnl user is not cance
 })
 test('a subscription on a different customer than the stored one is not canceled', async () => {
   const stripe = fakeStripe({ subs: [{ id: 'sub_A', customer: 'cus_OTHER', status: 'active' }] })
-  assert.equal((await run(stripe, fakeAdmin({ sub: ROW }))).reason, 'ownership_mismatch')
+  assert.equal((await run(stripe, fakeAdmin({ sub: ROW }))).reason, 'customer_conflict')
   assert.equal(deletes(stripe).length, 0)
 })
 test('test/live mismatch is refused, both ways', async () => {
@@ -296,4 +305,129 @@ test('defense in depth: the subscription itself is environment-checked even if t
     hooks: { 'GET /v1/subscriptions/sub_A': ({ S }) => ({ status: 200, body: { ...S.get('sub_A'), livemode: true } }) } })
   assert.deepEqual(await run(stripe, fakeAdmin({ sub: ROW })), { ok: false, retryable: false, reason: 'environment_mismatch' })
   assert.equal(deletes(stripe).length, 0)
+})
+
+// ── Finding 1: the Checkout/deletion race is closed by the durable fence ───────────────────────────
+const fenced = (over) => ({ fenced: true, checkout_state: 'none', creating_age_seconds: null, sessions: [], ...over })
+test('F1: the fence is taken first, for the verified user only, before any read or Stripe call', async () => {
+  const admin = fakeAdmin({ sub: ROW })
+  const stripe = fakeStripe({ subs: [{ id: 'sub_A', customer: 'cus_A', status: 'active' }] })
+  await run(stripe, admin)
+  assert.deepEqual(admin.rpcCalls, [{ name: 'begin_account_deletion', args: { p_user_id: USER } }])
+})
+test('F1: a creating operation without a session id is NOT "no billing": deletion is refused, retryable', async () => {
+  for (const age of [0, 119, 121, 3600, 24 * 3600]) {
+    const stripe = fakeStripe()
+    const r = await run(stripe, fakeAdmin({ fence: fenced({ checkout_state: 'creating', creating_age_seconds: age }) }))
+    assert.deepEqual(r, { ok: false, retryable: true, reason: 'checkout_creation_unresolved' }, 'age ' + age)
+    assert.equal(stripe.calls.length, 0)
+  }
+  const missing = await run(fakeStripe(), fakeAdmin({ fence: fenced({ checkout_state: 'creating', creating_age_seconds: null }) }))
+  assert.equal(missing.reason, 'checkout_creation_unresolved', 'an unknown age is treated as unresolved')
+})
+test('F1: a creating operation older than any session lifetime is resolved (its session can no longer be paid)', async () => {
+  const r = await run(fakeStripe(), fakeAdmin({ fence: fenced({ checkout_state: 'creating', creating_age_seconds: UNCERTAIN_CREATION_SECONDS + 1 }) }))
+  assert.deepEqual(r, { ok: true, canceled: 0, alreadyEnded: 0, sessionsExpired: 0, billing: false })
+  assert.ok(UNCERTAIN_CREATION_SECONDS > 24 * 3600, 'the window covers Stripe’s 24-hour maximum session lifetime')
+})
+test('F1: a malformed fence result fails closed', async () => {
+  for (const bad of [fenced({ checkout_state: 'weird' }), fenced({ sessions: 'cs_A' }), fenced({ sessions: ['not_a_session'] }), { fenced: false }]) {
+    const r = await run(fakeStripe(), fakeAdmin({ fence: bad }))
+    assert.equal(r.ok, false)
+  }
+})
+test('F1: every session the fence reports (current and overwritten) is expired', async () => {
+  const stripe = fakeStripe({ sessions: [{ id: 'cs_old', status: 'open' }, { id: 'cs_new', status: 'open' }] })
+  const r = await run(stripe, fakeAdmin({ fence: fenced({ checkout_state: 'ready', sessions: ['cs_new', 'cs_old'] }) }))
+  assert.equal(r.sessionsExpired, 2)
+  assert.equal(stripe.C.get('cs_old').status, 'expired')
+})
+
+// ── Finding 2: the customer is resolved and validated before the customer-wide check ───────────────
+const listCalls = (stripe) => stripe.calls.filter((c) => c.method === 'GET' && c.path === '/v1/subscriptions')
+test('F2: a subscription whose customer differs from the stored customer stops before the customer-wide check', async () => {
+  const stripe = fakeStripe({ subs: [{ id: 'sub_A', customer: 'cus_B', status: 'active' }] })
+  assert.deepEqual(await run(stripe, fakeAdmin({ sub: ROW })), { ok: false, retryable: false, reason: 'customer_conflict' })
+  assert.equal(listCalls(stripe).length, 0, 'no listing with an unvalidated customer')
+  assert.equal(deletes(stripe).length, 0)
+})
+test('F2: a customer discovered from a completed session must match its subscription before listing', async () => {
+  const stripe = fakeStripe({ sessions: [{ id: 'cs_A', status: 'complete', customer: 'cus_S', subscription: 'sub_N' }],
+    subs: [{ id: 'sub_N', customer: 'cus_OTHER', status: 'active' }] })
+  assert.equal((await run(stripe, fakeAdmin({ op: { stripe_session_id: 'cs_A' } }))).reason, 'customer_conflict')
+  assert.equal(listCalls(stripe).length, 0)
+})
+test('F2: the customer-wide check uses the customer validated from the subscription itself', async () => {
+  const stripe = fakeStripe({ sessions: [{ id: 'cs_A', status: 'complete', customer: 'cus_N', subscription: 'sub_N' }],
+    subs: [{ id: 'sub_N', customer: 'cus_N', status: 'active' }, { id: 'sub_X', customer: 'cus_N', status: 'active' }] })
+  const r = await run(stripe, fakeAdmin({ op: { stripe_session_id: 'cs_A' } }))     // no subscriptions row at all
+  assert.equal(r.reason, 'other_active_subscription', 'the unknown subscription on the resolved customer is found')
+  assert.deepEqual(listCalls(stripe)[0].opts.params, { customer: 'cus_N', status: 'all', limit: '100' })
+  assert.equal(deletes(stripe).length, 0)
+})
+test('F2: malformed customer or subscription identifiers fail closed', async () => {
+  assert.equal((await run(fakeStripe(), fakeAdmin({ sub: { ...ROW, stripe_customer_id: 'bogus' } }))).reason, 'customer_malformed')
+  assert.equal((await run(fakeStripe(), fakeAdmin({ sub: { ...ROW, stripe_subscription_id: 'bogus' } }))).reason, 'subscription_malformed')
+  const noCustomer = fakeStripe({ subs: [{ id: 'sub_A', customer: null, status: 'active' }] })
+  assert.equal((await run(noCustomer, fakeAdmin({ sub: ROW }))).reason, 'customer_malformed')
+  const listOther = fakeStripe({ subs: [{ id: 'sub_A', customer: 'cus_A', status: 'active' }],
+    hooks: { 'GET /v1/subscriptions': { status: 200, body: { data: [{ id: 'sub_Z', customer: 'cus_Z', status: 'canceled', livemode: false }], has_more: false } } } })
+  assert.equal((await run(listOther, fakeAdmin({ sub: ROW }))).reason, 'customer_conflict', 'a listing that returns another customer fails closed')
+})
+
+// ── Finding 3: unknown or malformed Stripe data fails closed ───────────────────────────────────────
+const expires = (stripe) => stripe.calls.filter((c) => c.path.endsWith('/expire'))
+test('F3: an unknown Checkout status fails closed without expiring or deleting anything', async () => {
+  for (const status of ['pending', '', null, 'OPEN']) {
+    const stripe = fakeStripe({ sessions: [{ id: 'cs_A', status }] })
+    assert.deepEqual(await run(stripe, fakeAdmin({ op: { stripe_session_id: 'cs_A' } })), { ok: false, retryable: false, reason: 'session_status_unknown' }, String(status))
+    assert.equal(expires(stripe).length, 0)
+  }
+})
+test('F3: a completed session missing its customer or subscription fails closed', async () => {
+  for (const sess of [{ customer: null, subscription: 'sub_N' }, { customer: 'cus_N', subscription: null }, { customer: 'cus_N', subscription: 'pi_123' }]) {
+    const stripe = fakeStripe({ sessions: [{ id: 'cs_A', status: 'complete', ...sess }], subs: [{ id: 'sub_N', customer: 'cus_N', status: 'active' }] })
+    assert.deepEqual(await run(stripe, fakeAdmin({ op: { stripe_session_id: 'cs_A' } })), { ok: false, retryable: false, reason: 'session_missing_identifiers' })
+    assert.equal(deletes(stripe).length, 0)
+  }
+})
+test('F3: an expire response that does not match is not accepted; the re-read decides', async () => {
+  const mismatches = [
+    (C) => ({ status: 200, body: { ...C.get('cs_A'), id: 'cs_OTHER', status: 'expired' } }),
+    (C) => ({ status: 200, body: { ...C.get('cs_A'), livemode: true, status: 'expired' } }),
+    (C) => ({ status: 200, body: { ...C.get('cs_A'), status: 'open' } }),
+    () => ({ status: 200, body: null }),
+  ]
+  for (const m of mismatches) {
+    // Stripe did NOT expire it: the re-read shows it still open, so deletion must not proceed.
+    const still = fakeStripe({ sessions: [{ id: 'cs_A', status: 'open' }], hooks: { 'POST /v1/checkout/sessions/cs_A/expire': ({ C }) => m(C) } })
+    assert.deepEqual(await run(still, fakeAdmin({ op: { stripe_session_id: 'cs_A' } })), { ok: false, retryable: true, reason: 'session_expire_unconfirmed' })
+  }
+  // Stripe did expire it but answered with a malformed body: the re-read confirms, deletion proceeds.
+  const did = fakeStripe({ sessions: [{ id: 'cs_A', status: 'open' }], hooks: { 'POST /v1/checkout/sessions/cs_A/expire': ({ C }) => { C.get('cs_A').status = 'expired'; return { status: 200, body: { id: 'cs_A' } } } } })
+  assert.equal((await run(did, fakeAdmin({ op: { stripe_session_id: 'cs_A' } }))).sessionsExpired, 1)
+})
+test('F3: expire times out and the re-read times out: account kept (retryable), then a retry completes', async () => {
+  let n = 0
+  const stripe = fakeStripe({ sessions: [{ id: 'cs_A', status: 'open' }],
+    hooks: { 'POST /v1/checkout/sessions/cs_A/expire': () => (n++ === 0 ? 'timeout' : 'passthrough'), 'GET /v1/checkout/sessions/cs_A': () => (n === 1 && n++ ? 'timeout' : 'passthrough') } })
+  const admin = fakeAdmin({ op: { stripe_session_id: 'cs_A' } })
+  assert.deepEqual(await run(stripe, admin), { ok: false, retryable: true, reason: 'session_expire_unconfirmed' })
+  const second = await run(stripe, admin)
+  assert.equal(second.ok, true)
+  assert.equal(stripe.C.get('cs_A').status, 'expired')
+  assert.ok(expires(stripe).every((c) => c.opts.idempotencyKey === 'funnl-account-deletion:expire:cs_A'), 'the same idempotency key on every attempt')
+})
+test('F3: an unknown subscription status fails closed and nothing is canceled', async () => {
+  const stripe = fakeStripe({ subs: [{ id: 'sub_A', customer: 'cus_A', status: 'mystery' }] })
+  assert.deepEqual(await run(stripe, fakeAdmin({ sub: ROW })), { ok: false, retryable: false, reason: 'subscription_status_unknown' })
+  assert.equal(deletes(stripe).length, 0)
+  const listed = fakeStripe({ subs: [{ id: 'sub_A', customer: 'cus_A', status: 'active' }, { id: 'sub_Q', customer: 'cus_A', status: 'mystery' }] })
+  assert.equal((await run(listed, fakeAdmin({ sub: ROW }))).reason, 'subscription_status_unknown')
+  assert.equal(deletes(listed).length, 0)
+})
+test('F3: a cancel response for a different object is not accepted as confirmation', async () => {
+  const stripe = fakeStripe({ subs: [{ id: 'sub_A', customer: 'cus_A', status: 'active' }],
+    hooks: { 'DELETE /v1/subscriptions/sub_A': { status: 200, body: { id: 'sub_OTHER', customer: 'cus_A', status: 'canceled', livemode: false } } } })
+  assert.deepEqual(await run(stripe, fakeAdmin({ sub: ROW })), { ok: false, retryable: true, reason: 'cancel_unconfirmed' })
 })

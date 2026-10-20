@@ -16,6 +16,7 @@ import { join } from 'node:path'
 import { createClient } from '@supabase/supabase-js'
 import { cancelAccountSubscriptions, makeStripeRequest } from '../../supabase/functions/delete-account/subscriptionCancellation.js'
 import { runWebhookOrchestration } from '../../supabase/functions/stripe-webhook/webhookHandler.js'
+import { runCheckoutOrchestration } from '../../supabase/functions/create-checkout-session/checkoutOrchestrator.js'
 
 const NL = String.fromCharCode(10)
 const ROOT = join(import.meta.dirname, '..', '..')
@@ -122,7 +123,7 @@ const stripeRequest = makeStripeRequest({ stripeKey: STRIPE_KEY, timeoutMs: 800,
 const cancels = (sub) => log.filter((e) => e.method === 'DELETE' && e.path === `/v1/subscriptions/${sub}`)
 const creates = () => log.filter((e) => e.method === 'POST' && !e.path.endsWith('/expire'))
 
-// delete-account after authentication, in its order: billing, contacts, auth user.
+// delete-account after authentication, in its order: fence + billing, contacts, auth user.
 async function deleteAccount (admin, uid) {
   const billing = await cancelAccountSubscriptions({ userId: uid, admin, stripeKey: STRIPE_KEY, stripeRequest })
   if (!billing.ok) return { status: billing.retryable ? 503 : 409, code: billing.retryable ? 'subscription_cancel_unconfirmed' : 'subscription_needs_support', reason: billing.reason }
@@ -173,7 +174,7 @@ async function main () {
 
   // Synthetic users: each gets contacts + an interaction; billing as named.
   const ids = {}
-  for (const tag of ['nobill', 'active', 'dbfail', 'ended', 'mismatch', 'open', 'bystander']) {
+  for (const tag of ['nobill', 'active', 'dbfail', 'ended', 'mismatch', 'open', 'bystander', 'race', 'oldcheckout', 'inflight', 'stalecreate', 'history']) {
     const { data, error } = await admin.auth.admin.createUser({ email: `del-${tag}@example.test`, password: randomBytes(12).toString('hex'), email_confirm: true })
     if (error) throw new Error(`createUser ${tag}: ${error.message}`)
     ids[tag] = data.user.id
@@ -256,7 +257,72 @@ async function main () {
   console.log(`  (late updated / checkout-completed answered ${outcomes[0]} / ${outcomes[2]}: the write is refused because the account no longer exists; Stripe retries then stops)`)
   check('...and no stuck "processing" webhook rows', one("SELECT count(*) FROM public.stripe_webhook_events WHERE status = 'processing'") === '0')
 
-  console.log(NL + '6. Bystander')
+  console.log(NL + '6. Finding 1: Checkout creation and deletion are serialized by the durable fence')
+  const claim = (uid, mode = 'reuse_or_create') => admin.rpc('claim_checkout_operation', { p_user_id: uid, p_price_id: PRICE, p_mode: mode })
+  const begin = (uid) => admin.rpc('begin_account_deletion', { p_user_id: uid })
+  const resetRace = () => psql(`DELETE FROM public.account_deletion_fences WHERE user_id = '${ids.race}'; DELETE FROM public.checkout_operations WHERE user_id = '${ids.race}';`)
+  let claimFirst = 0, fenceFirst = 0, violations = 0
+  for (let i = 0; i < 40; i++) {
+    resetRace()
+    const jitter = () => sleep(Math.floor(Math.random() * 6))
+    const [c, b] = await Promise.all([jitter().then(() => claim(ids.race)), jitter().then(() => begin(ids.race))])
+    const cr = c.data?.result, bs = b.data?.checkout_state
+    if (cr === 'claimed' && bs === 'creating') claimFirst++
+    else if (cr === 'account_deleting' && bs === 'none') fenceFirst++
+    else violations++
+  }
+  check('40 concurrent create/delete races: every outcome is one of the two serial orders', violations === 0, `claim-first ${claimFirst}, fence-first ${fenceFirst}, other ${violations}`)
+  check('...never "deletion saw no billing" while a checkout was claimed', violations === 0)
+  console.log(`  (orders observed: claim first ${claimFirst}, fence first ${fenceFirst})`)
+  resetRace(); await begin(ids.race)
+  const modes = await Promise.all(['reuse_or_create', 'reuse_only', 'fresh_only'].map((m) => claim(ids.race, m)))
+  check('once fenced, every checkout mode is refused (no claim, no reuse of a stored URL)', modes.every((m) => m.data?.result === 'account_deleting'), modes.map((m) => m.data?.result).join(','))
+
+  let stripeCreates = 0
+  await begin(ids.oldcheckout)
+  const oc = await runCheckoutOrchestration({
+    user: { id: ids.oldcheckout, email: 'del-oldcheckout@example.test' }, supabaseAdmin: admin,
+    createStripeSession: async () => { stripeCreates++; return { outcome: 'success', session: {} } },
+    env: { priceId: PRICE, stripeKey: STRIPE_KEY, successUrl: 'https://www.getfunnl.com/settings?checkout=success', cancelUrl: 'https://www.getfunnl.com/settings?checkout=cancelled' },
+  })
+  check('the CURRENTLY DEPLOYED checkout code is blocked by the fence: 503, no Stripe call', oc.status === 503 && stripeCreates === 0, `${oc.status} / ${stripeCreates}`)
+
+  const ic = await claim(ids.inflight)
+  check('an in-flight creation is claimed before deletion starts', ic.data?.result === 'claimed')
+  const I0 = owned(ids.inflight)
+  const r9 = await deleteAccount(admin, ids.inflight)
+  check('deletion during an unfinished creation is refused (503) and keeps the account', r9.status === 503 && r9.reason === 'checkout_creation_unresolved' && owned(ids.inflight) !== '' && gone(ids.inflight) === false, JSON.stringify(r9))
+  check('...its rows are unchanged apart from the fence', owned(ids.inflight) === I0)
+  C.set('cs_inflight', { id: 'cs_inflight', object: 'checkout.session', status: 'open', livemode: false, client_reference_id: ids.inflight, metadata: { user_id: ids.inflight }, customer: null, subscription: null })
+  const fin = await admin.rpc('finalize_checkout_operation', { p_user_id: ids.inflight, p_claim_token: ic.data.claim_token, p_state: 'ready', p_session_id: 'cs_inflight', p_checkout_url: 'https://checkout.stripe.com/c/pay/cs_inflight', p_expires_at: new Date(Date.now() + 86400000).toISOString() })
+  check('the in-flight creator can still record its session under the fence', fin.data === true, JSON.stringify(fin.error))
+  const r10 = await deleteAccount(admin, ids.inflight)
+  check('the retry expires that session and deletes the account', r10.status === 200 && r10.billing.sessionsExpired === 1 && C.get('cs_inflight').status === 'expired' && gone(ids.inflight), JSON.stringify(r10))
+
+  const sc = await claim(ids.stalecreate)
+  psql(`UPDATE public.checkout_operations SET updated_at = now() - interval '25 hours' WHERE user_id = '${ids.stalecreate}';`)
+  const before = log.length
+  const r11 = await deleteAccount(admin, ids.stalecreate)
+  check('a creation older than any session lifetime no longer blocks deletion', sc.data?.result === 'claimed' && r11.status === 200 && gone(ids.stalecreate), JSON.stringify(r11))
+  check('...and needs no Stripe call', log.length === before)
+
+  psql(`INSERT INTO public.subscriptions (user_id, stripe_customer_id, stripe_subscription_id, status, current_period_end, price_id) VALUES ('${ids.history}', 'cus_history', 'sub_history', 'canceled', now() - interval '1 day', '${PRICE}');
+        INSERT INTO public.checkout_operations (user_id, price_id, stripe_session_id, state, checkout_url, expires_at) VALUES ('${ids.history}', '${PRICE}', 'cs_h1', 'ready', 'https://checkout.stripe.com/c/pay/cs_h1', now() + interval '20 hours');`)
+  stripeSub('history', 'canceled')
+  for (const id of ['cs_h1', 'cs_h2']) C.set(id, { id, object: 'checkout.session', status: 'open', livemode: false, client_reference_id: ids.history, metadata: { user_id: ids.history }, customer: 'cus_history', subscription: null })
+  const hc = await claim(ids.history, 'fresh_only')
+  await admin.rpc('finalize_checkout_operation', { p_user_id: ids.history, p_claim_token: hc.data.claim_token, p_state: 'ready', p_session_id: 'cs_h2', p_checkout_url: 'https://checkout.stripe.com/c/pay/cs_h2', p_expires_at: new Date(Date.now() + 86400000).toISOString() })
+  check('starting a new operation keeps the overwritten, still-payable session in history', one(`SELECT count(*) FROM public.checkout_session_history WHERE user_id = '${ids.history}' AND stripe_session_id = 'cs_h1'`) === '1')
+  const r12 = await deleteAccount(admin, ids.history)
+  check('deletion expires BOTH the overwritten and the current session', r12.status === 200 && r12.billing.sessionsExpired === 2 && C.get('cs_h1').status === 'expired' && C.get('cs_h2').status === 'expired' && gone(ids.history), JSON.stringify(r12))
+
+  const blocked = await claim(ids.mismatch)
+  psql(`UPDATE public.account_deletion_fences SET started_at = now() - interval '16 minutes' WHERE user_id = '${ids.mismatch}';`)
+  const after = await claim(ids.mismatch)
+  check('after a refused deletion, Checkout stays fenced, then reopens once the fence expires', blocked.data?.result === 'account_deleting' && after.data?.result === 'claimed', `${blocked.data?.result} -> ${after.data?.result}`)
+  check('no request ever created anything at Stripe (whole run)', creates().length === 0)
+
+  console.log(NL + '7. Bystander')
   check("the bystander's account and subscription are unchanged throughout", owned(ids.bystander) === BY0 && S.get('sub_bystander').status === 'active' && cancels('sub_bystander').length === 0)
 }
 

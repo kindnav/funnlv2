@@ -38,7 +38,7 @@ function replay (createRe, dropRe) {
 }
 const FINAL_TABLES = replay(/^CREATE TABLE (?:IF NOT EXISTS )?public[.]([a-z_]+)/i, /^DROP TABLE (?:IF EXISTS )?public[.]([a-z_]+)/i)
 const FINAL_FUNCTIONS = replay(/^CREATE (?:OR REPLACE )?FUNCTION public[.]([a-z_]+)[(]/i, /^DROP FUNCTION (?:IF EXISTS )?public[.]([a-z_]+)[(]/i)
-const APP_TABLES = ['checkout_operations', 'contacts', 'interactions', 'pro_trials', 'profiles', 'stripe_webhook_events', 'subscriptions']
+const APP_TABLES = ['account_deletion_fences', 'checkout_operations', 'checkout_session_history', 'contacts', 'interactions', 'pro_trials', 'profiles', 'stripe_webhook_events', 'subscriptions']
 const RETIRED_TABLES = ['interaction_candidates', 'new_contact_candidates', 'microsoft_oauth_states', 'google_oauth_states', 'google_connections',
   'google_tokens', 'microsoft_connections', 'microsoft_tokens', 'outlook_sync_state', 'outlook_subscriptions', 'email_candidate_refs']
 const RETIRED_START = '<Section title="Retired connections: Google Calendar, Gmail and Outlook">'
@@ -125,7 +125,7 @@ test('the records left from the retired connections are described as deleted, wi
 
 test('schema: the migrations leave no integration table or function, and keep the app tables and the source labels', () => {
   for (const t of RETIRED_TABLES) assert.ok(!FINAL_TABLES.has(t), t + ' still exists after the migrations')
-  assert.deepStrictEqual([...FINAL_TABLES].sort(), APP_TABLES, 'exactly the seven application tables remain')
+  assert.deepStrictEqual([...FINAL_TABLES].sort(), APP_TABLES, 'exactly the application and billing tables remain')
   for (const fn of ['run_google_local_cleanup', 'outlook_sync_state_consume_wake', 'outlook_unpaired_valid', 'expire_pending_email_context', 'expire_pending_outlook_context']) {
     assert.ok(!FINAL_FUNCTIONS.has(fn), fn + ' still exists after the migrations')
   }
