@@ -10,10 +10,17 @@
 //
 // Coordination with Checkout (migration 20261020000000): begin_account_deletion() writes a durable
 // per-user fence under the same transaction lock that claim_checkout_operation() takes, so no new
-// Checkout can be created once deletion has begun. It reports, under that lock, the checkout state and
-// every session id that may still be payable. A 'creating' operation (no session id yet) is NOT "no
-// billing": deletion is refused (retryable) until it is finalized, or until it is old enough that any
-// session it could have created has expired (Stripe Checkout sessions live at most 24 hours).
+// Checkout can be created once deletion has begun. It reports, under that lock, the checkout state,
+// EVERY session id ever recorded for the account (expired or not), and how many operations were discarded
+// without reporting a session.
+//
+// Expiry and age prove nothing about billing: a session's expires_at only bounds when an UNPAID session
+// can still be paid; a session that completed started a subscription that continues. So each recorded
+// session's outcome comes from Stripe itself (expired = never paid; complete = cancel its subscription),
+// and an operation whose session is unknown is never cleared by age:
+//   - 'creating' for up to CREATING_IN_FLIGHT_SECONDS: its request may still be running - retryable;
+//   - 'creating' for longer, or a discarded unresolved operation: refused for support. The owner checks
+//     Stripe and records the outcome with resolve_checkout_outcome(); no session is created to find out.
 //
 // Trust: identifiers come ONLY from this user's own rows (via the verified user id) and are cross-checked
 // against Stripe: Funnl user id in metadata, customer, test/live mode. The customer is resolved and
@@ -37,10 +44,10 @@ export const SESSION_STATUSES = new Set(['open', 'complete', 'expired'])
 /** Checkout states begin_account_deletion() may report. */
 export const CHECKOUT_STATES = new Set(['none', 'creating', 'ready', 'failed'])
 /**
- * A 'creating' operation younger than this may have produced a session that can still be paid:
- * Stripe's maximum Checkout Session lifetime (24 h) plus margin for the creating request itself.
+ * A 'creating' operation this young may still have its create request in flight (claim stale window
+ * 120 s + the 20 s Stripe timeout + margin): retry later. Older, its outcome is unknown: support.
  */
-export const UNCERTAIN_CREATION_SECONDS = 24 * 3600 + 15 * 60
+export const CREATING_IN_FLIGHT_SECONDS = 180
 
 /** 'live' | 'test' | null, from the secret or restricted key prefix. */
 export function stripeKeyMode (key) {
@@ -92,12 +99,16 @@ export async function cancelAccountSubscriptions ({ userId, admin, stripeKey, st
   const fence = await admin.rpc('begin_account_deletion', { p_user_id: userId })
   if (fence.error || !fence.data || fence.data.fenced !== true) return unconfirmed('deletion_fence_failed')
   const f = fence.data
-  if (!CHECKOUT_STATES.has(f.checkout_state) || !Array.isArray(f.sessions) || !f.sessions.every((s) => isId(s, 'cs_'))) {
+  if (!CHECKOUT_STATES.has(f.checkout_state) || !Array.isArray(f.sessions) || !f.sessions.every((s) => isId(s, 'cs_')) ||
+      !Number.isInteger(f.unresolved_operations) || f.unresolved_operations < 0) {
     return needsSupport('checkout_state_unknown')
   }
+  // An operation whose session (if any) is unknown can never be cleared by age.
+  if (f.unresolved_operations > 0) return needsSupport('checkout_outcome_unresolved')
   if (f.checkout_state === 'creating') {
-    const age = Number(f.creating_age_seconds)
-    if (!Number.isFinite(age) || age < UNCERTAIN_CREATION_SECONDS) return unconfirmed('checkout_creation_unresolved')
+    const age = f.creating_age_seconds
+    if (Number.isInteger(age) && age >= 0 && age <= CREATING_IN_FLIGHT_SECONDS) return unconfirmed('checkout_creation_in_progress')
+    return needsSupport('checkout_outcome_unresolved')
   }
   const sessionIds = [...new Set(f.sessions)]
 
@@ -133,7 +144,8 @@ export async function cancelAccountSubscriptions ({ userId, admin, stripeKey, st
   if (subRow?.stripe_subscription_id) subscriptionIds.push(subRow.stripe_subscription_id)
   let sessionsExpired = 0
 
-  // ── 1. Sessions that may still be paid: expire open ones; adopt a completed one's subscription. ───
+  // ── 1. Every recorded session, whatever its expiry: Stripe says what became of it. Open: expire it.
+  //    Expired: never paid, nothing to cancel. Complete: adopt its subscription, even if long expired. ────
   for (const sid of sessionIds) {
     const path = `/v1/checkout/sessions/${encodeURIComponent(sid)}`
     const check = (sess) => {

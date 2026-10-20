@@ -174,7 +174,7 @@ async function main () {
 
   // Synthetic users: each gets contacts + an interaction; billing as named.
   const ids = {}
-  for (const tag of ['nobill', 'active', 'dbfail', 'ended', 'mismatch', 'open', 'bystander', 'race', 'oldcheckout', 'inflight', 'stalecreate', 'history']) {
+  for (const tag of ['nobill', 'active', 'dbfail', 'ended', 'mismatch', 'open', 'bystander', 'race', 'oldcheckout', 'inflight', 'stalecreate', 'history', 'diffprice', 'samekey', 'samekey2', 'histpaid', 'expiredunpaid']) {
     const { data, error } = await admin.auth.admin.createUser({ email: `del-${tag}@example.test`, password: randomBytes(12).toString('hex'), email_confirm: true })
     if (error) throw new Error(`createUser ${tag}: ${error.message}`)
     ids[tag] = data.user.id
@@ -291,7 +291,7 @@ async function main () {
   check('an in-flight creation is claimed before deletion starts', ic.data?.result === 'claimed')
   const I0 = owned(ids.inflight)
   const r9 = await deleteAccount(admin, ids.inflight)
-  check('deletion during an unfinished creation is refused (503) and keeps the account', r9.status === 503 && r9.reason === 'checkout_creation_unresolved' && owned(ids.inflight) !== '' && gone(ids.inflight) === false, JSON.stringify(r9))
+  check('deletion during an unfinished creation is refused (503) and keeps the account', r9.status === 503 && r9.reason === 'checkout_creation_in_progress' && owned(ids.inflight) !== '' && gone(ids.inflight) === false, JSON.stringify(r9))
   check('...its rows are unchanged apart from the fence', owned(ids.inflight) === I0)
   C.set('cs_inflight', { id: 'cs_inflight', object: 'checkout.session', status: 'open', livemode: false, client_reference_id: ids.inflight, metadata: { user_id: ids.inflight }, customer: null, subscription: null })
   const fin = await admin.rpc('finalize_checkout_operation', { p_user_id: ids.inflight, p_claim_token: ic.data.claim_token, p_state: 'ready', p_session_id: 'cs_inflight', p_checkout_url: 'https://checkout.stripe.com/c/pay/cs_inflight', p_expires_at: new Date(Date.now() + 86400000).toISOString() })
@@ -299,12 +299,68 @@ async function main () {
   const r10 = await deleteAccount(admin, ids.inflight)
   check('the retry expires that session and deletes the account', r10.status === 200 && r10.billing.sessionsExpired === 1 && C.get('cs_inflight').status === 'expired' && gone(ids.inflight), JSON.stringify(r10))
 
+  // An old creating operation whose Stripe session was PAID, but whose finalize and webhook never arrived.
   const sc = await claim(ids.stalecreate)
-  psql(`UPDATE public.checkout_operations SET updated_at = now() - interval '25 hours' WHERE user_id = '${ids.stalecreate}';`)
-  const before = log.length
+  psql(`UPDATE public.checkout_operations SET updated_at = now() - interval '25 hours', operation_started_at = now() - interval '25 hours' WHERE user_id = '${ids.stalecreate}';`)
+  C.set('cs_lost', { id: 'cs_lost', object: 'checkout.session', status: 'complete', livemode: false, client_reference_id: ids.stalecreate, metadata: { user_id: ids.stalecreate }, customer: 'cus_lost', subscription: 'sub_lost' })
+  S.set('sub_lost', { id: 'sub_lost', object: 'subscription', customer: 'cus_lost', status: 'active', livemode: false, metadata: { user_id: ids.stalecreate }, items: { data: [] } })
+  const L0 = owned(ids.stalecreate), before = log.length
   const r11 = await deleteAccount(admin, ids.stalecreate)
-  check('a creation older than any session lifetime no longer blocks deletion', sc.data?.result === 'claimed' && r11.status === 200 && gone(ids.stalecreate), JSON.stringify(r11))
-  check('...and needs no Stripe call', log.length === before)
+  check('an old unresolved creation is NOT cleared by age: refused for support (409)', sc.data?.result === 'claimed' && r11.status === 409 && r11.reason === 'checkout_outcome_unresolved', JSON.stringify(r11))
+  check('...the account is unchanged, the paid subscription is untouched, and no Stripe call was made', owned(ids.stalecreate) === L0 && S.get('sub_lost').status === 'active' && log.length === before)
+  // Support path: the owner finds the session in Stripe and records it. Nothing is created.
+  const res = await admin.rpc('resolve_checkout_outcome', { p_user_id: ids.stalecreate, p_operation_id: sc.data.operation_id, p_session_id: 'cs_lost' })
+  check('the owner records the outcome with resolve_checkout_outcome', res.data?.resolved === true && one(`SELECT state FROM public.checkout_operations WHERE user_id = '${ids.stalecreate}'`) === 'failed', JSON.stringify(res.error))
+  const r11b = await deleteAccount(admin, ids.stalecreate)
+  check('the retry cancels the subscription that session started, then deletes the account', r11b.status === 200 && r11b.billing.canceled === 1 && S.get('sub_lost').status === 'canceled' && gone(ids.stalecreate), JSON.stringify(r11b))
+  const anonRes = await createClient(GW, mintJwt({ role: 'authenticated', sub: ids.bystander, aud: 'authenticated' }), { auth: { persistSession: false } })
+    .rpc('resolve_checkout_outcome', { p_user_id: ids.bystander, p_operation_id: sc.data.operation_id, p_session_id: null })
+  check('...and a signed-in user cannot call the support function', Boolean(anonRes.error))
+
+  // Different-price replacement of an unresolved creating operation.
+  const d1 = await admin.rpc('claim_checkout_operation', { p_user_id: ids.diffprice, p_price_id: 'price_old', p_mode: 'reuse_or_create' })
+  psql(`UPDATE public.checkout_operations SET updated_at = now() - interval '10 minutes' WHERE user_id = '${ids.diffprice}';`)
+  const d2 = await claim(ids.diffprice)
+  check('a different-price claim replaces the stale operation with a NEW one', d2.data?.result === 'claimed' && d2.data.operation_id !== d1.data.operation_id)
+  check('...and records the replaced operation as unresolved (its identity is not discarded)', one(`SELECT reason FROM public.checkout_unresolved_operations WHERE user_id = '${ids.diffprice}' AND operation_id = '${d1.data.operation_id}'`) === 'replaced_different_price')
+  C.set('cs_dp2', { id: 'cs_dp2', object: 'checkout.session', status: 'open', livemode: false, client_reference_id: ids.diffprice, metadata: { user_id: ids.diffprice }, customer: null, subscription: null })
+  await admin.rpc('finalize_checkout_operation', { p_user_id: ids.diffprice, p_claim_token: d2.data.claim_token, p_state: 'ready', p_session_id: 'cs_dp2', p_checkout_url: 'https://checkout.stripe.com/c/pay/cs_dp2', p_expires_at: new Date(Date.now() + 86400000).toISOString() })
+  const DP0 = owned(ids.diffprice)
+  const r13 = await deleteAccount(admin, ids.diffprice)
+  check('deletion is refused while the replaced operation is unresolved (409), account unchanged', r13.status === 409 && r13.reason === 'checkout_outcome_unresolved' && owned(ids.diffprice) === DP0, JSON.stringify(r13))
+  await admin.rpc('resolve_checkout_outcome', { p_user_id: ids.diffprice, p_operation_id: d1.data.operation_id, p_session_id: null })
+  const r14 = await deleteAccount(admin, ids.diffprice)
+  check('after the owner confirms it created no session, deletion expires the current session and completes', r14.status === 200 && r14.billing.sessionsExpired === 1 && gone(ids.diffprice), JSON.stringify(r14))
+
+  // Same-price reclaim: replay only while the idempotency key is certainly retained.
+  const k1 = await claim(ids.samekey2)
+  psql(`UPDATE public.checkout_operations SET updated_at = now() - interval '10 minutes' WHERE user_id = '${ids.samekey2}';`)
+  const k2 = await claim(ids.samekey2)
+  check('a same-price reclaim inside the key-retention window replays the SAME operation (Stripe returns the original session)', k2.data?.result === 'claimed' && k2.data.operation_id === k1.data.operation_id && one(`SELECT count(*) FROM public.checkout_unresolved_operations WHERE user_id = '${ids.samekey2}'`) === '0')
+  const j1 = await claim(ids.samekey)
+  psql(`UPDATE public.checkout_operations SET updated_at = now() - interval '10 minutes', operation_started_at = now() - interval '24 hours' WHERE user_id = '${ids.samekey}';`)
+  const j2 = await claim(ids.samekey)
+  check('a same-price reclaim after the key may have lapsed mints a NEW operation and records the old one as unresolved', j2.data?.result === 'claimed' && j2.data.operation_id !== j1.data.operation_id &&
+    one(`SELECT reason FROM public.checkout_unresolved_operations WHERE user_id = '${ids.samekey}' AND operation_id = '${j1.data.operation_id}'`) === 'reclaimed_after_key_retention')
+
+  // A recorded session long past its expiry that was PAID (webhook missed): its subscription is canceled.
+  psql(`INSERT INTO public.checkout_operations (user_id, price_id, stripe_session_id, state, checkout_url, expires_at, operation_started_at) VALUES ('${ids.histpaid}', '${PRICE}', 'cs_hp', 'ready', 'https://checkout.stripe.com/c/pay/cs_hp', now() - interval '3 days', now() - interval '4 days');`)
+  C.set('cs_hp', { id: 'cs_hp', object: 'checkout.session', status: 'complete', livemode: false, client_reference_id: ids.histpaid, metadata: { user_id: ids.histpaid }, customer: 'cus_hp', subscription: 'sub_hp' })
+  S.set('sub_hp', { id: 'sub_hp', object: 'subscription', customer: 'cus_hp', status: 'active', livemode: false, metadata: { user_id: ids.histpaid }, items: { data: [] } })
+  const hp = await claim(ids.histpaid)
+  check('a new operation keeps the overwritten session in history even though it is past its expiry', hp.data?.result === 'claimed' && one(`SELECT count(*) FROM public.checkout_session_history WHERE user_id = '${ids.histpaid}' AND stripe_session_id = 'cs_hp'`) === '1')
+  C.set('cs_hp2', { id: 'cs_hp2', object: 'checkout.session', status: 'open', livemode: false, client_reference_id: ids.histpaid, metadata: { user_id: ids.histpaid }, customer: null, subscription: null })
+  await admin.rpc('finalize_checkout_operation', { p_user_id: ids.histpaid, p_claim_token: hp.data.claim_token, p_state: 'ready', p_session_id: 'cs_hp2', p_checkout_url: 'https://checkout.stripe.com/c/pay/cs_hp2', p_expires_at: new Date(Date.now() + 86400000).toISOString() })
+  const r15 = await deleteAccount(admin, ids.histpaid)
+  check('deletion cancels the subscription of the expired-but-PAID session and expires the open one', r15.status === 200 && r15.billing.canceled === 1 && r15.billing.sessionsExpired === 1 && S.get('sub_hp').status === 'canceled' && gone(ids.histpaid), JSON.stringify(r15))
+
+  // A genuinely expired, unpaid session is cleared safely.
+  psql(`INSERT INTO public.checkout_operations (user_id, price_id, stripe_session_id, state, checkout_url, expires_at, operation_started_at) VALUES ('${ids.expiredunpaid}', '${PRICE}', 'cs_eu', 'ready', 'https://checkout.stripe.com/c/pay/cs_eu', now() - interval '2 days', now() - interval '3 days');`)
+  C.set('cs_eu', { id: 'cs_eu', object: 'checkout.session', status: 'expired', livemode: false, client_reference_id: ids.expiredunpaid, metadata: { user_id: ids.expiredunpaid }, customer: null, subscription: null })
+  const eb = log.length
+  const r16 = await deleteAccount(admin, ids.expiredunpaid)
+  check('an expired, unpaid session is cleared: one Stripe read, no expire or cancel, account deleted', r16.status === 200 && r16.billing.sessionsExpired === 0 && r16.billing.canceled === 0 && gone(ids.expiredunpaid) &&
+    log.slice(eb).every((e) => e.method === 'GET'), JSON.stringify(r16))
 
   psql(`INSERT INTO public.subscriptions (user_id, stripe_customer_id, stripe_subscription_id, status, current_period_end, price_id) VALUES ('${ids.history}', 'cus_history', 'sub_history', 'canceled', now() - interval '1 day', '${PRICE}');
         INSERT INTO public.checkout_operations (user_id, price_id, stripe_session_id, state, checkout_url, expires_at) VALUES ('${ids.history}', '${PRICE}', 'cs_h1', 'ready', 'https://checkout.stripe.com/c/pay/cs_h1', now() + interval '20 hours');`)

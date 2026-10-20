@@ -11,7 +11,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { cancelAccountSubscriptions, makeStripeRequest, stripeKeyMode, ENDED_STATUSES, UNCERTAIN_CREATION_SECONDS } from '../supabase/functions/delete-account/subscriptionCancellation.js'
+import { cancelAccountSubscriptions, makeStripeRequest, stripeKeyMode, ENDED_STATUSES, CREATING_IN_FLIGHT_SECONDS } from '../supabase/functions/delete-account/subscriptionCancellation.js'
 
 const USER = '11111111-1111-4111-8111-111111111111'
 const OTHER = '22222222-2222-4222-8222-222222222222'
@@ -22,7 +22,7 @@ const LIVE_KEY = 'sk_live_synthetic'
 // The database side: begin_account_deletion() (fence + checkout state) and the subscriptions row.
 // `op` is a convenience for a 'ready' operation with one session; `fence` overrides the RPC result.
 function fakeAdmin ({ sub = null, op = null, subError = false, fenceError = false, fence = null } = {}) {
-  const fenceData = fence ?? { fenced: true, checkout_state: op ? 'ready' : 'none', creating_age_seconds: null, sessions: op?.stripe_session_id ? [op.stripe_session_id] : [] }
+  const fenceData = fence ?? { fenced: true, checkout_state: op ? 'ready' : 'none', creating_age_seconds: null, sessions: op?.stripe_session_id ? [op.stripe_session_id] : [], unresolved_operations: 0 }
   const admin = {
     rpcCalls: [],
     async rpc (name, args) {
@@ -308,30 +308,40 @@ test('defense in depth: the subscription itself is environment-checked even if t
 })
 
 // ── Finding 1: the Checkout/deletion race is closed by the durable fence ───────────────────────────
-const fenced = (over) => ({ fenced: true, checkout_state: 'none', creating_age_seconds: null, sessions: [], ...over })
+const fenced = (over) => ({ fenced: true, checkout_state: 'none', creating_age_seconds: null, sessions: [], unresolved_operations: 0, ...over })
 test('F1: the fence is taken first, for the verified user only, before any read or Stripe call', async () => {
   const admin = fakeAdmin({ sub: ROW })
   const stripe = fakeStripe({ subs: [{ id: 'sub_A', customer: 'cus_A', status: 'active' }] })
   await run(stripe, admin)
   assert.deepEqual(admin.rpcCalls, [{ name: 'begin_account_deletion', args: { p_user_id: USER } }])
 })
-test('F1: a creating operation without a session id is NOT "no billing": deletion is refused, retryable', async () => {
-  for (const age of [0, 119, 121, 3600, 24 * 3600]) {
+test('F1: a creating operation without a session id is NOT "no billing": retryable while its request may be in flight', async () => {
+  for (const age of [0, 119, 121, CREATING_IN_FLIGHT_SECONDS]) {
     const stripe = fakeStripe()
     const r = await run(stripe, fakeAdmin({ fence: fenced({ checkout_state: 'creating', creating_age_seconds: age }) }))
-    assert.deepEqual(r, { ok: false, retryable: true, reason: 'checkout_creation_unresolved' }, 'age ' + age)
+    assert.deepEqual(r, { ok: false, retryable: true, reason: 'checkout_creation_in_progress' }, 'age ' + age)
     assert.equal(stripe.calls.length, 0)
   }
-  const missing = await run(fakeStripe(), fakeAdmin({ fence: fenced({ checkout_state: 'creating', creating_age_seconds: null }) }))
-  assert.equal(missing.reason, 'checkout_creation_unresolved', 'an unknown age is treated as unresolved')
 })
-test('F1: a creating operation older than any session lifetime is resolved (its session can no longer be paid)', async () => {
-  const r = await run(fakeStripe(), fakeAdmin({ fence: fenced({ checkout_state: 'creating', creating_age_seconds: UNCERTAIN_CREATION_SECONDS + 1 }) }))
-  assert.deepEqual(r, { ok: true, canceled: 0, alreadyEnded: 0, sessionsExpired: 0, billing: false })
-  assert.ok(UNCERTAIN_CREATION_SECONDS > 24 * 3600, 'the window covers Stripe’s 24-hour maximum session lifetime')
+
+test('F1: no age bypass - an older creating operation, however old, is refused for support (its session may have been paid)', async () => {
+  for (const age of [CREATING_IN_FLIGHT_SECONDS + 1, 3600, 24 * 3600 + 15 * 60 + 1, 25 * 3600, 30 * 86400, null, -5, 1.5]) {
+    const stripe = fakeStripe()
+    const r = await run(stripe, fakeAdmin({ fence: fenced({ checkout_state: 'creating', creating_age_seconds: age }) }))
+    assert.deepEqual(r, { ok: false, retryable: false, reason: 'checkout_outcome_unresolved' }, 'age ' + age)
+    assert.equal(stripe.calls.length, 0)
+  }
 })
+test('F1: an operation discarded without a session (unresolved) blocks deletion for support, before any Stripe call', async () => {
+  const stripe = fakeStripe({ subs: [{ id: 'sub_A', customer: 'cus_A', status: 'active' }] })
+  const r = await run(stripe, fakeAdmin({ sub: ROW, fence: fenced({ checkout_state: 'ready', unresolved_operations: 1 }) }))
+  assert.deepEqual(r, { ok: false, retryable: false, reason: 'checkout_outcome_unresolved' })
+  assert.equal(stripe.calls.length, 0)
+})
+
 test('F1: a malformed fence result fails closed', async () => {
-  for (const bad of [fenced({ checkout_state: 'weird' }), fenced({ sessions: 'cs_A' }), fenced({ sessions: ['not_a_session'] }), { fenced: false }]) {
+  for (const bad of [fenced({ checkout_state: 'weird' }), fenced({ sessions: 'cs_A' }), fenced({ sessions: ['not_a_session'] }), { fenced: false },
+    fenced({ unresolved_operations: undefined }), fenced({ unresolved_operations: -1 }), fenced({ unresolved_operations: '0' })]) {
     const r = await run(fakeStripe(), fakeAdmin({ fence: bad }))
     assert.equal(r.ok, false)
   }
@@ -430,4 +440,25 @@ test('F3: a cancel response for a different object is not accepted as confirmati
   const stripe = fakeStripe({ subs: [{ id: 'sub_A', customer: 'cus_A', status: 'active' }],
     hooks: { 'DELETE /v1/subscriptions/sub_A': { status: 200, body: { id: 'sub_OTHER', customer: 'cus_A', status: 'canceled', livemode: false } } } })
   assert.deepEqual(await run(stripe, fakeAdmin({ sub: ROW })), { ok: false, retryable: true, reason: 'cancel_unconfirmed' })
+})
+
+// ── Recorded sessions: Stripe's status decides, never expiry ───────────────────────────────────────
+test('a recorded session long past its expiry that COMPLETED: its active subscription is canceled', async () => {
+  // The payment page "expired" long ago in time, but the session was paid: Stripe reports 'complete'.
+  const stripe = fakeStripe({ sessions: [{ id: 'cs_old', status: 'complete', customer: 'cus_O', subscription: 'sub_O', expires_at: 1 }],
+    subs: [{ id: 'sub_O', customer: 'cus_O', status: 'active' }] })
+  const r = await run(stripe, fakeAdmin({ fence: fenced({ checkout_state: 'ready', sessions: ['cs_old'] }) }))   // no subscriptions row: webhook missed
+  assert.deepEqual(r, { ok: true, canceled: 1, alreadyEnded: 0, sessionsExpired: 0, billing: true })
+  assert.equal(stripe.S.get('sub_O').status, 'canceled')
+})
+test('a genuinely expired, unpaid session is cleared without any cancel or expire call', async () => {
+  const stripe = fakeStripe({ sessions: [{ id: 'cs_gone', status: 'expired', customer: null, subscription: null }] })
+  const r = await run(stripe, fakeAdmin({ fence: fenced({ checkout_state: 'failed', sessions: ['cs_gone'] }) }))
+  assert.deepEqual(r, { ok: true, canceled: 0, alreadyEnded: 0, sessionsExpired: 0, billing: true })
+  assert.equal(expires(stripe).length + deletes(stripe).length, 0)
+})
+test('the module has no expiry- or age-based shortcut', () => {
+  const src = readFileSync(new URL('../supabase/functions/delete-account/subscriptionCancellation.js', import.meta.url), 'utf8')
+  const code = src.split(String.fromCharCode(10)).filter((l) => !l.trim().startsWith('//') && !l.trim().startsWith('*')).join(String.fromCharCode(10))
+  assert.ok(!code.includes('expires_at') && !code.includes('UNCERTAIN_CREATION'), 'no expiry/age proxy in code')
 })
