@@ -174,7 +174,7 @@ async function main () {
 
   // Synthetic users: each gets contacts + an interaction; billing as named.
   const ids = {}
-  for (const tag of ['nobill', 'active', 'dbfail', 'ended', 'mismatch', 'open', 'bystander', 'race', 'oldcheckout', 'inflight', 'stalecreate', 'history', 'diffprice', 'samekey', 'samekey2', 'histpaid', 'expiredunpaid']) {
+  for (const tag of ['nobill', 'active', 'dbfail', 'ended', 'mismatch', 'open', 'bystander', 'race', 'oldcheckout', 'inflight', 'stalecreate', 'history', 'diffprice', 'samekey', 'samekey2', 'histpaid', 'expiredunpaid', 'paused', 'replaced']) {
     const { data, error } = await admin.auth.admin.createUser({ email: `del-${tag}@example.test`, password: randomBytes(12).toString('hex'), email_confirm: true })
     if (error) throw new Error(`createUser ${tag}: ${error.message}`)
     ids[tag] = data.user.id
@@ -319,7 +319,7 @@ async function main () {
 
   // Different-price replacement of an unresolved creating operation.
   const d1 = await admin.rpc('claim_checkout_operation', { p_user_id: ids.diffprice, p_price_id: 'price_old', p_mode: 'reuse_or_create' })
-  psql(`UPDATE public.checkout_operations SET updated_at = now() - interval '10 minutes' WHERE user_id = '${ids.diffprice}';`)
+  psql(`UPDATE public.checkout_operations SET updated_at = now() - interval '20 minutes' WHERE user_id = '${ids.diffprice}';`)
   const d2 = await claim(ids.diffprice)
   check('a different-price claim replaces the stale operation with a NEW one', d2.data?.result === 'claimed' && d2.data.operation_id !== d1.data.operation_id)
   check('...and records the replaced operation as unresolved (its identity is not discarded)', one(`SELECT reason FROM public.checkout_unresolved_operations WHERE user_id = '${ids.diffprice}' AND operation_id = '${d1.data.operation_id}'`) === 'replaced_different_price')
@@ -378,7 +378,79 @@ async function main () {
   check('after a refused deletion, Checkout stays fenced, then reopens once the fence expires', blocked.data?.result === 'account_deleting' && after.data?.result === 'claimed', `${blocked.data?.result} -> ${after.data?.result}`)
   check('no request ever created anything at Stripe (whole run)', creates().length === 0)
 
-  console.log(NL + '7. Bystander')
+  console.log(NL + '7. Support resolution never races a Checkout request that may still call Stripe')
+  // A Checkout whose request is paused AFTER claiming and BEFORE calling Stripe, under the real (deployed)
+  // checkout orchestration. The gate is released by the test, so every step is deterministic.
+  function pausedCheckout (uid, priceId, sessionId) {
+    let release, entered
+    const gate = new Promise((r) => { release = r })
+    const reached = new Promise((r) => { entered = r })
+    const done = runCheckoutOrchestration({
+      user: { id: uid, email: 'del-' + sessionId + '@example.test' }, supabaseAdmin: admin,
+      createStripeSession: async ({ idempotencyKey }) => {
+        entered(idempotencyKey)
+        await gate
+        // Stripe creates the session only now, after the pause.
+        C.set(sessionId, { id: sessionId, object: 'checkout.session', status: 'open', livemode: false, client_reference_id: uid, metadata: { user_id: uid }, customer: null, subscription: null })
+        return { outcome: 'success', session: { id: sessionId, url: 'https://checkout.stripe.com/c/pay/' + sessionId, expires_at: Math.floor(Date.now() / 1000) + 86400 } }
+      },
+      env: { priceId, stripeKey: STRIPE_KEY, successUrl: 'https://www.getfunnl.com/settings?checkout=success', cancelUrl: 'https://www.getfunnl.com/settings?checkout=cancelled' },
+    })
+    return { release, reached, done }
+  }
+  const opOf = (uid) => one(`SELECT operation_id FROM public.checkout_operations WHERE user_id = '${uid}'`)
+  const resolveNull = (uid, op) => admin.rpc('resolve_checkout_outcome', { p_user_id: uid, p_operation_id: op, p_session_id: null })
+
+  // A. The current attempt is paused before calling Stripe.
+  const pa = pausedCheckout(ids.paused, PRICE, 'cs_paused')
+  await pa.reached
+  const pausedOp = opOf(ids.paused)
+  check('A1. checkout is paused after claiming and before calling Stripe', one(`SELECT state FROM public.checkout_operations WHERE user_id = '${ids.paused}'`) === 'creating' && !C.has('cs_paused'))
+  const P0 = owned(ids.paused)
+  const ra = await deleteAccount(admin, ids.paused)
+  check('A2. deletion while it is paused is refused as in progress (503); the account remains', ra.status === 503 && ra.reason === 'checkout_creation_in_progress' && owned(ids.paused) === P0, JSON.stringify(ra))
+  const na = await resolveNull(ids.paused, pausedOp)
+  check('A3. NULL support resolution is refused while the request may still call Stripe', /attempt_may_still_be_running/.test(na.error?.message ?? ''), JSON.stringify(na.error?.message))
+  check('...and changes nothing: the attempt is still open and the account remains', one(`SELECT state FROM public.checkout_operations WHERE user_id = '${ids.paused}'`) === 'creating' && owned(ids.paused) === P0)
+  // Even once it is past the claim's stale window (it may be stuck), it is still within the in-flight bound.
+  psql(`UPDATE public.checkout_operations SET updated_at = now() - interval '5 minutes' WHERE user_id = '${ids.paused}';`)
+  const rb = await deleteAccount(admin, ids.paused)
+  const nb = await resolveNull(ids.paused, pausedOp)
+  check('A4. at 5 minutes old: deletion needs support (409), and NULL resolution is STILL refused', rb.status === 409 && rb.reason === 'checkout_outcome_unresolved' && /attempt_may_still_be_running/.test(nb.error?.message ?? ''), JSON.stringify([rb, nb.error?.message]))
+  pa.release()
+  const pr = await pa.done
+  check('A5. released, Checkout gets its session from Stripe and records it (the fence does not block finalize)', pr.status === 200 && one(`SELECT stripe_session_id FROM public.checkout_operations WHERE user_id = '${ids.paused}'`) === 'cs_paused', JSON.stringify(pr))
+  const rc = await deleteAccount(admin, ids.paused)
+  check('A6. deletion then accounts for that session (expires it) before deleting the account', rc.status === 200 && rc.billing.sessionsExpired === 1 && C.get('cs_paused').status === 'expired' && gone(ids.paused), JSON.stringify(rc))
+
+  // B. A replaced attempt whose original request is still running.
+  const pb = pausedCheckout(ids.replaced, 'price_old', 'cs_replaced')
+  await pb.reached
+  const oldOp = opOf(ids.replaced)
+  psql(`UPDATE public.checkout_operations SET updated_at = now() - interval '10 minutes' WHERE user_id = '${ids.replaced}';`)   // stale enough to be replaced
+  const nc = await claim(ids.replaced)                                      // a different-price attempt replaces it
+  check('B1. the still-running attempt is replaced by a new one and recorded as unresolved', nc.data?.result === 'claimed' && opOf(ids.replaced) !== oldOp &&
+    one(`SELECT count(*) FROM public.checkout_unresolved_operations WHERE user_id = '${ids.replaced}' AND operation_id = '${oldOp}'`) === '1')
+  const R0 = owned(ids.replaced)
+  const rd = await deleteAccount(admin, ids.replaced)
+  const nd = await resolveNull(ids.replaced, oldOp)
+  check('B2. deletion needs support and NULL resolution of the replaced attempt is refused while it may still run', rd.status === 409 && /attempt_may_still_be_running/.test(nd.error?.message ?? '') && owned(ids.replaced) === R0, JSON.stringify([rd, nd.error?.message]))
+  pb.release()
+  const prb = await pb.done
+  check('B3. the original request still obtains a session; finalize no longer matches, but the session is RECORDED', prb.status === 503 &&
+    one(`SELECT count(*) FROM public.checkout_session_history WHERE user_id = '${ids.replaced}' AND stripe_session_id = 'cs_replaced'`) === '1', JSON.stringify(prb))
+  const re = await deleteAccount(admin, ids.replaced)
+  check('B4. deletion is still refused (the replaced attempt is unresolved); the account remains', re.status === 409 && re.reason === 'checkout_outcome_unresolved' && owned(ids.replaced) === R0, JSON.stringify(re))
+  // Time passes beyond the in-flight bound; the new attempt also finishes.
+  psql(`UPDATE public.checkout_unresolved_operations SET last_claimed_at = now() - interval '20 minutes' WHERE user_id = '${ids.replaced}';`)
+  C.set('cs_new', { id: 'cs_new', object: 'checkout.session', status: 'open', livemode: false, client_reference_id: ids.replaced, metadata: { user_id: ids.replaced }, customer: null, subscription: null })
+  await admin.rpc('finalize_checkout_operation', { p_user_id: ids.replaced, p_claim_token: nc.data.claim_token, p_state: 'ready', p_session_id: 'cs_new', p_checkout_url: 'https://checkout.stripe.com/c/pay/cs_new', p_expires_at: new Date(Date.now() + 86400000).toISOString() })
+  const ne = await resolveNull(ids.replaced, oldOp)
+  check('B5. past the bound, the owner can resolve it - and even a mistaken NULL cannot lose the recorded session', ne.data?.resolved === true, JSON.stringify(ne.error?.message))
+  const rf = await deleteAccount(admin, ids.replaced)
+  check('B6. deletion accounts for BOTH sessions (the late one and the new one) before deleting', rf.status === 200 && rf.billing.sessionsExpired === 2 && C.get('cs_replaced').status === 'expired' && C.get('cs_new').status === 'expired' && gone(ids.replaced), JSON.stringify(rf))
+
+  console.log(NL + '8. Bystander')
   check("the bystander's account and subscription are unchanged throughout", owned(ids.bystander) === BY0 && S.get('sub_bystander').status === 'active' && cancels('sub_bystander').length === 0)
 }
 

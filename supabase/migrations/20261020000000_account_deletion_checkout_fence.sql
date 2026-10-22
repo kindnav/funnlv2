@@ -29,6 +29,14 @@
 --      certainly still retained (< 23 h); otherwise the old operation is recorded as unresolved and a new
 --      one is minted, instead of a replay that could silently create a second session.
 --
+--   5. finalize_checkout_operation() also records the session of a LATE request whose operation was
+--      reclaimed, replaced or closed meanwhile (its own update no longer matches), so a session a still-
+--      running request obtains from Stripe is never lost.
+--   6. resolve_checkout_outcome() (the owner's support path) refreshes the fence and refuses while the
+--      attempt's last claim is younger than IN_FLIGHT_BOUND (15 minutes): until then the request that
+--      claimed it may still be calling Stripe. Age only establishes that the request has finished; it
+--      never establishes "no session was created" - that is the owner's assertion after checking Stripe.
+--
 -- FENCE_TTL is 15 minutes: far longer than one delete-account invocation (platform wall clock 150 s). A
 -- successful deletion removes every row here with the account (ON DELETE CASCADE).
 --
@@ -136,7 +144,14 @@ GRANT  EXECUTE ON FUNCTION public.begin_account_deletion(uuid) TO service_role;
 --                  next deletion attempt asks Stripe about it and cancels any subscription it started;
 --   p_session_id = NULL: the owner has confirmed in Stripe that the operation created no session.
 -- Either way the operation stops blocking deletion. If it is still the current 'creating' operation it is
--- closed as 'failed', so a late finalize from its original request cannot reopen it. Creates nothing.
+-- closed as 'failed', so a late finalize from its original request cannot reopen it (that late finalize
+-- still records its session in the history - see finalize below). Creates nothing.
+--
+-- REFUSED ('attempt_may_still_be_running') while the attempt's last claim is younger than 15 minutes: the
+-- request holding that claim may still be calling Stripe (an Edge Function runs at most 150 s on the Free
+-- plan, 400 s on paid plans; 15 minutes leaves wide margin). This applies to the current operation and to
+-- a replaced one alike. The fence is refreshed in the same locked transaction, so no new claim can reopen
+-- or reclaim the operation after this check.
 CREATE OR REPLACE FUNCTION public.resolve_checkout_outcome(p_user_id uuid, p_operation_id uuid, p_session_id text)
 RETURNS jsonb
 LANGUAGE plpgsql
@@ -144,8 +159,9 @@ SECURITY DEFINER
 SET search_path = ''
 AS $$
 DECLARE
-  v_removed integer;
-  v_closed  integer;
+  v_removed    integer;
+  v_closed     integer;
+  v_last_claim timestamptz;
 BEGIN
   IF p_user_id IS NULL OR p_operation_id IS NULL THEN
     RAISE EXCEPTION 'invalid_arguments';
@@ -154,6 +170,25 @@ BEGIN
     RAISE EXCEPTION 'invalid_session_id';
   END IF;
   PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('funnl:billing:' || p_user_id::text, 0));
+
+  -- Fence Checkout for this account (same as begin_account_deletion), so nothing can claim after this check.
+  INSERT INTO public.account_deletion_fences (user_id, started_at) VALUES (p_user_id, now())
+  ON CONFLICT (user_id) DO UPDATE SET started_at = now();
+
+  -- The attempt's last claim: a replaced attempt keeps it in the unresolved record; the current one in
+  -- checkout_operations.updated_at (every claim and reclaim sets it).
+  SELECT u.last_claimed_at INTO v_last_claim FROM public.checkout_unresolved_operations u
+  WHERE u.user_id = p_user_id AND u.operation_id = p_operation_id;
+  IF NOT FOUND THEN
+    SELECT o.updated_at INTO v_last_claim FROM public.checkout_operations o
+    WHERE o.user_id = p_user_id AND o.operation_id = p_operation_id AND o.state = 'creating';
+  END IF;
+  IF v_last_claim IS NULL THEN
+    RAISE EXCEPTION 'operation_not_unresolved';
+  END IF;
+  IF v_last_claim > now() - interval '15 minutes' THEN
+    RAISE EXCEPTION 'attempt_may_still_be_running';
+  END IF;
 
   IF p_session_id IS NOT NULL THEN
     INSERT INTO public.checkout_session_history (user_id, stripe_session_id, expires_at)
@@ -335,3 +370,57 @@ REVOKE EXECUTE ON FUNCTION public.claim_checkout_operation(uuid, text, text, int
 REVOKE EXECUTE ON FUNCTION public.claim_checkout_operation(uuid, text, text, integer) FROM anon;
 REVOKE EXECUTE ON FUNCTION public.claim_checkout_operation(uuid, text, text, integer) FROM authenticated;
 GRANT  EXECUTE ON FUNCTION public.claim_checkout_operation(uuid, text, text, integer) TO service_role;
+
+-- ── 5. finalize_checkout_operation: the 20260815003056 body, with marked [fence] additions ────────────
+CREATE OR REPLACE FUNCTION public.finalize_checkout_operation(
+  p_user_id      uuid,
+  p_claim_token  uuid,
+  p_state        text,
+  p_session_id   text        DEFAULT NULL,
+  p_checkout_url text        DEFAULT NULL,
+  p_expires_at   timestamptz DEFAULT NULL
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  v_rows integer;
+BEGIN
+  IF p_state NOT IN ('ready','failed') THEN
+    RAISE EXCEPTION 'invalid_finalize_state';
+  END IF;
+
+  -- [fence] Same lock as claim / begin_account_deletion / resolve_checkout_outcome, taken BEFORE the row
+  -- lock so the lock order is the same everywhere.
+  PERFORM pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('funnl:billing:' || p_user_id::text, 0));
+
+  UPDATE public.checkout_operations
+  SET    state              = p_state,
+         stripe_session_id  = CASE WHEN p_state = 'ready' THEN p_session_id   ELSE stripe_session_id END,
+         checkout_url       = CASE WHEN p_state = 'ready' THEN p_checkout_url ELSE checkout_url       END,
+         expires_at         = CASE WHEN p_state = 'ready' THEN p_expires_at   ELSE expires_at         END,
+         updated_at         = now()
+  WHERE  user_id     = p_user_id
+    AND  claim_token = p_claim_token   -- ownership validation (rotated on reclaim)
+    AND  state       = 'creating';     -- terminal rows can never be re-finalized
+
+  GET DIAGNOSTICS v_rows = ROW_COUNT;
+
+  -- [fence] A late request whose operation was reclaimed, replaced or closed meanwhile still obtained a
+  -- real session from Stripe: keep it, so deletion reconciles it with Stripe instead of losing it.
+  IF v_rows = 0 AND p_state = 'ready' AND p_session_id IS NOT NULL THEN
+    INSERT INTO public.checkout_session_history (user_id, stripe_session_id, expires_at)
+    VALUES (p_user_id, p_session_id, p_expires_at)
+    ON CONFLICT (user_id, stripe_session_id) DO NOTHING;
+  END IF;
+
+  RETURN v_rows > 0;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION public.finalize_checkout_operation(uuid, uuid, text, text, text, timestamptz) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION public.finalize_checkout_operation(uuid, uuid, text, text, text, timestamptz) FROM anon;
+REVOKE EXECUTE ON FUNCTION public.finalize_checkout_operation(uuid, uuid, text, text, text, timestamptz) FROM authenticated;
+GRANT  EXECUTE ON FUNCTION public.finalize_checkout_operation(uuid, uuid, text, text, text, timestamptz) TO service_role;
