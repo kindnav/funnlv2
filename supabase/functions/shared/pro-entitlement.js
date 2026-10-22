@@ -12,14 +12,15 @@
 // subscriptionGrantsAccess() in shared/subscriptionStatusPolicy.js — this file
 // delegates to it, so the access-granting status set cannot drift.
 
-import { subscriptionGrantsAccess } from './subscriptionStatusPolicy.js'
+import { subscriptionGrantsAccessAt } from './subscriptionStatusPolicy.js'
 
 /**
  * Pure Pro entitlement evaluation given raw DB row values and a reference instant.
  *
  * Priority rules (permanent always wins):
  *   1. profile.ai_enabled = true           → canUse: true,  reason: 'permanent'
- *   2. subscription.status 'active'/'past_due' → canUse: true,  reason: 'subscription'
+ *   2. subscription grants Pro at `now` (Stripe period + failed-renewal grace; see
+ *      subscriptionAccessUntil) → canUse: true, reason: 'subscription'
  *   3. active trial (started + !expired)   → canUse: true,  reason: 'trial'
  *   4. expired trial                       → canUse: false, reason: 'expired_trial'
  *   5. eligible / no trial row / no profile → canUse: false, reason: 'no_trial'
@@ -36,12 +37,13 @@ export function evaluateProEntitlement(profile, trial, subscription, now) {
     return { canUse: true, reason: 'permanent' }
   }
 
-  // 2. Active Stripe subscription — delegates to the CANONICAL subscriptionGrantsAccess()
+  // 2. Stripe subscription — delegates to the CANONICAL time-bounded subscriptionGrantsAccessAt()
   //    (active + past_due, per the shared policy table). 'past_due' is included for the
   //    dunning window (Stripe retries and reverts to 'active' on success or a terminal
   //    status on final failure). No local status allowlist — the granting set lives in
   //    exactly one place so it cannot drift from the checkout policy.
-  if (subscriptionGrantsAccess(subscription?.status)) {
+  // Time-bounded by Stripe's reported period and the failed-renewal grace (mirrors the SQL RPC).
+  if (subscriptionGrantsAccessAt(subscription, now)) {
     return { canUse: true, reason: 'subscription' }
   }
 
@@ -150,7 +152,7 @@ async function safeQuery(queryPromise) {
  * @returns {Promise<{
  *   profile: { ai_enabled: boolean }|null,
  *   trial: { started_at: string|null, ends_at: string|null }|null,
- *   subscription: { status: string, current_period_end: string|null, cancel_at_period_end: boolean }|null,
+ *   subscription: { status: string, current_period_end: string|null, cancel_at_period_end: boolean, grace_started_at: string|null }|null,
  *   profileError: boolean,
  *   trialError: boolean,
  *   subscriptionError: boolean,
@@ -181,7 +183,7 @@ export async function loadProEntitlement(supabaseAdmin, userId) {
     safeQuery(
       supabaseAdmin
         .from('subscriptions')
-        .select('status, current_period_end, cancel_at_period_end')
+        .select('status, current_period_end, cancel_at_period_end, grace_started_at')
         .eq('user_id', userId)
         .maybeSingle()
     ),

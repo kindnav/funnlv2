@@ -22,24 +22,28 @@ const EXPIRED_TRIAL = { started_at: '2026-09-01T00:00:00Z', ends_at: '2026-09-08
 const NO_ERRORS = { profileError: false, trialError: false, subscriptionError: false }
 const decide = (profile, trial, subscription, errors = {}) =>
   decideEntitlement({ profile, trial, subscription, ...NO_ERRORS, ...errors }, NOW).status
-const sub = (status, extra = {}) => ({ status, current_period_end: '2026-11-14T00:00:00Z', cancel_at_period_end: false, ...extra })
+// grace_started_at: a renewal that failed 2 days before NOW (only used by past_due / unpaid; see subscriptionAccessUntil).
+const sub = (status, extra = {}) => ({ status, current_period_end: '2026-11-14T00:00:00Z', cancel_at_period_end: false, grace_started_at: '2026-10-12T16:00:00Z', ...extra })
 
 // ── The server decision ────────────────────────────────────────────────────────
 
-test('a subscription-only account is Pro when the policy grants its status (active, past_due)', () => {
+test('a subscription-only account is Pro within its time window (active period; past_due/unpaid grace)', () => {
   assert.equal(decide({ ai_enabled: false }, null, sub('active')), 'allow')
   assert.equal(decide({ ai_enabled: false }, EXPIRED_TRIAL, sub('past_due')), 'allow')
+  assert.equal(decide({ ai_enabled: false }, null, sub('unpaid')), 'allow')
+  // 7 days after the failed renewal the grace is over.
+  assert.equal(decide({ ai_enabled: false }, null, sub('past_due', { grace_started_at: '2026-10-07T16:00:00Z' })), 'deny')
 })
 
 test('every other subscription status is refused, including unknown ones', () => {
-  for (const s of ['none', 'trialing', 'unpaid', 'paused', 'canceled', 'incomplete', 'incomplete_expired', 'something_new', '', null]) {
+  for (const s of ['none', 'trialing', 'paused', 'canceled', 'incomplete', 'incomplete_expired', 'something_new', '', null]) {
     assert.equal(decide({ ai_enabled: false }, null, s === null ? null : sub(s)), 'deny', String(s))
   }
 })
 
-test('the granting set is exactly the published policy: active and past_due', () => {
+test('the statuses that may grant (time-bounded) are exactly the published policy: active, past_due, unpaid', () => {
   const granting = Object.entries(SUBSCRIPTION_STATUS_POLICY).filter(([, p]) => p.grantsAccess).map(([k]) => k).sort()
-  assert.deepEqual(granting, ['active', 'past_due'])
+  assert.deepEqual(granting, ['active', 'past_due', 'unpaid'])
 })
 
 test('cancellation is decided by status: still "active" until period end, refused once "canceled"', () => {
@@ -48,9 +52,11 @@ test('cancellation is decided by status: still "active" until period end, refuse
   assert.equal(decide({ ai_enabled: false }, null, sub('canceled', { cancel_at_period_end: true })), 'deny')
 })
 
-test('the decision reads status only: a lapsed period end with status still "active" is allowed (existing policy)', () => {
-  // Recorded, not invented: neither the RPC nor the shared policy checks current_period_end.
-  assert.equal(decide({ ai_enabled: false }, null, sub('active', { current_period_end: '2026-01-01T00:00:00Z' })), 'allow')
+test('a lapsed period end no longer grants forever: up to 7 days after it (renewal not yet synced), then Free', () => {
+  // Owner-approved 2026-10-22 (migration 20261023000000): status alone never grants.
+  assert.equal(decide({ ai_enabled: false }, null, sub('active', { current_period_end: '2026-01-01T00:00:00Z' })), 'deny')
+  assert.equal(decide({ ai_enabled: false }, null, sub('active', { current_period_end: '2026-10-10T00:00:00Z' })), 'allow')
+  assert.equal(decide({ ai_enabled: false }, null, sub('active', { current_period_end: '2026-10-10T00:00:00Z', cancel_at_period_end: true })), 'deny')
 })
 
 test('permanent Pro and valid trials are preserved; an expired trial alone is refused', () => {

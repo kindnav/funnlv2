@@ -23,7 +23,7 @@ const TABLE = [
   ['past_due',           'block',           true,  'billing_attention'],
   ['incomplete',         'reuse_only',      false, 'payment_incomplete'],
   ['trialing',           'block',           false, 'billing_attention'],
-  ['unpaid',             'block',           false, 'billing_attention'],
+  ['unpaid',             'block',           true,  'billing_attention'],   // grace-eligible (time-bounded)
   ['paused',             'block',           false, 'billing_attention'],
   ['canceled',           'fresh_only',      false, 'can_checkout'],
   ['incomplete_expired', 'fresh_only',      false, 'can_checkout'],

@@ -44,7 +44,8 @@ const NON_PRO_PROFILE    = { ai_enabled: false }
 const NULL_FLAG_PROFILE  = { ai_enabled: null }
 
 const ACTIVE_SUBSCRIPTION   = { status: 'active',   current_period_end: '2026-08-27T12:00:00.000Z', cancel_at_period_end: false }
-const PAST_DUE_SUBSCRIPTION = { status: 'past_due', current_period_end: '2026-08-27T12:00:00.000Z', cancel_at_period_end: false }
+// A failed renewal on 2026-07-25 (Stripe's period start): within the 7-day grace at NOW.
+const PAST_DUE_SUBSCRIPTION = { status: 'past_due', current_period_end: '2026-08-27T12:00:00.000Z', cancel_at_period_end: false, grace_started_at: '2026-07-25T12:00:00.000Z' }
 const CANCELED_SUBSCRIPTION = { status: 'canceled', current_period_end: '2026-07-27T12:00:00.000Z', cancel_at_period_end: false }
 
 // ── Permanent Pro (ai_enabled = true) always wins ──────────────────────────────

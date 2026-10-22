@@ -257,6 +257,7 @@ export async function runWebhookOrchestration({
             stripe_subscription_id: sub.id,
             status:                 subStatus,
             current_period_end:     snap.periodEndIso,
+            current_period_start:   snap.periodStartIso,
             cancel_at_period_end:   Boolean(sub.cancel_at_period_end),
             price_id:               snap.priceId,
             updated_at:             now(),
@@ -304,7 +305,25 @@ export async function runWebhookOrchestration({
 
         // From here on, use ONLY the authoritative fetched subscription.
         // R3: price validation AND period-end come from the SAME validated Pro item.
-        const snap = extractProSubscriptionSnapshot(sub, priceId)
+        let snap = extractProSubscriptionSnapshot(sub, priceId)
+        // A subscription already bound to a Funnl user (same subscription AND customer in our table) keeps
+        // receiving legitimate updates on the price it was bought at, even when today's checkout price
+        // differs. An unbound subscription on another price is still "not our product".
+        if (!snap.ok && snap.reason === 'no_matching_item') {
+          const { data: bound, error: boundError } = await supabaseAdmin
+            .from('subscriptions')
+            .select('user_id, price_id, stripe_customer_id')
+            .eq('stripe_subscription_id', sub.id)
+            .maybeSingle()
+          if (boundError) {
+            log('ownership_lookup_failed', { requestId, eventType })
+            return finalize('failed', 'ownership_lookup_failed', resp(500, 'Ownership lookup failed'))
+          }
+          if (bound && bound.stripe_customer_id === sub.customer && typeof bound.price_id === 'string' && bound.price_id) {
+            const boundSnap = extractProSubscriptionSnapshot(sub, bound.price_id)
+            if (boundSnap.ok || boundSnap.reason !== 'no_matching_item') snap = boundSnap
+          }
+        }
         if (!snap.ok) {
           // Only items that exist but do NOT include our price prove "not our product".
           if (snap.reason === 'no_matching_item') {
@@ -362,6 +381,7 @@ export async function runWebhookOrchestration({
             stripe_subscription_id: sub.id,
             status:                 subStatus,
             current_period_end:     snap.periodEndIso,
+            current_period_start:   snap.periodStartIso,
             cancel_at_period_end:   Boolean(sub.cancel_at_period_end),
             price_id:               snap.priceId,
             updated_at:             now(),
