@@ -172,6 +172,9 @@ test('applied migrations are unmodified; the only addition is the forward scope 
     // Stage F: drops the retired integration tables and their last functions. It drops
     // run_google_local_cleanup and the tables the files above created, so it applies last.
     '20261019180000_drop_integration_tables.sql',
+    // Billing: the account-deletion fence and checkout session history, and claim_checkout_operation
+    // re-issued with the fence check (re-states the 20260815003056 body), so it applies after it.
+    '20261020000000_account_deletion_checkout_fence.sql',
   ]
   assert.deepStrictEqual(files.slice(-FORWARD_TAIL.length), FORWARD_TAIL,
     'the forward migrations must be the newest, in this order')

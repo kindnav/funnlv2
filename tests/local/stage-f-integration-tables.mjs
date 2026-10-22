@@ -251,10 +251,12 @@ async function main () {
     '-e', 'GOTRUE_MAILER_AUTOCONFIRM=true', '-e', 'GOTRUE_DISABLE_SIGNUP=false', AUTH_IMAGE])
   await waitHttp(`http://127.0.0.1:${P.auth}/health`, (r) => r.ok, 'GoTrue')
   const migrations = readdirSync(join(ROOT, 'supabase/migrations')).filter((f) => f.endsWith('.sql')).sort()
-  check('the Stage F migration is the latest migration', migrations[migrations.length - 1] === NEW_MIGRATION, migrations.slice(-2).join(', '))
-  for (const m of migrations.filter((f) => f !== NEW_MIGRATION)) psql(readFileSync(join(ROOT, 'supabase/migrations', m), 'utf8'))
+  check('the Stage F migration is present', migrations.includes(NEW_MIGRATION), String(migrations.length))
+  // Later migrations (for example the billing deletion fence) are not part of this proof.
+  const before = migrations.filter((f) => f < NEW_MIGRATION)
+  for (const m of before) psql(readFileSync(join(ROOT, 'supabase/migrations', m), 'utf8'))
   psql(CLI_HISTORY_SETUP)
-  console.log(`  applied ${migrations.length - 1} migrations (the Stage D state) and the CLI history table`)
+  console.log(`  applied ${before.length} migrations (the Stage D state) and the CLI history table`)
   docker(['run', '-d', '--name', REST, '--network', NET, '-p', `${P.rest}:3000`, '-e', `PGRST_DB_URI=postgres://authenticator:${DB_PASSWORD}@${PG}:5432/postgres`,
     '-e', 'PGRST_DB_SCHEMAS=public', '-e', 'PGRST_DB_ANON_ROLE=anon', '-e', `PGRST_JWT_SECRET=${JWT_SECRET}`, REST_IMAGE])
   await waitHttp(`http://127.0.0.1:${P.rest}/`, (r) => r.status < 500, 'PostgREST')
