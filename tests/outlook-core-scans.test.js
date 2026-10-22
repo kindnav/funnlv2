@@ -175,6 +175,9 @@ test('applied migrations are unmodified; the only addition is the forward scope 
     // Billing: the account-deletion fence and checkout session history, and claim_checkout_operation
     // re-issued with the fence check (re-states the 20260815003056 body), so it applies after it.
     '20261020000000_account_deletion_checkout_fence.sql',
+    // Billing: time-bounded subscription access (period + failed-renewal grace), the stale-write guard,
+    // and get_my_pro_access_status re-issued from the 20260812000000 body.
+    '20261023000000_subscription_access_periods.sql',
   ]
   assert.deepStrictEqual(files.slice(-FORWARD_TAIL.length), FORWARD_TAIL,
     'the forward migrations must be the newest, in this order')

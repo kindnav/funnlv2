@@ -20,6 +20,9 @@ function assert(c, m) { if (!c) throw new Error(m ?? 'Assertion failed') }
 function assertEqual(a, b, m) { if (a !== b) throw new Error(m ?? `Expected ${JSON.stringify(b)}, got ${JSON.stringify(a)}`) }
 
 const NOW = new Date('2026-08-15T12:00:00.000Z')
+// Subscriptions grant only within Stripe's reported period (see subscriptionAccessUntil).
+const PAID = { status: 'active', current_period_end: '2026-09-01T00:00:00.000Z', cancel_at_period_end: false }
+const IN_GRACE = { status: 'past_due', current_period_end: '2026-09-10T00:00:00.000Z', cancel_at_period_end: false, grace_started_at: '2026-08-12T00:00:00.000Z' }
 const ACTIVE_TRIAL  = { started_at: '2026-08-14T00:00:00.000Z', ends_at: '2026-08-20T00:00:00.000Z' }
 const EXPIRED_TRIAL = { started_at: '2026-08-01T00:00:00.000Z', ends_at: '2026-08-10T00:00:00.000Z' }
 
@@ -36,8 +39,8 @@ function loaded(over = {}) {
 // ── Positive entitlement from a single source → allow ───────────────────────────
 test('permanent only → allow', () => assertEqual(decideEntitlement(loaded({ profile: { ai_enabled: true } }), NOW).status, 'allow'))
 test('trial only (active) → allow', () => assertEqual(decideEntitlement(loaded({ trial: ACTIVE_TRIAL }), NOW).status, 'allow'))
-test('subscription only (active) → allow', () => assertEqual(decideEntitlement(loaded({ subscription: { status: 'active' } }), NOW).status, 'allow'))
-test('past_due subscription → allow (dunning window per policy)', () => assertEqual(decideEntitlement(loaded({ subscription: { status: 'past_due' } }), NOW).status, 'allow'))
+test('subscription only (active) → allow', () => assertEqual(decideEntitlement(loaded({ subscription: PAID }), NOW).status, 'allow'))
+test('past_due subscription → allow (dunning window per policy)', () => assertEqual(decideEntitlement(loaded({ subscription: IN_GRACE }), NOW).status, 'allow'))
 
 // ── No entitlement, no errors → deny (confirmed non-Pro) ────────────────────────
 test('no entitlement, no errors → deny', () => assertEqual(decideEntitlement(loaded(), NOW).status, 'deny'))
@@ -68,10 +71,10 @@ test('subscription error BUT active trial → allow', () => {
   assertEqual(decideEntitlement(loaded({ trial: ACTIVE_TRIAL, subscriptionError: true }), NOW).status, 'allow')
 })
 test('profile error BUT valid subscription → allow (paying user not denied)', () => {
-  assertEqual(decideEntitlement(loaded({ subscription: { status: 'active' }, profileError: true }), NOW).status, 'allow')
+  assertEqual(decideEntitlement(loaded({ subscription: PAID, profileError: true }), NOW).status, 'allow')
 })
 test('trial error BUT valid subscription → allow', () => {
-  assertEqual(decideEntitlement(loaded({ subscription: { status: 'active' }, trialError: true }), NOW).status, 'allow')
+  assertEqual(decideEntitlement(loaded({ subscription: PAID, trialError: true }), NOW).status, 'allow')
 })
 
 // ── Malformed subscription data → treated as no grant; deny if no errors ─────────

@@ -33,7 +33,7 @@ export const SUBSCRIPTION_STATUS_POLICY = {
   },
   past_due: {
     checkoutMode: 'block', grantsAccess: true, uiState: 'billing_attention',
-    description: 'Payment failed; Stripe retrying. Access preserved during dunning; offer billing management.',
+    description: 'Renewal payment failed; Stripe retrying. Pro only until 7 days after the failed renewal (subscriptionAccessUntil); offer billing management.',
   },
   incomplete: {
     checkoutMode: 'reuse_only', grantsAccess: false, uiState: 'payment_incomplete',
@@ -44,8 +44,8 @@ export const SUBSCRIPTION_STATUS_POLICY = {
     description: 'Stripe trial (Funnl does not use Stripe trials). Direct to billing management; do not create another subscription.',
   },
   unpaid: {
-    checkoutMode: 'block', grantsAccess: false, uiState: 'billing_attention',
-    description: 'Dunning exhausted. Direct to billing management / recovery; do not auto-create another subscription.',
+    checkoutMode: 'block', grantsAccess: true, uiState: 'billing_attention',
+    description: 'Renewal payment failed and Stripe stopped retrying. Pro only until 7 days after the failed renewal (subscriptionAccessUntil); offer billing management.',
   },
   paused: {
     checkoutMode: 'block', grantsAccess: false, uiState: 'billing_attention',
@@ -161,4 +161,54 @@ export function isKnownSubscriptionStatus(status) {
 export function subscriptionAttentionState(status) {
   const uiState = checkoutPolicyForStatus(status).uiState
   return uiState === 'billing_attention' || uiState === 'payment_incomplete' ? uiState : null
+}
+
+// ── Time-bounded subscription access (owner-approved 2026-10-22) ───────────────────────────────────
+// The SINGLE JS implementation of the access rule. It MIRRORS public.subscription_access_until() in
+// migration 20261023000000 exactly; a local parity test evaluates both on identical inputs at every
+// cutoff. Status alone never grants access any more - only Stripe's reported period does:
+//   active, renewing:            until current_period_end + 7 days (renewal outcome unknown after the
+//                                period end is treated like a failed renewal);
+//   active, cancel at period end: until current_period_end (no grace for a scheduled cancellation);
+//   past_due / unpaid:            until grace_started_at + 7 days (anchor set once by the database from
+//                                Stripe's renewal moment; never restarted by retries or duplicates);
+//   anything else:                none.
+
+/** Pro after a failed renewal, and the tolerance for an unsynced renewal: 7 days. */
+export const PAYMENT_GRACE_MS = 7 * 24 * 60 * 60 * 1000
+
+function toMs (value) {
+  if (value === null || value === undefined || value === '') return null
+  const ms = value instanceof Date ? value.getTime() : new Date(value).getTime()
+  return Number.isFinite(ms) ? ms : null
+}
+
+/**
+ * The instant until which a subscription row grants Pro, or null when it grants none.
+ * @param {{status?: string, current_period_end?: string|Date|null, cancel_at_period_end?: boolean|null, grace_started_at?: string|Date|null}|null|undefined} sub
+ * @returns {Date|null}
+ */
+export function subscriptionAccessUntil (sub) {
+  if (!sub || typeof sub.status !== 'string') return null
+  const periodEnd = toMs(sub.current_period_end)
+  if (sub.status === 'active') {
+    if (periodEnd === null) return null
+    return new Date(sub.cancel_at_period_end === true ? periodEnd : periodEnd + PAYMENT_GRACE_MS)
+  }
+  if (sub.status === 'past_due' || sub.status === 'unpaid') {
+    const anchor = toMs(sub.grace_started_at)
+    return anchor === null ? null : new Date(anchor + PAYMENT_GRACE_MS)
+  }
+  return null
+}
+
+/**
+ * True when the subscription row grants Pro at `now` (server clock). Access holds while now < until.
+ * @param {object|null|undefined} sub
+ * @param {Date} now
+ * @returns {boolean}
+ */
+export function subscriptionGrantsAccessAt (sub, now) {
+  const until = subscriptionAccessUntil(sub)
+  return until !== null && now instanceof Date && now.getTime() < until.getTime()
 }

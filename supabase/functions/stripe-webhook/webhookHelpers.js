@@ -242,7 +242,8 @@ export function shouldRetryOnMissingOwnership(eventType) {
 // item-level period end nor a valid legacy top-level fallback.
 //
 // Returns:
-//   { ok: true,  priceId, periodEndIso, source: 'item'|'legacy' }
+//   { ok: true,  priceId, periodEndIso, periodStartIso, source: 'item'|'legacy' }
+//   (periodStartIso is the start of the same billing period - the renewal moment - or null if absent)
 //   { ok: false, reason }   where reason ∈
 //     'price_not_configured' | 'no_items' | 'malformed_items' | 'no_matching_item' |
 //     'multiple_matching_items' | 'unsupported_item_configuration' | 'no_period_end'
@@ -268,8 +269,9 @@ export function extractProSubscriptionSnapshot(sub, priceId) {
   // Prefer the item-level period end; fall back to the legacy top-level field only.
   const fromItem   = unixToIso(item?.current_period_end)
   const fromLegacy = unixToIso(sub?.current_period_end)
-  if (fromItem)   return { ok: true, priceId, periodEndIso: fromItem,   source: 'item' }
-  if (fromLegacy) return { ok: true, priceId, periodEndIso: fromLegacy, source: 'legacy' }
+  // The period start comes from the SAME source as the period end.
+  if (fromItem)   return { ok: true, priceId, periodEndIso: fromItem,   periodStartIso: unixToIso(item?.current_period_start), source: 'item' }
+  if (fromLegacy) return { ok: true, priceId, periodEndIso: fromLegacy, periodStartIso: unixToIso(sub?.current_period_start), source: 'legacy' }
   return { ok: false, reason: 'no_period_end' }
 }
 
