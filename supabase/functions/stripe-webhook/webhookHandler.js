@@ -28,6 +28,9 @@ import {
   extractProSubscriptionSnapshot,
   isUniqueViolation,
   crossCheckOwnership,
+  extractInvoiceEvidence,
+  invoiceSubscriptionId,
+  stripeKeyMode,
 } from './webhookHelpers.js'
 import {
   validateEventShape,
@@ -48,6 +51,7 @@ const noopLog = () => {}
  * @param {string} args.requestId
  * @param {object} args.supabaseAdmin
  * @param {(subId: string, stripeKey: string) => Promise<Record<string, unknown>|null>} args.fetchSubscription
+ * @param {(invoiceId: string, stripeKey: string) => Promise<Record<string, unknown>|'timeout'|null>} [args.fetchInvoice]
  * @param {{ priceId: string, stripeKey: string }} args.env
  * @param {() => string} [args.now]
  * @param {(eventName: string, fields: Record<string, unknown>) => void} [args.log]
@@ -58,6 +62,7 @@ export async function runWebhookOrchestration({
   requestId,
   supabaseAdmin,
   fetchSubscription,
+  fetchInvoice = async () => null,
   env,
   now = () => new Date().toISOString(),
   log = noopLog,
@@ -172,6 +177,36 @@ export async function runWebhookOrchestration({
     return { userId: null, error: false }
   }
 
+  // Payment evidence from the subscription's latest invoice, applied after a subscription write. Only a
+  // verified PAID invoice is recorded here (it advances the paid period and can end a failed renewal's
+  // grace); failure times come only from invoice.payment_failed events. Returns null on success, or the
+  // finalize() result to return.
+  async function applyLatestPaidInvoice(sub, userId, prices) {
+    const latest = typeof sub.latest_invoice === 'string' ? sub.latest_invoice : sub.latest_invoice?.id
+    if (!latest) return null
+    const inv = await fetchInvoice(latest, stripeKey)
+    if (inv === 'timeout') return finalize('failed', 'provider_timeout', resp(503, 'Provider timeout'))
+    if (!inv) return finalize('failed', 'stripe_fetch_failed', resp(500, 'Stripe fetch failed'))
+    const ev = extractInvoiceEvidence(inv, { subscriptionId: sub.id, customerId: sub.customer, priceIds: prices, mode: stripeKeyMode(stripeKey) })
+    if (!ev.ok) {
+      if (ev.reason === 'ownership_mismatch' || ev.reason === 'environment_mismatch') {
+        log('invoice_ownership_mismatch', { requestId, eventType })
+        return finalize('failed', 'ownership_mismatch', resp(500, 'Invoice mismatch'))
+      }
+      return null   // a latest invoice we cannot read as evidence (e.g. proration) proves nothing either way
+    }
+    if (ev.kind !== 'paid') return null
+    const { data, error } = await supabaseAdmin.rpc('apply_subscription_evidence', {
+      p_user_id: userId, p_subscription_id: sub.id, p_customer_id: sub.customer, p_kind: 'paid',
+      p_invoice_id: ev.invoiceId, p_invoice_created: ev.createdIso, p_paid_period_end: ev.periodEndIso, p_failed_at: null,
+    })
+    if (error || !data?.result) {
+      log('db_write_failed', { requestId, eventType })
+      return finalize('failed', 'db_write_failed', resp(500, 'Database write failed'))
+    }
+    return null
+  }
+
   try {
     switch (eventType) {
 
@@ -270,6 +305,8 @@ export async function runWebhookOrchestration({
           log(code, { requestId, eventType })
           return finalize('failed', code, resp(500, 'Database write failed'))
         }
+        const paidStep = await applyLatestPaidInvoice(sub, userId, [snap.priceId])
+        if (paidStep) return paidStep
         return finalize('processed', undefined, resp(200, 'ok'))
       }
 
@@ -393,6 +430,8 @@ export async function runWebhookOrchestration({
           log(code, { requestId, eventType })
           return finalize('failed', code, resp(500, 'Database write failed'))
         }
+        const paidStep = await applyLatestPaidInvoice(sub, userId, [snap.priceId])
+        if (paidStep) return paidStep
         return finalize('processed', undefined, resp(200, 'ok'))
       }
 
@@ -441,13 +480,84 @@ export async function runWebhookOrchestration({
         return finalize('processed', undefined, resp(200, 'ok'))
       }
 
-      // ── invoice.payment_succeeded / invoice.payment_failed ─────────────────
-      // C7: informational only — no subscription DB writes. The authoritative
-      // period/status is applied by customer.subscription.updated.
+      // ── invoice.paid / invoice.payment_succeeded / invoice.payment_failed ──────
+      // Verified payment evidence (migration 20261023000000). The invoice is RE-FETCHED with the server
+      // key and accepted only for the subscription AND customer bound to a Funnl user, in the key's
+      // mode. Paid: advances the paid period, and ends a failed renewal's grace only when it is that
+      // renewal or a newer invoice. Failed: the event's Stripe timestamp is the failure time; only a
+      // RENEWAL (subscription_cycle) gets grace - an initial purchase never does. The database merge is
+      // monotonic, so duplicates, retries, delayed delivery and concurrent handlers cannot restart or
+      // undo anything.
+      case 'invoice.paid':
       case 'invoice.payment_succeeded':
       case 'invoice.payment_failed': {
-        log('invoice_informational', { requestId, eventType })
-        return finalize('ignored', undefined, resp(200, 'ok'))
+        const mode = stripeKeyMode(stripeKey)
+        if (!stripeKey || !priceId || !mode) {
+          log('config_missing', { requestId, eventType })
+          return finalize('failed', 'config_missing', resp(500, 'Configuration error'))
+        }
+        const invoiceId = typeof eventData?.id === 'string' ? eventData.id : null
+        if (!invoiceId) return finalize('failed', 'missing_ids', resp(500, 'Missing required IDs'))
+        const inv = await fetchInvoice(invoiceId, stripeKey)
+        if (inv === 'timeout') {
+          log('provider_timeout', { requestId, eventType })
+          return finalize('failed', 'provider_timeout', resp(503, 'Provider timeout'))
+        }
+        if (!inv) {
+          log('stripe_fetch_failed', { requestId, eventType })
+          return finalize('failed', 'stripe_fetch_failed', resp(500, 'Stripe fetch failed'))
+        }
+        const subId = invoiceSubscriptionId(inv)
+        if (!subId) return finalize('ignored', undefined, resp(200, 'ok'))          // not a subscription invoice
+
+        const { data: bound, error: boundError } = await supabaseAdmin
+          .from('subscriptions')
+          .select('user_id, price_id, stripe_customer_id')
+          .eq('stripe_subscription_id', subId)
+          .maybeSingle()
+        if (boundError) {
+          log('ownership_lookup_failed', { requestId, eventType })
+          return finalize('failed', 'ownership_lookup_failed', resp(500, 'Ownership lookup failed'))
+        }
+        if (!bound?.user_id || !isValidUUID(bound.user_id)) {
+          // An initial purchase that failed never binds a user: nothing to record, no retry.
+          if (eventType === 'invoice.payment_failed' && inv.billing_reason === 'subscription_create') {
+            return finalize('ignored', undefined, resp(200, 'ok'))
+          }
+          log('owner_not_found', { requestId, eventType })
+          return finalize('failed', 'owner_not_found', resp(500, 'User not found - retry pending'))
+        }
+
+        const prices = [bound.price_id, priceId].filter((p) => typeof p === 'string' && p)
+        const ev = extractInvoiceEvidence(inv, { subscriptionId: subId, customerId: bound.stripe_customer_id, priceIds: prices, mode })
+        if (!ev.ok) {
+          if (ev.reason === 'ownership_mismatch' || ev.reason === 'environment_mismatch') {
+            log('invoice_ownership_mismatch', { requestId, eventType })
+            return finalize('failed', 'ownership_mismatch', resp(500, 'Invoice mismatch'))
+          }
+          log('invalid_invoice', { requestId, eventType, reason: ev.reason })
+          return finalize('failed', 'invalid_subscription_item', resp(500, 'Invalid invoice'))
+        }
+
+        let args = null
+        if (ev.kind === 'paid') {
+          args = { p_kind: 'paid', p_paid_period_end: ev.periodEndIso, p_failed_at: null }
+        } else if (ev.kind === 'failed' && eventType === 'invoice.payment_failed' && ev.renewal) {
+          const failedAt = unixToIso(event.created)
+          if (!failedAt) return finalize('failed', 'invalid_event', resp(500, 'Invalid event time'))
+          args = { p_kind: 'failed', p_paid_period_end: null, p_failed_at: failedAt }
+        }
+        if (!args) return finalize('ignored', undefined, resp(200, 'ok'))   // initial-purchase failure, or nothing proven
+
+        const { data, error } = await supabaseAdmin.rpc('apply_subscription_evidence', {
+          p_user_id: bound.user_id, p_subscription_id: subId, p_customer_id: bound.stripe_customer_id,
+          p_invoice_id: ev.invoiceId, p_invoice_created: ev.createdIso, ...args,
+        })
+        if (error || !data?.result) {
+          log('db_write_failed', { requestId, eventType })
+          return finalize('failed', 'db_write_failed', resp(500, 'Database write failed'))
+        }
+        return finalize(data.result === 'applied' ? 'processed' : 'ignored', undefined, resp(200, 'ok'))
       }
 
       default:

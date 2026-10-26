@@ -20,7 +20,7 @@ import { subscriptionGrantsAccessAt } from './subscriptionStatusPolicy.js'
  * Priority rules (permanent always wins):
  *   1. profile.ai_enabled = true           → canUse: true,  reason: 'permanent'
  *   2. subscription grants Pro at `now` (Stripe period + failed-renewal grace; see
- *      subscriptionAccessUntil) → canUse: true, reason: 'subscription'
+ *      subscriptionAccessUntil: verified paid period / failed-renewal grace) → canUse: true, reason: 'subscription'
  *   3. active trial (started + !expired)   → canUse: true,  reason: 'trial'
  *   4. expired trial                       → canUse: false, reason: 'expired_trial'
  *   5. eligible / no trial row / no profile → canUse: false, reason: 'no_trial'
@@ -152,7 +152,7 @@ async function safeQuery(queryPromise) {
  * @returns {Promise<{
  *   profile: { ai_enabled: boolean }|null,
  *   trial: { started_at: string|null, ends_at: string|null }|null,
- *   subscription: { status: string, current_period_end: string|null, cancel_at_period_end: boolean, grace_started_at: string|null }|null,
+ *   subscription: { status: string, current_period_end: string|null, cancel_at_period_end: boolean, evidence_version: number, paid_through: string|null, failed_invoice_id: string|null, grace_started_at: string|null }|null,
  *   profileError: boolean,
  *   trialError: boolean,
  *   subscriptionError: boolean,
@@ -183,7 +183,7 @@ export async function loadProEntitlement(supabaseAdmin, userId) {
     safeQuery(
       supabaseAdmin
         .from('subscriptions')
-        .select('status, current_period_end, cancel_at_period_end, grace_started_at')
+        .select('status, current_period_end, cancel_at_period_end, evidence_version, paid_through, failed_invoice_id, grace_started_at')
         .eq('user_id', userId)
         .maybeSingle()
     ),

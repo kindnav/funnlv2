@@ -34,6 +34,27 @@ async function fetchStripeSubscription(
   }
 }
 
+// Fetches the authoritative current state of an invoice (same contract as fetchStripeSubscription).
+async function fetchStripeInvoice(
+  invoiceId: string,
+  stripeKey: string,
+): Promise<Record<string, unknown> | 'timeout' | null> {
+  let res: Response
+  try {
+    res = await fetchWithTimeout(`${STRIPE_API}/invoices/${encodeURIComponent(invoiceId)}`, {
+      headers: { 'Authorization': `Bearer ${stripeKey}` },
+    })
+  } catch (err) {
+    return isTimeoutError(err) ? 'timeout' : null
+  }
+  if (!res.ok) return null
+  try {
+    return await res.json() as Record<string, unknown>
+  } catch {
+    return null
+  }
+}
+
 // Privacy-safe structured logger. Only controlled, non-PII fields are ever passed
 // by the orchestration layer (requestId, eventType, and controlled reason codes).
 // Never logs Stripe payloads, metadata, customer/subscription IDs, emails, names,
@@ -104,6 +125,7 @@ Deno.serve(async (req) => {
     requestId,
     supabaseAdmin,
     fetchSubscription: fetchStripeSubscription,
+    fetchInvoice: fetchStripeInvoice,
     env: { priceId, stripeKey },
     now: () => new Date().toISOString(),
     log,

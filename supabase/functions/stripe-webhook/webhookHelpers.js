@@ -282,3 +282,64 @@ export function extractProSubscriptionSnapshot(sub, priceId) {
 export function isUniqueViolation(error) {
   return !!error && error.code === '23505'
 }
+
+// ── Invoice evidence (migration 20261023000000) ────────────────────────────────────────────────────
+// Access is decided from verified INVOICE facts, never from a subscription's status snapshot. These pure
+// helpers read a Stripe invoice that the webhook has RE-FETCHED with the server key (never the event
+// payload) and accept it only when it belongs to the expected subscription AND customer, in the key's
+// mode (test/live). Both the classic and the 2025+ invoice shapes are read.
+
+/** 'live' | 'test' | null from a secret or restricted key. */
+export function stripeKeyMode(key) {
+  if (typeof key !== 'string') return null
+  if (key.startsWith('sk_live_') || key.startsWith('rk_live_')) return 'live'
+  if (key.startsWith('sk_test_') || key.startsWith('rk_test_')) return 'test'
+  return null
+}
+
+/** The subscription id an invoice belongs to (classic `subscription` or 2025+ `parent.subscription_details`). */
+export function invoiceSubscriptionId(inv) {
+  const classic = typeof inv?.subscription === 'string' ? inv.subscription : inv?.subscription?.id
+  return classic ?? inv?.parent?.subscription_details?.subscription ?? null
+}
+
+function invoiceCustomerId(inv) {
+  return typeof inv?.customer === 'string' ? inv.customer : inv?.customer?.id ?? null
+}
+
+function linePriceId(line) {
+  return line?.price?.id ?? line?.pricing?.price_details?.price ?? null
+}
+
+/**
+ * Turns a re-fetched invoice into evidence.
+ *   { ok: true, kind: 'paid', invoiceId, createdIso, periodEndIso }     paid; covers our price's line period
+ *   { ok: true, kind: 'failed', invoiceId, createdIso, renewal }        unpaid after >= 1 payment attempt
+ *   { ok: true, kind: 'none', invoiceId }                               draft / void / not yet attempted
+ *   { ok: false, reason }  'malformed' | 'environment_mismatch' | 'ownership_mismatch' | 'no_matching_line'
+ * `renewal` is true only for billing_reason 'subscription_cycle': an initial purchase never gets grace.
+ * @param {object} inv
+ * @param {{ subscriptionId: string, customerId: string, priceIds: string[], mode: 'live'|'test' }} expected
+ */
+export function extractInvoiceEvidence(inv, { subscriptionId, customerId, priceIds, mode }) {
+  if (!inv || typeof inv.id !== 'string' || !inv.id.startsWith('in_')) return { ok: false, reason: 'malformed' }
+  if ((mode === 'live') !== (inv.livemode === true) || (mode !== 'live' && mode !== 'test')) return { ok: false, reason: 'environment_mismatch' }
+  if (!subscriptionId || !customerId || invoiceSubscriptionId(inv) !== subscriptionId || invoiceCustomerId(inv) !== customerId) {
+    return { ok: false, reason: 'ownership_mismatch' }
+  }
+  const createdIso = unixToIso(inv.created)
+  if (!createdIso) return { ok: false, reason: 'malformed' }
+  if (inv.status === 'paid') {
+    const lines = inv.lines?.data
+    if (!Array.isArray(lines)) return { ok: false, reason: 'malformed' }
+    const ours = lines.filter((l) => priceIds.includes(linePriceId(l)))
+    if (ours.length !== 1) return { ok: false, reason: 'no_matching_line' }
+    const periodEndIso = unixToIso(ours[0]?.period?.end)
+    if (!periodEndIso) return { ok: false, reason: 'malformed' }
+    return { ok: true, kind: 'paid', invoiceId: inv.id, createdIso, periodEndIso }
+  }
+  if ((inv.status === 'open' || inv.status === 'uncollectible') && Number(inv.attempt_count) >= 1) {
+    return { ok: true, kind: 'failed', invoiceId: inv.id, createdIso, renewal: inv.billing_reason === 'subscription_cycle' }
+  }
+  return { ok: true, kind: 'none', invoiceId: inv.id }
+}

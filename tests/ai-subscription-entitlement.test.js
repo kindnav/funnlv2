@@ -22,17 +22,22 @@ const EXPIRED_TRIAL = { started_at: '2026-09-01T00:00:00Z', ends_at: '2026-09-08
 const NO_ERRORS = { profileError: false, trialError: false, subscriptionError: false }
 const decide = (profile, trial, subscription, errors = {}) =>
   decideEntitlement({ profile, trial, subscription, ...NO_ERRORS, ...errors }, NOW).status
-// grace_started_at: a renewal that failed 2 days before NOW (only used by past_due / unpaid; see subscriptionAccessUntil).
-const sub = (status, extra = {}) => ({ status, current_period_end: '2026-11-14T00:00:00Z', cancel_at_period_end: false, grace_started_at: '2026-10-12T16:00:00Z', ...extra })
+// Evidence-based rows (migration 20261023000000): a verified paid period through 2026-11-14.
+const sub = (status, extra = {}) => ({ status, evidence_version: 1, current_period_end: '2026-11-14T00:00:00Z', cancel_at_period_end: false,
+  paid_through: '2026-11-14T00:00:00Z', failed_invoice_id: null, grace_started_at: null, ...extra })
+// A renewal whose payment failed 2 days before NOW: paid period ended, grace from the first failure.
+const FAILED = { paid_through: '2026-10-12T00:00:00Z', failed_invoice_id: 'in_renewal', grace_started_at: '2026-10-12T16:00:00Z' }
 
 // ── The server decision ────────────────────────────────────────────────────────
 
-test('a subscription-only account is Pro within its time window (active period; past_due/unpaid grace)', () => {
+test('a subscription-only account is Pro through its verified paid period, and in grace after a verified failure', () => {
   assert.equal(decide({ ai_enabled: false }, null, sub('active')), 'allow')
-  assert.equal(decide({ ai_enabled: false }, EXPIRED_TRIAL, sub('past_due')), 'allow')
-  assert.equal(decide({ ai_enabled: false }, null, sub('unpaid')), 'allow')
-  // 7 days after the failed renewal the grace is over.
-  assert.equal(decide({ ai_enabled: false }, null, sub('past_due', { grace_started_at: '2026-10-07T16:00:00Z' })), 'deny')
+  assert.equal(decide({ ai_enabled: false }, EXPIRED_TRIAL, sub('past_due', FAILED)), 'allow')
+  assert.equal(decide({ ai_enabled: false }, null, sub('unpaid', FAILED)), 'allow')
+  // 7 days after the first failed payment the grace is over.
+  assert.equal(decide({ ai_enabled: false }, null, sub('past_due', { ...FAILED, grace_started_at: '2026-10-07T16:00:00Z' })), 'deny')
+  // past_due WITHOUT verified failure evidence: no grace is invented.
+  assert.equal(decide({ ai_enabled: false }, null, sub('past_due', { paid_through: '2026-10-12T00:00:00Z' })), 'deny')
 })
 
 test('every other subscription status is refused, including unknown ones', () => {
@@ -52,11 +57,14 @@ test('cancellation is decided by status: still "active" until period end, refuse
   assert.equal(decide({ ai_enabled: false }, null, sub('canceled', { cancel_at_period_end: true })), 'deny')
 })
 
-test('a lapsed period end no longer grants forever: up to 7 days after it (renewal not yet synced), then Free', () => {
-  // Owner-approved 2026-10-22 (migration 20261023000000): status alone never grants.
-  assert.equal(decide({ ai_enabled: false }, null, sub('active', { current_period_end: '2026-01-01T00:00:00Z' })), 'deny')
-  assert.equal(decide({ ai_enabled: false }, null, sub('active', { current_period_end: '2026-10-10T00:00:00Z' })), 'allow')
-  assert.equal(decide({ ai_enabled: false }, null, sub('active', { current_period_end: '2026-10-10T00:00:00Z', cancel_at_period_end: true })), 'deny')
+test('status alone never grants: an active row is Pro only through its verified paid period', () => {
+  // Migration 20261023000000. No allowance after the period: an unreported renewal is Free until evidence.
+  assert.equal(decide({ ai_enabled: false }, null, sub('active', { paid_through: '2026-10-10T00:00:00Z', current_period_end: '2026-11-10T00:00:00Z' })), 'deny')
+  assert.equal(decide({ ai_enabled: false }, null, sub('active', { paid_through: null })), 'deny')
+  // Rows from before the migration (evidence_version 0) use Stripe's reported period end, with no allowance.
+  assert.equal(decide({ ai_enabled: false }, null, { status: 'active', evidence_version: 0, current_period_end: '2026-01-01T00:00:00Z' }), 'deny')
+  assert.equal(decide({ ai_enabled: false }, null, { status: 'active', evidence_version: 0, current_period_end: '2026-11-14T00:00:00Z' }), 'allow')
+  assert.equal(decide({ ai_enabled: false }, null, { status: 'past_due', evidence_version: 0, current_period_end: '2026-11-14T00:00:00Z' }), 'deny')
 })
 
 test('permanent Pro and valid trials are preserved; an expired trial alone is refused', () => {

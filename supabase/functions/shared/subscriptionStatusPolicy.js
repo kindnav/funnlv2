@@ -33,7 +33,7 @@ export const SUBSCRIPTION_STATUS_POLICY = {
   },
   past_due: {
     checkoutMode: 'block', grantsAccess: true, uiState: 'billing_attention',
-    description: 'Renewal payment failed; Stripe retrying. Pro only until 7 days after the failed renewal (subscriptionAccessUntil); offer billing management.',
+    description: 'Renewal payment failed; Stripe retrying. Pro only through the paid period or 7 days after the FIRST verified failed payment (subscriptionAccessUntil); offer billing management.',
   },
   incomplete: {
     checkoutMode: 'reuse_only', grantsAccess: false, uiState: 'payment_incomplete',
@@ -45,7 +45,7 @@ export const SUBSCRIPTION_STATUS_POLICY = {
   },
   unpaid: {
     checkoutMode: 'block', grantsAccess: true, uiState: 'billing_attention',
-    description: 'Renewal payment failed and Stripe stopped retrying. Pro only until 7 days after the failed renewal (subscriptionAccessUntil); offer billing management.',
+    description: 'Renewal payment failed and Stripe stopped retrying. Pro only through the paid period or 7 days after the FIRST verified failed payment (subscriptionAccessUntil); offer billing management.',
   },
   paused: {
     checkoutMode: 'block', grantsAccess: false, uiState: 'billing_attention',
@@ -163,18 +163,18 @@ export function subscriptionAttentionState(status) {
   return uiState === 'billing_attention' || uiState === 'payment_incomplete' ? uiState : null
 }
 
-// ── Time-bounded subscription access (owner-approved 2026-10-22) ───────────────────────────────────
-// The SINGLE JS implementation of the access rule. It MIRRORS public.subscription_access_until() in
-// migration 20261023000000 exactly; a local parity test evaluates both on identical inputs at every
-// cutoff. Status alone never grants access any more - only Stripe's reported period does:
-//   active, renewing:            until current_period_end + 7 days (renewal outcome unknown after the
-//                                period end is treated like a failed renewal);
-//   active, cancel at period end: until current_period_end (no grace for a scheduled cancellation);
-//   past_due / unpaid:            until grace_started_at + 7 days (anchor set once by the database from
-//                                Stripe's renewal moment; never restarted by retries or duplicates);
-//   anything else:                none.
+// ── Subscription access from verified payment evidence (migration 20261023000000) ───────────────────
+// The SINGLE JS implementation of the access rule. It MIRRORS public.subscription_access_until()
+// exactly; a local parity test evaluates both on identical inputs at every cutoff.
+//   status not active / past_due / unpaid            -> none
+//   evidence_version 1 (rows written after the migration):
+//       greatest(paid_through, grace_started_at + 7 days while a failed renewal is outstanding)
+//       Status alone never grants: an 'active' row is Pro only through its verified paid period.
+//   evidence_version 0 (rows from before the migration, until their first evidence):
+//       active -> current_period_end; otherwise none.
+// Owner-approved: a failed renewal keeps Pro 7 days from the FIRST failed payment, then Free until paid.
 
-/** Pro after a failed renewal, and the tolerance for an unsynced renewal: 7 days. */
+/** Pro after the first failed renewal payment: 7 days. */
 export const PAYMENT_GRACE_MS = 7 * 24 * 60 * 60 * 1000
 
 function toMs (value) {
@@ -185,21 +185,22 @@ function toMs (value) {
 
 /**
  * The instant until which a subscription row grants Pro, or null when it grants none.
- * @param {{status?: string, current_period_end?: string|Date|null, cancel_at_period_end?: boolean|null, grace_started_at?: string|Date|null}|null|undefined} sub
+ * @param {{status?: string, evidence_version?: number|null, current_period_end?: string|Date|null, paid_through?: string|Date|null,
+ *          failed_invoice_id?: string|null, grace_started_at?: string|Date|null}|null|undefined} sub
  * @returns {Date|null}
  */
 export function subscriptionAccessUntil (sub) {
-  if (!sub || typeof sub.status !== 'string') return null
-  const periodEnd = toMs(sub.current_period_end)
-  if (sub.status === 'active') {
-    if (periodEnd === null) return null
-    return new Date(sub.cancel_at_period_end === true ? periodEnd : periodEnd + PAYMENT_GRACE_MS)
+  if (!sub || !['active', 'past_due', 'unpaid'].includes(sub.status)) return null
+  if (!sub.evidence_version) {
+    if (sub.status !== 'active') return null
+    const pe = toMs(sub.current_period_end)
+    return pe === null ? null : new Date(pe)
   }
-  if (sub.status === 'past_due' || sub.status === 'unpaid') {
-    const anchor = toMs(sub.grace_started_at)
-    return anchor === null ? null : new Date(anchor + PAYMENT_GRACE_MS)
-  }
-  return null
+  const paid = toMs(sub.paid_through)
+  const anchor = sub.failed_invoice_id ? toMs(sub.grace_started_at) : null
+  const grace = anchor === null ? null : anchor + PAYMENT_GRACE_MS
+  if (paid === null && grace === null) return null
+  return new Date(Math.max(paid ?? -Infinity, grace ?? -Infinity))
 }
 
 /**

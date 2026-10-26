@@ -110,6 +110,7 @@ function makeDeps(over = {}) {
     requestId: 'req-1',
     supabaseAdmin,
     fetchSubscription: over.fetchSubscription ?? (async () => goodSub()),
+    fetchInvoice: over.fetchInvoice,
     env: over.env ?? { priceId: PRICE, stripeKey: 'sk_test' },
     now: () => NOW_ISO,
     log: (name, fields) => logCalls.push({ name, fields }),
@@ -425,26 +426,31 @@ async function run() {
     assertEqual(supabaseAdmin.calls.mark[0].p_status, 'processed')
   })
 
-  // 23 ── invoice events cause no subscription writes
-  test('invoice.payment_succeeded → 200 ignored, no fetch, no writes', async () => {
-    let fetched = false
+  // 23 ── invoice events are payment evidence (migration 20261023000000): the invoice is RE-FETCHED,
+  //        never trusted from the payload. Full evidence behaviour: tests/subscription-access.test.js.
+  test('invoice.payment_succeeded for a non-subscription invoice → re-fetched, 200 ignored, no writes', async () => {
+    let subFetched = false, invFetched = null
     const { deps, supabaseAdmin } = makeDeps({
       event: invoiceEvent('invoice.payment_succeeded'),
-      fetchSubscription: async () => { fetched = true; return goodSub() },
+      env: { priceId: PRICE, stripeKey: 'sk_test_x' },
+      fetchSubscription: async () => { subFetched = true; return goodSub() },
+      fetchInvoice: async (id) => { invFetched = id; return { id: 'in_1', customer: 'cus_1', status: 'paid', livemode: false, created: 1_700_000_000 } },
     })
     const r = await runWebhookOrchestration(deps)
     assertEqual(r.status, 200)
-    assert(!fetched, 'invoice events must not call Stripe')
+    assertEqual(invFetched, 'in_1', 'the invoice is re-fetched by id')
+    assert(!subFetched)
     assertEqual(supabaseAdmin.calls.upserts.length, 0)
     assertEqual(supabaseAdmin.calls.deletes.length, 0)
     assertEqual(supabaseAdmin.calls.mark[0].p_status, 'ignored')
   })
 
-  test('invoice.payment_failed → 200 ignored, no writes', async () => {
-    const { deps, supabaseAdmin } = makeDeps({ event: invoiceEvent('invoice.payment_failed') })
+  test('invoice.payment_failed whose invoice cannot be fetched → 500 (Stripe redelivers), no writes', async () => {
+    const { deps, supabaseAdmin } = makeDeps({ event: invoiceEvent('invoice.payment_failed'), env: { priceId: PRICE, stripeKey: 'sk_test_x' }, fetchInvoice: async () => null })
     const r = await runWebhookOrchestration(deps)
-    assertEqual(r.status, 200)
+    assertEqual(r.status, 500)
     assertEqual(supabaseAdmin.calls.upserts.length, 0)
+    assertEqual(supabaseAdmin.calls.mark[0].p_status, 'failed')
   })
 
   // R3 ── item-level period end is stored as the correct ISO in the DB payload

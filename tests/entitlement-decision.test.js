@@ -22,7 +22,8 @@ function assertEqual(a, b, m) { if (a !== b) throw new Error(m ?? `Expected ${JS
 const NOW = new Date('2026-08-15T12:00:00.000Z')
 // Subscriptions grant only within Stripe's reported period (see subscriptionAccessUntil).
 const PAID = { status: 'active', current_period_end: '2026-09-01T00:00:00.000Z', cancel_at_period_end: false }
-const IN_GRACE = { status: 'past_due', current_period_end: '2026-09-10T00:00:00.000Z', cancel_at_period_end: false, grace_started_at: '2026-08-12T00:00:00.000Z' }
+const IN_GRACE = { status: 'past_due', evidence_version: 1, current_period_end: '2026-09-10T00:00:00.000Z', cancel_at_period_end: false,
+  paid_through: '2026-08-11T00:00:00.000Z', failed_invoice_id: 'in_renewal', grace_started_at: '2026-08-12T00:00:00.000Z' }
 const ACTIVE_TRIAL  = { started_at: '2026-08-14T00:00:00.000Z', ends_at: '2026-08-20T00:00:00.000Z' }
 const EXPIRED_TRIAL = { started_at: '2026-08-01T00:00:00.000Z', ends_at: '2026-08-10T00:00:00.000Z' }
 
