@@ -53,12 +53,19 @@
 -- and the snapshot it holds may still say 'active', so its STATUS proves nothing. What does prove it is
 -- Stripe's immutable creation time of the subscription (stripe_subscription_created), which every webhook
 -- write carries. Under the row lock taken by the write itself, a write naming a DIFFERENT subscription is
--- applied only when that subscription was created strictly AFTER the bound one; otherwise the stored row is
--- kept unchanged (binding, customer, status, period and evidence). Without a creation time it is never
--- applied. A row written before this migration has no stored creation time; its floor is the row's own
--- created_at (when the binding was first recorded), which every genuinely later purchase follows. An ENDED
--- subscription (canceled / incomplete_expired) never replaces another one. A legitimate replacement starts
--- fresh: its evidence columns are cleared.
+-- applied only when BOTH creation times are known and the incoming one is strictly LATER. Every other case
+-- RAISES, so the statement changes nothing (binding, customer, status, period, evidence) and the caller
+-- learns why:
+--   subscription_superseded       the incoming subscription is OLDER          -> webhook: 200 'ignored'
+--   subscription_ended_not_bound  the incoming subscription has ended         -> webhook: 200 'ignored'
+--   subscription_order_unknown    a creation time is missing                  -> webhook: 500 'binding_conflict'
+--   subscription_order_equal      both were created in the same second        -> webhook: 500 'binding_conflict'
+-- No ordering is inferred from anything else: not the row's created_at (it survives replacements, so it
+-- dates the FIRST binding, not the current one), not Stripe ids, not Checkout completion times.
+-- A row bound before this migration has no stored creation time. Before replacing it, the webhook fetches
+-- THAT bound subscription from Stripe, verifies its id, customer, owner and test/live mode, and records its
+-- creation time with establish_subscription_created() - only if the row is still bound to exactly that
+-- subscription and customer. A legitimate replacement starts fresh: its evidence columns are cleared.
 --
 -- ROLLOUT: deploy stripe-webhook FIRST (until this migration exists its writes fail with 5xx and Stripe
 -- redelivers, so no invoice evidence is consumed and lost), then apply this migration, then deploy
@@ -90,11 +97,19 @@ DECLARE
   v_evidence_write boolean := coalesce(current_setting('funnl.evidence_write', true), '') = 'on';
 BEGIN
   IF TG_OP = 'UPDATE' AND OLD.stripe_subscription_id IS DISTINCT FROM NEW.stripe_subscription_id THEN
-    -- A superseded or unprovable subscription never replaces the bound one: keep the row as it is.
-    IF NEW.status IN ('canceled', 'incomplete_expired')
-       OR NEW.stripe_subscription_created IS NULL
-       OR NEW.stripe_subscription_created <= coalesce(OLD.stripe_subscription_created, OLD.created_at) THEN
-      RETURN OLD;
+    -- Replacing the bound subscription needs PROOF that the incoming one is newer: both Stripe creation
+    -- times, strictly ordered. Every refusal raises, so nothing changes and the caller can tell why.
+    IF NEW.status IN ('canceled', 'incomplete_expired') THEN
+      RAISE EXCEPTION 'subscription_ended_not_bound';
+    END IF;
+    IF NEW.stripe_subscription_created IS NULL OR OLD.stripe_subscription_created IS NULL THEN
+      RAISE EXCEPTION 'subscription_order_unknown';
+    END IF;
+    IF NEW.stripe_subscription_created = OLD.stripe_subscription_created THEN
+      RAISE EXCEPTION 'subscription_order_equal';
+    END IF;
+    IF NEW.stripe_subscription_created < OLD.stripe_subscription_created THEN
+      RAISE EXCEPTION 'subscription_superseded';
     END IF;
     -- A different subscription: nothing proven about the old one applies to it.
     NEW.paid_through := NULL; NEW.last_paid_invoice_id := NULL; NEW.last_paid_invoice_created := NULL;
@@ -142,6 +157,57 @@ DROP TRIGGER IF EXISTS subscriptions_access_guard ON public.subscriptions;
 CREATE TRIGGER subscriptions_access_guard
   BEFORE INSERT OR UPDATE ON public.subscriptions
   FOR EACH ROW EXECUTE FUNCTION public.subscriptions_access_guard();
+
+-- ── 2b. establish_subscription_created: record the BOUND subscription's verified creation time ──────
+-- The caller (stripe-webhook) has fetched p_subscription_id from Stripe and verified its id, customer, owner
+-- and mode. Recorded only while the row is still bound to exactly that subscription and customer, and only
+-- when no creation time is stored (an existing one is never overwritten). No other column changes.
+CREATE OR REPLACE FUNCTION public.establish_subscription_created(
+  p_user_id         uuid,
+  p_subscription_id text,
+  p_customer_id     text,
+  p_created         timestamptz
+)
+RETURNS jsonb
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = ''
+AS $$
+DECLARE
+  r public.subscriptions%ROWTYPE;
+BEGIN
+  IF p_user_id IS NULL OR p_subscription_id IS NULL OR p_customer_id IS NULL OR p_created IS NULL THEN
+    RAISE EXCEPTION 'invalid_evidence';
+  END IF;
+  SELECT * INTO r FROM public.subscriptions WHERE user_id = p_user_id FOR UPDATE;
+  IF NOT FOUND OR r.stripe_subscription_id IS DISTINCT FROM p_subscription_id OR r.stripe_customer_id IS DISTINCT FROM p_customer_id THEN
+    RETURN jsonb_build_object('result', 'binding_changed');
+  END IF;
+  IF r.stripe_subscription_created IS NOT NULL THEN
+    RETURN jsonb_build_object('result', CASE WHEN r.stripe_subscription_created = p_created THEN 'already_known' ELSE 'mismatch' END);
+  END IF;
+  -- The evidence flag keeps the trigger from touching anything else (no legacy conversion here).
+  PERFORM set_config('funnl.evidence_write', 'on', true);
+  UPDATE public.subscriptions SET stripe_subscription_created = p_created WHERE user_id = p_user_id;
+  PERFORM set_config('funnl.evidence_write', 'off', true);
+  RETURN jsonb_build_object('result', 'recorded');
+END;
+$$;
+REVOKE EXECUTE ON FUNCTION public.establish_subscription_created(uuid, text, text, timestamptz) FROM PUBLIC, anon, authenticated;
+GRANT  EXECUTE ON FUNCTION public.establish_subscription_created(uuid, text, text, timestamptz) TO service_role;
+
+-- A replacement whose ordering cannot be proven is retried and recorded with a controlled code.
+ALTER TABLE public.stripe_webhook_events DROP CONSTRAINT stripe_webhook_events_failure_code_check;
+ALTER TABLE public.stripe_webhook_events ADD CONSTRAINT stripe_webhook_events_failure_code_check CHECK (
+  failure_code IN (
+    'missing_user_id', 'missing_ids', 'config_missing', 'stripe_fetch_failed',
+    'ownership_lookup_failed', 'owner_not_found', 'db_write_failed',
+    'handler_exception', 'invalid_event', 'invalid_status',
+    'invalid_subscription_item', 'identity_conflict',
+    'provider_timeout', 'ownership_mismatch',
+    'binding_conflict'
+  )
+);
 
 -- ── 3. apply_subscription_evidence: the one monotonic merge (service role only) ──────────────────────
 -- p_kind 'paid':   p_paid_period_end = the period end the paid invoice covers.

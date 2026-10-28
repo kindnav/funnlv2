@@ -130,8 +130,8 @@ async function main () {
   }
   // Every new account gets the automatic trial; expire it for accounts that test SUBSCRIPTION access.
   const expireTrial = (uid) => psql(`UPDATE public.pro_trials SET started_at = now() - interval '20 days', ends_at = now() - interval '13 days' WHERE user_id = '${uid}';`)
-  for (const t of ['legacytrial', 'legacystale', 'legacyactive', 'legacypastdue', 'legacyconv', 'permanent', 'bystander']) await mk(t)
-  for (const t of ['legacystale', 'legacyactive', 'legacypastdue', 'legacyconv', 'bystander']) expireTrial(ids[t])
+  for (const t of ['legacytrial', 'legacystale', 'legacyactive', 'legacypastdue', 'legacyconv', 'permanent', 'bystander', 'lswapu', 'lswapc', 'lunknown']) await mk(t)
+  for (const t of ['legacystale', 'legacyactive', 'legacypastdue', 'legacyconv', 'bystander', 'lswapu', 'lswapc', 'lunknown']) expireTrial(ids[t])
   psql(`UPDATE public.pro_trials SET started_at = now() - interval '3 days', ends_at = now() + interval '4 days' WHERE user_id = '${ids.legacytrial}';
         UPDATE public.profiles SET ai_enabled = true WHERE id = '${ids.permanent}';
         INSERT INTO public.subscriptions (user_id, stripe_customer_id, stripe_subscription_id, status, current_period_end, cancel_at_period_end, price_id) VALUES
@@ -139,7 +139,14 @@ async function main () {
           ('${ids.legacyactive}',  'cus_legacyactive',  'sub_legacyactive',  'active',   now() + interval '25 days', false, '${PRICE}'),
           ('${ids.legacypastdue}', 'cus_legacypastdue', 'sub_legacypastdue', 'past_due', now() + interval '25 days', false, '${PRICE}'),
           ('${ids.legacyconv}',    'cus_legacyconv',    'sub_legacyconv',    'active',   now() + interval '5 days',  false, '${PRICE}'),
-          ('${ids.bystander}',     'cus_bystander',     'sub_bystander',     'active',   now() + interval '20 days', false, '${PRICE}');`)
+          ('${ids.bystander}',     'cus_bystander',     'sub_bystander',     'active',   now() + interval '20 days', false, '${PRICE}');
+        -- The row was first written 400 days ago (for an earlier subscription). Subscription A (created 200 days
+        -- ago) replaced that one, then B (created 30 days ago) replaced A - all before this migration, so the
+        -- row is bound to B, stores no creation time, and its created_at is OLDER than A.
+        INSERT INTO public.subscriptions (user_id, stripe_customer_id, stripe_subscription_id, status, current_period_end, cancel_at_period_end, price_id, created_at) VALUES
+          ('${ids.lswapu}',   'cus_lswapu',   'sub_lswapub',   'active', now() + interval '20 days', false, '${PRICE}', now() - interval '400 days'),
+          ('${ids.lswapc}',   'cus_lswapc',   'sub_lswapcb',   'active', now() + interval '20 days', false, '${PRICE}', now() - interval '400 days'),
+          ('${ids.lunknown}', 'cus_lunknown', 'sub_lunknownb', 'active', now() + interval '20 days', false, '${PRICE}', now() - interval '400 days');`)
   const baseCols = 'user_id, stripe_customer_id, stripe_subscription_id, status, current_period_end, cancel_at_period_end, price_id, created_at, updated_at'
   const dataDigest = () => one(`SELECT ${setDigest('SELECT * FROM public.pro_trials')} || '|' || ${setDigest('SELECT * FROM public.profiles')} || '|' || ${setDigest(`SELECT ${baseCols} FROM public.subscriptions`)}`)
   const D0 = dataDigest()
@@ -459,8 +466,8 @@ async function main () {
     const staleA = clone(stripe.subs.get(subA)), g = gate(), h = reached()
     const fetchPaused = async () => { h.hit(); await g.p; return staleA }
     const handlerA = via === 'checkout'
-      ? send('checkout.session.completed', { id: `cs_${subA}`, customer: custA, subscription: subA, client_reference_id: uid, metadata: { user_id: uid } }, { fetchSubscription: fetchPaused })
-      : subUpdated(subA, custA, { fetchSubscription: fetchPaused })
+      ? send('checkout.session.completed', { id: `cs_${subA}`, customer: custA, subscription: subA, client_reference_id: uid, metadata: { user_id: uid } }, { id: `evt_${tag}stale`, fetchSubscription: fetchPaused })
+      : subUpdated(subA, custA, { id: `evt_${tag}stale`, fetchSubscription: fetchPaused })
     await h.p
     // Meanwhile: A is cancelled, B is bought and its payment verified.
     putSub({ id: subA, customer: custA, user: uid, status: 'canceled', start: now - 10 * DAY, end: now + 20 * DAY, latest: `in_${tag}a0` })
@@ -475,7 +482,7 @@ async function main () {
     check(`${via}: setup - A bound and Pro, A cancelled, B bound with verified payment`, bound && del.status === 200 && bindB.status === 200 &&
       rowB.stripe_subscription_id === subB && rowB.stripe_customer_id === custB && rowB.last_paid_invoice_id === `in_${tag}b0`, JSON.stringify([bindA.status, del.status, bindB.status]))
     check(`${via}: the released handler holding an ACTIVE snapshot of A changes nothing - B's binding, customer, status, period, payment evidence and access are identical`,
-      released.status === 200 && JSON.stringify(after) === JSON.stringify(rowB) && await until(uid) === untilB && await pro(uid),
+      released.status === 200 && eventStatus(`evt_${tag}stale`) === 'ignored:' && JSON.stringify(after) === JSON.stringify(rowB) && await until(uid) === untilB && await pro(uid),
       JSON.stringify({ status: released.status, sub: after.stripe_subscription_id, customer: after.stripe_customer_id }))
     // Later events for B still process normally.
     putSub({ id: subB, customer: custB, user: uid, cancel: true, start: now - HOUR, end: now + 30 * DAY - HOUR, latest: `in_${tag}b0` })
@@ -488,25 +495,86 @@ async function main () {
       later.last_paid_invoice_id === `in_${tag}b1` && await until(uid) === sec(now + 60 * DAY - HOUR) * 1000, JSON.stringify([upd.status, paid.status, later.last_paid_invoice_id]))
     // A NEWER subscription that has already ended (its first payment never completed) cannot replace B either.
     putSub({ id: `sub_${tag}c`, customer: custB, user: uid, status: 'incomplete_expired', created: now, start: now, end: now + 30 * DAY })
-    const ended = await subUpdated(`sub_${tag}c`, custB)
-    check(`${via}: a NEWER but already-ended subscription does not replace the live binding`, ended.status === 200 && JSON.stringify(subRow(uid)) === JSON.stringify(later) && await pro(uid))
+    const ended = await subUpdated(`sub_${tag}c`, custB, { id: `evt_${tag}ended` })
+    check(`${via}: a NEWER but already-ended subscription does not replace the live binding`, ended.status === 200 && eventStatus(`evt_${tag}ended`) === 'ignored:' && JSON.stringify(subRow(uid)) === JSON.stringify(later) && await pro(uid))
   }
   await replacementRace({ tag: 'swapu', via: 'subscription-update', custA: 'cus_swapua', custB: 'cus_swapub' })
   await replacementRace({ tag: 'swapc', via: 'checkout', custA: 'cus_swapc', custB: 'cus_swapc' })
-  // A row written before the migration has no stored creation time: the binding's own created_at is the floor.
-  const lsBefore = subRow(ids.legacystale)
-  putSub({ id: 'sub_legacyolder', customer: 'cus_legacystale', user: ids.legacystale, created: now - 400 * DAY, start: now - 5 * DAY, end: now + 25 * DAY })
-  await subUpdated('sub_legacyolder', 'cus_legacystale')
-  check('a pre-migration binding: an OLDER subscription (created before the binding was recorded) cannot replace it', JSON.stringify(subRow(ids.legacystale)) === JSON.stringify(lsBefore))
-  putInv({ id: 'in_legacynew0', customer: 'cus_legacystale', sub: 'sub_legacynew', created: now, reason: 'subscription_create', status: 'paid', start: now, end: now + 30 * DAY })
-  putSub({ id: 'sub_legacynew', customer: 'cus_legacystale', user: ids.legacystale, created: now, start: now, end: now + 30 * DAY, latest: 'in_legacynew0' })
-  const lnew = await checkout(ids.legacystale, 'sub_legacynew', 'cus_legacystale')
-  check('...while a genuinely new purchase replaces it normally (fresh evidence, Pro)', lnew.status === 200 && subRow(ids.legacystale).stripe_subscription_id === 'sub_legacynew' &&
-    subRow(ids.legacystale).last_paid_invoice_id === 'in_legacynew0' && await pro(ids.legacystale))
-  const noCreated = one(`UPDATE public.subscriptions SET stripe_subscription_id = 'sub_forged', stripe_customer_id = 'cus_forged', stripe_subscription_created = NULL WHERE user_id = '${ids.swapu}' RETURNING stripe_subscription_id || '|' || stripe_customer_id;`)
+  // ── 7c. Bindings from before the migration: ordering from VERIFIED Stripe evidence only ──────────
+  console.log(NL + '7c. A pre-migration binding (B replaced A before the migration; row created_at older than A)')
+  const psqlRefusal = (sql) => {
+    const r = spawnSync('docker', ['exec', '-i', PG, 'psql', '-U', 'postgres', '-d', 'postgres', '-v', 'ON_ERROR_STOP=1', '-q', '-At', '-f', '-'], { input: sql, encoding: 'utf8' })
+    return r.status === 0 ? 'applied' : ((r.stderr || '').match(/subscription_[a-z_]+/) || ['error'])[0]
+  }
+  async function legacyRegression ({ tag, via }) {
+    const uid = ids[tag], subA = `sub_${tag}a`, subB = `sub_${tag}b`, cust = `cus_${tag}`
+    // Stripe: A created 200 days ago (AFTER the row's created_at), B 30 days ago.
+    putSub({ id: subA, customer: cust, user: uid, created: now - 200 * DAY, start: now - 10 * DAY, end: now + 20 * DAY })
+    putSub({ id: subB, customer: cust, user: uid, created: now - 30 * DAY, start: now - 10 * DAY, end: now + 20 * DAY })
+    const before = subRow(uid), untilBefore = await until(uid)
+    const rowCreatedOlder = one(`SELECT created_at < '${iso(now - 200 * DAY)}' FROM public.subscriptions WHERE user_id = '${uid}'`) === 't'
+    // A's delayed handler holds an ACTIVE snapshot of A; it is released now.
+    const staleA = clone(stripe.subs.get(subA)), g = gate(), h = reached()
+    const fetchPaused = async (id) => { if (id !== subA) return liveFetchSub(id); h.hit(); await g.p; return staleA }
+    const handlerA = via === 'checkout'
+      ? send('checkout.session.completed', { id: `cs_${subA}`, customer: cust, subscription: subA, client_reference_id: uid, metadata: { user_id: uid } }, { id: `evt_${tag}stale`, fetchSubscription: fetchPaused })
+      : subUpdated(subA, cust, { id: `evt_${tag}stale`, fetchSubscription: fetchPaused })
+    await h.p; g.open()
+    const released = await handlerA
+    const after = subRow(uid)
+    const { stripe_subscription_created: establishedB, ...restAfter } = after
+    const { stripe_subscription_created: unknownBefore, ...restBefore } = before
+    check(`${via}: setup - row bound to B, no stored creation time, row created_at OLDER than A`, before.stripe_subscription_id === subB && unknownBefore === null && rowCreatedOlder && before.evidence_version === 0)
+    check(`${via}: A's delayed ACTIVE snapshot is refused - B's complete row (binding, customer, status, period, price, evidence) and access are unchanged; recorded "ignored"`,
+      released.status === 200 && eventStatus(`evt_${tag}stale`) === 'ignored:' && JSON.stringify(restAfter) === JSON.stringify(restBefore) && await until(uid) === untilBefore && await pro(uid),
+      JSON.stringify({ status: released.status, ev: eventStatus(`evt_${tag}stale`), sub: after.stripe_subscription_id }))
+    check(`${via}: ...the ONLY change is B's creation time, established from B's own verified Stripe record`, Date.parse(establishedB) === sec(now - 30 * DAY) * 1000)
+    // A genuinely newer replacement still works once B's creation time is known.
+    putInv({ id: `in_${tag}c0`, customer: cust, sub: `sub_${tag}c`, created: now, reason: 'subscription_create', status: 'paid', start: now, end: now + 30 * DAY })
+    putSub({ id: `sub_${tag}c`, customer: cust, user: uid, created: now, start: now, end: now + 30 * DAY, latest: `in_${tag}c0` })
+    const c = via === 'checkout' ? await checkout(uid, `sub_${tag}c`, cust) : await subUpdated(`sub_${tag}c`, cust)
+    const rc = subRow(uid)
+    check(`${via}: a genuinely NEWER subscription then replaces B normally (fresh evidence, Pro)`, c.status === 200 && rc.stripe_subscription_id === `sub_${tag}c` &&
+      rc.last_paid_invoice_id === `in_${tag}c0` && Date.parse(rc.stripe_subscription_created) === sec(now) * 1000 && await pro(uid), JSON.stringify([c.status, rc.stripe_subscription_id]))
+  }
+  await legacyRegression({ tag: 'lswapu', via: 'subscription-update' })
+  await legacyRegression({ tag: 'lswapc', via: 'checkout' })
+
+  // Ordering that cannot be established: the bound subscription is not available from Stripe.
+  const unkBefore = subRow(ids.lunknown)
+  putSub({ id: 'sub_lunknownd', customer: 'cus_lunknown', user: ids.lunknown, created: now, start: now, end: now + 30 * DAY })
+  const unk = await subUpdated('sub_lunknownd', 'cus_lunknown', { id: 'evt_lunknownd' })
+  check('unknown ordering (the bound subscription cannot be read from Stripe): binding kept, 5xx, recorded failed - never "processed"',
+    unk.status >= 500 && eventStatus('evt_lunknownd') === 'failed:stripe_fetch_failed' && JSON.stringify(subRow(ids.lunknown)) === JSON.stringify(unkBefore))
+
+  // Equal-second creation: no ordering is invented.
+  console.log(NL + '7d. Equal-second creation')
+  const eq0 = subRow(ids.swapu)
+  const sameSecond = Date.parse(eq0.stripe_subscription_created)
+  putSub({ id: 'sub_swapusame', customer: 'cus_swapub', user: ids.swapu, created: sameSecond, start: now, end: now + 30 * DAY })
+  const eqU = await subUpdated('sub_swapusame', 'cus_swapub', { id: 'evt_equalupdate' })
+  const eqC = await checkout(ids.swapu, 'sub_swapusame', 'cus_swapub', { id: 'evt_equalcheckout' })
+  check('a DIFFERENT subscription created in the SAME second as the bound one: binding kept through both handlers, 500 binding_conflict (retried, diagnosable)',
+    eqU.status === 500 && eqC.status === 500 && eventStatus('evt_equalupdate') === 'failed:binding_conflict' && eventStatus('evt_equalcheckout') === 'failed:binding_conflict' &&
+    JSON.stringify(subRow(ids.swapu)) === JSON.stringify(eq0) && await pro(ids.swapu))
+
+  // In the database itself (no webhook): refusals raise, so nothing changes and the reason is visible.
+  const swapRow = subRow(ids.swapu)
+  const noCreated = psqlRefusal(`UPDATE public.subscriptions SET stripe_subscription_id = 'sub_forged', stripe_customer_id = 'cus_forged', stripe_subscription_created = NULL WHERE user_id = '${ids.swapu}';`)
+  const equal = psqlRefusal(`UPDATE public.subscriptions SET stripe_subscription_id = 'sub_forged', stripe_subscription_created = '${swapRow.stripe_subscription_created}' WHERE user_id = '${ids.swapu}';`)
+  const older = psqlRefusal(`UPDATE public.subscriptions SET stripe_subscription_id = 'sub_forged', stripe_subscription_created = '${iso(now - 365 * DAY)}' WHERE user_id = '${ids.swapu}';`)
+  const unknownStored = psqlRefusal(`UPDATE public.subscriptions SET stripe_subscription_id = 'sub_forged', stripe_subscription_created = now() WHERE user_id = '${ids.lunknown}';`)
   const sameIdCustomer = one(`UPDATE public.subscriptions SET stripe_customer_id = 'cus_forged', stripe_subscription_created = now() WHERE user_id = '${ids.swapc}' RETURNING stripe_customer_id || '|' || (stripe_subscription_created < now() - interval '30 minutes');`)
-  check('in the database itself: a binding change without a creation time is refused, and the same subscription never changes customer or creation time',
-    noCreated === 'sub_swapub|cus_swapub' && sameIdCustomer === 'cus_swapc|true', JSON.stringify([noCreated, sameIdCustomer]))
+  check('in the database itself: missing, equal, older and unknown-stored orderings each RAISE their own reason and change nothing; the same subscription never changes customer or creation time',
+    noCreated === 'subscription_order_unknown' && equal === 'subscription_order_equal' && older === 'subscription_superseded' && unknownStored === 'subscription_order_unknown' &&
+    JSON.stringify(subRow(ids.swapu)) === JSON.stringify(swapRow) && sameIdCustomer === 'cus_swapc|true', JSON.stringify([noCreated, equal, older, unknownStored, sameIdCustomer]))
+
+  const swapc0 = subRow(ids.swapc)
+  const estMismatch = one(`SELECT public.establish_subscription_created('${ids.swapu}', 'sub_swapub', 'cus_swapub', '${iso(now - 999 * DAY)}') ->> 'result'`)
+  const estMoved = one(`SELECT public.establish_subscription_created('${ids.swapc}', 'sub_swapca', 'cus_swapc', '${iso(now - 999 * DAY)}') ->> 'result'`)
+  check('establish_subscription_created never overwrites a known creation time, and records nothing once the binding has moved on',
+    estMismatch === 'mismatch' && estMoved === 'binding_changed' && JSON.stringify(subRow(ids.swapu)) === JSON.stringify(swapRow) && JSON.stringify(subRow(ids.swapc)) === JSON.stringify(swapc0),
+    JSON.stringify([estMismatch, estMoved]))
 
   // ── 8. Browser RPC and AI evaluator agree ────────────────────────────────────────────────────────
   console.log(NL + '8. Browser RPC and AI-function evaluator agree on live rows')

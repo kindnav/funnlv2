@@ -14,7 +14,7 @@ import { readFileSync } from 'node:fs'
 import { subscriptionAccessUntil, subscriptionGrantsAccessAt, PAYMENT_GRACE_MS } from '../supabase/functions/shared/subscriptionStatusPolicy.js'
 import { evaluateProEntitlement } from '../supabase/functions/shared/pro-entitlement.js'
 import { runWebhookOrchestration } from '../supabase/functions/stripe-webhook/webhookHandler.js'
-import { extractProSubscriptionSnapshot, extractInvoiceEvidence } from '../supabase/functions/stripe-webhook/webhookHelpers.js'
+import { extractProSubscriptionSnapshot, extractInvoiceEvidence, classifyBindingRefusal } from '../supabase/functions/stripe-webhook/webhookHelpers.js'
 import { runCheckoutOrchestration } from '../supabase/functions/create-checkout-session/checkoutOrchestrator.js'
 
 const DAY = 86400000
@@ -163,7 +163,8 @@ test('a bound subscription that moved to a third, unknown price is still ignored
 test('a NEW purchase (checkout.session.completed) still requires today’s configured price', () => {
   const src = readFileSync(new URL('../supabase/functions/stripe-webhook/webhookHandler.js', import.meta.url), 'utf8')
   const checkout = src.slice(src.indexOf("case 'checkout.session.completed'"), src.indexOf("case 'customer.subscription.created'"))
-  assert.ok(checkout.includes('extractProSubscriptionSnapshot(sub, priceId)') && !checkout.includes('bound'))
+  // The older-price fallback (bound price) is for subscriptions already bound - never for a new purchase.
+  assert.ok(checkout.includes('extractProSubscriptionSnapshot(sub, priceId)') && !checkout.includes('boundSnap') && !checkout.includes('bound.price_id'))
 })
 
 // ── Checkout: permanent Pro cannot buy a redundant subscription ────────────────────────────────────
@@ -268,4 +269,91 @@ test('after a subscription write, a PAID latest invoice is recorded as evidence;
   await runWebhookOrchestration({ event: updated(subOn(NEW_PRICE, { latest_invoice: 'in_R' })), requestId: 'r', supabaseAdmin: openAdmin,
     fetchSubscription: async () => subOn(NEW_PRICE, { latest_invoice: 'in_R' }), fetchInvoice: async () => inv({ status: 'open' }), env: { priceId: NEW_PRICE, stripeKey: 'sk_test_x' } })
   assert.equal(openAdmin.calls.evidence, undefined, 'an active snapshot with an unpaid invoice is not proof of payment')
+})
+
+// ── A different subscription replaces the bound one only on VERIFIED Stripe ordering ──────────────
+test('binding refusals from the database are classified; anything else is not', () => {
+  assert.equal(classifyBindingRefusal({ message: 'subscription_superseded' }), 'superseded')
+  assert.equal(classifyBindingRefusal({ message: 'subscription_ended_not_bound' }), 'superseded')
+  assert.equal(classifyBindingRefusal({ message: 'subscription_order_unknown' }), 'conflict')
+  assert.equal(classifyBindingRefusal({ message: 'subscription_order_equal' }), 'conflict')
+  for (const e of [null, undefined, {}, { message: 'boom' }, { code: '23505', message: 'duplicate key' }]) assert.equal(classifyBindingRefusal(e), null)
+})
+function bindingAdmin ({ current = null, upsertError = null, establish = 'recorded' } = {}) {
+  const calls = { upserts: [], marks: [], establish: [] }
+  const builder = () => {
+    const st = { filters: {} }
+    const b = {
+      select () { return b }, eq (c, v) { st.filters[c] = v; return b },
+      maybeSingle () { return Promise.resolve({ data: 'user_id' in st.filters ? current : null, error: null }) },
+      upsert (payload) { calls.upserts.push(payload); return Promise.resolve({ error: upsertError }) },
+    }
+    return b
+  }
+  return {
+    calls,
+    rpc (fn, args) {
+      if (fn === 'claim_webhook_event') return Promise.resolve({ data: { result: 'claimed', claim_token: 'tok' }, error: null })
+      if (fn === 'mark_webhook_event') { calls.marks.push(args.p_failure_code ? `${args.p_status}:${args.p_failure_code}` : args.p_status); return Promise.resolve({ data: true, error: null }) }
+      if (fn === 'establish_subscription_created') { calls.establish.push(args); return Promise.resolve({ data: { result: establish }, error: null }) }
+      return Promise.resolve({ data: null, error: null })
+    },
+    from () { return builder() },
+  }
+}
+// The user's row is bound (before the migration) to sub_B, whose creation time was never stored.
+const LEGACY_B = { stripe_subscription_id: 'sub_B', stripe_customer_id: 'cus_X', stripe_subscription_created: null }
+const stripeB = { id: 'sub_B', object: 'subscription', customer: 'cus_X', created: (T - 10 * DAY) / 1000, livemode: false, metadata: { user_id: USER } }
+const incomingA = subOn(NEW_PRICE, { id: 'sub_A', created: (T - 40 * DAY) / 1000, livemode: false })
+const runReplace = (admin, subs) => runWebhookOrchestration({ event: { ...updated(incomingA), id: 'evt_replace01' }, requestId: 'r', supabaseAdmin: admin,
+  fetchSubscription: async (id) => subs[id] ?? null, env: { priceId: NEW_PRICE, stripeKey: 'sk_test_x' } })
+test('unknown bound creation time: the BOUND subscription is fetched, verified and recorded before the write', async () => {
+  const admin = bindingAdmin({ current: LEGACY_B })
+  await runReplace(admin, { sub_A: incomingA, sub_B: stripeB })
+  assert.deepEqual(admin.calls.establish, [{ p_user_id: USER, p_subscription_id: 'sub_B', p_customer_id: 'cus_X', p_created: new Date(T - 10 * DAY).toISOString() }])
+  assert.equal(admin.calls.upserts.length, 1, 'the database then judges the replacement')
+})
+test('the bound subscription cannot be verified (other customer, owner or mode, no creation time, wrong id): 500 binding_conflict, no write', async () => {
+  for (const bad of [{ ...stripeB, customer: 'cus_OTHER' }, { ...stripeB, metadata: { user_id: '22222222-2222-4222-8222-222222222222' } },
+    { ...stripeB, livemode: true }, { ...stripeB, livemode: undefined }, { ...stripeB, created: undefined }, { ...stripeB, id: 'sub_OTHER' }]) {
+    const admin = bindingAdmin({ current: LEGACY_B })
+    const r = await runReplace(admin, { sub_A: incomingA, sub_B: bad })
+    assert.equal(r.status, 500)
+    assert.deepEqual(admin.calls.marks, ['failed:binding_conflict'])
+    assert.equal(admin.calls.establish.length + admin.calls.upserts.length, 0)
+  }
+  const missing = bindingAdmin({ current: LEGACY_B })
+  assert.equal((await runReplace(missing, { sub_A: incomingA })).status, 500, 'the bound subscription could not be fetched: retried')
+  assert.deepEqual(missing.calls.marks, ['failed:stripe_fetch_failed'])
+})
+test('a stored creation time that differs from Stripe’s is a conflict, never overwritten', async () => {
+  const admin = bindingAdmin({ current: LEGACY_B, establish: 'mismatch' })
+  const r = await runReplace(admin, { sub_A: incomingA, sub_B: stripeB })
+  assert.equal(r.status, 500)
+  assert.deepEqual(admin.calls.marks, ['failed:binding_conflict'])
+  assert.equal(admin.calls.upserts.length, 0)
+})
+test('known creation time, the same subscription, or no row: nothing extra is fetched or recorded', async () => {
+  for (const current of [{ ...LEGACY_B, stripe_subscription_created: new Date(T).toISOString() }, { ...LEGACY_B, stripe_subscription_id: 'sub_A' }, null]) {
+    const admin = bindingAdmin({ current }); const fetched = []
+    await runWebhookOrchestration({ event: { ...updated(incomingA), id: 'evt_replace02' }, requestId: 'r', supabaseAdmin: admin,
+      fetchSubscription: async (id) => { fetched.push(id); return id === 'sub_A' ? incomingA : stripeB }, env: { priceId: NEW_PRICE, stripeKey: 'sk_test_x' } })
+    assert.deepEqual(fetched, ['sub_A'])
+    assert.equal(admin.calls.establish.length, 0)
+  }
+})
+test('database refusals: provably older or ended -> 200 ignored; unknown or equal order -> 500 binding_conflict (never "processed")', async () => {
+  const known = { ...LEGACY_B, stripe_subscription_created: new Date(T).toISOString() }
+  for (const [message, status, mark] of [['subscription_superseded', 200, 'ignored'], ['subscription_ended_not_bound', 200, 'ignored'],
+    ['subscription_order_unknown', 500, 'failed:binding_conflict'], ['subscription_order_equal', 500, 'failed:binding_conflict']]) {
+    for (const via of ['update', 'checkout']) {
+      const admin = bindingAdmin({ current: known, upsertError: { code: 'P0001', message } })
+      const r = via === 'update' ? await runReplace(admin, { sub_A: incomingA })
+        : await runWebhookOrchestration({ event: { id: 'evt_replace03', type: 'checkout.session.completed', created: T / 1000,
+          data: { object: { id: 'cs_A', customer: 'cus_X', subscription: 'sub_A', client_reference_id: USER, metadata: { user_id: USER } } } },
+          requestId: 'r', supabaseAdmin: admin, fetchSubscription: async () => incomingA, env: { priceId: NEW_PRICE, stripeKey: 'sk_test_x' } })
+      assert.equal(r.status, status, `${via} ${message}`)
+      assert.deepEqual(admin.calls.marks, [mark], `${via} ${message}`)
+    }
+  }
 })

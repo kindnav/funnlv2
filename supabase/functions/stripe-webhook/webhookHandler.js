@@ -27,6 +27,7 @@ import {
   shouldRetryOnMissingOwnership,
   extractProSubscriptionSnapshot,
   isUniqueViolation,
+  classifyBindingRefusal,
   crossCheckOwnership,
   extractInvoiceEvidence,
   invoiceSubscriptionId,
@@ -177,6 +178,70 @@ export async function runWebhookOrchestration({
     return { userId: null, error: false }
   }
 
+  // Before a write that would REPLACE the user's bound subscription: if the bound subscription's Stripe
+  // creation time is unknown (bound before migration 20261023000000), fetch THAT subscription from Stripe,
+  // verify its id, customer, owner and test/live mode, and record its creation time - only while the row is
+  // still bound to exactly it. The database then decides the replacement on verified ordering. Returns null
+  // to continue, or the finalize() result to return.
+  async function establishBoundCreation(userId, incomingSubId) {
+    const { data: cur, error } = await supabaseAdmin
+      .from('subscriptions')
+      .select('stripe_subscription_id, stripe_customer_id, stripe_subscription_created')
+      .eq('user_id', userId)
+      .maybeSingle()
+    if (error) {
+      log('ownership_lookup_failed', { requestId, eventType })
+      return finalize('failed', 'ownership_lookup_failed', resp(500, 'Ownership lookup failed'))
+    }
+    if (!cur?.stripe_subscription_id || cur.stripe_subscription_id === incomingSubId || cur.stripe_subscription_created) return null
+    const bound = await fetchSubscription(cur.stripe_subscription_id, stripeKey)
+    if (bound === 'timeout') {
+      log('provider_timeout', { requestId, eventType })
+      return finalize('failed', 'provider_timeout', resp(503, 'Provider timeout'))
+    }
+    if (!bound) {
+      log('stripe_fetch_failed', { requestId, eventType })
+      return finalize('failed', 'stripe_fetch_failed', resp(500, 'Stripe fetch failed'))
+    }
+    const mode = stripeKeyMode(stripeKey)
+    const boundCreatedIso = unixToIso(bound.created)
+    const verified = validateAuthoritativeSub(bound, cur.stripe_subscription_id, cur.stripe_customer_id).valid &&
+      !crossCheckOwnership(bound.metadata?.user_id ?? null, userId).mismatch &&
+      (mode === 'live' || mode === 'test') && typeof bound.livemode === 'boolean' && bound.livemode === (mode === 'live') &&
+      Boolean(boundCreatedIso)
+    if (!verified) {
+      log('binding_conflict', { requestId, eventType, reason: 'bound_subscription_unverified' })
+      return finalize('failed', 'binding_conflict', resp(500, 'Binding conflict'))
+    }
+    const { data, error: recordError } = await supabaseAdmin.rpc('establish_subscription_created', {
+      p_user_id: userId, p_subscription_id: cur.stripe_subscription_id, p_customer_id: cur.stripe_customer_id, p_created: boundCreatedIso,
+    })
+    if (recordError || !data?.result) {
+      log('db_write_failed', { requestId, eventType })
+      return finalize('failed', 'db_write_failed', resp(500, 'Database write failed'))
+    }
+    if (data.result === 'mismatch') {
+      log('binding_conflict', { requestId, eventType, reason: 'stored_creation_differs' })
+      return finalize('failed', 'binding_conflict', resp(500, 'Binding conflict'))
+    }
+    return null   // recorded, already known, or the binding changed meanwhile (the trigger judges the current row)
+  }
+
+  // A subscription write refused by the database because it names a different subscription than the bound
+  // one: a provably older or ended one is acknowledged and changes nothing; an unprovable order is retried.
+  function bindingRefusalResult(error) {
+    const refusal = classifyBindingRefusal(error)
+    if (refusal === 'superseded') {
+      log('subscription_superseded', { requestId, eventType })
+      return finalize('ignored', undefined, resp(200, 'ok'))
+    }
+    if (refusal === 'conflict') {
+      log('binding_conflict', { requestId, eventType, reason: error.message })
+      return finalize('failed', 'binding_conflict', resp(500, 'Binding conflict'))
+    }
+    return null
+  }
+
   // Payment evidence from the subscription's latest invoice, applied after a subscription write. Only a
   // verified PAID invoice is recorded here (it advances the paid period and can end a failed renewal's
   // grace); failure times come only from invoice.payment_failed events. Returns null on success, or the
@@ -292,6 +357,9 @@ export async function runWebhookOrchestration({
           return finalize('failed', 'invalid_subscription_item', resp(500, 'Invalid subscription'))
         }
 
+        const boundStep = await establishBoundCreation(userId, sub.id)
+        if (boundStep) return boundStep
+
         const { error } = await supabaseAdmin
           .from('subscriptions')
           .upsert({
@@ -308,6 +376,8 @@ export async function runWebhookOrchestration({
           }, { onConflict: 'user_id' })
 
         if (error) {
+          const refused = bindingRefusalResult(error)
+          if (refused) return refused
           // R6: a unique-violation means this Stripe identity is already attached to a
           // different Funnl user — fail closed (never overwrite another user's row).
           const code = isUniqueViolation(error) ? 'identity_conflict' : 'db_write_failed'
@@ -427,6 +497,9 @@ export async function runWebhookOrchestration({
           return finalize('failed', 'invalid_subscription_item', resp(500, 'Invalid subscription'))
         }
 
+        const boundStep = await establishBoundCreation(userId, sub.id)
+        if (boundStep) return boundStep
+
         const { error } = await supabaseAdmin
           .from('subscriptions')
           .upsert({
@@ -443,6 +516,8 @@ export async function runWebhookOrchestration({
           }, { onConflict: 'user_id' })
 
         if (error) {
+          const refused = bindingRefusalResult(error)
+          if (refused) return refused
           // R6: unique-violation → Stripe identity already attached to another user.
           const code = isUniqueViolation(error) ? 'identity_conflict' : 'db_write_failed'
           log(code, { requestId, eventType })

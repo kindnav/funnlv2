@@ -283,6 +283,22 @@ export function isUniqueViolation(error) {
   return !!error && error.code === '23505'
 }
 
+/**
+ * Classifies a refusal raised by the subscriptions trigger (migration 20261023000000) when a write names a
+ * DIFFERENT subscription than the one bound to the user.
+ *   'superseded' - the incoming subscription is provably older, or has ended: acknowledge, change nothing.
+ *   'conflict'   - the ordering is unknown or equal: retry, recorded as 'binding_conflict'.
+ *   null         - not a binding refusal.
+ * @param {{ message?: string }|null|undefined} error
+ * @returns {'superseded'|'conflict'|null}
+ */
+export function classifyBindingRefusal(error) {
+  const m = typeof error?.message === 'string' ? error.message : ''
+  if (m === 'subscription_superseded' || m === 'subscription_ended_not_bound') return 'superseded'
+  if (m === 'subscription_order_unknown' || m === 'subscription_order_equal') return 'conflict'
+  return null
+}
+
 // ── Invoice evidence (migration 20261023000000) ────────────────────────────────────────────────────
 // Access is decided from verified INVOICE facts, never from a subscription's status snapshot. These pure
 // helpers read a Stripe invoice that the webhook has RE-FETCHED with the server key (never the event
