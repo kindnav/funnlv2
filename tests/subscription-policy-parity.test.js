@@ -18,6 +18,7 @@ import {
   SUBSCRIPTION_STATUS_POLICY,
   subscriptionGrantsAccess,
   PAYMENT_GRACE_MS,
+  PENDING_RENEWAL_ALLOWANCE_MS,
 } from '../supabase/functions/shared/subscriptionStatusPolicy.js'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -62,6 +63,8 @@ test('SQL subscription_access_until mentions exactly the JS status set and the s
     `SQL statuses ${JSON.stringify([...sqlSet])} must equal JS granting set ${JSON.stringify([...JS_GRANTING])}`)
   assertEqual((body.match(/interval '7 days'/g) || []).length, 1, 'SQL uses the 7-day grace once (failed renewals only)')
   assertEqual(PAYMENT_GRACE_MS, 7 * 24 * 60 * 60 * 1000, 'JS grace is 7 days')
+  assertEqual((body.match(/interval '24 hours'/g) || []).length, 1, 'SQL uses the 24-hour pending-renewal allowance once')
+  assertEqual(PENDING_RENEWAL_ALLOWANCE_MS, 24 * 60 * 60 * 1000, 'JS pending-renewal allowance is 24 hours')
   // get_my_pro_access_status uses the function, with no status-only shortcut left.
   assert(/v_sub_active := v_sub_until IS NOT NULL AND v_now < v_sub_until;/.test(sql))
   assert(!/v_sub_active\s*:=\s*COALESCE\(\s*v_sub_status\s+IN/.test(sql))
@@ -71,7 +74,7 @@ test('SQL subscription_access_until mentions exactly the JS status set and the s
 test('pro-entitlement.js uses the time-bounded subscriptionGrantsAccessAt and has no hardcoded allowlist', () => {
   const src = readFileSync(join(ROOT, 'supabase/functions/shared/pro-entitlement.js'), 'utf8')
   assert(src.includes('subscriptionGrantsAccessAt(subscription, now)'), 'must delegate to subscriptionGrantsAccessAt')
-  assert(src.includes("select('status, current_period_end, cancel_at_period_end, evidence_version, paid_through, failed_invoice_id, grace_started_at')"), 'must load the columns the rule needs')
+  assert(src.includes("select('status, current_period_end, cancel_at_period_end, evidence_version, paid_through, failed_invoice_id, grace_started_at, verified_paid_through, renews_automatically')"), 'must load the columns the rule needs')
   // No duplicate allowlist like: === 'active' || ... === 'past_due'
   assert(!/===\s*'active'[\s\S]{0,40}===\s*'past_due'/.test(src),
     'must not hardcode the active/past_due allowlist')

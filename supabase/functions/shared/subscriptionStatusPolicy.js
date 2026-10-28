@@ -167,15 +167,22 @@ export function subscriptionAttentionState(status) {
 // The SINGLE JS implementation of the access rule. It MIRRORS public.subscription_access_until()
 // exactly; a local parity test evaluates both on identical inputs at every cutoff.
 //   status not active / past_due / unpaid            -> none
-//   evidence_version 1 (rows written after the migration):
-//       greatest(paid_through, grace_started_at + 7 days while a failed renewal is outstanding)
-//       Status alone never grants: an 'active' row is Pro only through its verified paid period.
+//   evidence_version 1 (rows written after the migration): the latest of three SEPARATE terms
+//       1. verified paid access       paid_through
+//       2. pending-renewal allowance  verified_paid_through + 24 hours, while no failure is outstanding and
+//                                     the subscription renews automatically (renews_automatically)
+//       3. failed-payment grace       grace_started_at + 7 days, while a failed renewal is outstanding
+//       Status alone never grants.
 //   evidence_version 0 (rows from before the migration, until their first evidence):
 //       active -> current_period_end; otherwise none.
-// Owner-approved: a failed renewal keeps Pro 7 days from the FIRST failed payment, then Free until paid.
+// Owner-approved: a failed renewal keeps Pro 7 days from the FIRST failed payment, then Free until paid;
+// a previously paid automatic renewal keeps Pro up to 24 hours after its verified paid period while pending.
 
 /** Pro after the first failed renewal payment: 7 days. */
 export const PAYMENT_GRACE_MS = 7 * 24 * 60 * 60 * 1000
+
+/** Pro after a verified paid period while an automatic renewal is being collected: 24 hours. */
+export const PENDING_RENEWAL_ALLOWANCE_MS = 24 * 60 * 60 * 1000
 
 function toMs (value) {
   if (value === null || value === undefined || value === '') return null
@@ -186,7 +193,8 @@ function toMs (value) {
 /**
  * The instant until which a subscription row grants Pro, or null when it grants none.
  * @param {{status?: string, evidence_version?: number|null, current_period_end?: string|Date|null, paid_through?: string|Date|null,
- *          failed_invoice_id?: string|null, grace_started_at?: string|Date|null}|null|undefined} sub
+ *          failed_invoice_id?: string|null, grace_started_at?: string|Date|null, verified_paid_through?: string|Date|null,
+ *          renews_automatically?: boolean|null}|null|undefined} sub
  * @returns {Date|null}
  */
 export function subscriptionAccessUntil (sub) {
@@ -199,8 +207,10 @@ export function subscriptionAccessUntil (sub) {
   const paid = toMs(sub.paid_through)
   const anchor = sub.failed_invoice_id ? toMs(sub.grace_started_at) : null
   const grace = anchor === null ? null : anchor + PAYMENT_GRACE_MS
-  if (paid === null && grace === null) return null
-  return new Date(Math.max(paid ?? -Infinity, grace ?? -Infinity))
+  const verified = !sub.failed_invoice_id && sub.renews_automatically === true ? toMs(sub.verified_paid_through) : null
+  const allowance = verified === null ? null : verified + PENDING_RENEWAL_ALLOWANCE_MS
+  if (paid === null && grace === null && allowance === null) return null
+  return new Date(Math.max(paid ?? -Infinity, grace ?? -Infinity, allowance ?? -Infinity))
 }
 
 /**

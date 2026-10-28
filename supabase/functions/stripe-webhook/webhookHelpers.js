@@ -292,6 +292,24 @@ export function isUniqueViolation(error) {
  * @param {{ message?: string }|null|undefined} error
  * @returns {'superseded'|'conflict'|null}
  */
+/**
+ * Whether Stripe will try to collect this subscription's next renewal automatically: the condition for the
+ * 24-hour pending-renewal allowance (migration 20261023000000). Fail-safe: anything missing or unexpected is
+ * NOT automatic renewal (a scheduled cancellation, cancel_at, paused collection, invoices sent for manual
+ * payment, or an ended status).
+ * @param {Record<string, unknown>|null|undefined} sub  the authoritative (re-fetched) subscription
+ * @returns {boolean}
+ */
+export function subscriptionRenewsAutomatically(sub) {
+  if (!sub || typeof sub !== 'object') return false
+  if (!['active', 'past_due', 'unpaid'].includes(sub.status)) return false
+  if (sub.collection_method !== 'charge_automatically') return false
+  if (sub.cancel_at_period_end !== false) return false
+  if (sub.cancel_at !== null && sub.cancel_at !== undefined) return false
+  if (sub.pause_collection) return false
+  return true
+}
+
 export function classifyBindingRefusal(error) {
   const m = typeof error?.message === 'string' ? error.message : ''
   if (m === 'subscription_superseded' || m === 'subscription_ended_not_bound') return 'superseded'

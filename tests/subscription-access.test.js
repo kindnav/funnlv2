@@ -11,13 +11,14 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { subscriptionAccessUntil, subscriptionGrantsAccessAt, PAYMENT_GRACE_MS } from '../supabase/functions/shared/subscriptionStatusPolicy.js'
+import { subscriptionAccessUntil, subscriptionGrantsAccessAt, PAYMENT_GRACE_MS, PENDING_RENEWAL_ALLOWANCE_MS } from '../supabase/functions/shared/subscriptionStatusPolicy.js'
 import { evaluateProEntitlement } from '../supabase/functions/shared/pro-entitlement.js'
 import { runWebhookOrchestration } from '../supabase/functions/stripe-webhook/webhookHandler.js'
-import { extractProSubscriptionSnapshot, extractInvoiceEvidence, classifyBindingRefusal } from '../supabase/functions/stripe-webhook/webhookHelpers.js'
+import { extractProSubscriptionSnapshot, extractInvoiceEvidence, classifyBindingRefusal, subscriptionRenewsAutomatically } from '../supabase/functions/stripe-webhook/webhookHelpers.js'
 import { runCheckoutOrchestration } from '../supabase/functions/create-checkout-session/checkoutOrchestrator.js'
 
 const DAY = 86400000
+const HOUR = 3600000
 const T = Date.parse('2026-11-16T00:00:00.000Z')            // a period end / renewal moment
 const at = (ms) => new Date(ms)
 const USER = '11111111-1111-4111-8111-111111111111'
@@ -356,4 +357,62 @@ test('database refusals: provably older or ended -> 200 ignored; unknown or equa
       assert.deepEqual(admin.calls.marks, [mark], `${via} ${message}`)
     }
   }
+})
+
+// ── Pending-renewal allowance: 24 hours after the VERIFIED paid period (approved 2026-10-28) ────────
+const RENEWING = (o) => ev1({ paid_through: new Date(T).toISOString(), verified_paid_through: new Date(T).toISOString(), renews_automatically: true, ...o })
+test('allowance: Pro immediately before the 24-hour cutoff, Free exactly at and after it', () => {
+  for (const status of ['active', 'past_due', 'unpaid']) {
+    const sub = RENEWING({ status })
+    for (const [ms, want] of [[T - 1, true], [T, true], [T + 24 * HOUR - 1, true], [T + 24 * HOUR, false], [T + 24 * HOUR + 1, false], [T + 7 * DAY, false]]) {
+      assert.equal(subscriptionGrantsAccessAt(sub, at(ms)), want, `${status} @ ${ms - T}`)
+    }
+  }
+  assert.equal(PENDING_RENEWAL_ALLOWANCE_MS, 24 * HOUR)
+})
+test('allowance requires a previously VERIFIED paid period AND automatic renewal; status alone never grants it', () => {
+  // No verified paid invoice (an initial purchase never paid, or a legacy-converted row): paid period only.
+  assert.equal(subscriptionAccessUntil(RENEWING({ verified_paid_through: null })).getTime(), T)
+  // Scheduled to cancel / manual invoices / paused: no allowance.
+  assert.equal(subscriptionAccessUntil(RENEWING({ renews_automatically: false })).getTime(), T)
+  assert.equal(subscriptionAccessUntil(RENEWING({ renews_automatically: null })).getTime(), T)
+  // Canceled (immediate cancellation) or any other ended status: nothing at all.
+  for (const status of ['canceled', 'incomplete', 'incomplete_expired', 'paused', 'trialing']) assert.equal(subscriptionAccessUntil(RENEWING({ status })), null, status)
+  // A legacy row (before the migration) never gets it.
+  assert.equal(subscriptionAccessUntil({ status: 'active', evidence_version: 0, current_period_end: new Date(T).toISOString(), verified_paid_through: new Date(T).toISOString(), renews_automatically: true }).getTime(), T)
+})
+test('a verified failure switches to the 7-day grace from the first failed payment (no allowance alongside it)', () => {
+  const failedEarly = RENEWING({ failed_invoice_id: 'in_r', grace_started_at: new Date(T + HOUR).toISOString() })
+  assert.equal(subscriptionAccessUntil(failedEarly).getTime(), T + HOUR + 7 * DAY, 'failure inside the allowance window')
+  const failedLate = RENEWING({ failed_invoice_id: 'in_r', grace_started_at: new Date(T + 30 * HOUR).toISOString() })
+  assert.equal(subscriptionGrantsAccessAt(failedLate, at(T + 25 * HOUR)), true, 'once the failure is reported, grace runs 7 days from the failure')
+  assert.equal(subscriptionAccessUntil(failedLate).getTime(), T + 30 * HOUR + 7 * DAY)
+})
+test('recovery advances access through the newly verified paid period; the allowance follows the NEW verified end', () => {
+  const paidAgain = RENEWING({ paid_through: new Date(T + 30 * DAY).toISOString(), verified_paid_through: new Date(T + 30 * DAY).toISOString() })
+  assert.equal(subscriptionAccessUntil(paidAgain).getTime(), T + 30 * DAY + 24 * HOUR)
+})
+test('automatic renewal: only charge_automatically, not scheduled to cancel, not paused, live status', () => {
+  const base = { status: 'active', collection_method: 'charge_automatically', cancel_at_period_end: false, cancel_at: null, pause_collection: null }
+  assert.equal(subscriptionRenewsAutomatically(base), true)
+  assert.equal(subscriptionRenewsAutomatically({ ...base, status: 'past_due' }), true)
+  for (const bad of [{ cancel_at_period_end: true }, { cancel_at_period_end: undefined }, { cancel_at: 1_800_000_000 }, { collection_method: 'send_invoice' },
+    { collection_method: undefined }, { pause_collection: { behavior: 'void' } }, { status: 'canceled' }, { status: 'incomplete' }, { status: 'trialing' }]) {
+    assert.equal(subscriptionRenewsAutomatically({ ...base, ...bad }), false, JSON.stringify(bad))
+  }
+  assert.equal(subscriptionRenewsAutomatically(null), false)
+})
+test('webhook writes record automatic-renewal eligibility and when the Stripe read STARTED (before the fetch)', async () => {
+  const times = ['2026-11-16T00:00:01.000Z', '2026-11-16T00:00:09.000Z', '2026-11-16T00:00:10.000Z']; let i = 0
+  const order = []
+  const admin = fakeAdmin()
+  const sub = subOn(NEW_PRICE, { collection_method: 'charge_automatically', cancel_at: null })
+  await runWebhookOrchestration({ event: updated(sub), requestId: 'r', supabaseAdmin: admin, now: () => { order.push('now'); return times[Math.min(i++, times.length - 1)] },
+    fetchSubscription: async () => { order.push('fetch'); return sub }, env: { priceId: NEW_PRICE, stripeKey: 'sk_test_x' } })
+  assert.equal(admin.calls.upserts[0].renews_automatically, true)
+  assert.equal(admin.calls.upserts[0].renewal_state_read_at, times[0], 'the time taken BEFORE the Stripe read')
+  assert.equal(order.indexOf('now') < order.indexOf('fetch'), true)
+  const cancelling = fakeAdmin()
+  await runUpdate(subOn(NEW_PRICE, { collection_method: 'charge_automatically', cancel_at_period_end: true }), cancelling)
+  assert.equal(cancelling.calls.upserts[0].renews_automatically, false)
 })

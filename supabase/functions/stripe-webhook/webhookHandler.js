@@ -28,6 +28,7 @@ import {
   extractProSubscriptionSnapshot,
   isUniqueViolation,
   classifyBindingRefusal,
+  subscriptionRenewsAutomatically,
   crossCheckOwnership,
   extractInvoiceEvidence,
   invoiceSubscriptionId,
@@ -298,6 +299,8 @@ export async function runWebhookOrchestration({
           return finalize('failed', 'config_missing', resp(500, 'Configuration error'))
         }
 
+        // When this handler's Stripe read STARTED: orders renewal-eligibility writes (an older read never wins).
+        const readStartedAt = now()
         const sub = await fetchSubscription(subscriptionId, stripeKey)
         if (sub === 'timeout') {
           // Bounded Stripe retrieval timed out — retryable. Finalize the claimed event
@@ -370,6 +373,8 @@ export async function runWebhookOrchestration({
             current_period_end:     snap.periodEndIso,
             current_period_start:   snap.periodStartIso,
             stripe_subscription_created: subCreatedIso,
+            renews_automatically:   subscriptionRenewsAutomatically(sub),
+            renewal_state_read_at:  readStartedAt,
             cancel_at_period_end:   Boolean(sub.cancel_at_period_end),
             price_id:               snap.priceId,
             updated_at:             now(),
@@ -402,6 +407,8 @@ export async function runWebhookOrchestration({
           return finalize('failed', 'config_missing', resp(500, 'Configuration error'))
         }
 
+        // When this handler's Stripe read STARTED: orders renewal-eligibility writes (an older read never wins).
+        const readStartedAt = now()
         const sub = await fetchSubscription(expectedSubId, stripeKey)
         if (sub === 'timeout') {
           log('provider_timeout', { requestId, eventType })
@@ -510,6 +517,8 @@ export async function runWebhookOrchestration({
             current_period_end:     snap.periodEndIso,
             current_period_start:   snap.periodStartIso,
             stripe_subscription_created: subCreatedIso,
+            renews_automatically:   subscriptionRenewsAutomatically(sub),
+            renewal_state_read_at:  readStartedAt,
             cancel_at_period_end:   Boolean(sub.cancel_at_period_end),
             price_id:               snap.priceId,
             updated_at:             now(),

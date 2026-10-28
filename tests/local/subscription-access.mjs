@@ -159,6 +159,7 @@ async function main () {
   const putSub = (o) => {
     const created = stripe.subs.get(o.id)?.created ?? sec(o.created ?? o.start)
     const s = { id: o.id, object: 'subscription', created, customer: o.customer, status: o.status ?? 'active', cancel_at_period_end: o.cancel ?? false, livemode: false,
+      collection_method: o.collection ?? 'charge_automatically', cancel_at: o.cancelAt ?? null, pause_collection: null,
       metadata: { user_id: o.user }, latest_invoice: o.latest ?? null,
       items: { data: [{ price: { id: o.price ?? PRICE }, current_period_start: sec(o.start), current_period_end: sec(o.end) }] } }
     stripe.subs.set(o.id, s); return s
@@ -248,31 +249,35 @@ async function main () {
   const T = Date.parse('2026-11-16T00:00:00.000Z'), F = T + HOUR
   const cases = []
   for (const st of ['active', 'past_due', 'unpaid', 'canceled', 'incomplete', 'incomplete_expired', 'trialing', 'paused', 'none', 'mystery']) {
-    for (const v of [0, 1]) for (const pe of [T, null]) for (const paid of [T, null]) for (const fi of ['in_x', null]) for (const g of [F, null]) {
-      for (const o of [-DAY, -1, 0, 1, HOUR - 1, HOUR, HOUR + 7 * DAY - 1, HOUR + 7 * DAY, HOUR + 7 * DAY + 1, 30 * DAY]) cases.push({ st, v, pe, paid, fi, g, now: T + o })
+    for (const v of [0, 1]) for (const pe of [T, null]) for (const paid of [T, null]) for (const fi of ['in_x', null]) for (const g of [F, null]) for (const vp of [T, null]) for (const ra of [true, false]) {
+      for (const o of [-DAY, -1, 0, 1, HOUR - 1, HOUR, DAY - 1, DAY, DAY + 1, HOUR + 7 * DAY - 1, HOUR + 7 * DAY, HOUR + 7 * DAY + 1, 30 * DAY]) cases.push({ st, v, pe, paid, fi, g, vp, ra, now: T + o })
     }
   }
   const lit = (ms) => (ms === null ? 'NULL' : `'${iso(ms)}'`)
-  const values = cases.map((c, i) => `(${i}, '${c.st}', ${c.v}::smallint, ${lit(c.pe)}::timestamptz, ${lit(c.paid)}::timestamptz, ${c.fi === null ? 'NULL' : `'${c.fi}'`}, ${lit(c.g)}::timestamptz, '${iso(c.now)}'::timestamptz)`).join(',')
-  const rows = psql(`SELECT i, coalesce(extract(epoch FROM u) * 1000, -1)::bigint, (u IS NOT NULL AND n < u) FROM (SELECT i, public.subscription_access_until(s, v, pe, pd, fi, g) AS u, n FROM (VALUES ${values}) x(i, s, v, pe, pd, fi, g, n)) y ORDER BY i;`).trim().split(NL)
+  const values = cases.map((c, i) => `(${i}, '${c.st}', ${c.v}::smallint, ${lit(c.pe)}::timestamptz, ${lit(c.paid)}::timestamptz, ${c.fi === null ? 'NULL' : `'${c.fi}'`}, ${lit(c.g)}::timestamptz, ${lit(c.vp)}::timestamptz, ${c.ra}, '${iso(c.now)}'::timestamptz)`).join(',')
+  const rows = psql(`SELECT i, coalesce(extract(epoch FROM u) * 1000, -1)::bigint, (u IS NOT NULL AND n < u) FROM (SELECT i, public.subscription_access_until(s, v, pe, pd, fi, g, vp, ra) AS u, n FROM (VALUES ${values}) x(i, s, v, pe, pd, fi, g, vp, ra, n)) y ORDER BY i;`).trim().split(NL)
   let mismatches = 0
   for (const line of rows) {
     const [i, untilMs, grants] = line.split('|'); const c = cases[Number(i)]
-    const js = subscriptionAccessUntil({ status: c.st, evidence_version: c.v, current_period_end: iso(c.pe), paid_through: iso(c.paid), failed_invoice_id: c.fi, grace_started_at: iso(c.g) })
+    const js = subscriptionAccessUntil({ status: c.st, evidence_version: c.v, current_period_end: iso(c.pe), paid_through: iso(c.paid), failed_invoice_id: c.fi, grace_started_at: iso(c.g), verified_paid_through: iso(c.vp), renews_automatically: c.ra })
     const jsGrants = js !== null && c.now < js.getTime()
     if ((js === null ? -1 : js.getTime()) !== Number(untilMs) || jsGrants !== (grants === 't')) mismatches++
   }
-  check(`SQL subscription_access_until and JS subscriptionAccessUntil agree on all ${cases.length} cases (10 statuses × legacy/evidence × period, paid, failure and anchor shapes × 10 instants)`, rows.length === cases.length && mismatches === 0, `${mismatches} mismatches`)
+  check(`SQL subscription_access_until and JS subscriptionAccessUntil agree on all ${cases.length} cases (10 statuses × legacy/evidence × period, paid, failure, anchor, verified-paid and automatic-renewal shapes × 13 instants)`, rows.length === cases.length && mismatches === 0, `${mismatches} mismatches`)
   const sqlGrants = (args, n) => one(`SELECT coalesce(public.subscription_access_until(${args}) > '${iso(n)}', false)`) === 't'
-  check('exact SQL cutoffs: paid through T (Pro at T-1 ms, Free at T); grace = first failure + 7 days (Pro at F+7d-1 ms, Free at F+7d); legacy active through its period end; no grace without a verified failure',
-    sqlGrants(`'active', 1::smallint, NULL, '${iso(T)}', NULL, NULL`, T - 1) && !sqlGrants(`'active', 1::smallint, NULL, '${iso(T)}', NULL, NULL`, T) &&
-    sqlGrants(`'past_due', 1::smallint, NULL, '${iso(T)}', 'in_x', '${iso(F)}'`, F + 7 * DAY - 1) && !sqlGrants(`'past_due', 1::smallint, NULL, '${iso(T)}', 'in_x', '${iso(F)}'`, F + 7 * DAY) &&
-    sqlGrants(`'active', 0::smallint, '${iso(T)}', NULL, NULL, NULL`, T - 1) && !sqlGrants(`'active', 0::smallint, '${iso(T)}', NULL, NULL, NULL`, T) &&
-    !sqlGrants(`'past_due', 1::smallint, '${iso(T + 30 * DAY)}', '${iso(T)}', NULL, '${iso(F)}'`, T))
+  const vT = `'${iso(T)}'`
+  check('exact SQL cutoffs: paid through T without automatic renewal (Pro at T-1 ms, Free at T); pending-renewal allowance (Pro at T+24h-1 ms, Free at T+24h); grace = first failure + 7 days; legacy active through its period end; neither allowance nor grace from status alone',
+    sqlGrants(`'active', 1::smallint, NULL, ${vT}, NULL, NULL, ${vT}, false`, T - 1) && !sqlGrants(`'active', 1::smallint, NULL, ${vT}, NULL, NULL, ${vT}, false`, T) &&
+    sqlGrants(`'active', 1::smallint, NULL, ${vT}, NULL, NULL, ${vT}, true`, T + DAY - 1) && !sqlGrants(`'active', 1::smallint, NULL, ${vT}, NULL, NULL, ${vT}, true`, T + DAY) &&
+    !sqlGrants(`'active', 1::smallint, NULL, ${vT}, NULL, NULL, NULL, true`, T) &&
+    sqlGrants(`'past_due', 1::smallint, NULL, ${vT}, 'in_x', '${iso(F)}', ${vT}, true`, F + 7 * DAY - 1) && !sqlGrants(`'past_due', 1::smallint, NULL, ${vT}, 'in_x', '${iso(F)}', ${vT}, true`, F + 7 * DAY) &&
+    sqlGrants(`'active', 0::smallint, ${vT}, NULL, NULL, NULL, NULL, false`, T - 1) && !sqlGrants(`'active', 0::smallint, ${vT}, NULL, NULL, NULL, ${vT}, true`, T) &&
+    !sqlGrants(`'past_due', 1::smallint, '${iso(T + 30 * DAY)}', ${vT}, NULL, '${iso(F)}', NULL, false`, T) &&
+    !sqlGrants(`'canceled', 1::smallint, NULL, ${vT}, NULL, NULL, ${vT}, true`, T - 1))
 
   // ── 4. The webhook, end to end (real orchestration, real database, fake Stripe) ──────────────────
   console.log(NL + '4. Failed renewals: grace from the FIRST failed payment, never restarted')
-  for (const t of ['w', 'cycle', 'initfail', 'race1', 'race2', 'edge', 'edgepaid', 'oldprice', 'unrelated', 'buyer', 'swapu', 'swapc']) { await mk(t); expireTrial(ids[t]) }
+  for (const t of ['w', 'cycle', 'initfail', 'race1', 'race2', 'edge', 'edgepaid', 'oldprice', 'unrelated', 'buyer', 'swapu', 'swapc', 'renew', 'allowdup', 'allowcut', 'failearly', 'faillate', 'allowrace']) { await mk(t); expireTrial(ids[t]) }
   const BY0 = one(`SELECT ${setDigest(`SELECT * FROM public.subscriptions WHERE user_id = '${ids.bystander}'`)}`)
   const row = (uid) => JSON.parse(one(`SELECT row_to_json(s) FROM (SELECT * FROM public.subscriptions WHERE user_id = '${uid}') s`) || 'null')
   const ms = (v) => (v === null ? null : Date.parse(v))
@@ -328,8 +333,8 @@ async function main () {
   putInv({ id: 'in_c3', customer: 'cus_c', sub: 'sub_c', created: R3, status: 'paid', start: R3, end: R3 + 30 * DAY })
   putSub({ id: 'sub_c', customer: 'cus_c', user: ids.cycle, status: 'active', start: R3, end: R3 + 30 * DAY, latest: 'in_c3' })
   await invEvent('invoice.paid', 'in_c3')
-  check('genuine recovery (the newest renewal paid): failure cleared, Pro through the newly paid period',
-    row(ids.cycle).failed_invoice_id === null && row(ids.cycle).grace_started_at === null && await pro(ids.cycle) && await until(ids.cycle) === sec(R3 + 30 * DAY) * 1000)
+  check('genuine recovery (the newest renewal paid): failure cleared, Pro through the newly paid period (plus the 24-hour pending-renewal allowance after it)',
+    row(ids.cycle).failed_invoice_id === null && row(ids.cycle).grace_started_at === null && await pro(ids.cycle) && await until(ids.cycle) === sec(R3 + 30 * DAY) * 1000 + DAY)
   const lateFail = await invEvent('invoice.payment_failed', 'in_c2', { created: now })
   check('a delayed failure for an invoice that has since been paid is recorded as payment, not as a failure', lateFail.status === 200 && row(ids.cycle).failed_invoice_id === null)
   putInv({ id: 'in_c4', customer: 'cus_c', sub: 'sub_c', created: now - 2 * HOUR, status: 'open', attempts: 1, start: now - 2 * HOUR, end: now + 30 * DAY })
@@ -359,19 +364,115 @@ async function main () {
   const inGrace = await pro(ids.edge)
   await ev(ids.edge, 'sub_e', 'cus_e', 'failed', 'in_e1', iso(n0 - 8 * DAY), { failed: iso(n0 - 7 * DAY) })
   check('failure 7 days minus 5 s ago: Pro; the same renewal’s earlier failure exactly 7 days ago: Free (anchor only moves earlier)', inGrace === true && !(await pro(ids.edge)))
-  putInv({ id: 'in_p0', customer: 'cus_p', sub: 'sub_p', created: now - DAY, reason: 'subscription_create', status: 'paid', start: now - DAY, end: now - DAY })
-  putSub({ id: 'sub_p', customer: 'cus_p', user: ids.edgepaid, start: now - DAY, end: now + DAY, latest: 'in_p0' })
+  // Scheduled to cancel: no allowance - access ends exactly at the verified paid period.
+  putInv({ id: 'in_p0', customer: 'cus_p', sub: 'sub_p', created: now - 30 * DAY, reason: 'subscription_create', status: 'paid', start: now - 30 * DAY, end: now - 2 * DAY })
+  putSub({ id: 'sub_p', customer: 'cus_p', user: ids.edgepaid, cancel: true, start: now - 30 * DAY, end: now - 2 * DAY, latest: 'in_p0' })
   await checkout(ids.edgepaid, 'sub_p', 'cus_p')
+  // Renews automatically, nothing reported since its paid period: the allowance ends exactly at +24 hours.
+  putInv({ id: 'in_ac0', customer: 'cus_ac', sub: 'sub_ac', created: now - 30 * DAY, reason: 'subscription_create', status: 'paid', start: now - 30 * DAY, end: now - 2 * DAY })
+  putSub({ id: 'sub_ac', customer: 'cus_ac', user: ids.allowcut, start: now - 30 * DAY, end: now - 2 * DAY, latest: 'in_ac0' })
+  await checkout(ids.allowcut, 'sub_ac', 'cus_ac')
   n0 = dbNow()
-  await ev(ids.edgepaid, 'sub_p', 'cus_p', 'paid', 'in_p1', iso(n0), { paid: iso(n0 + 3000) })
-  const paidBefore = await pro(ids.edgepaid)
+  await ev(ids.edgepaid, 'sub_p', 'cus_p', 'paid', 'in_p1', iso(n0 - 60000), { paid: iso(n0 + 3000) })
+  await ev(ids.allowcut, 'sub_ac', 'cus_ac', 'paid', 'in_ac1', iso(n0 - 60000), { paid: iso(n0 - DAY + 3000) })
+  const cancelBefore = await pro(ids.edgepaid), cutBefore = await status(ids.allowcut)
   await sleep(Math.max(0, n0 + 3000 - dbNow()) + 300)
-  check('paid through now + 3 s: Pro before it, Free after it (no allowance after the paid period)', paidBefore === true && !(await pro(ids.edgepaid)))
+  const cutAfter = await status(ids.allowcut)
+  check('scheduled to cancel: paid through now + 3 s gives Pro before it and Free after it - no allowance', cancelBefore === true && !(await pro(ids.edgepaid)))
+  check('renews automatically, no payment or failure reported: Pro (renewal_allowance_active) until exactly verified paid end + 24 h, then Free',
+    cutBefore.can_use_pro === true && cutBefore.renewal_allowance_active === true && Date.parse(cutBefore.subscription_access_until) === n0 + 3000 &&
+    cutAfter.can_use_pro === false && cutAfter.renewal_allowance_active === false, JSON.stringify([cutBefore.renewal_allowance_active, cutAfter.can_use_pro]))
+
+  // ── 5b. Pending-renewal allowance (24 hours after the verified paid period) ─────────────────────
+  const gate = () => { let open; const p = new Promise((r) => { open = r }); return { p, open } }
+  const reached = () => { let hit; const p = new Promise((r) => { hit = r }); return { p, hit } }
+  console.log(NL + '5b. Pending-renewal allowance: temporary access while Stripe collects an automatic renewal')
+  async function paidThen (tag, P, extra = {}) {
+    putInv({ id: `in_${tag}0`, customer: `cus_${tag}`, sub: `sub_${tag}`, created: P - 30 * DAY, reason: 'subscription_create', status: 'paid', start: P - 30 * DAY, end: P })
+    putSub({ id: `sub_${tag}`, customer: `cus_${tag}`, user: ids[tag], start: P - 30 * DAY, end: P, latest: `in_${tag}0`, ...extra })
+    return checkout(ids[tag], `sub_${tag}`, `cus_${tag}`)
+  }
+  const renewalStarts = (tag, P, o = {}) => {
+    putInv({ id: `in_${tag}1`, customer: `cus_${tag}`, sub: `sub_${tag}`, created: P, status: 'open', attempts: 0, start: P, end: P + 30 * DAY })
+    putSub({ id: `sub_${tag}`, customer: `cus_${tag}`, user: ids[tag], start: P, end: P + 30 * DAY, latest: `in_${tag}1`, ...o })
+  }
+  // Normal renewal during Stripe's collection delay.
+  const P1 = now - HOUR
+  await paidThen('renew', P1)
+  renewalStarts('renew', P1)
+  await subUpdated('sub_renew', 'cus_renew')
+  const during = await status(ids.renew)
+  check('normal renewal: paid period ended an hour ago, the new invoice is not yet paid - Pro through the allowance (verified paid end + 24 h), not as payment',
+    during.can_use_pro === true && during.renewal_allowance_active === true && during.payment_grace_active === false &&
+    Date.parse(during.subscription_access_until) === sec(P1) * 1000 + DAY && ms(row(ids.renew).paid_through) === sec(P1) * 1000)
+  putInv({ id: 'in_renew1', customer: 'cus_renew', sub: 'sub_renew', created: P1, status: 'paid', start: P1, end: P1 + 30 * DAY })
+  await invEvent('invoice.paid', 'in_renew1')
+  const paidNow = await status(ids.renew)
+  check('...Stripe collects it: verified paid access through the new period (+24 h after it); the allowance is no longer what grants Pro',
+    paidNow.can_use_pro === true && paidNow.renewal_allowance_active === false && Date.parse(paidNow.subscription_access_until) === sec(P1 + 30 * DAY) * 1000 + DAY)
+
+  // Duplicates, retries, status changes, delayed and stale deliveries never extend or restart it.
+  const P2 = now - 2 * HOUR
+  await paidThen('allowdup', P2)
+  renewalStarts('allowdup', P2)
+  const cut2 = sec(P2) * 1000 + DAY
+  const dupUntil0 = await until(ids.allowdup)
+  const evDup = 'evt_allowdupupd'
+  await subUpdated('sub_allowdup', 'cus_allowdup', { id: evDup })
+  await subUpdated('sub_allowdup', 'cus_allowdup', { id: evDup })                    // duplicate delivery
+  await subUpdated('sub_allowdup', 'cus_allowdup')                                  // a retry as a new event
+  renewalStarts('allowdup', P2, { status: 'past_due' })
+  await subUpdated('sub_allowdup', 'cus_allowdup')                                  // status changes, no failure evidence yet
+  await invEvent('invoice.paid', 'in_allowdup0')                                    // a DELAYED paid event for the previous period
+  renewalStarts('allowdup', P2 + 30 * DAY)
+  await subUpdated('sub_allowdup', 'cus_allowdup')                                  // a snapshot even claiming a later period
+  check('duplicates, retries, status changes, a delayed paid event for the old period and a later-period snapshot leave the cutoff at exactly verified paid end + 24 h',
+    dupUntil0 === cut2 && await until(ids.allowdup) === cut2 && ms(row(ids.allowdup).verified_paid_through) === sec(P2) * 1000, JSON.stringify([dupUntil0, await until(ids.allowdup), cut2]))
+
+  // A verified failure inside the allowance: switches to the 7-day grace from the first failed payment.
+  const P3 = now - 3 * HOUR, F3e = now - 2 * HOUR
+  await paidThen('failearly', P3)
+  renewalStarts('failearly', P3, { status: 'past_due' })
+  putInv({ id: 'in_failearly1', customer: 'cus_failearly', sub: 'sub_failearly', created: P3, status: 'open', attempts: 1, start: P3, end: P3 + 30 * DAY })
+  await invEvent('invoice.payment_failed', 'in_failearly1', { created: F3e })
+  const fe = await status(ids.failearly)
+  check('failure before the allowance expires: grace from the first failed payment (+7 days) replaces it',
+    fe.can_use_pro === true && fe.payment_grace_active === true && fe.renewal_allowance_active === false && Date.parse(fe.subscription_access_until) === sec(F3e) * 1000 + 7 * DAY)
+  // ...and after it expired (Free in between), the verified failure still starts the 7-day grace.
+  const P4 = now - 3 * DAY, F4 = now - HOUR
+  await paidThen('faillate', P4)
+  renewalStarts('faillate', P4)
+  await subUpdated('sub_faillate', 'cus_faillate')
+  const lateBefore = await pro(ids.faillate)
+  putInv({ id: 'in_faillate1', customer: 'cus_faillate', sub: 'sub_faillate', created: P4, status: 'open', attempts: 1, start: P4, end: P4 + 30 * DAY })
+  await invEvent('invoice.payment_failed', 'in_faillate1', { created: F4 })
+  const fl = await status(ids.faillate)
+  check('allowance expired with nothing reported: Free; a later verified failure then starts the 7-day grace from that failure',
+    lateBefore === false && fl.can_use_pro === true && fl.payment_grace_active === true && Date.parse(fl.subscription_access_until) === sec(F4) * 1000 + 7 * DAY)
+  const cy = await status(ids.cycle)
+  check('an unresolved failed renewal gains no allowance when a later billing cycle starts (the cycle account stays on its grace, now ended)',
+    cy.renewal_allowance_active === false && (await status(ids.initfail)).renewal_allowance_active === false)
+
+  // Out-of-order handlers: an OLDER read saying "renews" cannot re-enable the allowance after a NEWER read said "cancelling".
+  const P5 = now - HOUR
+  await paidThen('allowrace', P5)
+  renewalStarts('allowrace', P5)
+  const staleRenewing = clone(stripe.subs.get('sub_allowrace')), gr = gate(), hr = reached()
+  const olderRead = subUpdated('sub_allowrace', 'cus_allowrace', { fetchSubscription: async () => { hr.hit(); await gr.p; return staleRenewing } })
+  await hr.p
+  renewalStarts('allowrace', P5, { cancel: true })
+  await subUpdated('sub_allowrace', 'cus_allowrace')
+  const scheduled = await status(ids.allowrace)
+  gr.open(); await olderRead
+  const afterStale = await status(ids.allowrace)
+  check('scheduled cancellation ends the allowance, and a delayed handler holding an older "renews" read cannot bring it back',
+    scheduled.renewal_allowance_active === false && scheduled.can_use_pro === false && row(ids.allowrace).renews_automatically === false &&
+    afterStale.can_use_pro === false && afterStale.renewal_allowance_active === false, JSON.stringify([scheduled.can_use_pro, afterStale.can_use_pro]))
+  const forged = psql(`UPDATE public.subscriptions SET renews_automatically = true WHERE user_id = '${ids.allowrace}' RETURNING renews_automatically;`).trim()
+  check('a direct write without a newer Stripe read time cannot turn the allowance back on', forged === 'f')
 
   // ── 6. Deterministic races: an older handler paused after its Stripe read ───────────────────────
   console.log(NL + '6. Races: an older handler paused after its Stripe read, released after newer evidence')
-  const gate = () => { let open; const p = new Promise((r) => { open = r }); return { p, open } }
-  const reached = () => { let hit; const p = new Promise((r) => { hit = r }); return { p, hit } }
   // race1: an older handler holds the PRE-renewal snapshot (active, previous invoice PAID); meanwhile the renewal fails.
   putInv({ id: 'in_r10', customer: 'cus_r1', sub: 'sub_r1', created: R - 30 * DAY, reason: 'subscription_create', status: 'paid', start: R - 30 * DAY, end: R })
   putSub({ id: 'sub_r1', customer: 'cus_r1', user: ids.race1, start: R - 30 * DAY, end: R, latest: 'in_r10' })
@@ -410,7 +511,7 @@ async function main () {
   const r2row = row(ids.race2)
   check('released after a GENUINE RECOVERY: the stale "past_due + unpaid" reads restart no grace and remove no paid access',
     o2a.status === 200 && o2b.status === 200 && r2row.failed_invoice_id === null && r2row.grace_started_at === null && ms(r2row.paid_through) === sec(R + 30 * DAY) * 1000 &&
-    mid2 === sec(R + 30 * DAY) * 1000 && await until(ids.race2) === mid2 && await pro(ids.race2), JSON.stringify({ status: r2row.status, failed: r2row.failed_invoice_id }))
+    mid2 === sec(R + 30 * DAY) * 1000 + DAY && await until(ids.race2) === mid2 && await pro(ids.race2), JSON.stringify({ status: r2row.status, failed: r2row.failed_invoice_id }))
   check('a stale status write may leave the STATUS column stale, but access never depends on it (it comes only from payment evidence)', ['past_due', 'active'].includes(r2row.status))
 
   // ── 7. Cancellation, older prices, unrelated subscriptions ───────────────────────────────────────

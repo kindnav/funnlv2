@@ -183,7 +183,7 @@ export async function loadProEntitlement(supabaseAdmin, userId) {
     safeQuery(
       supabaseAdmin
         .from('subscriptions')
-        .select('status, current_period_end, cancel_at_period_end, evidence_version, paid_through, failed_invoice_id, grace_started_at')
+        .select('status, current_period_end, cancel_at_period_end, evidence_version, paid_through, failed_invoice_id, grace_started_at, verified_paid_through, renews_automatically')
         .eq('user_id', userId)
         .maybeSingle()
     ),
