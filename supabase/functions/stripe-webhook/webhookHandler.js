@@ -284,6 +284,14 @@ export async function runWebhookOrchestration({
           return finalize('failed', 'invalid_status', resp(500, 'Invalid status'))
         }
 
+        // Stripe's immutable creation time orders subscriptions: the database refuses to let an OLDER
+        // (superseded) subscription replace a newer binding, whatever status a delayed snapshot carries.
+        const subCreatedIso = unixToIso(sub.created)
+        if (!subCreatedIso) {
+          log('invalid_subscription_item', { requestId, eventType, reason: 'no_created' })
+          return finalize('failed', 'invalid_subscription_item', resp(500, 'Invalid subscription'))
+        }
+
         const { error } = await supabaseAdmin
           .from('subscriptions')
           .upsert({
@@ -293,6 +301,7 @@ export async function runWebhookOrchestration({
             status:                 subStatus,
             current_period_end:     snap.periodEndIso,
             current_period_start:   snap.periodStartIso,
+            stripe_subscription_created: subCreatedIso,
             cancel_at_period_end:   Boolean(sub.cancel_at_period_end),
             price_id:               snap.priceId,
             updated_at:             now(),
@@ -410,6 +419,14 @@ export async function runWebhookOrchestration({
           return finalize('failed', 'invalid_status', resp(500, 'Invalid status'))
         }
 
+        // Stripe's immutable creation time orders subscriptions: the database refuses to let an OLDER
+        // (superseded) subscription replace a newer binding, whatever status a delayed snapshot carries.
+        const subCreatedIso = unixToIso(sub.created)
+        if (!subCreatedIso) {
+          log('invalid_subscription_item', { requestId, eventType, reason: 'no_created' })
+          return finalize('failed', 'invalid_subscription_item', resp(500, 'Invalid subscription'))
+        }
+
         const { error } = await supabaseAdmin
           .from('subscriptions')
           .upsert({
@@ -419,6 +436,7 @@ export async function runWebhookOrchestration({
             status:                 subStatus,
             current_period_end:     snap.periodEndIso,
             current_period_start:   snap.periodStartIso,
+            stripe_subscription_created: subCreatedIso,
             cancel_at_period_end:   Boolean(sub.cancel_at_period_end),
             price_id:               snap.priceId,
             updated_at:             now(),

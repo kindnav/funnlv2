@@ -115,7 +115,7 @@ function fakeAdmin ({ bound = null } = {}) {
     from () { return builder() },
   }
 }
-const subOn = (price, extra = {}) => ({ id: 'sub_X', customer: 'cus_X', status: 'active', cancel_at_period_end: false, metadata: { user_id: USER },
+const subOn = (price, extra = {}) => ({ id: 'sub_X', customer: 'cus_X', status: 'active', created: (T - 60 * DAY) / 1000, cancel_at_period_end: false, metadata: { user_id: USER },
   items: { data: [{ price: { id: price }, current_period_start: T / 1000, current_period_end: (T + 30 * DAY) / 1000 }] }, ...extra })
 const updated = (sub) => ({ id: 'evt_access01', type: 'customer.subscription.updated', created: Math.floor(T / 1000), data: { object: { id: sub.id, customer: sub.customer } } })
 const runUpdate = async (sub, admin) => runWebhookOrchestration({ event: updated(sub), requestId: 'r', supabaseAdmin: admin, fetchSubscription: async () => sub, env: { priceId: NEW_PRICE, stripeKey: 'sk_test_x' } })

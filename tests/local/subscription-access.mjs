@@ -150,7 +150,8 @@ async function main () {
   const stripe = { subs: new Map(), invoices: new Map() }
   const clone = (o) => (o === undefined ? null : JSON.parse(JSON.stringify(o)))
   const putSub = (o) => {
-    const s = { id: o.id, object: 'subscription', customer: o.customer, status: o.status ?? 'active', cancel_at_period_end: o.cancel ?? false, livemode: false,
+    const created = stripe.subs.get(o.id)?.created ?? sec(o.created ?? o.start)
+    const s = { id: o.id, object: 'subscription', created, customer: o.customer, status: o.status ?? 'active', cancel_at_period_end: o.cancel ?? false, livemode: false,
       metadata: { user_id: o.user }, latest_invoice: o.latest ?? null,
       items: { data: [{ price: { id: o.price ?? PRICE }, current_period_start: sec(o.start), current_period_end: sec(o.end) }] } }
     stripe.subs.set(o.id, s); return s
@@ -177,8 +178,8 @@ async function main () {
   // ── 0. Webhook first: the NEW webhook against the OLD database ───────────────────────────────────
   console.log(NL + '0. Rollout compatibility: the new webhook against the database BEFORE the migration')
   const now0 = Date.now()
-  putInv({ id: 'in_la1', customer: 'cus_legacyactive', sub: 'sub_legacyactive', created: now0 - 5 * DAY, status: 'paid', start: now0 - 5 * DAY, end: now0 + 25 * DAY })
-  putSub({ id: 'sub_legacyactive', customer: 'cus_legacyactive', user: ids.legacyactive, start: now0 - 5 * DAY, end: now0 + 25 * DAY, latest: 'in_la1' })
+  putInv({ id: 'in_la1', customer: 'cus_legacyactive', sub: 'sub_legacyactive', created: now0 - 5 * DAY, status: 'paid', start: now0 - 5 * DAY, end: now0 + 26 * DAY })
+  putSub({ id: 'sub_legacyactive', customer: 'cus_legacyactive', user: ids.legacyactive, start: now0 - 5 * DAY, end: now0 + 26 * DAY, latest: 'in_la1' })
   const e1 = await subUpdated('sub_legacyactive', 'cus_legacyactive', { id: 'evt_compatsub01' })
   const e2 = await invEvent('invoice.paid', 'in_la1', { id: 'evt_compatinv01' })
   check('subscription and invoice events FAIL retryably (5xx, recorded failed) instead of being consumed, and change no row',
@@ -200,7 +201,7 @@ async function main () {
   const la = JSON.parse(one(`SELECT row_to_json(s) FROM (SELECT evidence_version, paid_through, last_paid_invoice_id FROM public.subscriptions WHERE user_id = '${ids.legacyactive}') s`))
   check('Stripe redelivers the SAME events after the migration: processed, and the paid invoice is recorded as evidence',
     r1.status === 200 && r2.status === 200 && eventStatus('evt_compatsub01') === 'processed:' && la.evidence_version === 1 && la.last_paid_invoice_id === 'in_la1' &&
-    Date.parse(la.paid_through) === sec(now0 + 25 * DAY) * 1000, JSON.stringify([r1.status, r2.status, la]))
+    Date.parse(la.paid_through) === sec(now0 + 26 * DAY) * 1000, JSON.stringify([r1.status, r2.status, la]))
   // A legacy row's first write after the migration, with a later period end but NO paid invoice.
   const convEnd = Date.parse(one(`SELECT current_period_end FROM public.subscriptions WHERE user_id = '${ids.legacyconv}'`))
   putInv({ id: 'in_lc1', customer: 'cus_legacyconv', sub: 'sub_legacyconv', created: now0, status: 'open', attempts: 0, start: now0, end: now0 + 35 * DAY })
@@ -264,7 +265,7 @@ async function main () {
 
   // ── 4. The webhook, end to end (real orchestration, real database, fake Stripe) ──────────────────
   console.log(NL + '4. Failed renewals: grace from the FIRST failed payment, never restarted')
-  for (const t of ['w', 'cycle', 'initfail', 'race1', 'race2', 'edge', 'edgepaid', 'oldprice', 'unrelated', 'buyer']) { await mk(t); expireTrial(ids[t]) }
+  for (const t of ['w', 'cycle', 'initfail', 'race1', 'race2', 'edge', 'edgepaid', 'oldprice', 'unrelated', 'buyer', 'swapu', 'swapc']) { await mk(t); expireTrial(ids[t]) }
   const BY0 = one(`SELECT ${setDigest(`SELECT * FROM public.subscriptions WHERE user_id = '${ids.bystander}'`)}`)
   const row = (uid) => JSON.parse(one(`SELECT row_to_json(s) FROM (SELECT * FROM public.subscriptions WHERE user_id = '${uid}') s`) || 'null')
   const ms = (v) => (v === null ? null : Date.parse(v))
@@ -441,6 +442,71 @@ async function main () {
   check("the bystander's subscription row is unchanged throughout", one(`SELECT ${setDigest(`SELECT * FROM public.subscriptions WHERE user_id = '${ids.bystander}'`)}`) === BY0)
   const direct = psql(`UPDATE public.subscriptions SET paid_through = now() + interval '1 year', grace_started_at = now(), failed_invoice_id = 'in_forged' WHERE user_id = '${ids.cycle}' RETURNING paid_through = now() + interval '1 year', failed_invoice_id;`).trim()
   check('a direct table write cannot forge or move evidence (only the evidence merge can)', direct.startsWith('f|') && direct !== 'f|in_forged')
+
+  // ── 7b. A superseded subscription cannot replace a newer binding ─────────────────────────────────
+  console.log(NL + '7b. Races: a handler holding subscription A, released after A was cancelled and B bought')
+  const subRow = (uid) => JSON.parse(one(`SELECT row_to_json(s) FROM (SELECT user_id, stripe_customer_id, stripe_subscription_id, stripe_subscription_created, status, current_period_start,
+    current_period_end, cancel_at_period_end, price_id, evidence_version, paid_through, last_paid_invoice_id, last_paid_invoice_created, failed_invoice_id, failed_invoice_created,
+    latest_failed_invoice_id, latest_failed_invoice_created, grace_started_at FROM public.subscriptions WHERE user_id = '${uid}') s`))
+  async function replacementRace ({ tag, via, custA, custB }) {
+    const uid = ids[tag], subA = `sub_${tag}a`, subB = `sub_${tag}b`
+    // A: bought 40 days ago, paid, still live.
+    putInv({ id: `in_${tag}a0`, customer: custA, sub: subA, created: now - 10 * DAY, status: 'paid', start: now - 10 * DAY, end: now + 20 * DAY })
+    putSub({ id: subA, customer: custA, user: uid, created: now - 40 * DAY, start: now - 10 * DAY, end: now + 20 * DAY, latest: `in_${tag}a0` })
+    const bindA = via === 'checkout' ? await send('customer.subscription.created', { id: subA, customer: custA }) : await checkout(uid, subA, custA)
+    const bound = bindA.status === 200 && subRow(uid).stripe_subscription_id === subA && await pro(uid)
+    // A's handler reads Stripe (A is active) and is paused BEFORE its database write.
+    const staleA = clone(stripe.subs.get(subA)), g = gate(), h = reached()
+    const fetchPaused = async () => { h.hit(); await g.p; return staleA }
+    const handlerA = via === 'checkout'
+      ? send('checkout.session.completed', { id: `cs_${subA}`, customer: custA, subscription: subA, client_reference_id: uid, metadata: { user_id: uid } }, { fetchSubscription: fetchPaused })
+      : subUpdated(subA, custA, { fetchSubscription: fetchPaused })
+    await h.p
+    // Meanwhile: A is cancelled, B is bought and its payment verified.
+    putSub({ id: subA, customer: custA, user: uid, status: 'canceled', start: now - 10 * DAY, end: now + 20 * DAY, latest: `in_${tag}a0` })
+    const del = await send('customer.subscription.deleted', { id: subA, customer: custA, metadata: { user_id: uid } })
+    putInv({ id: `in_${tag}b0`, customer: custB, sub: subB, created: now - HOUR, reason: 'subscription_create', status: 'paid', start: now - HOUR, end: now + 30 * DAY - HOUR })
+    putSub({ id: subB, customer: custB, user: uid, created: now - HOUR, start: now - HOUR, end: now + 30 * DAY - HOUR, latest: `in_${tag}b0` })
+    const bindB = await checkout(uid, subB, custB)
+    const rowB = subRow(uid), untilB = await until(uid)
+    // Release A's handler.
+    g.open(); const released = await handlerA
+    const after = subRow(uid)
+    check(`${via}: setup - A bound and Pro, A cancelled, B bound with verified payment`, bound && del.status === 200 && bindB.status === 200 &&
+      rowB.stripe_subscription_id === subB && rowB.stripe_customer_id === custB && rowB.last_paid_invoice_id === `in_${tag}b0`, JSON.stringify([bindA.status, del.status, bindB.status]))
+    check(`${via}: the released handler holding an ACTIVE snapshot of A changes nothing - B's binding, customer, status, period, payment evidence and access are identical`,
+      released.status === 200 && JSON.stringify(after) === JSON.stringify(rowB) && await until(uid) === untilB && await pro(uid),
+      JSON.stringify({ status: released.status, sub: after.stripe_subscription_id, customer: after.stripe_customer_id }))
+    // Later events for B still process normally.
+    putSub({ id: subB, customer: custB, user: uid, cancel: true, start: now - HOUR, end: now + 30 * DAY - HOUR, latest: `in_${tag}b0` })
+    const upd = await subUpdated(subB, custB)
+    putInv({ id: `in_${tag}b1`, customer: custB, sub: subB, created: now, status: 'paid', start: now + 30 * DAY - HOUR, end: now + 60 * DAY - HOUR })
+    const paid = await invEvent('invoice.paid', `in_${tag}b1`)
+    const later = subRow(uid)
+    check(`${via}: later events for B still process normally (update applied, renewal payment recorded)`,
+      upd.status === 200 && paid.status === 200 && later.stripe_subscription_id === subB && later.cancel_at_period_end === true &&
+      later.last_paid_invoice_id === `in_${tag}b1` && await until(uid) === sec(now + 60 * DAY - HOUR) * 1000, JSON.stringify([upd.status, paid.status, later.last_paid_invoice_id]))
+    // A NEWER subscription that has already ended (its first payment never completed) cannot replace B either.
+    putSub({ id: `sub_${tag}c`, customer: custB, user: uid, status: 'incomplete_expired', created: now, start: now, end: now + 30 * DAY })
+    const ended = await subUpdated(`sub_${tag}c`, custB)
+    check(`${via}: a NEWER but already-ended subscription does not replace the live binding`, ended.status === 200 && JSON.stringify(subRow(uid)) === JSON.stringify(later) && await pro(uid))
+  }
+  await replacementRace({ tag: 'swapu', via: 'subscription-update', custA: 'cus_swapua', custB: 'cus_swapub' })
+  await replacementRace({ tag: 'swapc', via: 'checkout', custA: 'cus_swapc', custB: 'cus_swapc' })
+  // A row written before the migration has no stored creation time: the binding's own created_at is the floor.
+  const lsBefore = subRow(ids.legacystale)
+  putSub({ id: 'sub_legacyolder', customer: 'cus_legacystale', user: ids.legacystale, created: now - 400 * DAY, start: now - 5 * DAY, end: now + 25 * DAY })
+  await subUpdated('sub_legacyolder', 'cus_legacystale')
+  check('a pre-migration binding: an OLDER subscription (created before the binding was recorded) cannot replace it', JSON.stringify(subRow(ids.legacystale)) === JSON.stringify(lsBefore))
+  putInv({ id: 'in_legacynew0', customer: 'cus_legacystale', sub: 'sub_legacynew', created: now, reason: 'subscription_create', status: 'paid', start: now, end: now + 30 * DAY })
+  putSub({ id: 'sub_legacynew', customer: 'cus_legacystale', user: ids.legacystale, created: now, start: now, end: now + 30 * DAY, latest: 'in_legacynew0' })
+  const lnew = await checkout(ids.legacystale, 'sub_legacynew', 'cus_legacystale')
+  check('...while a genuinely new purchase replaces it normally (fresh evidence, Pro)', lnew.status === 200 && subRow(ids.legacystale).stripe_subscription_id === 'sub_legacynew' &&
+    subRow(ids.legacystale).last_paid_invoice_id === 'in_legacynew0' && await pro(ids.legacystale))
+  const noCreated = one(`UPDATE public.subscriptions SET stripe_subscription_id = 'sub_forged', stripe_customer_id = 'cus_forged', stripe_subscription_created = NULL WHERE user_id = '${ids.swapu}' RETURNING stripe_subscription_id || '|' || stripe_customer_id;`)
+  const sameIdCustomer = one(`UPDATE public.subscriptions SET stripe_customer_id = 'cus_forged', stripe_subscription_created = now() WHERE user_id = '${ids.swapc}' RETURNING stripe_customer_id || '|' || (stripe_subscription_created < now() - interval '30 minutes');`)
+  check('in the database itself: a binding change without a creation time is refused, and the same subscription never changes customer or creation time',
+    noCreated === 'sub_swapub|cus_swapub' && sameIdCustomer === 'cus_swapc|true', JSON.stringify([noCreated, sameIdCustomer]))
 
   // ── 8. Browser RPC and AI evaluator agree ────────────────────────────────────────────────────────
   console.log(NL + '8. Browser RPC and AI-function evaluator agree on live rows')

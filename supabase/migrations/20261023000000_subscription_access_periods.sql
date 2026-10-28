@@ -45,10 +45,20 @@
 --       period end in a later status snapshot is not payment evidence.)
 --
 -- STALE STATUS WRITES. For the SAME subscription id: a canceled / incomplete_expired row never returns to
--- a live status, and a live row never returns to 'incomplete'. A different subscription id starts fresh
--- (its evidence columns are cleared) - except that an ENDED subscription (canceled / incomplete_expired)
--- never replaces another subscription's row: a delayed write for an old subscription cannot erase the
--- current one's evidence.
+-- a live status, a live row never returns to 'incomplete', and the customer and Stripe creation time
+-- never change (Stripe never moves a subscription to another customer).
+--
+-- SUPERSEDED SUBSCRIPTIONS. A user's row is bound to one subscription. A webhook handler can read a
+-- subscription from Stripe, be delayed, and write after the user has cancelled it and bought another one -
+-- and the snapshot it holds may still say 'active', so its STATUS proves nothing. What does prove it is
+-- Stripe's immutable creation time of the subscription (stripe_subscription_created), which every webhook
+-- write carries. Under the row lock taken by the write itself, a write naming a DIFFERENT subscription is
+-- applied only when that subscription was created strictly AFTER the bound one; otherwise the stored row is
+-- kept unchanged (binding, customer, status, period and evidence). Without a creation time it is never
+-- applied. A row written before this migration has no stored creation time; its floor is the row's own
+-- created_at (when the binding was first recorded), which every genuinely later purchase follows. An ENDED
+-- subscription (canceled / incomplete_expired) never replaces another one. A legitimate replacement starts
+-- fresh: its evidence columns are cleared.
 --
 -- ROLLOUT: deploy stripe-webhook FIRST (until this migration exists its writes fail with 5xx and Stripe
 -- redelivers, so no invoice evidence is consumed and lost), then apply this migration, then deploy
@@ -56,6 +66,7 @@
 
 -- ── 1. Columns ─────────────────────────────────────────────────────────────────────────────────────
 ALTER TABLE public.subscriptions ADD COLUMN IF NOT EXISTS current_period_start      timestamptz;
+ALTER TABLE public.subscriptions ADD COLUMN IF NOT EXISTS stripe_subscription_created timestamptz;
 ALTER TABLE public.subscriptions ADD COLUMN IF NOT EXISTS paid_through              timestamptz;
 ALTER TABLE public.subscriptions ADD COLUMN IF NOT EXISTS last_paid_invoice_id      text;
 ALTER TABLE public.subscriptions ADD COLUMN IF NOT EXISTS last_paid_invoice_created timestamptz;
@@ -79,8 +90,10 @@ DECLARE
   v_evidence_write boolean := coalesce(current_setting('funnl.evidence_write', true), '') = 'on';
 BEGIN
   IF TG_OP = 'UPDATE' AND OLD.stripe_subscription_id IS DISTINCT FROM NEW.stripe_subscription_id THEN
-    -- An ended subscription never replaces another one (a delayed write for an old subscription).
-    IF NEW.status IN ('canceled', 'incomplete_expired') THEN
+    -- A superseded or unprovable subscription never replaces the bound one: keep the row as it is.
+    IF NEW.status IN ('canceled', 'incomplete_expired')
+       OR NEW.stripe_subscription_created IS NULL
+       OR NEW.stripe_subscription_created <= coalesce(OLD.stripe_subscription_created, OLD.created_at) THEN
       RETURN OLD;
     END IF;
     -- A different subscription: nothing proven about the old one applies to it.
@@ -92,6 +105,9 @@ BEGIN
   END IF;
 
   IF TG_OP = 'UPDATE' THEN
+    -- The same subscription never changes customer or creation time (recorded once, when first known).
+    NEW.stripe_customer_id := OLD.stripe_customer_id;
+    NEW.stripe_subscription_created := coalesce(OLD.stripe_subscription_created, NEW.stripe_subscription_created);
     -- Stripe never revives a canceled / incomplete_expired subscription, and never returns a live one to
     -- 'incomplete': such a write for the same subscription is stale. Keep the stored status.
     IF (OLD.status IN ('canceled', 'incomplete_expired') AND NEW.status NOT IN ('canceled', 'incomplete_expired'))

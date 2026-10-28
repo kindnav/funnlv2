@@ -97,7 +97,7 @@ function invoiceEvent(type) {
 }
 
 function goodSub(overrides = {}) {
-  return { id: 'sub_1', customer: 'cus_1', status: 'active', current_period_end: 1_701_000_000,
+  return { id: 'sub_1', customer: 'cus_1', status: 'active', created: 1_699_000_000, current_period_end: 1_701_000_000,
     cancel_at_period_end: false, metadata: {}, items: { data: [{ price: { id: PRICE } }] }, ...overrides }
 }
 
@@ -199,8 +199,19 @@ async function run() {
     assertEqual(up.status, 'active')
     assertEqual(up.price_id, PRICE)
     assertEqual(up.updated_at, NOW_ISO)
+    assertEqual(up.stripe_subscription_created, new Date(1_699_000_000 * 1000).toISOString(), 'Stripe creation time orders subscriptions')
     assertEqual(supabaseAdmin.calls.mark[0].p_status, 'processed')
     assertEqual(supabaseAdmin.calls.mark[0].p_claim_token, 'tok-1')
+  })
+
+  test('checkout / update with no Stripe creation time → 500 invalid_subscription_item, no write (Stripe retries)', async () => {
+    for (const event of [checkoutEvent(), { id: 'evt_nocreated1', type: 'customer.subscription.updated', created: 1_700_000_000, data: { object: { id: 'sub_1', customer: 'cus_1' } } }]) {
+      const { deps, supabaseAdmin } = makeDeps({ event, fetchSubscription: async () => goodSub({ created: undefined, metadata: { user_id: USER } }) })
+      const r = await runWebhookOrchestration(deps)
+      assertEqual(r.status, 500)
+      assertEqual(supabaseAdmin.calls.upserts.length, 0)
+      assertEqual(supabaseAdmin.calls.mark[0].p_failure_code, 'invalid_subscription_item')
+    }
   })
 
   // 8 ── checkout missing user ID → 500 + failed(missing_user_id)
