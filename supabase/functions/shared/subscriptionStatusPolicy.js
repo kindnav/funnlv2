@@ -33,7 +33,7 @@ export const SUBSCRIPTION_STATUS_POLICY = {
   },
   past_due: {
     checkoutMode: 'block', grantsAccess: true, uiState: 'billing_attention',
-    description: 'Payment failed; Stripe retrying. Access preserved during dunning; offer billing management.',
+    description: 'Renewal payment failed; Stripe retrying. Pro only through the paid period or 7 days after the FIRST verified failed payment (subscriptionAccessUntil); offer billing management.',
   },
   incomplete: {
     checkoutMode: 'reuse_only', grantsAccess: false, uiState: 'payment_incomplete',
@@ -44,8 +44,8 @@ export const SUBSCRIPTION_STATUS_POLICY = {
     description: 'Stripe trial (Funnl does not use Stripe trials). Direct to billing management; do not create another subscription.',
   },
   unpaid: {
-    checkoutMode: 'block', grantsAccess: false, uiState: 'billing_attention',
-    description: 'Dunning exhausted. Direct to billing management / recovery; do not auto-create another subscription.',
+    checkoutMode: 'block', grantsAccess: true, uiState: 'billing_attention',
+    description: 'Renewal payment failed and Stripe stopped retrying. Pro only through the paid period or 7 days after the FIRST verified failed payment (subscriptionAccessUntil); offer billing management.',
   },
   paused: {
     checkoutMode: 'block', grantsAccess: false, uiState: 'billing_attention',
@@ -161,4 +161,65 @@ export function isKnownSubscriptionStatus(status) {
 export function subscriptionAttentionState(status) {
   const uiState = checkoutPolicyForStatus(status).uiState
   return uiState === 'billing_attention' || uiState === 'payment_incomplete' ? uiState : null
+}
+
+// ── Subscription access from verified payment evidence (migration 20261023000000) ───────────────────
+// The SINGLE JS implementation of the access rule. It MIRRORS public.subscription_access_until()
+// exactly; a local parity test evaluates both on identical inputs at every cutoff.
+//   status not active / past_due / unpaid            -> none
+//   evidence_version 1 (rows written after the migration): the latest of three SEPARATE terms
+//       1. verified paid access       paid_through
+//       2. pending-renewal allowance  verified_paid_through + 24 hours, while no failure is outstanding and
+//                                     the subscription renews automatically (renews_automatically)
+//       3. failed-payment grace       grace_started_at + 7 days, while a failed renewal is outstanding
+//       Status alone never grants.
+//   evidence_version 0 (rows from before the migration, until their first evidence):
+//       active -> current_period_end; otherwise none.
+// Owner-approved: a failed renewal keeps Pro 7 days from the FIRST failed payment, then Free until paid;
+// a previously paid automatic renewal keeps Pro up to 24 hours after its verified paid period while pending.
+
+/** Pro after the first failed renewal payment: 7 days. */
+export const PAYMENT_GRACE_MS = 7 * 24 * 60 * 60 * 1000
+
+/** Pro after a verified paid period while an automatic renewal is being collected: 24 hours. */
+export const PENDING_RENEWAL_ALLOWANCE_MS = 24 * 60 * 60 * 1000
+
+function toMs (value) {
+  if (value === null || value === undefined || value === '') return null
+  const ms = value instanceof Date ? value.getTime() : new Date(value).getTime()
+  return Number.isFinite(ms) ? ms : null
+}
+
+/**
+ * The instant until which a subscription row grants Pro, or null when it grants none.
+ * @param {{status?: string, evidence_version?: number|null, current_period_end?: string|Date|null, paid_through?: string|Date|null,
+ *          failed_invoice_id?: string|null, grace_started_at?: string|Date|null, verified_paid_through?: string|Date|null,
+ *          renews_automatically?: boolean|null}|null|undefined} sub
+ * @returns {Date|null}
+ */
+export function subscriptionAccessUntil (sub) {
+  if (!sub || !['active', 'past_due', 'unpaid'].includes(sub.status)) return null
+  if (!sub.evidence_version) {
+    if (sub.status !== 'active') return null
+    const pe = toMs(sub.current_period_end)
+    return pe === null ? null : new Date(pe)
+  }
+  const paid = toMs(sub.paid_through)
+  const anchor = sub.failed_invoice_id ? toMs(sub.grace_started_at) : null
+  const grace = anchor === null ? null : anchor + PAYMENT_GRACE_MS
+  const verified = !sub.failed_invoice_id && sub.renews_automatically === true ? toMs(sub.verified_paid_through) : null
+  const allowance = verified === null ? null : verified + PENDING_RENEWAL_ALLOWANCE_MS
+  if (paid === null && grace === null && allowance === null) return null
+  return new Date(Math.max(paid ?? -Infinity, grace ?? -Infinity, allowance ?? -Infinity))
+}
+
+/**
+ * True when the subscription row grants Pro at `now` (server clock). Access holds while now < until.
+ * @param {object|null|undefined} sub
+ * @param {Date} now
+ * @returns {boolean}
+ */
+export function subscriptionGrantsAccessAt (sub, now) {
+  const until = subscriptionAccessUntil(sub)
+  return until !== null && now instanceof Date && now.getTime() < until.getTime()
 }

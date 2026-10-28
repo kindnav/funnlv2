@@ -242,7 +242,8 @@ export function shouldRetryOnMissingOwnership(eventType) {
 // item-level period end nor a valid legacy top-level fallback.
 //
 // Returns:
-//   { ok: true,  priceId, periodEndIso, source: 'item'|'legacy' }
+//   { ok: true,  priceId, periodEndIso, periodStartIso, source: 'item'|'legacy' }
+//   (periodStartIso is the start of the same billing period - the renewal moment - or null if absent)
 //   { ok: false, reason }   where reason ∈
 //     'price_not_configured' | 'no_items' | 'malformed_items' | 'no_matching_item' |
 //     'multiple_matching_items' | 'unsupported_item_configuration' | 'no_period_end'
@@ -268,8 +269,9 @@ export function extractProSubscriptionSnapshot(sub, priceId) {
   // Prefer the item-level period end; fall back to the legacy top-level field only.
   const fromItem   = unixToIso(item?.current_period_end)
   const fromLegacy = unixToIso(sub?.current_period_end)
-  if (fromItem)   return { ok: true, priceId, periodEndIso: fromItem,   source: 'item' }
-  if (fromLegacy) return { ok: true, priceId, periodEndIso: fromLegacy, source: 'legacy' }
+  // The period start comes from the SAME source as the period end.
+  if (fromItem)   return { ok: true, priceId, periodEndIso: fromItem,   periodStartIso: unixToIso(item?.current_period_start), source: 'item' }
+  if (fromLegacy) return { ok: true, priceId, periodEndIso: fromLegacy, periodStartIso: unixToIso(sub?.current_period_start), source: 'legacy' }
   return { ok: false, reason: 'no_period_end' }
 }
 
@@ -279,4 +281,99 @@ export function extractProSubscriptionSnapshot(sub, priceId) {
 // a fail-closed conflict rather than overwriting another user's row.
 export function isUniqueViolation(error) {
   return !!error && error.code === '23505'
+}
+
+/**
+ * Classifies a refusal raised by the subscriptions trigger (migration 20261023000000) when a write names a
+ * DIFFERENT subscription than the one bound to the user.
+ *   'superseded' - the incoming subscription is provably older, or has ended: acknowledge, change nothing.
+ *   'conflict'   - the ordering is unknown or equal: retry, recorded as 'binding_conflict'.
+ *   null         - not a binding refusal.
+ * @param {{ message?: string }|null|undefined} error
+ * @returns {'superseded'|'conflict'|null}
+ */
+/**
+ * Whether Stripe will try to collect this subscription's next renewal automatically: the condition for the
+ * 24-hour pending-renewal allowance (migration 20261023000000). Fail-safe: anything missing or unexpected is
+ * NOT automatic renewal (a scheduled cancellation, cancel_at, paused collection, invoices sent for manual
+ * payment, or an ended status).
+ * @param {Record<string, unknown>|null|undefined} sub  the authoritative (re-fetched) subscription
+ * @returns {boolean}
+ */
+export function subscriptionRenewsAutomatically(sub) {
+  if (!sub || typeof sub !== 'object') return false
+  if (!['active', 'past_due', 'unpaid'].includes(sub.status)) return false
+  if (sub.collection_method !== 'charge_automatically') return false
+  if (sub.cancel_at_period_end !== false) return false
+  if (sub.cancel_at !== null && sub.cancel_at !== undefined) return false
+  if (sub.pause_collection) return false
+  return true
+}
+
+export function classifyBindingRefusal(error) {
+  const m = typeof error?.message === 'string' ? error.message : ''
+  if (m === 'subscription_superseded' || m === 'subscription_ended_not_bound') return 'superseded'
+  if (m === 'subscription_order_unknown' || m === 'subscription_order_equal') return 'conflict'
+  return null
+}
+
+// ── Invoice evidence (migration 20261023000000) ────────────────────────────────────────────────────
+// Access is decided from verified INVOICE facts, never from a subscription's status snapshot. These pure
+// helpers read a Stripe invoice that the webhook has RE-FETCHED with the server key (never the event
+// payload) and accept it only when it belongs to the expected subscription AND customer, in the key's
+// mode (test/live). Both the classic and the 2025+ invoice shapes are read.
+
+/** 'live' | 'test' | null from a secret or restricted key. */
+export function stripeKeyMode(key) {
+  if (typeof key !== 'string') return null
+  if (key.startsWith('sk_live_') || key.startsWith('rk_live_')) return 'live'
+  if (key.startsWith('sk_test_') || key.startsWith('rk_test_')) return 'test'
+  return null
+}
+
+/** The subscription id an invoice belongs to (classic `subscription` or 2025+ `parent.subscription_details`). */
+export function invoiceSubscriptionId(inv) {
+  const classic = typeof inv?.subscription === 'string' ? inv.subscription : inv?.subscription?.id
+  return classic ?? inv?.parent?.subscription_details?.subscription ?? null
+}
+
+function invoiceCustomerId(inv) {
+  return typeof inv?.customer === 'string' ? inv.customer : inv?.customer?.id ?? null
+}
+
+function linePriceId(line) {
+  return line?.price?.id ?? line?.pricing?.price_details?.price ?? null
+}
+
+/**
+ * Turns a re-fetched invoice into evidence.
+ *   { ok: true, kind: 'paid', invoiceId, createdIso, periodEndIso }     paid; covers our price's line period
+ *   { ok: true, kind: 'failed', invoiceId, createdIso, renewal }        unpaid after >= 1 payment attempt
+ *   { ok: true, kind: 'none', invoiceId }                               draft / void / not yet attempted
+ *   { ok: false, reason }  'malformed' | 'environment_mismatch' | 'ownership_mismatch' | 'no_matching_line'
+ * `renewal` is true only for billing_reason 'subscription_cycle': an initial purchase never gets grace.
+ * @param {object} inv
+ * @param {{ subscriptionId: string, customerId: string, priceIds: string[], mode: 'live'|'test' }} expected
+ */
+export function extractInvoiceEvidence(inv, { subscriptionId, customerId, priceIds, mode }) {
+  if (!inv || typeof inv.id !== 'string' || !inv.id.startsWith('in_')) return { ok: false, reason: 'malformed' }
+  if ((mode === 'live') !== (inv.livemode === true) || (mode !== 'live' && mode !== 'test')) return { ok: false, reason: 'environment_mismatch' }
+  if (!subscriptionId || !customerId || invoiceSubscriptionId(inv) !== subscriptionId || invoiceCustomerId(inv) !== customerId) {
+    return { ok: false, reason: 'ownership_mismatch' }
+  }
+  const createdIso = unixToIso(inv.created)
+  if (!createdIso) return { ok: false, reason: 'malformed' }
+  if (inv.status === 'paid') {
+    const lines = inv.lines?.data
+    if (!Array.isArray(lines)) return { ok: false, reason: 'malformed' }
+    const ours = lines.filter((l) => priceIds.includes(linePriceId(l)))
+    if (ours.length !== 1) return { ok: false, reason: 'no_matching_line' }
+    const periodEndIso = unixToIso(ours[0]?.period?.end)
+    if (!periodEndIso) return { ok: false, reason: 'malformed' }
+    return { ok: true, kind: 'paid', invoiceId: inv.id, createdIso, periodEndIso }
+  }
+  if ((inv.status === 'open' || inv.status === 'uncollectible') && Number(inv.attempt_count) >= 1) {
+    return { ok: true, kind: 'failed', invoiceId: inv.id, createdIso, renewal: inv.billing_reason === 'subscription_cycle' }
+  }
+  return { ok: true, kind: 'none', invoiceId: inv.id }
 }

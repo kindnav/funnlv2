@@ -53,6 +53,21 @@ export async function runCheckoutOrchestration({
     return resp(503, { error: 'Checkout not configured. Please try again later.' })
   }
 
+  // ── 0. Permanent Pro never buys a redundant subscription (enforced here; the UI offers none). ─
+  const { data: profile, error: profileError } = await supabaseAdmin
+    .from('profiles')
+    .select('ai_enabled')
+    .eq('id', user.id)
+    .maybeSingle()
+  if (profileError) {
+    log('profile_lookup_failed', { requestId })
+    return resp(503, { error: 'Could not verify your account. Please try again.' })
+  }
+  if (profile?.ai_enabled === true) {
+    log('checkout_blocked_permanent_pro', { requestId })
+    return resp(409, { error: 'Funnl Pro is already active on this account.', state: 'permanent_pro' })
+  }
+
   // ── 1. Durable subscription state ────────────────────────────────────────────
   const { data: existingSub, error: subError } = await supabaseAdmin
     .from('subscriptions')
